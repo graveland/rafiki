@@ -28,7 +28,11 @@ const (
 	// http.Client.Timeout on the Client, which is what makes a chain of
 	// MaxRedirects hops cost one bound rather than one bound each.
 	OperationTimeout = 30 * time.Second
-	// ConnectTimeout bounds the TCP connect to one already-checked address.
+	// ConnectTimeout bounds the DNS lookup that produces the address, and the
+	// TCP connect to that one already-checked address. The lookup is inside the
+	// bound because a dial runs on the request's context and the streaming
+	// client's context has no deadline: without it a silent resolver is the only
+	// unbounded wait left in the dial.
 	ConnectTimeout = 10 * time.Second
 	// TLSHandshakeTimeout bounds the handshake, which is what proves the peer
 	// is the host we resolved rather than the address we dialled.
@@ -78,10 +82,24 @@ type Config struct {
 	// even when they are not public: 127.0.0.1, "internal.example", 10.0.0.7.
 	// No wildcards, no ports, no schemes. Case-insensitive, and an IP's mapped
 	// spelling is the same key as its plain one.
+	//
+	// A HOSTNAME here is a trust in that name's DNS, entirely and deliberately:
+	// the waiver covers every address the name answers with, at the pre-flight
+	// check and again at dial time, so a name that answers 169.254.169.254 is
+	// reachable and the daemon cannot tell that apart from a legitimate internal
+	// address. That is the point of the entry — the operator named the host, and
+	// the host owns its own answers — but it means this is the widest of the two
+	// opt-ins. An operator who wants the daemon reachable only inside a range
+	// lists that range in AllowCIDRs (or the IP literal here) instead, which
+	// narrows the permission to addresses rather than to a name's DNS.
 	AllowHosts []string `toml:"allow_hosts"`
 
 	// AllowCIDRs are netip prefixes (10.0.0.0/8, fd00::/8) whose addresses are
-	// permitted when the host is not in AllowHosts. Host bits are masked.
+	// permitted when the host is not in AllowHosts. Host bits are masked. An
+	// IPv4-mapped entry (::ffff:10.0.0.0/104) is accepted and converted to the
+	// IPv4 prefix it denotes, because candidates are unmapped before comparison
+	// and the mapped spelling would otherwise be a permission that matches
+	// nothing; see allowCIDRPrefix.
 	AllowCIDRs []string `toml:"allow_cidrs"`
 
 	// AllowHTTPHosts are the exact hostnames and IP literals that may be
@@ -113,10 +131,12 @@ type Policy struct {
 	dial      dialFunc
 	tlsConfig *tls.Config
 
-	// opTimeout and headerTimeout default to OperationTimeout and
-	// ResponseHeaderTimeout; tests shorten them instead of sleeping for 30s.
+	// opTimeout, headerTimeout and lookupTimeout default to OperationTimeout,
+	// ResponseHeaderTimeout and ConnectTimeout; tests shorten them instead of
+	// sleeping for the real bound.
 	opTimeout     time.Duration
 	headerTimeout time.Duration
+	lookupTimeout time.Duration
 
 	once sync.Once
 	base http.RoundTripper
@@ -157,7 +177,11 @@ func (c Config) Policy() (*Policy, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mcp_oauth.allow_cidrs: %q is not a CIDR: %w", entry, err)
 		}
-		p.allowCIDRs = append(p.allowCIDRs, prefix.Masked())
+		prefix, err = allowCIDRPrefix(entry, prefix)
+		if err != nil {
+			return nil, err
+		}
+		p.allowCIDRs = append(p.allowCIDRs, prefix)
 	}
 	for _, entry := range c.AllowHTTPHosts {
 		key, err := hostEntryKey(entry)
@@ -167,6 +191,27 @@ func (c Config) Policy() (*Policy, error) {
 		p.allowHTTPHosts[key] = struct{}{}
 	}
 	return p, nil
+}
+
+// allowCIDRPrefix turns one allow_cidrs entry into the spelling the address
+// check compares against.
+//
+// An IPv4-mapped prefix (::ffff:10.0.0.0/104) is converted to the IPv4 prefix it
+// denotes (10.0.0.0/8). Every candidate address is Unmap()ped before it is
+// compared, and netip.Prefix.Contains never matches an IPv4 address against an
+// IPv6 prefix, so the mapped spelling would parse, pass startup validation and
+// then match nothing — the exact silent no-op the validation exists to prevent.
+// A mapped prefix shorter than /96 covers more than the IPv4 address it embeds
+// and has no IPv4 spelling, so it is refused.
+func allowCIDRPrefix(entry string, prefix netip.Prefix) (netip.Prefix, error) {
+	if !prefix.Addr().Is4In6() {
+		return prefix.Masked(), nil
+	}
+	bits := prefix.Bits()
+	if bits < 96 {
+		return netip.Prefix{}, fmt.Errorf("mcp_oauth.allow_cidrs: %q is an IPv4-mapped prefix shorter than /96 and has no IPv4 spelling; write the IPv4 prefix itself", entry)
+	}
+	return netip.PrefixFrom(prefix.Addr().Unmap(), bits-96).Masked(), nil
 }
 
 // ValidateURL reports whether the daemon may contact u, including that every
@@ -185,7 +230,7 @@ func (p *Policy) ValidateURL(ctx context.Context, u *url.URL) error {
 	if err := p.checkScheme(u); err != nil {
 		return err
 	}
-	_, err := p.approvedAddr(ctx, u.Hostname())
+	_, err := p.approvedAddrs(ctx, u.Hostname())
 	return err
 }
 
@@ -255,11 +300,17 @@ func (p *Policy) checkScheme(u *url.URL) error {
 	}
 }
 
-// approvedAddr resolves host and returns the one address to connect to. EVERY
-// address the name resolves to must pass: a name that answers both a public and
-// a private address is refused outright, because which one a connect would use
-// is not ours to decide.
-func (p *Policy) approvedAddr(ctx context.Context, host string) (netip.Addr, error) {
+// approvedAddrs resolves host and returns EVERY address the policy allows a
+// connection to, in the order the resolver answered. Every address the name
+// resolves to must pass: a name that answers both a public and a private address
+// is refused outright, because which one a connect would use is not ours to
+// decide.
+//
+// The returned list is what a dial may connect to: it tries those addresses in
+// this order and re-resolves nothing, so a fallback cannot reach an address that
+// a second lookup answered (the rebinding window dialApproved's callers exist to
+// close).
+func (p *Policy) approvedAddrs(ctx context.Context, host string) ([]netip.Addr, error) {
 	p = p.orDefault()
 	allowedHost := p.hostAllowed(host)
 	key := hostKeyForCompare(host)
@@ -267,30 +318,34 @@ func (p *Policy) approvedAddr(ctx context.Context, host string) (netip.Addr, err
 		// An IP literal needs no lookup, and must not get one: resolving
 		// "10.0.0.1" would only be a chance for something else to answer.
 		if !allowedHost && !p.addrAllowed(addr) {
-			return netip.Addr{}, fmt.Errorf("%w: address %s is not public and no allow_hosts or allow_cidrs entry covers it",
+			return nil, fmt.Errorf("%w: address %s is not public and no allow_hosts or allow_cidrs entry covers it",
 				ErrDestinationDenied, addr)
 		}
-		return addr, nil
+		return []netip.Addr{addr}, nil
 	}
-	addrs, err := p.resolver().LookupNetIP(ctx, "ip", host)
+	// The lookup carries its own bound (dnsTimeout). A dial runs on the REQUEST's
+	// context, and StreamClient's has no deadline at all (that is the whole point
+	// of it), so without this the only limit on a resolver that never answers is
+	// the resolver's own — and a dial that hangs is a session that never starts.
+	lookupCtx, cancel := context.WithTimeout(ctx, p.dnsTimeout())
+	defer cancel()
+	addrs, err := p.resolver().LookupNetIP(lookupCtx, "ip", host)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: resolve %s: %v", ErrDestinationDenied, host, err)
+		return nil, fmt.Errorf("%w: resolve %s: %v", ErrDestinationDenied, host, err)
 	}
 	if len(addrs) == 0 {
-		return netip.Addr{}, fmt.Errorf("%w: resolve %s: no addresses", ErrDestinationDenied, host)
+		return nil, fmt.Errorf("%w: resolve %s: no addresses", ErrDestinationDenied, host)
 	}
-	var chosen netip.Addr
+	approved := make([]netip.Addr, 0, len(addrs))
 	for _, addr := range addrs {
 		addr = addr.Unmap()
 		if !allowedHost && !p.addrAllowed(addr) {
-			return netip.Addr{}, fmt.Errorf("%w: %s resolves to %s, which is not public and no allow_hosts or allow_cidrs entry covers it",
+			return nil, fmt.Errorf("%w: %s resolves to %s, which is not public and no allow_hosts or allow_cidrs entry covers it",
 				ErrDestinationDenied, host, addr)
 		}
-		if !chosen.IsValid() {
-			chosen = addr
-		}
+		approved = append(approved, addr)
 	}
-	return chosen, nil
+	return approved, nil
 }
 
 func (p *Policy) hostAllowed(host string) bool {
@@ -364,6 +419,14 @@ func isPublicAddr(addr netip.Addr) bool {
 // standard library's global-unicast test accepts them. The IPv6 entries that
 // embed an IPv4 address (6to4, NAT64, Teredo, IPv4-compatible) are here because
 // the address check above cannot see the IPv4 address inside them.
+//
+// The IPv4-MAPPED form (::ffff:0:0/96) needs no entry: such an address is
+// unmapped to its IPv4 address before the loop runs, so it is classified as the
+// IPv4 address it carries — which is where 10/8 and 169.254.169.254 get caught.
+// The IPv4-TRANSLATED form is a DIFFERENT prefix in a different place: RFC 6052
+// §2.2 puts ::ffff:0:0:0/96's ffff at bits 64-79 rather than 80-95, so Is4In6 is
+// false and Unmap does nothing. It carries an arbitrary IPv4 address in its low
+// 32 bits with nothing to inspect it, so it is listed here.
 var reservedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),       // "this network"
 	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 CGNAT, incl. 100.100.100.200
@@ -375,12 +438,17 @@ var reservedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3
 	netip.MustParsePrefix("240.0.0.0/4"),     // reserved
 	netip.MustParsePrefix("::/96"),           // IPv4-compatible
+	netip.MustParsePrefix("::ffff:0:0:0/96"), // IPv4-translatable (SIIT), RFC 6052
 	netip.MustParsePrefix("64:ff9b::/96"),    // NAT64
 	netip.MustParsePrefix("100::/64"),        // discard-only
 	netip.MustParsePrefix("2001::/32"),       // Teredo
+	netip.MustParsePrefix("2001:2::/48"),     // IPv6 benchmarking (RFC 5180)
+	netip.MustParsePrefix("2001:10::/28"),    // ORCHID (RFC 4843)
+	netip.MustParsePrefix("2001:20::/28"),    // ORCHIDv2 (RFC 7343)
 	netip.MustParsePrefix("2001:db8::/32"),   // documentation
 	netip.MustParsePrefix("2002::/16"),       // 6to4
 	netip.MustParsePrefix("3fff::/20"),       // documentation (RFC 9637)
+	netip.MustParsePrefix("5f00::/16"),       // SRv6 SIDs, not globally routable (RFC 9602)
 }
 
 // transport builds the one Transport both clients share, so a policy has one
@@ -406,17 +474,22 @@ func (p *Policy) transport() *http.Transport {
 		MaxIdleConns:          32,
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		// HTTP/2 stays off: the bundled transport only negotiates it with a
-		// standard TLS dialer, and the custom one above is the security
-		// property. HTTP/1.1 carries MCP's streamable SSE fine.
+		// HTTP/2 stays off, and not because a custom dialer forbids it: net/http
+		// simply does not auto-enable its bundled HTTP/2 support when the
+		// transport supplies its own dial or TLS config (ForceAttemptHTTP2 is the
+		// opt-in, and it is unset here). Leaving it unset is deliberate, because
+		// the ALPN list this transport would need lives in OUR tls.Config inside
+		// dialTLSContext, which the h2 support never sees — enabling it would hand
+		// protocol negotiation to a path that no longer owns the handshake. MCP's
+		// streamable SSE is carried by HTTP/1.1 without losing anything.
 	}
 }
 
 func (p *Policy) baseTransport() http.RoundTripper {
-	if p == nil {
-		zero := &Policy{}
-		return zero.transport()
-	}
+	// orDefault first: a nil *Policy gets the one package-level default, so the
+	// nil path shares one Transport (and one connection pool) rather than building
+	// a fresh one on every Client() call.
+	p = p.orDefault()
 	p.once.Do(func() { p.base = p.transport() })
 	return p.base
 }
@@ -426,15 +499,11 @@ func (p *Policy) dialContext(ctx context.Context, network, address string) (net.
 	if err != nil {
 		return nil, fmt.Errorf("%w: unparsable dial address %q", ErrDestinationDenied, address)
 	}
-	addr, err := p.approvedAddr(ctx, host)
+	addrs, err := p.approvedAddrs(ctx, host)
 	if err != nil {
 		return nil, err
 	}
-	// A numeric address: the dialer has nothing left to resolve, so the address
-	// checked above is the address connected to. Do not "improve" this into a
-	// host:port dial with a Control hook — that hands the resolution back to the
-	// dialer and reopens the rebinding window this closes.
-	return p.dialer()(ctx, network, net.JoinHostPort(addr.String(), port))
+	return p.dialApproved(ctx, network, port, addrs)
 }
 
 func (p *Policy) dialTLSContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -442,11 +511,11 @@ func (p *Policy) dialTLSContext(ctx context.Context, network, address string) (n
 	if err != nil {
 		return nil, fmt.Errorf("%w: unparsable dial address %q", ErrDestinationDenied, address)
 	}
-	addr, err := p.approvedAddr(ctx, host)
+	addrs, err := p.approvedAddrs(ctx, host)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := p.dialer()(ctx, network, net.JoinHostPort(addr.String(), port))
+	conn, err := p.dialApproved(ctx, network, port, addrs)
 	if err != nil {
 		return nil, err
 	}
@@ -467,8 +536,41 @@ func (p *Policy) dialTLSContext(ctx context.Context, network, address string) (n
 	return tlsConn, nil
 }
 
-// checkRedirect is the redirect half of both clients: same origin only, never an
-// HTTPS downgrade, never more than MaxRedirects hops.
+// dialApproved connects to the first of addrs that accepts, in the order the
+// resolver answered them.
+//
+// The list is the one approvedAddrs just validated, passed in and never
+// re-resolved here: a fallback may try a second address only because the SAME
+// lookup checked it, so this cannot outrun the address check or reopen the
+// rebinding window. Only a failed CONNECT falls through to the next address;
+// once a connection is handed back, the TLS handshake is one address's business.
+// Each attempt is bounded by the dialer's own ConnectTimeout and the whole
+// sequence by the client's OperationTimeout, so trying every address cannot make
+// a request unbounded.
+//
+// Every attempt dials a NUMERIC address. Do not "improve" this into a host:port
+// dial with a Control hook — that hands the resolution back to the dialer.
+func (p *Policy) dialApproved(ctx context.Context, network, port string, addrs []netip.Addr) (net.Conn, error) {
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("%w: no approved address", ErrDestinationDenied)
+	}
+	dial := p.dialer()
+	var lastErr error
+	for _, addr := range addrs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		conn, err := dial(ctx, network, net.JoinHostPort(addr.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// checkRedirect is the redirect half of both clients: same origin only, never a
+// scheme change, never more than MaxRedirects hops.
 //
 // The checks are not "is the target allowed" (a public second origin would pass
 // that); they are "is the target the origin we authenticated to". A credential —
@@ -476,6 +578,15 @@ func (p *Policy) dialTLSContext(ctx context.Context, network, address string) (n
 // secret — rides the request the client resends, so following a redirect to
 // another origin would hand it to whoever answered. The address check for a
 // same-origin hop still happens at dial, like every other hop's.
+//
+// A same-host http:// → https:// upgrade is refused as well, and that is
+// deliberate rather than an accident of comparing origins: a scheme change also
+// changes the port an origin means (80 → 443), so following it hands the request
+// to a server the configuration never named — the same reason a downgrade is
+// refused, one direction over. It is the safe direction, so an app that requires
+// TLS at its token endpoint must be configured with https:// from the start
+// instead of being upgraded into it. Configure the URL you mean; no redirect
+// re-decides the scheme.
 func (p *Policy) checkRedirect(req *http.Request, via []*http.Request) error {
 	p = p.orDefault()
 	if len(via) > MaxRedirects {
@@ -494,6 +605,14 @@ func (p *Policy) checkRedirect(req *http.Request, via []*http.Request) error {
 	}
 	if err := checkTarget(next); err != nil {
 		return fmt.Errorf("%w: %w", ErrRedirectRefused, err)
+	}
+	if prev != nil && !strings.EqualFold(prev.Scheme, next.Scheme) {
+		// The downgrade above is the dangerous direction and gets its own
+		// message; this catches the rest, which after checkTarget means an
+		// http:// → https:// upgrade on the same host. See the doc comment: a
+		// scheme change moves the port, so it is not the same origin.
+		return fmt.Errorf("%w: scheme change from %s to %s to %s", ErrRedirectRefused,
+			strings.ToLower(prev.Scheme), strings.ToLower(next.Scheme), redactTarget(next))
 	}
 	if !SameOrigin(via[0].URL, next) {
 		return fmt.Errorf("%w: cross-origin redirect to %s", ErrRedirectRefused, redactTarget(next))
@@ -637,10 +756,24 @@ func (p *Policy) responseHeaderTimeout() time.Duration {
 	return ResponseHeaderTimeout
 }
 
+func (p *Policy) dnsTimeout() time.Duration {
+	if p != nil && p.lookupTimeout > 0 {
+		return p.lookupTimeout
+	}
+	return ConnectTimeout
+}
+
+// defaultPolicy is what a nil *Policy behaves as: the zero Policy, i.e. public
+// HTTPS only. It is ONE package-level value rather than a fresh &Policy{} per
+// call because the base transport is built once per Policy — a per-call default
+// would build a Transport, and its connection pool, on every Client() call a
+// nil-policy caller makes, leaking idle pools one request at a time.
+var defaultPolicy = &Policy{}
+
 // orDefault makes a nil *Policy behave as the zero Policy (public HTTPS only).
 func (p *Policy) orDefault() *Policy {
 	if p == nil {
-		return &Policy{}
+		return defaultPolicy
 	}
 	return p
 }

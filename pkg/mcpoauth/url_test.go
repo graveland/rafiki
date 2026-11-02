@@ -20,6 +20,9 @@ func TestMcpOAuthURLCanonicalizes(t *testing.T) {
 		{"the default https port is dropped", "https://example.com:443/mcp", "https://example.com/mcp"},
 		{"the default http port is dropped", "http://example.com:80/mcp", "http://example.com/mcp"},
 		{"a non-default port is kept", "https://example.com:8443/mcp", "https://example.com:8443/mcp"},
+		{"a port with leading zeros is the port it spells", "https://example.com:0443/mcp", "https://example.com/mcp"},
+		{"a non-default port with leading zeros keeps its decimal spelling", "https://example.com:08443/mcp", "https://example.com:8443/mcp"},
+		{"an http default port with leading zeros is dropped", "http://example.com:0080/mcp", "http://example.com/mcp"},
 		{"an empty path becomes /", "https://example.com", "https://example.com/"},
 		{"an empty path with a query still becomes /", "https://example.com?a=1", "https://example.com/?a=1"},
 		{"an escaped path stays escaped", "https://example.com/a%2Fb", "https://example.com/a%2Fb"},
@@ -66,6 +69,9 @@ func TestMcpOAuthURLRejects(t *testing.T) {
 		{"fragment", "https://example.com/mcp#section"},
 		{"empty fragment", "https://example.com/mcp#"},
 		{"zoned IPv6 literal", "https://[2002::1%25eth0]/mcp"},
+		{"a port above 65535", "https://example.com:65536/mcp"},
+		{"port zero", "https://example.com:0/mcp"},
+		{"a port past the integer range", "https://example.com:99999999999999999999/mcp"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -144,6 +150,8 @@ func TestMcpOAuthURLEquivalentSpellings(t *testing.T) {
 		{"https://example.com/mcp", "https://example.com./mcp"},
 		{"http://example.com/mcp", "http://example.com:80/mcp"},
 		{"https://[::1]/mcp", "https://[::1]:443/mcp"},
+		{"https://example.com/mcp", "https://example.com:0443/mcp"},
+		{"https://example.com:8443/mcp", "https://example.com:08443/mcp"},
 		{"https://10.0.0.1/mcp", "https://[::ffff:10.0.0.1]/mcp"},
 	}
 	for _, c := range cases {
@@ -163,6 +171,7 @@ func TestMcpOAuthURLSameOrigin(t *testing.T) {
 		want        bool
 	}{
 		{"https://example.com/a", "https://example.com:443/b", true},
+		{"https://example.com/a", "https://example.com:0443/b", true},
 		{"http://example.com/a", "http://example.com:80/b", true},
 		{"https://example.com/a", "https://EXAMPLE.com/b", true},
 		{"https://example.com/a", "http://example.com/a", false},

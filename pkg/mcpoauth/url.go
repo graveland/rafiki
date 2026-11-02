@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -33,11 +34,12 @@ var ErrInvalidURL = errors.New("mcpoauth: invalid URL")
 // HTTP(S) URL.
 //
 // Canonical means: lowercase scheme and host, the scheme's default port
-// dropped, an empty path written as "/", a trailing dot on a DNS name dropped,
-// and the path, its escaping and the query kept exactly as given. It never
-// reduces a URL to its origin and never rewrites a trailing "/mcp" — those are
-// different resources, which is the whole point of keying a grant on this
-// string.
+// dropped, a port in its decimal spelling (":0443" is ":443", and on an https
+// URL that is the default and so dropped altogether), an empty path written as
+// "/", a trailing dot on a DNS name dropped, and the path, its escaping and the
+// query kept exactly as given. It never reduces a URL to its origin and never
+// rewrites a trailing "/mcp" — those are different resources, which is the whole
+// point of keying a grant on this string.
 //
 // This is a KEY, not a validation. The SDK's issuer and resource checks run on
 // the ORIGINAL spelling the server advertised: canonicalizing an issuer first
@@ -127,6 +129,18 @@ func checkTarget(u *url.URL) error {
 	if u.Hostname() == "" {
 		return fmt.Errorf("%w: %s: no host", ErrInvalidURL, redactTarget(u))
 	}
+	if port := u.Port(); port != "" {
+		// url.Parse checks that an explicit port is digits and nothing else, but
+		// not that it is a port. Anything outside 1-65535 (including the leading
+		// zeros that make "0443" a different string from "443") is refused here,
+		// which is the one place every path — Canonicalize, the pre-flight check,
+		// the transport and the redirect rule — passes through. Normalising the
+		// spelling is explicitPort's job, in canonicalHost and originKey.
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("%w: %s: %q is not a port between 1 and 65535", ErrInvalidURL, redactTarget(u), port)
+		}
+	}
 	if strings.ContainsRune(u.Hostname(), '%') {
 		// A zone (%eth0) is a local interface scope and names no remote
 		// destination. Refused here as well as in isPublicAddr so a zoned
@@ -179,20 +193,36 @@ func redactRawTarget(raw string) string {
 
 func canonicalHost(u *url.URL) string {
 	host := hostKeyForCompare(u.Hostname())
-	port := u.Port()
-	if port == "" || port == defaultPortFor(u.Scheme) {
-		if strings.Contains(host, ":") {
-			return "[" + host + "]"
-		}
-		return host
+	if port, ok := explicitPort(u); ok && port != defaultPortFor(u.Scheme) {
+		return net.JoinHostPort(host, port)
 	}
-	return net.JoinHostPort(host, port)
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
+// explicitPort is u's port in its canonical decimal spelling. A URL's Host keeps
+// the port exactly as it was written, so ":0443" would otherwise be a spelling of
+// 443 that neither collides with ":443" as a storage key nor compares equal in
+// SameOrigin. checkTarget has already refused anything that is not a port at all,
+// so an unparsable port here simply reads as absent.
+func explicitPort(u *url.URL) (string, bool) {
+	port := u.Port()
+	if port == "" {
+		return "", false
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return "", false
+	}
+	return strconv.Itoa(n), true
 }
 
 func originKey(u *url.URL) string {
 	scheme := strings.ToLower(u.Scheme)
-	port := u.Port()
-	if port == "" {
+	port, ok := explicitPort(u)
+	if !ok {
 		port = defaultPortFor(scheme)
 	}
 	return scheme + "://" + net.JoinHostPort(hostKeyForCompare(u.Hostname()), port)
