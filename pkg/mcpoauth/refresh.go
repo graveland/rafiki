@@ -276,8 +276,12 @@ func isBearerType(tokenType string) bool {
 // resource and a status, never the token or a response body).
 //
 // Each revocation is bounded by RevocationTimeout, the same budget a logout's
-// revoke uses, and the loop stops as soon as the caller's own context ends. A
-// caller that wants one bound for the whole batch passes a deadline of its own.
+// revoke uses. The batch is never cut short: a failure on one item, and a caller
+// whose context has already ended, both leave the remaining items attempted,
+// because the local invalidation these follow is already committed and a
+// credential left alive at the authorization server is exactly what this exists
+// to prevent. A caller that wants one bound for the whole batch passes a deadline
+// of its own — the returned error says when the batch outlived it.
 func (e *Engine) RevokeDetached(ctx context.Context, revocations []Revocation) error {
 	if len(revocations) == 0 {
 		return nil
@@ -290,15 +294,16 @@ func (e *Engine) RevokeDetached(ctx context.Context, revocations []Revocation) e
 	base := context.WithoutCancel(ctx)
 	var errs []error
 	for _, rev := range revocations {
-		if ctx.Err() != nil {
-			break
-		}
 		itemCtx, cancel := context.WithTimeout(base, RevocationTimeout)
 		err := e.revokeOne(itemCtx, rev)
 		cancel()
 		if err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		// Reported, not obeyed: the work finished after the caller stopped waiting.
+		errs = append(errs, fmt.Errorf("mcpoauth: revocation outlived the caller's context: %w", err))
 	}
 	return errors.Join(errs...)
 }

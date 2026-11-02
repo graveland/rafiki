@@ -178,6 +178,11 @@ func (h *passiveHandler) Authorize(_ context.Context, req *http.Request, resp *h
 	if h.hintable {
 		return &LoginRequiredError{Server: h.server}
 	}
+	if h.owner == "" {
+		// No owner on this connection: there is no grant a login could add, so the
+		// refusal says that rather than blaming credentials nobody configured.
+		return fmt.Errorf("mcp: server %q has no owner to hold a credential", h.server)
+	}
 	return fmt.Errorf("mcp: server %q rejected the credentials it was configured with", h.server)
 }
 

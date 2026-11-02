@@ -731,3 +731,138 @@ func TestMcpOAuthDiscoveryRedactsURLCredentials(t *testing.T) {
 		secretFree(t, err.Error())
 	})
 }
+
+// TestMcpOAuthDiscoveryRedactsEachMessage walks the discovery messages that can
+// name a URL, one at a time.
+//
+// A configured MCP endpoint may carry a credential in its query — canonicalisation
+// keeps the query on purpose — and every candidate URL is derived from it. So each
+// of these messages is a place the token would be repeated, and each is asserted
+// separately: a single test that only exercised one of them would leave the rest
+// free to regress.
+func TestMcpOAuthDiscoveryRedactsEachMessage(t *testing.T) {
+	const (
+		password   = "message-password-1a2b"
+		queryToken = "message-token-3c4d"
+	)
+	secretFree := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), queryToken) {
+			t.Fatalf("a URL credential reached the message: %v", err)
+		}
+	}
+	ctx := context.Background()
+	policy := publicPolicy(t)
+	endpoint := "https://mcp.example/mcp?access_token=" + queryToken
+	prmPath := "https://mcp.example/.well-known/oauth-protected-resource/mcp?access_token=" + queryToken
+	prmRoot := "https://mcp.example/.well-known/oauth-protected-resource?access_token=" + queryToken
+	challenge := func(url string) scriptedExchange {
+		return scriptedExchange{
+			method: "POST", url: endpoint, status: http.StatusUnauthorized,
+			header: http.Header{"Www-Authenticate": []string{`Bearer resource_metadata="` + url + `"`}},
+		}
+	}
+	okAuthURL := "https://as.example/authorize?resource=" + url.QueryEscape(endpoint)
+
+	t.Run("an endpoint that is not a URL", func(t *testing.T) {
+		_, err := prmCandidates("", "https://user:"+password+"@mcp.example/%zz?access_token="+queryToken)
+		secretFree(t, err)
+	})
+
+	t.Run("a round with no authentication challenge", func(t *testing.T) {
+		// The recorded 401 is for another endpoint, so this round has no challenge to
+		// read and the message names the endpoint it never found one for.
+		rec := recordScript(t, ctx, []scriptedExchange{
+			{method: "POST", url: "https://mcp.example/elsewhere", status: http.StatusUnauthorized},
+		})
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint: endpoint, AuthorizationURL: okAuthURL, Recorder: rec, Policy: policy,
+		})
+		secretFree(t, err)
+		if !strings.Contains(err.Error(), "no authentication challenge") {
+			t.Fatalf("error = %v, want the missing-challenge refusal", err)
+		}
+	})
+
+	t.Run("metadata with no authorization servers", func(t *testing.T) {
+		rec := recordScript(t, ctx, []scriptedExchange{
+			challenge(prmPath),
+			{method: "GET", url: prmPath, status: http.StatusOK, body: `{"resource":"` + endpoint + `"}`},
+		})
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint: endpoint, AuthorizationURL: okAuthURL, Recorder: rec, Policy: policy,
+		})
+		secretFree(t, err)
+		if !strings.Contains(err.Error(), "no authorization servers") {
+			t.Fatalf("error = %v, want the empty-authorization-servers refusal", err)
+		}
+	})
+
+	t.Run("a fallback that the recordings do not establish", func(t *testing.T) {
+		// Only the challenge was recorded: neither well-known location was fetched,
+		// so the fallback cannot be claimed and the message names the candidate that
+		// is missing — a URL derived from the credentialed endpoint.
+		rec := recordScript(t, ctx, []scriptedExchange{challenge(prmPath)})
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint: endpoint, AuthorizationURL: okAuthURL, Recorder: rec, Policy: policy,
+		})
+		secretFree(t, err)
+		if !strings.Contains(err.Error(), "fallback is not established") {
+			t.Fatalf("error = %v, want the unestablished-fallback refusal", err)
+		}
+	})
+
+	t.Run("a fallback for a resource nobody described", func(t *testing.T) {
+		// Both locations answered 404, so the fallback applies — but the SDK asked
+		// for a resource that is not this endpoint, and that resource is named.
+		other := "https://other.example/resource?access_token=" + queryToken
+		rec := recordScript(t, ctx, []scriptedExchange{
+			challenge(prmPath),
+			{method: "GET", url: prmPath, status: http.StatusNotFound},
+			{method: "GET", url: prmRoot, status: http.StatusNotFound},
+		})
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint:         endpoint,
+			AuthorizationURL: "https://as.example/authorize?resource=" + url.QueryEscape(other),
+			Recorder:         rec,
+			Policy:           policy,
+		})
+		secretFree(t, err)
+		if !strings.Contains(err.Error(), "no validated metadata describes") {
+			t.Fatalf("error = %v, want the undescribed-resource refusal", err)
+		}
+	})
+
+	t.Run("metadata whose first authorization server is empty", func(t *testing.T) {
+		// The SDK's scheme check lets an empty string through, so a document can name
+		// an issuer-less resource. This refusal is the only thing that stops it — and
+		// it names the resource, which is the credentialed endpoint.
+		rec := recordScript(t, ctx, []scriptedExchange{
+			challenge(prmPath),
+			{method: "GET", url: prmPath, status: http.StatusOK,
+				body: `{"resource":"` + endpoint + `","authorization_servers":[""]}`},
+		})
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint: endpoint, AuthorizationURL: okAuthURL, Recorder: rec, Policy: policy,
+		})
+		secretFree(t, err)
+		if !strings.Contains(err.Error(), "names an empty authorization server") {
+			t.Fatalf("error = %v, want the empty-authorization-server refusal", err)
+		}
+	})
+
+	t.Run("an authorization server with no endpoints", func(t *testing.T) {
+		issuer := "https://as.example?access_token=" + queryToken
+		err := validateDiscovered(ctx, policy, validatedDiscovery{
+			RawResource: "https://mcp.example/mcp",
+			Issuer:      issuer,
+		})
+		secretFree(t, err)
+		if !strings.Contains(err.Error(), "advertises no authorization or token endpoint") {
+			t.Fatalf("error = %v, want the missing-endpoint refusal", err)
+		}
+	})
+}

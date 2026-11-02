@@ -885,7 +885,7 @@ func (e *Engine) capture(f *flow, cfg *oauth2.Config, tok *oauth2.Token) (oauth2
 	reg := Registration{
 		ClientID:              cfg.ClientID,
 		ClientSecret:          cfg.ClientSecret,
-		AuthStyle:             authStyleOf(cfg.Endpoint.AuthStyle),
+		AuthStyle:             resolveAuthStyle(cfg.ClientSecret, cfg.Endpoint.AuthStyle, discovery.TokenEndpointAuthMethods),
 		AuthorizationEndpoint: cfg.Endpoint.AuthURL,
 		TokenEndpoint:         cfg.Endpoint.TokenURL,
 		RevocationEndpoint:    discovery.RevocationEndpoint,
@@ -932,6 +932,56 @@ func scopeFilter(override []string) func([]string) []string {
 	}
 	scopes := append([]string(nil), override...)
 	return func([]string) []string { return scopes }
+}
+
+// resolveAuthStyle decides, once, how this grant will present its client
+// credentials — at the only moment the answer is knowable: while login holds both
+// the client secret and the authorization server's own list of accepted methods.
+//
+// A refresh cannot re-decide this, and must not try: a refresh token is
+// single-use, so probing a second method would spend a rotation on a request that
+// already failed. Whatever is decided here is what the grant does for its whole
+// life, which makes this the place the decision has to be right.
+//
+// The order is a ruling, not a preference:
+//
+//  1. No client secret: a public client ("none"). Its id goes in the body and it
+//     never sends an Authorization header.
+//  2. The issuer offers client_secret_basic: use it.
+//  3. The issuer offers client_secret_post: use that instead. This is the case a
+//     server would otherwise be unable to serve — a body-credentials-only issuer
+//     with a confidential client — and the one a "the SDK left it at auto" style
+//     used to fail at the first refresh.
+//  4. No usable method advertised: keep the style the SDK's own exchange used,
+//     which comes from the registration when the server named one there.
+//  5. Nothing at all: HTTP Basic, RFC 7591's default, which is also the fallback
+//     the refresh path assumes when a stored style is unmodelled.
+//
+// authStyleOf then names it for the store, which keys on the NAME and refuses an
+// unmodelled value rather than reinterpreting a stored row.
+func resolveAuthStyle(clientSecret string, sdkStyle oauth2.AuthStyle, advertised []string) AuthStyle {
+	if clientSecret == "" {
+		return AuthStyleInParams
+	}
+	if containsMethod(advertised, "client_secret_basic") {
+		return AuthStyleInHeader
+	}
+	if containsMethod(advertised, "client_secret_post") {
+		return AuthStyleInParams
+	}
+	if sdkStyle == oauth2.AuthStyleAutoDetect {
+		return AuthStyleInHeader
+	}
+	return authStyleOf(sdkStyle)
+}
+
+func containsMethod(methods []string, want string) bool {
+	for _, method := range methods {
+		if strings.EqualFold(strings.TrimSpace(method), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // authStyleOf names the stored auth style from the SDK's resolved one. The store

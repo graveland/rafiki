@@ -505,6 +505,15 @@ type fakeOAuthServer struct {
 	prmVaryOnSecondHit bool
 	serveASM           bool
 	asmScopes          []string
+	// tokenAuthMethods is the issuer's token_endpoint_auth_methods_supported.
+	tokenAuthMethods []string
+	// dcrClientSecret makes dynamic client registration issue a secret and omit
+	// token_endpoint_auth_method, which is the shape that leaves the SDK at its
+	// default rather than a registered method.
+	dcrClientSecret string
+	// refreshAuthPlacement makes the token endpoint refuse a refresh whose client
+	// credentials are not presented the named way ("basic" or "post").
+	refreshAuthPlacement string
 	// authorizationEndpoint overrides the authorization endpoint the AS metadata
 	// advertises, which is how a consent URL outside the operator's policy is
 	// produced.
@@ -563,6 +572,9 @@ type fakeOAuthServer struct {
 	tokenCalls   int
 	revokeHits   int
 	revokeStatus int
+	// revokeFailFirst refuses only the FIRST revocation request, so a batch can
+	// have a failing item in the middle of it.
+	revokeFailFirst bool
 	// lastTokenHadBasicAuth records how the most recent token request presented
 	// its client credentials.
 	lastTokenHadBasicAuth bool
@@ -807,6 +819,12 @@ func (f *fakeOAuthServer) handleASM(w http.ResponseWriter, r *http.Request) {
 	if authorizationEndpoint == "" {
 		authorizationEndpoint = f.srv.URL + "/authorize"
 	}
+	f.mu.Lock()
+	authMethods := append([]string(nil), f.tokenAuthMethods...)
+	f.mu.Unlock()
+	if authMethods == nil {
+		authMethods = []string{"none"}
+	}
 	meta := map[string]any{
 		"issuer":                                issuer,
 		"authorization_endpoint":                authorizationEndpoint,
@@ -814,7 +832,7 @@ func (f *fakeOAuthServer) handleASM(w http.ResponseWriter, r *http.Request) {
 		"registration_endpoint":                 f.srv.URL + "/register",
 		"scopes_supported":                      scopes,
 		"code_challenge_methods_supported":      []string{"S256"},
-		"token_endpoint_auth_methods_supported": []string{"none"},
+		"token_endpoint_auth_methods_supported": authMethods,
 	}
 	if revoke {
 		meta["revocation_endpoint"] = f.srv.URL + "/revoke"
@@ -836,6 +854,7 @@ func (f *fakeOAuthServer) handleRegister(w http.ResponseWriter, r *http.Request)
 	clientID := fmt.Sprintf("client-%d", len(f.dcrBodies))
 	f.dcrClients = append(f.dcrClients, clientID)
 	failure, sentinel := f.dcrFailure, f.dcrSentinel
+	secret := f.dcrClientSecret
 	f.mu.Unlock()
 	switch failure {
 	case "error":
@@ -854,12 +873,19 @@ func (f *fakeOAuthServer) handleRegister(w http.ResponseWriter, r *http.Request)
 		_, _ = w.Write([]byte(`{"client_secret":"` + sentinel + `"`))
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"client_id":                  clientID,
-		"redirect_uris":              body["redirect_uris"],
-		"grant_types":                body["grant_types"],
-		"token_endpoint_auth_method": "none",
-	})
+	registration := map[string]any{
+		"client_id":     clientID,
+		"redirect_uris": body["redirect_uris"],
+		"grant_types":   body["grant_types"],
+	}
+	if secret == "" {
+		registration["token_endpoint_auth_method"] = "none"
+	} else {
+		// A confidential registration that names no method: the SDK then falls back
+		// to its own default, which is exactly the case the login has to resolve.
+		registration["client_secret"] = secret
+	}
+	writeJSON(w, http.StatusCreated, registration)
 }
 
 func (f *fakeOAuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -892,6 +918,16 @@ func (f *fakeOAuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if tokenType == "" {
 		tokenType = "Bearer"
+	}
+
+	if form.Get("grant_type") == "refresh_token" {
+		f.mu.Lock()
+		placement := f.refreshAuthPlacement
+		f.mu.Unlock()
+		if !authPlacementMatches(placement, r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid_client"})
+			return
+		}
 	}
 
 	switch form.Get("grant_type") {
@@ -970,6 +1006,9 @@ func (f *fakeOAuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	f.revokeHits++
 	f.revoked = append(f.revoked, r.PostForm.Get("token"))
 	status := f.revokeStatus
+	if f.revokeFailFirst && f.revokeHits == 1 {
+		status = http.StatusInternalServerError
+	}
 	f.mu.Unlock()
 	if status == 0 {
 		status = http.StatusOK
@@ -1063,6 +1102,20 @@ func (f *fakeOAuthServer) intercept(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// authPlacementMatches reports whether a token request presents its client
+// credentials the way placement asks for. An empty placement accepts anything.
+func authPlacementMatches(placement string, r *http.Request) bool {
+	basic := strings.HasPrefix(strings.ToLower(r.Header.Get("Authorization")), "basic ")
+	switch placement {
+	case "basic":
+		return basic
+	case "post":
+		return !basic
+	default:
+		return true
+	}
 }
 
 func missingScopes(have, want []string) []string {
@@ -2315,4 +2368,68 @@ func TestMcpOAuthEngineSecretsStayOutOfErrorsWhenTheEndpointCarriesOne(t *testin
 	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
 		t.Fatal("a grant was committed for a login that failed verification")
 	}
+}
+
+func TestMcpOAuthEngineRevokeDetachedContinuesPastAFailure(t *testing.T) {
+	fx := newEngineFixture(t)
+	revocation := func(resource string) Revocation {
+		return Revocation{
+			OwnerUserID: fx.owner,
+			Resource:    resource,
+			Issuer:      fx.oauth.issuer(),
+			Registration: Registration{
+				ClientID:           "client-1",
+				AuthStyle:          AuthStyleInParams,
+				RevocationEndpoint: fx.oauth.srv.URL + "/revoke",
+			},
+			RefreshToken: "refresh-token-for-" + resource,
+		}
+	}
+	batch := []Revocation{
+		revocation(fx.oauth.endpoint()),
+		revocation(fx.oauth.endpointAt("b")),
+		revocation(fx.oauth.endpointAt("c")),
+	}
+
+	t.Run("a refused item does not stop the batch", func(t *testing.T) {
+		fx.oauth.set(func(f *fakeOAuthServer) {
+			f.revokeStatus = 0
+			f.revokeFailFirst = true
+		})
+		err := fx.eng.RevokeDetached(context.Background(), batch)
+		if err == nil {
+			t.Fatal("RevokeDetached reported success although the first revocation was refused")
+		}
+		// The message names the grant it is about, without its query.
+		if !strings.Contains(err.Error(), "was refused") {
+			t.Fatalf("error = %v, want the refused-revocation report", err)
+		}
+		if strings.Contains(err.Error(), "refresh-token-for-") {
+			t.Fatalf("the error quoted a token: %v", err)
+		}
+		if got, want := fx.oauth.revokeCount(), len(batch); got != want {
+			t.Fatalf("revocations attempted = %d, want all %d", got, want)
+		}
+	})
+
+	t.Run("a dead caller context does not abandon the rest", func(t *testing.T) {
+		fx.oauth.set(func(f *fakeOAuthServer) {
+			f.revokeStatus = 0
+			f.revokeFailFirst = false
+		})
+		before := fx.oauth.revokeCount()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := fx.eng.RevokeDetached(ctx, batch)
+		// The work was done anyway; the caller is told its request did not cover it.
+		if got, want := fx.oauth.revokeCount()-before, len(batch); got != want {
+			t.Fatalf("revocations attempted = %d, want all %d", got, want)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want it to report the caller's cancellation", err)
+		}
+		if strings.Contains(err.Error(), "refresh-token-for-") {
+			t.Fatalf("the error quoted a token: %v", err)
+		}
+	})
 }

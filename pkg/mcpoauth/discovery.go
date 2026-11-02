@@ -358,7 +358,9 @@ func prmCandidates(challengeMetadataURL, endpoint string) ([]prmCandidate, error
 	}
 	ru, err := url.Parse(endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("mcpoauth: mcp endpoint %q is not a URL: %w", redactRawTarget(endpoint), err)
+		// Authored, and the parse error is not wrapped: url.Parse quotes the URL it
+		// was given, and this one may carry userinfo and a query token.
+		return nil, fmt.Errorf("mcpoauth: mcp endpoint %q is not a usable URL: %w", redactRawTarget(endpoint), ErrInvalidURL)
 	}
 	mu := *ru
 	// "At the path of the server's MCP endpoint".
@@ -384,6 +386,11 @@ type validatedDiscovery struct {
 	TokenEndpoint         string
 	// RevocationEndpoint is empty when the issuer advertised none.
 	RevocationEndpoint string
+	// TokenEndpointAuthMethods is the issuer's
+	// token_endpoint_auth_methods_supported, which is what decides how a client
+	// secret is presented once a login is over: the login persists the resolved
+	// style, so a refresh never has to guess and never has to retry.
+	TokenEndpointAuthMethods []string
 }
 
 // discoveryInput is everything one round's capture needs.
@@ -449,11 +456,12 @@ func captureDiscovery(ctx context.Context, in discoveryInput) (validatedDiscover
 	}
 
 	out := validatedDiscovery{
-		RawResource:           prm.Resource,
-		Issuer:                asm.Issuer,
-		AuthorizationEndpoint: asm.AuthorizationEndpoint,
-		TokenEndpoint:         asm.TokenEndpoint,
-		RevocationEndpoint:    asm.RevocationEndpoint,
+		RawResource:              prm.Resource,
+		Issuer:                   asm.Issuer,
+		AuthorizationEndpoint:    asm.AuthorizationEndpoint,
+		TokenEndpoint:            asm.TokenEndpoint,
+		RevocationEndpoint:       asm.RevocationEndpoint,
+		TokenEndpointAuthMethods: asm.TokenEndpointAuthMethodsSupported,
 	}
 	if out.Resource, err = Canonicalize(prm.Resource); err != nil {
 		return validatedDiscovery{}, fmt.Errorf("mcpoauth: discovered resource: %w", err)

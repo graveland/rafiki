@@ -6,9 +6,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
 // A refresh is the one upstream call that spends a single-use credential, so
@@ -381,6 +384,20 @@ func TestMcpOAuthRefreshRedactsURLCredentials(t *testing.T) {
 		secretFree(t, err)
 	})
 
+	t.Run("a request that cannot be built", func(t *testing.T) {
+		// The policy refuses a malformed endpoint before a request is built, so this
+		// branch is reached directly: http.NewRequest quotes the URL it was given.
+		fx := newEngineFixture(t)
+		registration := Registration{
+			ClientID:      "client-1",
+			AuthStyle:     AuthStyleInParams,
+			TokenEndpoint: "https://user:" + password + "@mcp.example/%zz?access_token=" + queryToken,
+		}
+		_, err := fx.eng.tokenRequest(context.Background(), registration.TokenEndpoint, registration,
+			url.Values{"grant_type": {"refresh_token"}}, clientAuthParams)
+		secretFree(t, err)
+	})
+
 	t.Run("endpoint that is not a usable URL", func(t *testing.T) {
 		fx := newEngineFixture(t)
 		grant := refreshableGrant(fx, "refresh-1")
@@ -389,4 +406,96 @@ func TestMcpOAuthRefreshRedactsURLCredentials(t *testing.T) {
 		_, err := fx.eng.refresh(context.Background(), grant)
 		secretFree(t, err)
 	})
+}
+
+// The style a refresh uses is decided once, at login, from the authorization
+// server's own advertised methods — so a confidential client whose issuer only
+// accepts body credentials can refresh, and no refresh ever has to try a second
+// placement (which would spend the single-use rotation twice).
+func TestMcpOAuthRefreshUsesTheStyleResolvedAtLogin(t *testing.T) {
+	cases := []struct {
+		name       string
+		placement  string
+		advertised []string
+		want       AuthStyle
+		wantBasic  bool
+	}{
+		{
+			name:       "issuer that offers only client_secret_basic",
+			placement:  "basic",
+			advertised: []string{"client_secret_basic"},
+			want:       AuthStyleInHeader,
+			wantBasic:  true,
+		},
+		{
+			name:       "issuer that offers only client_secret_post",
+			placement:  "post",
+			advertised: []string{"client_secret_post"},
+			want:       AuthStyleInParams,
+			wantBasic:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newEngineFixture(t)
+			fx.oauth.set(func(f *fakeOAuthServer) {
+				f.tokenAuthMethods = tc.advertised
+				// A confidential registration that names no method: the SDK falls back
+				// to its own default, so the login has to resolve the style itself.
+				f.dcrClientSecret = "confidential-" + tc.placement
+				f.refreshAuthPlacement = tc.placement
+			})
+
+			d := fx.begin()
+			fx.mustComplete(d.LoginID, fx.oauth.callback(d.AuthorizeURL))
+			grant, ok := fx.store.grant(fx.owner, fx.oauth.endpoint())
+			if !ok {
+				t.Fatal("the login committed no grant")
+			}
+			if grant.Registration.ClientSecret == "" {
+				t.Fatal("the registration issued no secret, so this is not the confidential case")
+			}
+			if got := grant.Registration.AuthStyle; got != tc.want {
+				t.Fatalf("stored auth style = %q, want %q (resolved from the issuer's advertised methods)", got, tc.want)
+			}
+
+			// The endpoint refuses any placement but its own, so this only succeeds if
+			// the stored style is the one the server accepts — and it must do so in one
+			// request, because a second attempt would re-send a spent rotation.
+			before := fx.oauth.tokenCallCount()
+			if _, err := fx.eng.refresh(context.Background(), grant); err != nil {
+				t.Fatalf("refresh = %v, want the style resolved at login to work", err)
+			}
+			if got := fx.oauth.tokenCallCount() - before; got != 1 {
+				t.Fatalf("token requests = %d, want exactly one", got)
+			}
+			if fx.oauth.lastTokenHadBasicAuth != tc.wantBasic {
+				t.Fatalf("basic auth = %v, want %v", fx.oauth.lastTokenHadBasicAuth, tc.wantBasic)
+			}
+		})
+	}
+}
+
+func TestMcpOAuthRefreshStyleResolutionPrefersTheIssuersMethods(t *testing.T) {
+	cases := []struct {
+		name       string
+		secret     string
+		sdkStyle   oauth2.AuthStyle
+		advertised []string
+		want       AuthStyle
+	}{
+		{"public client is always params", "", oauth2.AuthStyleInHeader, []string{"client_secret_basic"}, AuthStyleInParams},
+		{"basic offered wins", "s", oauth2.AuthStyleInParams, []string{"client_secret_basic", "client_secret_post"}, AuthStyleInHeader},
+		{"post only is honoured", "s", oauth2.AuthStyleInHeader, []string{"client_secret_post"}, AuthStyleInParams},
+		{"unadvertised keeps the SDK style", "s", oauth2.AuthStyleInParams, nil, AuthStyleInParams},
+		{"unadvertised auto falls to basic", "s", oauth2.AuthStyleAutoDetect, nil, AuthStyleInHeader},
+		{"an unusable method list keeps the SDK style", "s", oauth2.AuthStyleInHeader, []string{"private_key_jwt"}, AuthStyleInHeader},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveAuthStyle(tc.secret, tc.sdkStyle, tc.advertised); got != tc.want {
+				t.Fatalf("resolveAuthStyle = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

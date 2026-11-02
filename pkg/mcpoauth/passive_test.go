@@ -335,4 +335,22 @@ func TestMcpOAuthPassiveExplicitAuthorizationNeverAsksForALogin(t *testing.T) {
 	if !strings.Contains(authErr.Error(), "fixture") {
 		t.Fatalf("the refusal does not name the server: %v", authErr)
 	}
+
+	// A connection with no owner has no grant a login could add, and says so rather
+	// than blaming credentials nobody configured.
+	ownerless, _, err := fx.eng.Passive("")(context.Background(), "fixture", fx.oauth.endpoint(), nil)
+	if err != nil {
+		t.Fatalf("factory without an owner: %v", err)
+	}
+	ownerlessErr := ownerless.Authorize(context.Background(), req,
+		&http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody})
+	if ownerlessErr == nil {
+		t.Fatal("Authorize accepted a 401 on an owner-less connection")
+	}
+	if errors.Is(ownerlessErr, ErrLoginRequired) || strings.Contains(ownerlessErr.Error(), "rafiki mcp login") {
+		t.Fatalf("an owner-less connection was told to log in: %v", ownerlessErr)
+	}
+	if strings.Contains(ownerlessErr.Error(), "configured with") {
+		t.Fatalf("an owner-less connection was blamed for configured credentials: %v", ownerlessErr)
+	}
 }
