@@ -3,12 +3,16 @@ package fundi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/auth"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
@@ -756,4 +760,40 @@ func TestWaitSectionFollowsFilteredToolSet(t *testing.T) {
 	}
 
 	c.NotStrContains(systemText("read"), "## Waiting", "an allowlist without agent_spawn or bash_start must silence the section; got")
+}
+
+// TestMcpOAuthRuntimeOptionThreadsTheFactory pins the runtime half of the
+// out-of-band seam: a factory handed to BuildRuntime as RuntimeOptions.MCPHTTP
+// is what ConnectMCP consults for a direct-URL entry. The factory refuses here,
+// which is also the behaviour under test at the runtime level — one server's
+// refused credential is a skipped server, never a failed spawn.
+func TestMcpOAuthRuntimeOptionThreadsTheFactory(t *testing.T) {
+	c := assert.NewAborting(t)
+	const endpoint = "https://mcp.example.test/mcp"
+	mcpPath := filepath.Join(t.TempDir(), ".mcp.json")
+	c.NoError(os.WriteFile(mcpPath, []byte(`{"mcpServers":{"srv":{"url":"`+endpoint+`","headers":{"X-Mcp-Tenant":"acme"}}}}`), 0o644), "write mcp config")
+
+	type factoryCall struct {
+		server   string
+		endpoint string
+		headers  map[string]string
+	}
+	var calls []factoryCall
+	opts := fakeRuntimeOptions(t, t.TempDir())
+	opts.MCPConfig = mcpPath
+	opts.MCPHTTP = func(_ context.Context, server, canonicalEndpoint string, headers map[string]string) (auth.OAuthHandler, *http.Client, error) {
+		calls = append(calls, factoryCall{server: server, endpoint: canonicalEndpoint, headers: headers})
+		return nil, nil, errors.New("no credential for this owner")
+	}
+
+	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+	c.NoError(err, "a refused MCP credential must not fail the spawn")
+	defer shutdown()
+	c.NotNil(eng, "BuildRuntime returned a nil engine")
+
+	c.Eq(1, len(calls), "factory calls")
+	c.Eq("srv", calls[0].server, "factory server name")
+	c.Eq(endpoint, calls[0].endpoint, "factory endpoint")
+	c.Eq("acme", calls[0].headers["X-Mcp-Tenant"], "factory headers")
 }

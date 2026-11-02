@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -18,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -186,7 +188,11 @@ func FilterMCPServers(cfg map[string]MCPServerConfig, allowlist string) map[stri
 // The returned shutdown func closes every session that was successfully
 // connected. It is always non-nil and safe to call even if every server was
 // skipped.
-func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy, env []string, dial MCPDialer) (func(), error) {
+//
+// dial builds the transport for a via_executor entry and httpFactory the HTTP
+// side of a direct-URL one; either may be nil, and each is consulted only for
+// the entries it owns (see dialMCPServer).
+func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy, env []string, dial MCPDialer, httpFactory MCPHTTPFactory) (func(), error) {
 	var refs []*mcpServerSession
 
 	// registeredNames tracks every mcp__server__tool name registered so far
@@ -200,16 +206,22 @@ func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy,
 	registeredNames := make(map[string]string)
 
 	for name, sc := range cfg.MCPServers {
-		session, health, err := dialMCPServer(ctx, name, sc, env, dial)
+		session, health, err := dialMCPServer(ctx, name, sc, env, dial, httpFactory)
 		if err != nil {
 			// The reason is named, not swallowed: for a via_executor entry the
-			// operator needs to see WHICH resolution step failed.
+			// operator needs to see WHICH resolution step failed, and for an
+			// OAuth-backed one the reason carries the login hint.
 			slog.Error("agent/tools: mcp: failed to connect to server, skipping", "server", name, "error", err)
 			continue
 		}
 
+		// The redial closure carries BOTH factories, so a session that dies and
+		// is replaced mid-life goes back through the same executor resolution and
+		// the same owner-bound credential lookup. Capturing them here (rather
+		// than re-reading anything later) is what keeps a reconnect from
+		// silently degrading into an anonymous dial.
 		ref := &mcpServerSession{name: name, sess: session, health: health, dial: func(ctx context.Context) (*mcp.ClientSession, MCPServerHealth, error) {
-			return dialMCPServer(ctx, name, sc, env, dial)
+			return dialMCPServer(ctx, name, sc, env, dial, httpFactory)
 		}}
 
 		if err := registerMCPServerTools(ctx, r, name, ref, p, registeredNames); err != nil {
@@ -238,6 +250,37 @@ func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy,
 // A nil dialer on a via_executor server is an error, never a silent direct
 // dial: the daemon's own localhost is not the machine the entry names.
 type MCPDialer func(ctx context.Context, name string, sc MCPServerConfig) (mcp.Transport, error)
+
+// MCPHTTPFactory builds the HTTP side of one DIRECT-URL MCP entry: the OAuth
+// handler the streamable transport authorizes with, and the guarded client it
+// sends through.
+//
+// It is supplied OUT OF BAND, because none of that may live in a project's
+// .mcp.json: MCPServerConfig gains no OAuth field, and an entry needs no
+// "oauth" switch. The daemon supplies it from the owner's stored credentials;
+// nil means this process has none (the standalone `rafikid fundi`), and a
+// direct-URL entry then behaves exactly as it did before this seam existed.
+//
+// canonicalEndpoint is the entry's url verbatim — canonicalizing it, and
+// refusing a URL that is not a canonical HTTP(S) one, belongs to the factory's
+// own package. headers is the entry's configured header map, handed over so the
+// factory can apply it to the MCP endpoint's requests; it is NOT a licence to
+// send those headers to discovery, registration or token URLs.
+//
+// An error REFUSES that server. It must not be reported as "no credential" and
+// retried anonymously: an unreadable credential and a public server are
+// different answers, and only one of them may dial with no Authorization.
+//
+// The handler's Authorize runs on a refused request (401/403) and must be
+// passive: it returns an error naming the login command rather than prompting,
+// because nothing interactive can run inside a spawn.
+//
+// Called at DIAL time, once per session, so a reconnected session repeats the
+// same owner-bound lookup instead of reusing whatever a previous dial resolved.
+// Contract for the returned client: it becomes the MCP endpoint's transport, so
+// it must already enforce the destination policy. nil means "no guarded
+// client", and the plain default client is used.
+type MCPHTTPFactory func(ctx context.Context, serverName, canonicalEndpoint string, headers map[string]string) (auth.OAuthHandler, *http.Client, error)
 
 // MCPServerHealth is the one-method view this package takes of a transport that
 // can report an OBSERVED process exit — execpool's MCPStdioTransport is the
@@ -280,10 +323,16 @@ func mcpClientOptions() *mcp.ClientOptions {
 // env (ToolOpts.Env) when one is pinned, else the process environment — the same
 // base every other subprocess-spawning tool uses.
 //
+// httpFactory is consulted for a DIRECT-URL entry only, and only when the entry
+// carries no Authorization header of its own. A stdio server's argv, a
+// via_executor entry's synthetic URL and an entry with an explicit
+// Authorization all mean "this entry's transport is already decided", so no
+// owner-bound, daemon-side credential is looked up for them.
+//
 // The returned health is nil for a transport that cannot report an observed
 // exit (a local stdio subprocess, an HTTP endpoint); call() reads it to decide
 // whether an error is retryable.
-func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig, env []string, dial MCPDialer) (*mcp.ClientSession, MCPServerHealth, error) {
+func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig, env []string, dial MCPDialer, httpFactory MCPHTTPFactory) (*mcp.ClientSession, MCPServerHealth, error) {
 	var transport mcp.Transport
 	switch {
 	case sc.ViaExecutor != nil:
@@ -300,11 +349,11 @@ func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig, env []s
 		cmd.Env = mcpServerEnv(env, sc.Env)
 		transport = &mcp.CommandTransport{Command: cmd}
 	case sc.URL != "":
-		httpClient := http.DefaultClient
-		if len(sc.Headers) > 0 {
-			httpClient = &http.Client{Transport: headerRoundTripper{headers: sc.Headers}}
+		handler, httpClient, err := mcpHTTPClient(ctx, name, sc, httpFactory)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mcp: server %q: %w", name, err)
 		}
-		transport = &mcp.StreamableClientTransport{Endpoint: sc.URL, HTTPClient: httpClient}
+		transport = &mcp.StreamableClientTransport{Endpoint: sc.URL, HTTPClient: httpClient, OAuthHandler: handler}
 	default:
 		return nil, nil, fmt.Errorf("mcp: server %q has neither command nor url configured", name)
 	}
@@ -319,6 +368,70 @@ func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig, env []s
 		health = h
 	}
 	return session, health, nil
+}
+
+// mcpHTTPClient builds the (handler, client) pair one direct-URL entry dials
+// with. It is the ONLY place the HTTP factory is consulted, and the two rules
+// it enforces are the whole point of the seam:
+//
+//   - The factory is asked for a direct url entry whose own headers carry no
+//     Authorization key — under ANY capitalization, and even with an empty
+//     value. Presence is the switch, because an explicit empty Authorization is
+//     still an operator's decision about that entry, and OAuth overwriting it
+//     would be the config losing to the daemon.
+//   - A factory failure REFUSES the server. Returning a plain client and hoping
+//     would turn "the credential store is down" into "this server is public",
+//     which is the one confusion that silently downgrades an authenticated
+//     endpoint to an anonymous one.
+//
+// The configured headers are re-attached here rather than trusted from the
+// factory, so the endpoint containment below applies to an OAuth-backed entry
+// exactly as it does to a standalone one. The base transport stays whatever the
+// factory's client used: replacing a guarded transport with DefaultTransport
+// would send the bearer token through an unchecked connection.
+func mcpHTTPClient(ctx context.Context, name string, sc MCPServerConfig, factory MCPHTTPFactory) (auth.OAuthHandler, *http.Client, error) {
+	endpoint, err := url.Parse(sc.URL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid url %q: %w", sc.URL, err)
+	}
+
+	var handler auth.OAuthHandler
+	client := &http.Client{}
+	base := http.RoundTripper(http.DefaultTransport)
+	if factory != nil && !hasHeader(sc.Headers, "Authorization") {
+		h, c, err := factory(ctx, name, sc.URL, sc.Headers)
+		if err != nil {
+			return nil, nil, err
+		}
+		handler = h
+		if c != nil {
+			client = c
+			if c.Transport != nil {
+				base = c.Transport
+			}
+		}
+	}
+
+	if handler == nil && len(sc.Headers) == 0 {
+		if factory == nil {
+			return nil, http.DefaultClient, nil
+		}
+		return nil, client, nil
+	}
+	wrapped := *client
+	wrapped.Transport = headerRoundTripper{endpoint: endpoint, headers: sc.Headers, base: base}
+	return handler, &wrapped, nil
+}
+
+// hasHeader reports whether headers has key under any capitalization. Headers
+// come from a JSON object, so their spelling is the operator's, not Go's.
+func hasHeader(headers map[string]string, key string) bool {
+	for k := range headers {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // mcpRedialCooldown throttles reconnection attempts after a FAILED dial: a
@@ -501,19 +614,79 @@ func (s *mcpServerSession) close() {
 	}
 }
 
-// headerRoundTripper injects a fixed set of headers (e.g. Authorization) on
-// every outgoing request, since StreamableClientTransport has no built-in
-// headers field.
+// headerRoundTripper injects a configured entry's headers (e.g. a static
+// Authorization or an X-API-Key) on requests to exactly ONE endpoint, since
+// StreamableClientTransport has no built-in headers field.
+//
+// "Exactly one endpoint" is the whole rule: scheme, host (port included), path
+// and query must all match the configured url. Anything else is not that
+// server, whatever the URL came from — and it usually came from a Location
+// header, because a redirect is the only way this client asks for a URL the
+// entry did not name. Two consequences are deliberate:
+//
+//   - A redirect hop never receives the configured headers, not even a
+//     same-origin one to another path. The entry named one resource; the
+//     credential for it is not a credential for whatever answers from
+//     elsewhere on the same host.
+//   - A hop to a different ORIGIN also loses Authorization, which covers the
+//     bearer the SDK itself sets. The HTTP client's own redirect handling
+//     copies that header by HOSTNAME, so a redirect to the same name on another
+//     port would carry a token the transport did not intend to send — the
+//     origin comparison here is what stops it.
+//
+// base is the transport underneath: the factory's guarded transport when an
+// OAuth-backed entry supplied one, http.DefaultTransport for a standalone
+// entry. Nothing here re-checks destinations; that stays the base's job, which
+// is why it is never replaced by DefaultTransport.
 type headerRoundTripper struct {
-	headers map[string]string
+	// endpoint is the entry's configured url: the only destination headers are
+	// attached to.
+	endpoint *url.URL
+	headers  map[string]string
+	base     http.RoundTripper
 }
 
 func (t headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	for k, v := range t.headers {
-		req.Header.Set(k, v)
+	out := req.Clone(req.Context())
+	if sameMCPEndpoint(out.URL, t.endpoint) {
+		for k, v := range t.headers {
+			out.Header.Set(k, v)
+		}
+		return t.base.RoundTrip(out)
 	}
-	return http.DefaultTransport.RoundTrip(req)
+	// Not the configured endpoint. The client may already have copied these
+	// headers onto a redirect request, so they are REMOVED here rather than
+	// merely not added.
+	for k := range t.headers {
+		out.Header.Del(k)
+	}
+	if !sameMCPOrigin(out.URL, t.endpoint) {
+		out.Header.Del("Authorization")
+	}
+	return t.base.RoundTrip(out)
+}
+
+// sameMCPEndpoint reports whether u is exactly the configured endpoint: same
+// scheme and host (case-insensitive, port included), same escaped path, same
+// query string. It is intentionally not "same origin" — see
+// headerRoundTripper.
+func sameMCPEndpoint(u, endpoint *url.URL) bool {
+	if u == nil || endpoint == nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, endpoint.Scheme) &&
+		strings.EqualFold(u.Host, endpoint.Host) &&
+		u.EscapedPath() == endpoint.EscapedPath() &&
+		u.RawQuery == endpoint.RawQuery
+}
+
+// sameMCPOrigin reports whether u and endpoint share scheme and host (port
+// included).
+func sameMCPOrigin(u, endpoint *url.URL) bool {
+	if u == nil || endpoint == nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, endpoint.Scheme) && strings.EqualFold(u.Host, endpoint.Host)
 }
 
 // registerMCPServerTools lists session's tools and registers each on r under

@@ -124,7 +124,17 @@ type RuntimeOptions struct {
 	// plane (the standalone `rafikid fundi`, and every daemon with no pool), in
 	// which case a via_executor server fails with a message naming the knobs
 	// that would enable it rather than silently dialling localhost.
-	MCPDial        tools.MCPDialer
+	MCPDial tools.MCPDialer
+	// MCPHTTP builds the HTTP side of a DIRECT-URL entry — the OAuth handler and
+	// guarded client the streamable transport dials with — from the owner's
+	// stored credentials. The daemon supplies it; nil means this process holds no
+	// such credentials (the standalone `rafikid fundi`), and a direct-URL entry
+	// then dials exactly as it did before the seam existed. It is consulted only
+	// for an entry that sets url and carries no Authorization header of its own:
+	// stdio, via_executor and explicitly authenticated entries never reach it.
+	// The concrete factory lives in pkg/mcpoauth (see
+	// docs/reference/mcp-oauth.md).
+	MCPHTTP        tools.MCPHTTPFactory
 	LSPConfig      string // absolute path, or empty to skip LSP entirely
 	FakeTurns      string
 	Providers      *providers.Set
@@ -831,7 +841,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		// Filter before ConnectMCP dials anything, so a restricted server is
 		// never even attempted, not merely hidden after connecting.
 		mcpCfg.MCPServers = filterMCPServers(mcpCfg.MCPServers, opts.MCPServers)
-		mcpShutdown, err = tools.ConnectMCP(ctx, registry, mcpCfg, outputPolicy, mergedEnv, opts.MCPDial)
+		mcpShutdown, err = tools.ConnectMCP(ctx, registry, mcpCfg, outputPolicy, mergedEnv, opts.MCPDial, opts.MCPHTTP)
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: connect mcp: %w", err)
 		}
