@@ -25,6 +25,11 @@ import (
 // before escalating to a hard kill.
 const defaultGrace = child.TermGrace
 
+// eofGrace is how long Shutdown waits, after closing the child's stdin, for it
+// to exit on its own before SIGTERM. A claude child exits 0 on EOF; signalling
+// it first costs it that clean exit (it answers SIGTERM with 143).
+var eofGrace = child.TermGrace
+
 // defaultRespawnLimit bounds consecutive respawns after unexpected exits. A
 // deterministically-failing child — a bad --resume, a binary that is gone —
 // would otherwise be forked forever.
@@ -534,7 +539,7 @@ func (h *Host) restart(spec ChildSpec, grace time.Duration) (int, error) {
 		spec = h.spec
 	}
 	if h.running {
-		h.stopLocked(grace, true)
+		h.stopLocked(grace, true, false)
 	}
 	stdout, stdoutDone, err := h.startLocked(spec)
 	if err != nil {
@@ -562,7 +567,7 @@ func (h *Host) Shutdown(grace time.Duration) (int, string, error) {
 	h.mu.Lock()
 	var info ExitInfo
 	if h.running {
-		info = h.stopLocked(grace, false)
+		info = h.stopLocked(grace, false, true)
 	}
 	h.mu.Unlock()
 
@@ -572,16 +577,26 @@ func (h *Host) Shutdown(grace time.Duration) (int, string, error) {
 
 // stopLocked signals, waits out grace, escalates to Kill, and takes the
 // outcome from the watcher. h.mu must be held; interrupt selects SIGINT (a turn
-// abort) over SIGTERM.
+// abort) over SIGTERM. closeStdin first closes the child's stdin and waits
+// eofGrace for it to exit on that EOF, signalling only if it does not.
 //
 // This does block while holding h.mu, deliberately: the wait is bounded by
 // grace plus a reap, and releasing the lock would let a concurrent Restart
 // start a process this call is about to declare stopped.
-func (h *Host) stopLocked(grace time.Duration, interrupt bool) ExitInfo {
+func (h *Host) stopLocked(grace time.Duration, interrupt, closeStdin bool) ExitInfo {
 	if grace <= 0 {
 		grace = defaultGrace
 	}
 	runner, exitCh := h.runner, h.exitCh
+	if closeStdin && h.stdin != nil {
+		_ = h.stdin.Close()
+		select {
+		case info := <-exitCh:
+			h.running, h.stdin, h.runner, h.exitCh = false, nil, nil, nil
+			return info
+		case <-time.After(eofGrace):
+		}
+	}
 	if interrupt {
 		_ = runner.Interrupt()
 	} else {

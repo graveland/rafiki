@@ -2858,8 +2858,10 @@ somebody else's worker, and that worker's coordinator — which did not act —
 still receives the fragment. The coordinator-facing half
 (`controllerSpawner.Kill`, `killMark{parent}`) suppresses the parent's
 event-buffer fragment instead, and only when the death was the kill's own
-doing (`exitCausedByShutdown`): a daraja-hosted claude child exits 143 from
-the SIGTERM the shutdown ladder sent — that is the kill — while a fundi
+doing (`exitCausedByShutdown`): a daraja-hosted claude child that ignores
+the host's stdin EOF (`daraja.eofGrace`) exits 143 from the SIGTERM the
+shutdown ladder sent — that is the kill, recorded as a clean exit by
+`recordedExit` — while a fundi
 panic's exit code 2 or a foreign signal landing during the passive stdin
 close wait is news even to the killer, and notifies.
 

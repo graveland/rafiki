@@ -15,6 +15,9 @@ import (
 // through claudeargv.Build, so the fake runs under claude's flags (-p
 // --input-format stream-json ...) and /bin/sh or /bin/cat would die on the
 // first one.
+// Fakes that ignore EOF would otherwise cost every Shutdown the full grace.
+func init() { eofGrace = 50 * time.Millisecond }
+
 func testChildBinary(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fake-child")
@@ -534,4 +537,33 @@ func TestRespawnStopsAtTheLimit(t *testing.T) {
 			t.Fatalf("host never gave up; restarts=%d", restarts)
 		}
 	}
+}
+
+// A child that exits on stdin EOF is stopped by the EOF alone: Shutdown reports
+// its own clean exit rather than the SIGTERM's.
+func TestHostShutdownClosesStdinBeforeSignalling(t *testing.T) {
+	c := assert.NewAborting(t)
+	prev := eofGrace
+	eofGrace = 5 * time.Second
+	defer func() { eofGrace = prev }()
+	h := NewHost(HostOptions{Binary: testChildBinary(t, "cat"), Spec: ChildSpec{Kind: KindClaude}})
+	c.NoError(h.Start(), "Start")
+
+	code, sig, err := h.Shutdown(5 * time.Second)
+	c.NoError(err, "Shutdown")
+	c.False(code != 0 || sig != "", "Shutdown = (%d, %q), want the child's own clean exit (0, \"\")", code, sig)
+}
+
+// A child that ignores EOF is still stopped: the signal ladder follows the
+// EOF grace.
+func TestHostShutdownSignalsAChildThatIgnoresEOF(t *testing.T) {
+	c := assert.NewAborting(t)
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
+	c.NoError(h.Start(), "Start")
+
+	start := time.Now()
+	code, sig, err := h.Shutdown(5 * time.Second)
+	c.NoError(err, "Shutdown")
+	c.False(sig == "" && code == 0, "Shutdown = (%d, %q), want a signalled death", code, sig)
+	c.False(time.Since(start) > 3*time.Second, "Shutdown took %s; the signal rung must follow the short EOF grace", time.Since(start))
 }
