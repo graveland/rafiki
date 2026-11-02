@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,17 +236,31 @@ func TestMcpOAuthStoreSealsCredentials(t *testing.T) {
 	c.True(len(raw.sealed) > len(want.Token.RefreshToken),
 		"credential_sealed is %d bytes, want more than the %d byte token", len(raw.sealed), len(want.Token.RefreshToken))
 
-	// No OTHER column may hold a secret either: scan every text/bytea column of
-	// the row for the plaintext values.
-	var leaked int
-	c.NoError(pool.QueryRow(ctx, `
-		SELECT count(*) FROM conversations.mcp_credential
-		 WHERE owner_user_id = $1::uuid AND resource = $2
-		   AND (client_id LIKE $3 OR redirect_url LIKE $3 OR issuer LIKE $3
-		        OR authorization_endpoint LIKE $3 OR token_endpoint LIKE $3
-		        OR revocation_endpoint LIKE $3)`,
-		owner, s.resource, "%"+want.Token.RefreshToken+"%").Scan(&leaked), "probe non-secret columns")
-	c.Eq(0, leaked, "a plaintext column carries the refresh token")
+	// No OTHER column may hold a secret either: scan every text column of the
+	// row, and of its endpoint row, for each plaintext secret.
+	for _, secret := range []string{
+		want.Registration.ClientSecret,
+		want.Token.AccessToken,
+		want.Token.RefreshToken,
+	} {
+		var leaked int
+		c.NoError(pool.QueryRow(ctx, `
+			SELECT count(*) FROM conversations.mcp_credential
+			 WHERE owner_user_id = $1::uuid AND resource = $2
+			   AND (client_id LIKE $3 OR redirect_url LIKE $3 OR issuer LIKE $3
+			        OR authorization_endpoint LIKE $3 OR token_endpoint LIKE $3
+			        OR revocation_endpoint LIKE $3 OR token_type LIKE $3
+			        OR array_to_string(scopes, ' ') LIKE $3)`,
+			owner, s.resource, "%"+secret+"%").Scan(&leaked), "probe credential columns")
+		c.Eq(0, leaked, "a plaintext credential column carries %q", secret)
+
+		c.NoError(pool.QueryRow(ctx, `
+			SELECT count(*) FROM conversations.mcp_endpoint
+			 WHERE owner_user_id = $1::uuid AND endpoint = $2
+			   AND (endpoint LIKE $3 OR bound_resource LIKE $3 OR bound_issuer LIKE $3)`,
+			owner, s.endpoint, "%"+secret+"%").Scan(&leaked), "probe endpoint columns")
+		c.Eq(0, leaked, "a plaintext endpoint column carries %q", secret)
+	}
 }
 
 // A successful login round-trips through the exact binding with no discovery:
@@ -484,6 +500,7 @@ func TestMcpOAuthStoreOwnerIsolation(t *testing.T) {
 
 // A database failure is never reported as an absent credential: the caller that
 // maps ErrMissing to "public server, no token" must not do so for an outage.
+// Every entry point that can fail must be pinned, not just the lookup.
 func TestMcpOAuthStoreUnavailableVersusMissing(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
@@ -498,10 +515,35 @@ func TestMcpOAuthStoreUnavailableVersusMissing(t *testing.T) {
 	dead := secondPool(t)
 	dead.Close()
 	unavailable := New(dead, newBox(t, 0x21))
+	assertOutage := func(what string, err error) {
+		t.Helper()
+		c.ErrorIs(err, mcpoauth.ErrUnavailable, "%s against a closed pool", what)
+		c.False(errors.Is(err, mcpoauth.ErrMissing), "%s reported an outage as a missing credential", what)
+		c.False(errors.Is(err, mcpoauth.ErrLoginRequired), "%s reported an outage as a login problem", what)
+		c.False(errors.Is(err, mcpoauth.ErrStaleFence), "%s reported an outage as a stale fence", what)
+	}
+
 	_, err = unavailable.LookupBinding(ctx, owner, s.endpoint)
-	c.ErrorIs(err, mcpoauth.ErrUnavailable, "a closed pool")
-	c.False(errors.Is(err, mcpoauth.ErrMissing), "a store outage was reported as a missing credential")
-	c.False(errors.Is(err, mcpoauth.ErrLoginRequired), "a store outage was reported as a login problem")
+	assertOutage("LookupBinding", err)
+	_, err = unavailable.Acquire(ctx, owner, s.endpoint, 1, nil)
+	assertOutage("Acquire", err)
+	_, err = unavailable.BeginFence(ctx, owner, s.endpoint)
+	assertOutage("BeginFence", err)
+	_, err = unavailable.BindFence(ctx, mcpoauth.LoginFence{
+		OwnerUserID: owner, Endpoint: s.endpoint, EndpointGeneration: 1,
+	}, s.resource, s.issuer)
+	assertOutage("BindFence", err)
+	_, err = unavailable.CommitLogin(ctx, mcpoauth.LoginFence{
+		OwnerUserID: owner, Endpoint: s.endpoint, EndpointGeneration: 1,
+		Resource: s.resource, Issuer: s.issuer,
+	}, fixtureGrant(owner, s))
+	assertOutage("CommitLogin", err)
+	_, err = unavailable.InvalidateResource(ctx, owner, s.resource)
+	assertOutage("InvalidateResource", err)
+	_, err = unavailable.InvalidateEndpoint(ctx, owner, s.endpoint)
+	assertOutage("InvalidateEndpoint", err)
+	_, err = unavailable.InvalidateOwner(ctx, owner)
+	assertOutage("InvalidateOwner", err)
 }
 
 // Every acquisition consults the store, but an unexpired token is returned
@@ -944,6 +986,8 @@ func TestMcpOAuthStoreFirstLoginEndpointFence(t *testing.T) {
 
 	_, err = st.CommitLogin(ctx, fence, fixtureGrant(owner, s))
 	c.ErrorIs(err, mcpoauth.ErrStaleFence, "a first login survived an endpoint logout")
+	_, err = st.BindFence(ctx, fence, s.resource, s.issuer)
+	c.ErrorIs(err, mcpoauth.ErrStaleFence, "a bind after an endpoint logout")
 
 	// A fresh Begin on the same endpoint is a new login and commits.
 	retry, err := st.BeginFence(ctx, owner, s.endpoint)
@@ -1114,4 +1158,202 @@ func TestMcpOAuthStoreAcquireStaleGeneration(t *testing.T) {
 
 	_, err = st.Acquire(ctx, owner, s.endpoint, old.GrantGeneration, nil)
 	c.ErrorIs(err, mcpoauth.ErrStaleFence, "an old binding adopted the replacement")
+}
+
+// rawEndpointState is everything a logout can change on an endpoint row.
+type rawEndpointState struct {
+	generation        int64
+	boundResource     *string
+	boundIssuer       *string
+	boundGeneration   *int64
+	pendingResource   *string
+	pendingIssuer     *string
+	pendingGeneration *int64
+}
+
+func readRawEndpoint(t *testing.T, pool *pgxpool.Pool, owner, endpoint string) rawEndpointState {
+	t.Helper()
+	var s rawEndpointState
+	err := pool.QueryRow(context.Background(), `
+		SELECT generation, bound_resource, bound_issuer, bound_grant_generation,
+		       pending_resource, pending_issuer, pending_grant_generation
+		  FROM conversations.mcp_endpoint
+		 WHERE owner_user_id = $1::uuid AND endpoint = $2`, owner, endpoint).
+		Scan(&s.generation, &s.boundResource, &s.boundIssuer, &s.boundGeneration,
+			&s.pendingResource, &s.pendingIssuer, &s.pendingGeneration)
+	assert.NewAborting(t).NoError(err, "read raw endpoint")
+	return s
+}
+
+// Logging out one resource must not unhook an endpoint's binding to a DIFFERENT
+// live resource: each half of the row clears only when that half is the
+// logged-out resource. The endpoint fence still advances, so the pending login
+// is dead either way.
+func TestMcpOAuthStoreInvalidateResourceKeepsUnrelatedBinding(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	owner := newOwner(t, pool)
+	st := New(pool, newBox(t, 0x2b))
+	live := newSite(t)
+	other := newSite(t)
+	liveGrant := fixtureGrant(owner, live)
+	liveGrant.Token.AccessToken = "live-access"
+	login(t, ctx, st, owner, live.endpoint, liveGrant)
+
+	// The bound endpoint starts a login for a DIFFERENT resource: exactly the
+	// mixed state the logout must not over-clear.
+	fence, err := st.BeginFence(ctx, owner, live.endpoint)
+	c.NoError(err, "begin a pending login on a bound endpoint")
+	fence, err = st.BindFence(ctx, fence, other.resource, other.issuer)
+	c.NoError(err, "bind the pending login to another resource")
+
+	if _, err := st.InvalidateResource(ctx, owner, other.resource); !errors.Is(err, mcpoauth.ErrMissing) {
+		t.Fatalf("logout of a resource with no grant = %v, want ErrMissing", err)
+	}
+
+	binding, err := st.LookupBinding(ctx, owner, live.endpoint)
+	c.NoError(err, "the live binding survived an unrelated logout")
+	c.Eq(live.resource, binding.Resource, "binding resource")
+	c.Eq(int64(1), binding.GrantGeneration, "binding generation")
+	got, err := st.Acquire(ctx, owner, live.endpoint, 1, nil)
+	c.NoError(err, "acquire after the unrelated logout")
+	c.Eq("live-access", got.Token.AccessToken, "access token")
+
+	// The pending login was fenced by the generation advance, and the binding
+	// is still the live resource's.
+	_, err = st.CommitLogin(ctx, fence, fixtureGrant(owner, other))
+	c.ErrorIs(err, mcpoauth.ErrStaleFence, "the pending login survived the logout")
+	state := readRawEndpoint(t, pool, owner, live.endpoint)
+	c.Eq(int64(2), state.generation, "the endpoint fence advanced")
+	c.NotNil(state.boundResource, "the unrelated logout cleared the live binding")
+	c.Eq(live.resource, *state.boundResource, "bound resource after the logout")
+	c.Nil(state.pendingResource, "the pending half for the logged-out resource was not cleared")
+
+	// The converse: when the logged-out resource IS the bound one, the binding
+	// clears and a pending login for a third resource is left as it was (its
+	// generation advance already fences it).
+	second := newSite(t)
+	third := newSite(t)
+	login(t, ctx, st, owner, second.endpoint, fixtureGrant(owner, second))
+	pending, err := st.BeginFence(ctx, owner, second.endpoint)
+	c.NoError(err, "begin the third-resource login")
+	pending, err = st.BindFence(ctx, pending, third.resource, third.issuer)
+	c.NoError(err, "bind the third-resource login")
+
+	if _, err := st.InvalidateResource(ctx, owner, second.resource); err != nil {
+		t.Fatalf("logout of the bound resource: %v", err)
+	}
+	state = readRawEndpoint(t, pool, owner, second.endpoint)
+	c.Nil(state.boundResource, "the logged-out resource's binding survived")
+	c.NotNil(state.pendingResource, "a pending login for an unrelated resource was cleared")
+	c.Eq(third.resource, *state.pendingResource, "pending resource")
+	_, err = st.LookupBinding(ctx, owner, second.endpoint)
+	c.ErrorIs(err, mcpoauth.ErrMissing, "the logged-out binding is still live")
+	_, err = st.CommitLogin(ctx, pending, fixtureGrant(owner, third))
+	c.ErrorIs(err, mcpoauth.ErrStaleFence, "the pending third-resource login survived")
+}
+
+// A refresh answer with no expires_in must not become SQL NULL, which never
+// refreshes: record it as already expired so the next acquisition spends the
+// refresh token the rotation just persisted.
+func TestMcpOAuthStoreRefreshWithoutExpiryRefreshesAgain(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	owner := newOwner(t, pool)
+	st := New(pool, newBox(t, 0x2c))
+	s := newSite(t)
+	base := fixtureGrant(owner, s)
+	base.Token.Expiry = time.Now().Add(-time.Minute).Truncate(time.Microsecond)
+	login(t, ctx, st, owner, s.endpoint, base)
+
+	var seen []string
+	first, err := st.Acquire(ctx, owner, s.endpoint, 1, func(_ context.Context, cur mcpoauth.Grant) (mcpoauth.RefreshResult, error) {
+		seen = append(seen, cur.Token.RefreshToken)
+		return mcpoauth.RefreshResult{AccessToken: "no-expiry-access", RefreshToken: "no-expiry-refresh"}, nil
+	})
+	c.NoError(err, "a refresh with no expiry")
+	c.Eq("no-expiry-access", first.Token.AccessToken, "access token")
+	c.True(first.Token.Expiry.Before(time.Now()), "a zero expiry was returned as a usable instant")
+
+	var stored *time.Time
+	c.NoError(pool.QueryRow(ctx, `
+		SELECT access_expiry FROM conversations.mcp_credential
+		 WHERE owner_user_id = $1::uuid AND resource = $2`, owner, s.resource).Scan(&stored), "read access_expiry")
+	c.NotNil(stored, "a refresh with no expires_in stored SQL NULL, which never refreshes")
+	c.True(stored.Before(time.Now()), "the stored expiry is not already expired")
+
+	second, err := st.Acquire(ctx, owner, s.endpoint, 1, func(_ context.Context, cur mcpoauth.Grant) (mcpoauth.RefreshResult, error) {
+		seen = append(seen, cur.Token.RefreshToken)
+		return mcpoauth.RefreshResult{
+			AccessToken: "second-access", RefreshToken: "second-refresh",
+			Expiry: time.Now().Add(time.Hour).Truncate(time.Microsecond),
+		}, nil
+	})
+	c.NoError(err, "the next acquisition refreshed again")
+	c.Eq("second-access", second.Token.AccessToken, "second access token")
+	c.EqDeep([]string{base.Token.RefreshToken, "no-expiry-refresh"}, seen,
+		"the refresh chain must spend the rotated refresh token, not the original")
+}
+
+// Independent store instances (separate pools) racing on one expired version
+// produce exactly one upstream refresh: the guarantee lives in the durable
+// intent, not in a process mutex.
+func TestMcpOAuthStoreRaceAcquireOneRefresh(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+	owner := newOwner(t, pool)
+	box := newBox(t, 0x2d)
+	first := New(pool, box)
+	s := newSite(t)
+	base := fixtureGrant(owner, s)
+	base.Token.Expiry = time.Now().Add(-time.Minute).Truncate(time.Microsecond)
+	login(t, ctx, first, owner, s.endpoint, base)
+	second := New(secondPool(t), box)
+	stores := []mcpoauth.Store{first, second}
+
+	const racers = 6
+	start := make(chan struct{})
+	results := make(chan error, racers)
+	var refreshes atomic.Int64
+	refresh := func(context.Context, mcpoauth.Grant) (mcpoauth.RefreshResult, error) {
+		refreshes.Add(1)
+		// Hold the intent open long enough that every racer meets it, so the
+		// test pins the intent rather than a lucky ordering.
+		time.Sleep(200 * time.Millisecond)
+		return mcpoauth.RefreshResult{
+			AccessToken: "raced-access", RefreshToken: "raced-refresh", TokenType: "Bearer",
+			Expiry: time.Now().Add(time.Hour).Truncate(time.Microsecond),
+		}, nil
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(st mcpoauth.Store) {
+			defer wg.Done()
+			<-start
+			_, err := st.Acquire(ctx, owner, s.endpoint, 1, refresh)
+			results <- err
+		}(stores[i%len(stores)])
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	c.Eq(int64(1), refreshes.Load(), "upstream refreshes for one version across two independent stores")
+	succeeded := 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+			continue
+		}
+		c.ErrorIs(err, mcpoauth.ErrLoginRequired, "a racing racer failed for another reason: %v", err)
+	}
+	c.True(succeeded >= 1, "no racer obtained a token")
+
+	final, err := first.Acquire(ctx, owner, s.endpoint, 1, nil)
+	c.NoError(err, "acquire after the race")
+	c.Eq("raced-refresh", final.Token.RefreshToken, "the winner's rotation is not what is stored")
 }

@@ -224,6 +224,12 @@ type Revocation struct {
 
 // Store is the durable MCP OAuth credential store. Every method is safe for
 // concurrent use and treats the database as the only authority.
+//
+// Every endpoint and resource argument is stored VERBATIM: the store never
+// canonicalizes or rewrites one. Callers MUST canonicalize both first, using
+// pkg/mcpoauth's canonicalizer, because exact binding is a byte comparison -- a
+// differently-spelled URL is a different row with a different credential,
+// which fails closed but silently makes a login invisible to its endpoint.
 type Store interface {
 	// BeginFence starts a login: it locks the owner, requires a live user and
 	// returns the endpoint's current generation, creating the endpoint state
@@ -260,17 +266,23 @@ type Store interface {
 	//
 	// When the access token has expired, Acquire commits a durable refresh
 	// intent and then calls refresh outside the transaction, committing the
-	// rotation before returning it. Another acquisition of a grant whose
-	// intent is committed returns ErrLoginRequired rather than spending the
-	// single-use token too. A refresh that fails, or whose rotation cannot be
-	// committed, leaves the intent committed: that generation needs a new
-	// explicit login. A nil refresh for an expired token is ErrLoginRequired.
+	// rotation before returning it. Another acquisition of a grant whose intent
+	// is committed returns ErrLoginRequired rather than spending the single-use
+	// token too; a refresh another session is completing right now, an intent
+	// abandoned by a crash, and a failed refresh are all the SAME answer, on
+	// purpose, and none of them is retryable from here: the design mandates one
+	// upstream refresh per version with no automatic replay, and an explicit
+	// login is the recovery. A refresh that fails, or whose rotation cannot be
+	// committed, leaves the intent committed for that reason. A nil refresh for
+	// an expired token is ErrLoginRequired.
 	Acquire(ctx context.Context, owner, endpoint string, expectedGeneration int64, refresh RefreshFunc) (Grant, error)
 
 	// InvalidateResource logs out one owner's canonical resource: it tombstones
 	// the grant with an incremented generation, clears and advances the fence
 	// of every endpoint bound or pending to that resource, and returns the
-	// detached revocation payload. An absent grant row is ErrMissing (after any
+	// detached revocation payload. An endpoint bound to a DIFFERENT live
+	// resource keeps that binding (its fence still advances if the pending half
+	// was for this resource). An absent grant row is ErrMissing (after any
 	// pending fence was advanced). It is idempotent: an already-invalidated
 	// grant returns an empty Revocation and no error.
 	InvalidateResource(ctx context.Context, owner, resource string) (Revocation, error)

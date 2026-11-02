@@ -264,8 +264,12 @@ func expired(expiry, now time.Time) bool {
 // and a concurrent tombstone cannot slip between the check and the write.
 func lockLiveOwner(ctx context.Context, tx pgx.Tx, owner string) error {
 	var live bool
+	// FOR NO KEY UPDATE, not FOR UPDATE: it conflicts with the tombstone UPDATE
+	// and with itself (so this owner's mutations still serialize on the row),
+	// but not with the FOR KEY SHARE that FK inserts elsewhere in the schema
+	// take, so a token acquisition does not block that owner's inserts.
 	err := tx.QueryRow(ctx,
-		`SELECT deleted_at IS NULL FROM conversations.users WHERE id = $1::uuid FOR UPDATE`, owner).Scan(&live)
+		`SELECT deleted_at IS NULL FROM conversations.users WHERE id = $1::uuid FOR NO KEY UPDATE`, owner).Scan(&live)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: owner %s does not exist", mcpoauth.ErrLoginRequired, owner)
 	}
@@ -284,8 +288,10 @@ func lockLiveOwner(ctx context.Context, tx pgx.Tx, owner string) error {
 // nonexistent owner can own no endpoint or grant rows, so cleanup is a no-op.
 func lockOwner(ctx context.Context, tx pgx.Tx, owner string) (bool, error) {
 	var id string
+	// FOR NO KEY UPDATE for the same reason as lockLiveOwner: serialization on
+	// this row without blocking foreign-key inserts elsewhere.
 	err := tx.QueryRow(ctx,
-		`SELECT id::text FROM conversations.users WHERE id = $1::uuid FOR UPDATE`, owner).Scan(&id)
+		`SELECT id::text FROM conversations.users WHERE id = $1::uuid FOR NO KEY UPDATE`, owner).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -664,12 +670,15 @@ func (s *Store) Acquire(ctx context.Context, owner, endpoint string, expectedGen
 	if err != nil {
 		return mcpoauth.Grant{}, err
 	}
+	if row.invalidated {
+		return mcpoauth.Grant{}, fmt.Errorf("%w: grant for resource %q was invalidated", mcpoauth.ErrLoginRequired, resource)
+	}
+	// Open the blob only after the tombstone check: a logged-out row has had
+	// its ciphertext wiped, and the honest answer is "invalidated", not
+	// "unreadable under this key".
 	cur, err := s.openRow(row)
 	if err != nil {
 		return mcpoauth.Grant{}, err
-	}
-	if row.invalidated {
-		return mcpoauth.Grant{}, fmt.Errorf("%w: grant for resource %q was invalidated", mcpoauth.ErrLoginRequired, resource)
 	}
 	if cur.Generation != expectedGeneration {
 		return mcpoauth.Grant{}, fmt.Errorf("%w: grant generation %d, expected %d",
@@ -765,7 +774,16 @@ func (s *Store) finalizeRefresh(ctx context.Context, owner, resource string, gen
 	if result.TokenType != "" {
 		next.Token.TokenType = result.TokenType
 	}
-	next.Token.Expiry = result.Expiry
+	if result.Expiry.IsZero() {
+		// NULL means "the issuer reported no expiry", which never refreshes on
+		// expiry and would pin this access token forever. A refresh that
+		// omitted expires_in must not become that: record the rotation as
+		// already expired, so the next acquisition refreshes again with the
+		// refresh token that was just persisted.
+		next.Token.Expiry = time.Now().Add(-time.Second).Truncate(time.Microsecond)
+	} else {
+		next.Token.Expiry = result.Expiry
+	}
 	if result.Scopes != nil {
 		next.Scopes = result.Scopes
 	}
@@ -834,10 +852,13 @@ func (s *Store) invalidateGrant(ctx context.Context, tx pgx.Tx, owner, resource 
 }
 
 // fenceEndpointsForResource advances the fence of every endpoint bound or
-// pending to one resource and clears both states. The rows are locked in
-// deterministic URL order before any is updated: all of this owner's mutations
-// already serialize on the users row, but the ordering keeps the rule explicit
-// and survives a future path that does not take that lock.
+// pending to one resource and clears the half that belongs to it -- the live
+// binding only when bound_resource is this resource, the pending login only
+// when pending_resource is. An endpoint bound to one live resource while a
+// different resource is being logged out keeps its binding. The rows are locked
+// in deterministic URL order before any is updated: all of this owner's
+// mutations already serialize on the users row, but the ordering keeps the rule
+// explicit and survives a future path that does not take that lock.
 func (s *Store) fenceEndpointsForResource(ctx context.Context, tx pgx.Tx, owner, resource string) error {
 	rows, err := tx.Query(ctx, `
 		SELECT endpoint FROM conversations.mcp_endpoint
@@ -861,13 +882,21 @@ func (s *Store) fenceEndpointsForResource(ctx context.Context, tx pgx.Tx, owner,
 		return unavailable("fence endpoints", err)
 	}
 	for _, endpoint := range endpoints {
+		// Clear each half only when IT is the logged-out resource. An endpoint
+		// bound to live resource R1 with a pending login for R2 must keep its
+		// R1 binding when R2 is logged out; its generation still advances, so
+		// the pending login is fenced either way.
 		if _, err := tx.Exec(ctx, `
 			UPDATE conversations.mcp_endpoint
 			   SET generation = generation + 1,
-			       bound_resource = NULL, bound_issuer = NULL, bound_grant_generation = NULL,
-			       pending_resource = NULL, pending_issuer = NULL, pending_grant_generation = NULL,
+			       bound_resource = CASE WHEN bound_resource = $3 THEN NULL ELSE bound_resource END,
+			       bound_issuer = CASE WHEN bound_resource = $3 THEN NULL ELSE bound_issuer END,
+			       bound_grant_generation = CASE WHEN bound_resource = $3 THEN NULL ELSE bound_grant_generation END,
+			       pending_resource = CASE WHEN pending_resource = $3 THEN NULL ELSE pending_resource END,
+			       pending_issuer = CASE WHEN pending_resource = $3 THEN NULL ELSE pending_issuer END,
+			       pending_grant_generation = CASE WHEN pending_resource = $3 THEN NULL ELSE pending_grant_generation END,
 			       updated_at = now()
-			 WHERE owner_user_id = $1::uuid AND endpoint = $2`, owner, endpoint); err != nil {
+			 WHERE owner_user_id = $1::uuid AND endpoint = $2`, owner, endpoint, resource); err != nil {
 			return unavailable("fence endpoint", err)
 		}
 	}
