@@ -53,22 +53,29 @@ import (
 // blockingFakeLLM answers /v1/messages with a canned SSE end_turn reply. It
 // blocks every request until `release` is closed, so a fundi child that called
 // it stays mid-turn (status streaming) for as long as the test needs. Requests
-// are counted: the re-issue assertions below read the count.
+// are counted: the re-issue assertions below read the count. arrived gets one
+// token per request, so a test can wait for a request to be in flight rather
+// than infer it from the child's status.
 type blockingFakeLLM struct {
 	srv      *httptest.Server
 	release  chan struct{}
+	arrived  chan struct{}
 	requests atomic.Int64
 }
 
 func newBlockingFakeLLM(t *testing.T) *blockingFakeLLM {
 	t.Helper()
-	f := &blockingFakeLLM{release: make(chan struct{})}
+	f := &blockingFakeLLM{release: make(chan struct{}), arrived: make(chan struct{}, 64)}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
 		}
 		f.requests.Add(1)
+		select {
+		case f.arrived <- struct{}{}:
+		default:
+		}
 		select {
 		case <-f.release:
 		case <-time.After(90 * time.Second):
@@ -268,6 +275,14 @@ func TestDBChildState_AutoResumeReissuesMidTurnAfterCrash(t *testing.T) {
 	}))
 	ck.NoError(err, "SendFrame prompt")
 	waitForStatus(t, d1, childID, string(protocol.StatusStreaming), 20*time.Second)
+	// The status turns streaming before the request leaves the daemon. A kill in
+	// that window leaves nothing in flight to re-issue, so wait for the request
+	// itself.
+	select {
+	case <-fake.arrived:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the fake never received the request the child was streaming")
+	}
 
 	// SIGKILL mid-turn.
 	_ = d1.proc.Process.Signal(syscall.SIGKILL)
