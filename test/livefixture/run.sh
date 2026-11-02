@@ -12,8 +12,9 @@
 #      allowance for loopback + cleartext, so a login can reach the fixture.
 #   3. test/livefixture: a fake authorization server and a real MCP SDK server
 #      on loopback. No vendor account, no network traffic to a real provider.
-#   4. A fundi child, given two scripted turns and then killed, so the
-#      follower/history tests have history to follow and page.
+#   4. One enrolled executor for this machine (the pool is on, and a spawn needs
+#      a live member), plus a fundi child given two scripted turns and then
+#      killed, so the follower/history tests have history to follow and page.
 #
 # It then spawns the ONE child the follower/history tests need and kills it, so
 # a scratch daemon has the history those four tests follow and page; see "the
@@ -297,22 +298,19 @@ Set RAFIKI_SDK_LIVE_TMPDIR to a shorter directory."
 fi
 
 daemon_id="sdk-live-$$"
-# This run keeps the executor POOL OFF. That is what lets a fundi child run
-# in-process, which both the history child below and the refresh test's spawn
-# rely on: with a pool on, an empty-selector spawn is refused unless a live
-# ENROLLED executor exists, and enrolling one is a credential dance this run
-# does not need. `rafiki create --no-local-executor` then skips the CLI's
-# workspace join, which is the only thing that required a pool.
-#
-# RAFIKI_EXECUTOR_NAME is still exported because the CLI labels this machine
-# with it; nothing in this run joins a pool.
-RAFIKI_EXECUTOR_NAME="sdk-live-exec-$$"
+# The executor pool is ON and this machine has a NAME: `rafiki create` refuses
+# to join a workspace without one ("this machine has no executor name"), and a
+# spawn through the pool needs a live executor to satisfy it. Both are exported
+# so the daemon AND every CLI call see them. The standing executor below is what
+# keeps the pool non-empty after the history child is killed.
+RAFIKI_EXECUTOR_NAME="livefix-$$"
 export RAFIKI_EXECUTOR_NAME
-export RAFIKI_EXECUTORS_ENABLED=0
+export RAFIKI_EXECUTORS_ENABLED=1
 user="sdk-live-$(date +%Y%m%d%H%M%S)-$$"
 secrets_key=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
 
 daemon_pid=""
+executor_pid=""
 fixture_pid=""
 
 stop_pid() {
@@ -353,6 +351,7 @@ cleanup() {
 	fi
 
 	stop_pid "$daemon_pid"
+	stop_pid "$executor_pid"
 	stop_pid "$fixture_pid"
 
 	if [ -n "${RAFIKI_SDK_LIVE_KEEP:-}" ]; then
@@ -446,7 +445,7 @@ mkdir -p "$XDG_CONFIG_HOME/rafiki/profiles/$profile"
 say "starting rafikid ($daemon_id)"
 RAFIKI_DB="$dsn" \
 	RAFIKI_SECRETS_KEY="$secrets_key" \
-	RAFIKI_EXECUTORS_ENABLED=0 \
+	RAFIKI_EXECUTORS_ENABLED=1 \
 	RAFIKI_EXECUTOR_NAME="$RAFIKI_EXECUTOR_NAME" \
 	RAFIKI_PROXY_LISTEN=127.0.0.1:0 \
 	RAFIKI_DAEMON_ID="$daemon_id" \
@@ -479,6 +478,40 @@ $(tail -n 40 "$tmp/daemon.log")"
 	sleep 0.25
 done
 
+# One standing executor, enrolled for this run. The pool must have a LIVE member
+# for two reasons: `rafiki create` joins a workspace, and the refresh test
+# spawns a child through the Connect API with an empty selector — which is
+# REFUSED ("no executor satisfies") when no executor is live. It runs for the
+# life of the run and is torn down with everything else.
+executor_sock="$XDG_RUNTIME_DIR/rafiki/executor.sock"
+say "enrolling an executor ($RAFIKI_EXECUTOR_NAME)"
+enroll=$("$tmp/bin/rafiki" executor enroll 2>"$tmp/enroll.log") ||
+	die "could not mint an executor enrollment token, so no child can be spawned:
+$(cat "$tmp/enroll.log")"
+enroll=$(printf '%s\n' "$enroll" | tail -n 1)
+[ -n "$enroll" ] || die "rafiki executor enroll printed no token"
+"$tmp/bin/rafiki" executor serve --connect-socket "$executor_sock" \
+	--enroll-token "$enroll" --root "$root" >"$tmp/executor.log" 2>&1 &
+executor_pid=$!
+
+executor_joined() { grep -q 'execpool: executor joined' "$tmp/daemon.log"; }
+deadline=$(( $(date +%s) + 60 ))
+while ! executor_joined; do
+	if ! kill -0 "$executor_pid" 2>/dev/null; then
+		die "the executor exited before joining the daemon, so no child can be spawned:
+$(cat "$tmp/executor.log")
+daemon log:
+$(tail -n 20 "$tmp/daemon.log")"
+	fi
+	if [ "$(date +%s)" -ge "$deadline" ]; then
+		die "no executor joined the daemon within 60s, so no child can be spawned:
+$(cat "$tmp/executor.log")
+daemon log:
+$(tail -n 20 "$tmp/daemon.log")"
+	fi
+	sleep 0.25
+done
+
 # ─── the child history the follower tests need ─────────────────────────────
 
 # Four pre-existing live tests follow, page and replay CHILD HISTORY, so they
@@ -503,7 +536,7 @@ NDJSON
 # The model is named explicitly: a daemon with no default configured refuses a
 # fundi spawn without one ("fundi kind requires a model"), and the scripted
 # turns mean it is never sent anywhere.
-"$tmp/bin/rafiki" create -d --no-local-executor --kind fundi --model anthropic/sonnet-latest \
+"$tmp/bin/rafiki" create -d --kind fundi --model anthropic/sonnet-latest \
 	--extra-arg=--fake-turns --extra-arg="$tmp/fake-turns.ndjson" "$child" >"$tmp/child.log" 2>&1 ||
 	die "could not spawn the history child. The four follower/history live tests need a child with history, and without one they cannot pass:
 $(cat "$tmp/child.log")

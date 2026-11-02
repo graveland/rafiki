@@ -380,10 +380,11 @@ database named by `RAFIKI_TEST_DSN` (override with `RAFIKI_SDK_LIVE_DSN`),
 mints a user token with `rafikid user create --token`, writes a scratch
 `rafikid.toml` carrying the operator `[mcp_oauth]` allowance loopback and
 cleartext need, starts the daemon and the fixture, waits for the control
-socket by making one authenticated Connect call, then runs
-`cargo test --locked --all-features --test daemon -- --ignored`. Everything it
-started is torn down on every exit path; `RAFIKI_SDK_LIVE_KEEP=1` keeps the
-scratch tree (with the daemon and fixture logs) for debugging.
+socket by making one authenticated Connect call, enrolls one executor for the
+run's own machine (the executor pool is on, and a spawn needs a live member),
+then runs `cargo test --locked --all-features --test daemon -- --ignored`.
+Everything it started is torn down on every exit path; `RAFIKI_SDK_LIVE_KEEP=1`
+keeps the scratch tree (with the daemon and fixture logs) for debugging.
 
 It needs cargo, Go and the disposable database. Each missing piece is a loud
 failure naming the fix, never a skip: a live run that silently passes nothing
