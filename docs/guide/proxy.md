@@ -15,8 +15,11 @@ Requests on the `/v1/messages` face (and `llm.Conversation`s) take:
 
 - a concrete Anthropic id (`claude-opus-4-8`) — sent to the Anthropic
   primary, with breaker-gated OpenRouter failover when configured;
-- a `<family>-latest` alias (`opus-latest`) — resolved live from the
-  OpenRouter catalog to the family's newest Anthropic model;
+- a `<tier>-latest` name — `anthropic/<tier>-latest` (`anthropic/opus-latest`),
+  OpenRouter's `~anthropic/claude-<tier>-latest`, or
+  `<provider>/gpt-<tier>-latest` for a provider of kind `openai-responses` /
+  `openai-responses-chatgpt` — resolved live from the OpenRouter catalog to
+  that tier's newest model;
 - any OpenRouter slash id (`moonshotai/kimi-k3`) — routed directly to
   OpenRouter with no failover;
 - one of your **model aliases** (`ds`) — a slash-free name you saved with
@@ -24,9 +27,12 @@ Requests on the `/v1/messages` face (and `llm.Conversation`s) take:
   request's owner. A miss falls through to the rules above, because Claude
   Code's own background calls and its `/model` menu send bare Anthropic ids.
 
-Nothing else is resolved: a slash-free name that is neither a `<family>-latest`
-alias nor one of your model aliases is passed through as written. The daemon
-ships no built-in per-line provider pin.
+Nothing else is resolved: a slash-free name that is neither a `<tier>-latest`
+name nor one of your model aliases is passed through as written — and a bare
+`<tier>-latest` (`opus-latest`) is refused rather than passed through, because
+a slash-free name is a model alias or an error (the refusal names the
+provider-qualified spelling). The daemon ships no built-in per-line provider
+pin.
 
 ### Routing specs
 
@@ -155,9 +161,16 @@ an inherited pin but never the bans, because clearing a pin is not authority to
 serve a banned host. Data policy is the exception in the other direction:
 `nodata`/`zdr` ride along even under a spec `only=`.
 
-No concrete model ids are hardcoded: `<family>-latest` names name families
-and the catalog is the source of truth, so an unresolvable name errors instead
-of falling back to a stale id. Slash ids require `OPENROUTER_API_KEY`. The `/v1/chat/completions` face does no resolution —
+No concrete model ids are hardcoded: `<tier>-latest` names name tiers and the
+catalog is the source of truth, so an unresolvable name errors instead of
+falling back to a stale id. Slash ids require `OPENROUTER_API_KEY`.
+
+OpenAI tiers come from the catalog's own `~openai/gpt-<tier>-latest` entries;
+the concrete model is the newest `openai/gpt-<version>-<tier>` by created
+stamp, never a `-pro` or `:batch` variant. A provider of any other kind passes
+`…-latest` through as its own id.
+
+The `/v1/chat/completions` face does no resolution —
 it takes raw ids and routes by configured prefix.
 
 ### Provider pinning and the provider guard

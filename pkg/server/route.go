@@ -27,7 +27,7 @@ var (
 
 // RouteModel decides where the proxy sends model, which must already be
 // resolved by routing.ResolveModel (that is what turns "anthropic/<id>" and
-// "<family>-latest" into a bare Anthropic id). A slash id is an
+// "anthropic/<tier>-latest" into a bare Anthropic id). A slash id is an
 // OpenRouter-native model; anything else goes to Anthropic. passthrough is
 // whether the request carries the caller's own Anthropic credential, openRouter
 // whether the proxy has an OpenRouter key.

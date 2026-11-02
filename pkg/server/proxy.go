@@ -70,7 +70,7 @@ type MessagesProxy struct {
 	// Model resolution (server-owned default + -latest). catalog may be nil
 	// (resolution then no-ops and the incoming model is forwarded as-is).
 	catalog      *routing.ModelCatalog
-	defaultModel string // e.g. "haiku-latest"
+	defaultModel string // e.g. "anthropic/haiku-latest"
 
 	// effortCache clamps/strips output_config.effort per model, learned at runtime
 	// from provider rejections (never a static snapshot). Empty until a model

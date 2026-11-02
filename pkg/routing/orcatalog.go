@@ -32,25 +32,11 @@ const NativeAnthropicPrefix = "anthropic/"
 // "~anthropic/..." OpenRouter auto-latest form (that stays an OpenRouter id).
 // Shared by ResolveModel (resolution) and the send path (routing) so the
 // native-Anthropic marker is understood identically at both entry points.
+//
+// The latest-model alias a caller spells is "anthropic/<tier>-latest"; this
+// strip is what hands the local name to LatestTier.
 func StripNativeAnthropicPrefix(model string) (string, bool) {
 	return strings.CutPrefix(model, NativeAnthropicPrefix)
-}
-
-// latestFamilies are the Anthropic family names for which "<family>-latest"
-// resolves. This is a set of family *names*, not model versions: it changes only
-// when Anthropic introduces a new family, and unlike concrete model ids it does
-// not drift — the actual newest version per family is resolved live from the
-// OpenRouter catalog. No concrete model ids are hardcoded anywhere.
-var latestFamilies = map[string]bool{"haiku": true, "sonnet": true, "opus": true, "fable": true}
-
-// LatestFamilies returns the "<family>-latest" aliases, sorted, for completion.
-func LatestFamilies() []string {
-	out := make([]string, 0, len(latestFamilies))
-	for fam := range latestFamilies {
-		out = append(out, fam+"-latest")
-	}
-	sort.Strings(out)
-	return out
 }
 
 // ProviderPrefs is OpenRouter's provider-routing request object, sent as the
@@ -86,13 +72,19 @@ type ProviderPrefs struct {
 
 // ResolveModel maps a requested model to the concrete id to send upstream:
 // empty -> defaultModel (and empty with no default is an error — there is no
-// hardcoded silent default); an "anthropic/<x>" prefix -> the native-Anthropic
-// marker, stripped and <x> resolved as a bare id; a "<family>-latest" alias ->
-// the catalog's newest for that family; anything else (a concrete Anthropic id,
-// a slash OpenRouter id, or any other short name) unchanged. No short-name
-// table is hardcoded here. A "<family>-latest" name errors when the catalog
-// can't resolve it (nil catalog, or offline with a cold cache) rather than
-// sending an unusable alias upstream — there is no hardcoded fallback list.
+// hardcoded silent default); "anthropic/<tier>-latest" or OpenRouter's
+// "~anthropic/claude-<tier>-latest" -> the catalog's newest native model for
+// that tier; an "anthropic/<x>" prefix -> the native-Anthropic marker, stripped
+// and <x> resolved as a bare id; anything else (a concrete Anthropic id, a slash
+// OpenRouter id, or any other short name) unchanged. No short-name table is
+// hardcoded here. A latest name errors when the catalog can't resolve it (nil
+// catalog, or offline with a cold cache) rather than sending an unusable alias
+// upstream — there is no hardcoded fallback list.
+//
+// A BARE "<tier>-latest" is refused: a slash-free name is a model alias of the
+// spawning owner or an error, and a provider-less latest would need a global
+// owner. A provider's own "<name>-latest" is pinned before this, by the
+// provider's KIND (llm.ResolveProviderLatest).
 func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, error) {
 	if requested == "" {
 		requested = defaultModel
@@ -103,18 +95,33 @@ func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, er
 	// An "anthropic/<x>" id names the native Anthropic sender under the shared
 	// "provider/model" convention: strip the prefix and resolve <x> exactly as a
 	// bare id, so the concrete result has no slash and downstream slash-routing
-	// leaves it on the direct Anthropic path. ("~anthropic/..." starts with "~",
-	// is untouched here, and is handled below as a latest alias / slash id.)
+	// leaves it on the direct Anthropic path. ("~anthropic/..." is untouched here
+	// and is handled in the last arm as a slash id.)
+	//
+	// "anthropic/<tier>-latest" and OpenRouter's "~anthropic/claude-<tier>-latest"
+	// pin to the newest native id. A bare "<tier>-latest" is not a spelling:
+	// slash-free names are aliases, and a provider-less latest would need a
+	// global owner.
+	local, native := StripNativeAnthropicPrefix(requested)
+	if rest, ok := strings.CutPrefix(requested, "~"+NativeAnthropicPrefix); ok {
+		local, native = rest, true
+	}
+	if native {
+		if tier, isLatest := LatestTier(VendorAnthropic, local); isLatest {
+			if cat != nil {
+				if antID, _, resolved := cat.ResolveTier(VendorAnthropic, tier); resolved {
+					return antID, nil
+				}
+			}
+			return "", fmt.Errorf("cannot resolve %q: OpenRouter model catalog unavailable", requested)
+		}
+	}
 	if stripped, ok := StripNativeAnthropicPrefix(requested); ok {
 		requested = stripped
 	}
-	if fam, ok := LatestAlias(requested); ok {
-		if cat != nil {
-			if antID, _, resolved := cat.ResolveLatest(fam); resolved {
-				return antID, nil
-			}
-		}
-		return "", fmt.Errorf("cannot resolve %q: OpenRouter model catalog unavailable", requested)
+	if !strings.Contains(requested, "/") && !strings.HasPrefix(requested, "~") && strings.HasSuffix(requested, "-latest") {
+		return "", fmt.Errorf("model %q: a bare -latest name is not a model; spell it with its provider, e.g. %q",
+			requested, "anthropic/"+strings.TrimPrefix(requested, "claude-"))
 	}
 	// A slash id routes to OpenRouter unchanged — except OpenRouter's auto-latest
 	// aliases carry a leading "~" (e.g. ~openai/gpt-latest) that AllIDs strips for
@@ -127,20 +134,6 @@ func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, er
 		}
 	}
 	return requested, nil
-}
-
-// LatestAlias reports whether model is a "<family>-latest" alias (bare,
-// "claude-<family>-latest", or OR's "~anthropic/claude-<family>-latest") and
-// returns the family.
-func LatestAlias(model string) (string, bool) {
-	m := strings.TrimPrefix(model, "~")
-	m = strings.TrimPrefix(m, "anthropic/")
-	m = strings.TrimPrefix(m, "claude-")
-	fam, isLatest := strings.CutSuffix(m, "-latest")
-	if !isLatest || !latestFamilies[fam] {
-		return "", false
-	}
-	return fam, true
 }
 
 type orModel struct {
@@ -249,7 +242,7 @@ func parsePriceOrZero(s string) float64 {
 }
 
 // ModelCatalog fetches and caches the OpenRouter model list, and resolves the
-// newest Anthropic model per family. It is the failover-safe source of truth
+// newest Anthropic model per tier. It is the failover-safe source of truth
 // for "latest": whatever it returns is present on OpenRouter. Callers get a
 // TTL-cached snapshot from the last successful refresh — it is not
 // re-verified on every call, so during an OpenRouter outage it can keep
@@ -377,9 +370,10 @@ func (c *ModelCatalog) backingOff() bool {
 
 // Warm triggers a best-effort catalog refresh. Call it (in a goroutine) at
 // startup so the first request doesn't pay the fetch latency and a snapshot is
-// populated before it's needed — narrowing the cold-cache window in which a
-// "<family>-latest" default can't resolve. A fetch failure is logged and left
-// for the next lazy refresh; there is deliberately no hardcoded fallback.
+// populated before it's needed — narrowing the cold-cache window in which an
+// "anthropic/<tier>-latest" default can't resolve. A fetch failure is logged
+// and left for the next lazy refresh; there is deliberately no hardcoded
+// fallback.
 //
 // Nil-receiver safe, like entryFor: Warm is reached through the
 // pricing.PriceSource interface, where a typed-nil *ModelCatalog makes the
@@ -434,13 +428,13 @@ func (c *ModelCatalog) recordFailure() {
 	c.mu.Unlock()
 }
 
-// ResolveLatest returns the newest anthropic/claude-<family>-* model (excluding
+// ResolveLatest returns the newest anthropic/claude-<tier>-* model (excluding
 // ~aliases and -fast variants) as (anthropicID, orID). ok=false if unresolved.
-func (c *ModelCatalog) ResolveLatest(family string) (string, string, bool) {
+func (c *ModelCatalog) ResolveLatest(tier string) (string, string, bool) {
 	c.refresh()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	prefix := "anthropic/claude-" + family
+	prefix := "anthropic/claude-" + tier
 	var best orModel
 	for _, m := range c.models {
 		if _, ok := nativeAnthropicID(m.ID); !ok || !strings.HasPrefix(m.ID, prefix) {
@@ -589,10 +583,10 @@ func (c *ModelCatalog) AllIDs() []string {
 
 // ContextWindow returns the OpenRouter-reported context length and max
 // completion tokens for a requested model, resolving it the same way the proxy
-// does (empty->default is not applied here; "<family>-latest" and bare/slash
-// ids resolve to the concrete OpenRouter entry). ok is false on a nil receiver,
-// an unresolvable model, a cold/stale cache without the entry, or an entry that
-// doesn't report a context length.
+// does (empty->default is not applied here; "anthropic/<tier>-latest" and
+// bare/slash ids resolve to the concrete OpenRouter entry). ok is false on a
+// nil receiver, an unresolvable model, a cold/stale cache without the entry, or
+// an entry that doesn't report a context length.
 func (c *ModelCatalog) ContextWindow(model string) (contextLen, maxCompletion int, ok bool) {
 	m, found := c.entryFor(model)
 	if !found {
@@ -705,10 +699,10 @@ var _ pricing.PriceSource = (*ModelCatalog)(nil)
 
 // entryFor resolves a requested model to its catalog orModel, shared by
 // ContextWindow and Pricing so both apply identical resolution and staleness
-// semantics. It mirrors the proxy's rules ("<family>-latest", bare Anthropic,
-// slash ids) via lookup, and falls back to the base model for a dated Anthropic
-// snapshot id (claude-haiku-4-5-20251001), which OpenRouter doesn't list. ok is
-// false on a nil receiver or no match.
+// semantics. It mirrors the proxy's rules ("anthropic/<tier>-latest", bare
+// Anthropic, slash ids) via lookup, and falls back to the base model for a dated
+// Anthropic snapshot id (claude-haiku-4-5-20251001), which OpenRouter doesn't
+// list. ok is false on a nil receiver or no match.
 func (c *ModelCatalog) entryFor(model string) (orModel, bool) {
 	if c == nil {
 		return orModel{}, false

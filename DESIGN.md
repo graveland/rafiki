@@ -20,9 +20,9 @@ every automated workflow, all LLM traffic routes through rafiki. It is the singl
   the shared conversation bus, not a point-to-point pipe.
 
 - **Model selection and fallback are infrastructure, not application code.** Anthropic as primary, OpenRouter as
-  fallback, configured once, inherited by all consumers. `<family>-latest` model aliases (`opus-latest`) resolve live,
-  and a providers.toml model declaration's `only` pins open-weight models to specific hosts. Circuit breakers and retry
-  are transparent.
+  fallback, configured once, inherited by all consumers. `<tier>-latest` model aliases (`anthropic/opus-latest`)
+  resolve live, and a providers.toml model declaration's `only` pins open-weight models to specific hosts. Circuit
+  breakers and retry are transparent.
 
 - **Out-of-band self-improvement replaces in-loop instruction-following.** Instead of asking a running agent to "learn
   from this conversation," conversations are stored in the DB and analyzed after the fact. The `analyze/` pipeline runs

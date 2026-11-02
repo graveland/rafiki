@@ -65,7 +65,7 @@ func newClaudeCmd() *cobra.Command {
 	// resolves), so a token minted after the process started still works and
 	// an explicit --token still wins.
 	cmd.Flags().String("token", "", "static bearer token for the proxy (default: the resolved profile's token)")
-	cmd.Flags().StringP("model", "m", os.Getenv("RAFIKI_MODEL"), "model id, one of your model aliases, a <family>-latest alias, or an OpenRouter slash id (or RAFIKI_MODEL)")
+	cmd.Flags().StringP("model", "m", os.Getenv("RAFIKI_MODEL"), "model id, one of your model aliases, an anthropic/<tier>-latest name, or an OpenRouter slash id (or RAFIKI_MODEL)")
 	cmd.Flags().String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
 	cmd.Flags().String("passthrough-auth", envOr("RAFIKI_CLAUDE_PASSTHROUGH", string(passthroughAuto)),
 		"who gets billed: auto|on|off (or RAFIKI_CLAUDE_PASSTHROUGH). auto bills your own\n"+

@@ -118,8 +118,9 @@ func AnthropicModel(model string) bool {
 	if strings.Contains(m, "/") {
 		return false // another provider's OpenRouter slash id
 	}
-	// A bare "<family>-latest" alias (opus-latest, fable-latest) is Anthropic's;
-	// every other provider is reachable only through a slash id, caught above.
+	// A "<tier>-latest" name (anthropic/opus-latest, or a bare one the proxy will
+	// refuse) is Anthropic's; every other provider is reachable only through a
+	// slash id, caught above.
 	return strings.HasPrefix(m, "claude") || strings.HasSuffix(m, "-latest")
 }
 

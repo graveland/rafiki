@@ -147,10 +147,11 @@ func Persona(p string) ConvOption { return func(c *convConfig) { c.persona = p }
 // WithName sets a human-readable name on the conversation.
 func WithName(n string) ConvOption { return func(c *convConfig) { c.name = n } }
 
-// Model sets the conversation's model. A "<family>-latest" alias resolves to
-// a concrete id once, at Conversation creation, and stays fixed for the
-// conversation's life (prefix stability). A slash (OpenRouter-native) id routes every send directly to
-// OpenRouter, with no failover.
+// Model sets the conversation's model. A "<tier>-latest" name —
+// "anthropic/<tier>-latest", or a provider-qualified `<provider>/<tier>-latest` —
+// resolves to a concrete id once, at Conversation creation, and stays fixed for
+// the conversation's life (prefix stability). A slash (OpenRouter-native) id
+// routes every send directly to OpenRouter, with no failover.
 func Model(m string) ConvOption { return func(c *convConfig) { c.model = m } }
 
 // Fallback sets the provider fallback chain consulted on retryable primary
@@ -249,7 +250,7 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 		return nil, errors.New("llm: an entrypoint is required (NewConversation or Entrypoint)")
 	}
 
-	// Resolve the model once: a "<family>-latest" alias pins to a concrete id
+	// Resolve the model once: a "<tier>-latest" name pins to a concrete id
 	// for the whole conversation so the cached prefix can't drift with catalog
 	// refreshes. A provider-qualified `<name>-latest` (`gpt/gpt-terra-latest`)
 	// pins first, by the provider's kind; the catalog-only `anthropic/` arms

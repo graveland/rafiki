@@ -41,22 +41,46 @@ func TestResolveLatest(t *testing.T) {
 	c, srv := newTestCatalog(t, orFixture)
 	defer srv.Close()
 
-	// sonnet-latest → newest non-alias, non-fast sonnet = claude-sonnet-5
+	// anthropic/sonnet-latest → newest non-alias, non-fast sonnet = claude-sonnet-5
 	ant, or, ok := c.ResolveLatest("sonnet")
 	ck.False(!ok || ant != "claude-sonnet-5" || or != "anthropic/claude-sonnet-5", "sonnet: got (%q,%q,%v)", ant, or, ok)
-	// opus-latest → 4.8 (the -fast variant is excluded)
+	// anthropic/opus-latest → 4.8 (the -fast variant is excluded)
 	ant, or, ok = c.ResolveLatest("opus")
 	ck.False(!ok || ant != "claude-opus-4-8" || or != "anthropic/claude-opus-4.8", "opus: got (%q,%q,%v)", ant, or, ok)
 }
 
-func TestLatestAlias(t *testing.T) {
-	for _, in := range []string{"haiku-latest", "claude-haiku-latest", "~anthropic/claude-haiku-latest"} {
-		if fam, ok := LatestAlias(in); !ok || fam != "haiku" {
-			t.Errorf("LatestAlias(%q) = (%q,%v)", in, fam, ok)
-		}
+// TestResolveModelProviderLatest pins the three accepted spellings of an
+// Anthropic tier name to the same native id, and TestResolveModelBareLatestIsRefused
+// pins the fourth: a bare "<tier>-latest" is a model alias or an error, never a
+// model, so it is refused with the provider-qualified spelling as the hint.
+func TestResolveModelProviderLatest(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, srv := newTestCatalog(t, orFixture)
+	defer srv.Close()
+
+	for _, req := range []string{"anthropic/haiku-latest", "anthropic/claude-haiku-latest", "~anthropic/claude-haiku-latest"} {
+		got, err := ResolveModel(c, "", req)
+		ck.Require().NoError(err, "ResolveModel(%q)", req)
+		ck.Eq("claude-haiku-4-5", got, "ResolveModel(%q) =", req)
 	}
-	_, ok := LatestAlias("claude-sonnet-5")
-	assert.NewCollecting(t).False(ok, "concrete id must not be a latest alias")
+}
+
+func TestResolveModelBareLatestIsRefused(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	cat := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	cat.SeedForTest([]CatalogEntry{
+		{ID: "anthropic/claude-haiku-4.5", Created: 1},
+		{ID: "anthropic/claude-opus-4.8", Created: 2},
+	})
+	for _, tc := range []struct{ req, hint string }{
+		{"haiku-latest", "anthropic/haiku-latest"},
+		{"claude-opus-latest", "anthropic/opus-latest"},
+	} {
+		got, err := ResolveModel(cat, "", tc.req)
+		ck.Require().Error(err, "ResolveModel(%q) must refuse a bare -latest name", tc.req)
+		ck.Eq("", got, "ResolveModel(%q) resolved despite being refused, got", tc.req)
+		ck.StrContains(err.Error(), tc.hint, "ResolveModel(%q) refusal must name the spelling to use, got", tc.req)
+	}
 }
 
 // TestOpenRouterModel covers the catalog-backed reverse lookup that replaced the
@@ -135,46 +159,46 @@ func TestResolveModel(t *testing.T) {
 			t.Errorf("ResolveModel(%q,%q) = (%q,%v), want %q", def, req, got, err, want)
 		}
 	}
-	mustResolve("haiku-latest", "", "claude-haiku-4-5") // empty -> default alias -> catalog
-	mustResolve("haiku-latest", "sonnet-latest", "claude-sonnet-5")
-	mustResolve("haiku-latest", "claude-opus-4-8", "claude-opus-4-8") // concrete passthrough
-	mustResolve("haiku-latest", "openai/gpt-4o", "openai/gpt-4o")     // real slash id: passthrough
+	mustResolve("anthropic/haiku-latest", "", "claude-haiku-4-5") // empty -> default alias -> catalog
+	mustResolve("anthropic/haiku-latest", "anthropic/sonnet-latest", "claude-sonnet-5")
+	mustResolve("anthropic/haiku-latest", "claude-opus-4-8", "claude-opus-4-8") // concrete passthrough
+	mustResolve("anthropic/haiku-latest", "openai/gpt-4o", "openai/gpt-4o")     // real slash id: passthrough
 
 	// OpenRouter auto-latest alias: the bare form (AllIDs strips the ~, and users
 	// copy-paste it) is re-tilded to the real catalog id instead of 400ing.
-	mustResolve("haiku-latest", "openai/gpt-latest", "~openai/gpt-latest")
+	mustResolve("anthropic/haiku-latest", "openai/gpt-latest", "~openai/gpt-latest")
 	// Already-tilde form is left as-is.
-	mustResolve("haiku-latest", "~openai/gpt-latest", "~openai/gpt-latest")
+	mustResolve("anthropic/haiku-latest", "~openai/gpt-latest", "~openai/gpt-latest")
 	// A slash id with neither bare nor tilde form must not gain an invented tilde;
 	// it passes through and OpenRouter's (now surfaced) error explains it.
-	mustResolve("haiku-latest", "openai/nonexistent", "openai/nonexistent")
+	mustResolve("anthropic/haiku-latest", "openai/nonexistent", "openai/nonexistent")
 	// Anthropic -latest resolves to a concrete id in every form, including OR's
-	// ~anthropic/claude-<fam>-latest.
-	mustResolve("haiku-latest", "~anthropic/claude-sonnet-latest", "claude-sonnet-5")
+	// ~anthropic/claude-<tier>-latest.
+	mustResolve("anthropic/haiku-latest", "~anthropic/claude-sonnet-latest", "claude-sonnet-5")
 
 	// An "anthropic/<x>" id names the native/direct Anthropic sender: the prefix
 	// is stripped and <x> resolved exactly as a bare id, so the concrete result
 	// has NO slash and downstream slash-routing keeps it on the Anthropic path.
-	mustResolve("haiku-latest", "anthropic/sonnet-latest", "claude-sonnet-5")       // alias, same as bare sonnet-latest
-	mustResolve("haiku-latest", "anthropic/claude-sonnet-4-5", "claude-sonnet-4-5") // concrete id, prefix stripped, passthrough
+	mustResolve("anthropic/haiku-latest", "anthropic/sonnet-latest", "claude-sonnet-5")       // the native tier spelling
+	mustResolve("anthropic/haiku-latest", "anthropic/claude-sonnet-4-5", "claude-sonnet-4-5") // concrete id, prefix stripped, passthrough
 	// A non-anthropic provider prefix stays an OpenRouter-native slash id, unchanged.
-	mustResolve("haiku-latest", "deepseek/deepseek-chat", "deepseek/deepseek-chat")
+	mustResolve("anthropic/haiku-latest", "deepseek/deepseek-chat", "deepseek/deepseek-chat")
 
 	// A short name is not a built-in alias: there is no hardcoded short-name
-	// table any more, so a slash-free id that is not a <family>-latest name is
+	// table any more, so a slash-free id that is not a <tier>-latest name is
 	// passed through as written — even when the catalog happens to contain a
 	// model whose line that name spells.
-	mustResolve("haiku-latest", "kimi-k3", "kimi-k3")
-	mustResolve("haiku-latest", "glm-5.2", "glm-5.2")
+	mustResolve("anthropic/haiku-latest", "kimi-k3", "kimi-k3")
+	mustResolve("anthropic/haiku-latest", "glm-5.2", "glm-5.2")
 	mustResolve("kimi-k3", "", "kimi-k3")
 
-	// A <family>-latest name the catalog can't resolve errors — there is no
-	// hardcoded fallback list to silently paper over it with a stale id.
-	if _, err := ResolveModel(c, "", "opus-latest"); err == nil {
-		t.Error("opus-latest absent from catalog must error, not fall back to a hardcoded id")
+	// An anthropic/<tier>-latest name the catalog can't resolve errors — there is
+	// no hardcoded fallback list to silently paper over it with a stale id.
+	if _, err := ResolveModel(c, "", "anthropic/opus-latest"); err == nil {
+		t.Error("anthropic/opus-latest absent from catalog must error, not fall back to a hardcoded id")
 	}
-	if _, err := ResolveModel(nil, "", "haiku-latest"); err == nil {
-		t.Error("nil catalog + -latest must error")
+	if _, err := ResolveModel(nil, "", "anthropic/haiku-latest"); err == nil {
+		t.Error("nil catalog + anthropic/-latest must error")
 	}
 	// No requested model AND no default must error loudly — there is no hardcoded
 	// silent default (haiku or otherwise) to paper over an unset model.
@@ -277,7 +301,7 @@ func TestContextWindow(t *testing.T) {
 	}{
 		{"slash id direct", "openai/gpt-5-codex", 400000, 128000, true},
 		{"OR auto-latest alias re-tilded", "openai/gpt-latest", 400000, 128000, true},
-		{"family-latest -> anthropic OR entry", "sonnet-latest", 1000000, 64000, true},
+		{"anthropic/-latest -> native Anthropic entry", "anthropic/sonnet-latest", 1000000, 64000, true},
 		{"dated snapshot id -> base model", "claude-sonnet-5-20260630", 1000000, 64000, true},
 		{"catalog miss", "openai/unknown", 0, 0, false},
 		{"entry without a context length", "openai/no-window", 0, 0, false},
@@ -367,9 +391,9 @@ func TestPricing(t *testing.T) {
 	if p, ok := c.Pricing("anthropic/claude-sonnet-5"); !ok || p.CompletionUSD != 0.00001 {
 		t.Errorf("slug pricing = (%+v,%v), want sonnet prices", p, ok)
 	}
-	// Family-latest alias resolves to the newest of the family.
-	if p, ok := c.Pricing("sonnet-latest"); !ok || p.PromptUSD != 0.000002 {
-		t.Errorf("sonnet-latest pricing = (%+v,%v), want sonnet prices", p, ok)
+	// An anthropic/<tier>-latest alias resolves to the newest of the tier.
+	if p, ok := c.Pricing("anthropic/sonnet-latest"); !ok || p.PromptUSD != 0.000002 {
+		t.Errorf("anthropic/sonnet-latest pricing = (%+v,%v), want sonnet prices", p, ok)
 	}
 	// Dated Anthropic snapshot ids aren't on OpenRouter; priced as the base model.
 	if p, ok := c.Pricing("claude-sonnet-5-20260101"); !ok || p.PromptUSD != 0.000002 {

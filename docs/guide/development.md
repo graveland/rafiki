@@ -88,10 +88,10 @@ make claude ARGS='--model openrouter/z-ai/glm-5.2' # …on any model the proxy c
 make claude ARGS='-- --permission-mode plan'       # …passing claude its own flags
 ```
 
-`--model` accepts a concrete id, a `<family>-latest` alias, or an OpenRouter
-slash id — the launcher registers it as a *custom model option* rather than
-setting `ANTHROPIC_MODEL`, which Claude Code would otherwise validate against
-a client-side allowlist and reject. It also pins
+`--model` accepts a concrete id, an `anthropic/<tier>-latest` name, or an
+OpenRouter slash id — the launcher registers it as a *custom model option*
+rather than setting `ANTHROPIC_MODEL`, which Claude Code would otherwise
+validate against a client-side allowlist and reject. It also pins
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the model's real context window and
 strips inherited `ANTHROPIC_*` variables so a nested launch can't land on the
 outer session's captured conversation.
