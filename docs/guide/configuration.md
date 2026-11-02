@@ -131,6 +131,81 @@ never refuses its spawn — the load-time refusals above are a property of the
 file, not of this child, so a malformed entry refuses every child that reads it
 whatever their allowlist says.
 
+## MCP OAuth
+
+A remote MCP server that authenticates with OAuth 2.1 is logged into explicitly
+(`rafiki mcp login <server>`), and the daemon holds the resulting credential.
+Nothing about it lives in `.mcp.json`: there is no `"oauth": true` switch, and
+no token is ever written into a project file. How the credential is bound,
+refreshed and revoked is [the MCP OAuth reference](../reference/mcp-oauth.md)'s
+subject; this section is the part an operator configures.
+
+Every outbound leg of that flow — protected-resource metadata, authorization
+server metadata, dynamic client registration, the code exchange, refresh and
+revocation — goes through one dedicated HTTP client, as do the authenticated
+requests sent to the MCP endpoint itself:
+
+- **Public HTTPS is the default.** A destination must resolve to a public
+  unicast address. Loopback, RFC 1918, IPv6 unique-local, link-local (which is
+  where cloud instance metadata lives), carrier-grade NAT, documentation and
+  benchmarking ranges, multicast, unspecified and reserved space are refused,
+  and so is an IPv4-mapped spelling of any of them.
+- **Every resolved address is checked, on every connection and every redirect
+  hop.** A name that answers both a public and a private address is refused
+  outright, and the daemon connects to the numeric address it checked, so a
+  later DNS answer cannot move the connection after the check. There is no
+  proxy either: `HTTP_PROXY`/`HTTPS_PROXY` in the daemon's environment are
+  ignored, because a proxy resolves the name itself and the daemon never sees
+  the address it reached.
+- **Redirects are refused** when they change origin or downgrade HTTPS to HTTP,
+  and only 5 are followed. A refused hop is not retried somewhere else, which is
+  what keeps a bearer token or client secret from following a `Location` to
+  another host.
+- **Bounds**: one operation 30s including reading the body, connect and TLS
+  handshake 10s each, a JSON response body 1 MiB (reading past it is an error,
+  never a truncated success), and at most 5 redirects. A streaming MCP response
+  is bounded only for its initial response: an SSE session lives as long as it
+  is meant to, not 30s after it starts.
+
+An operator opts in to anything less than public HTTPS in `rafikid.toml`. All
+three lists default to empty, and every entry is an exact match: no wildcards,
+no scheme, no port, no path.
+
+```toml
+[mcp_oauth]
+# Hostnames or IP literals the daemon may reach even when they are not public.
+allow_hosts = ["127.0.0.1", "internal.example"]
+
+# CIDRs (net/netip) covering addresses the daemon may reach.
+allow_cidrs = ["10.0.0.0/8", "fd00::/8"]
+
+# Hostnames or IP literals that may also be reached over cleartext HTTP.
+allow_http_hosts = ["127.0.0.1"]
+```
+
+The two gates are independent. A non-public address needs an `allow_hosts` or
+`allow_cidrs` entry; an `http://` URL needs, in addition, its exact host in
+`allow_http_hosts` — and that entry alone does not make a private address
+reachable. `https://` never needs an entry in `allow_http_hosts`. A malformed
+entry (a wildcard, a URL where a host belongs, a broken CIDR) fails daemon
+startup rather than becoming a permission that matches nothing.
+
+This is daemon configuration and only daemon configuration: a project
+`.mcp.json`, a flag passed to `rafiki mcp login` by an ordinary user, or an
+origin named by a server's own metadata cannot widen it. All three are data,
+and the policy comes from `rafikid.toml` on the daemon host. A URL derived from
+remote metadata — an authorization endpoint, a token endpoint, a revocation
+endpoint — is checked against the same policy, DNS included, before it is used
+or handed back for a browser to open.
+
+Two things the policy deliberately does not relax. The MCP SDK applies its own
+scheme restriction and may refuse a cleartext discovery URL that is not
+loopback no matter what this file says — operator policy cannot make an SDK
+check more permissive. And the `rafiki mcp login` callback listener on
+`127.0.0.1:1456` is an INBOUND listener, not an exemption: it is not a
+destination the daemon contacts, and it does not let any outbound request reach
+loopback.
+
 ## OpenAI Responses providers
 
 Besides `anthropic`, `anthropic-openrouter` and the generic `openai` kind (Chat
@@ -234,7 +309,7 @@ ignored). `.env.example` documents each one in full.
 | `RAFIKI_SKILLS_DIRS` | on-disk skill directories, path-list separated (opt-in — default is the daemon's database store). May be symlinks |
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
 | `RAFIKI_LSP_CONFIG` | global `lsp.json` for language server config (default `~/.config/rafiki/lsp.json`) |
-| `RAFIKI_CONFIG` | daemon-side: path to `rafikid.toml` (default `~/.config/rafiki/rafikid.toml`). Its `[telemetry]` section configures OTLP export; `OTEL_EXPORTER_OTLP_*` env vars override it |
+| `RAFIKI_CONFIG` | daemon-side: path to `rafikid.toml` (default `~/.config/rafiki/rafikid.toml`). Its `[telemetry]` section configures OTLP export; `OTEL_EXPORTER_OTLP_*` env vars override it, and its `[mcp_oauth]` section sets the outbound destination policy for MCP OAuth (see [MCP OAuth](#mcp-oauth)) |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
 | `RAFIKI_DB` | the conversation-store database; **required** — a DB-less daemon has no history, cost accounting, task ledger, user identity, executor plane or conversation leases, and `rafikid` refuses to start without it. A postgres URL for a database you provide, or the word `embedded` for rafikid's own PostgreSQL 18 (see [Paths](#paths) and [Installing rafiki](install.md#the-embedded-database)); `rafikid db psql` opens `psql` on either |
 | `RAFIKI_CONV_CACHE_BYTES` | daemon-side: the per-daemon conversation node cache, in bytes (default `268435456` = 256 MiB), charged by stored content bytes. One cache per daemon serves the proxy face, the review worker and every in-process child, so history captured by one is already cached for the others. Unset means `268435456`; anything that is not a positive integer (`<= 0` included) refuses startup |
@@ -293,4 +368,4 @@ close itself).
 
 ## Telemetry
 
-`rafikid` reads its own configuration — the `[telemetry]` section today, more sections over time — from `rafikid.toml`, at `$RAFIKI_CONFIG` else `<ConfigDir>/rafikid.toml` (a missing file means defaults, and an unknown key fails startup). Setting an OTLP endpoint there, or in the standard `OTEL_EXPORTER_OTLP_*` environment variables that override it, exports OpenTelemetry traces: one trace per agent turn, `execute_tool` and `chat` spans nested under it, cross-agent causality as span links, and postgres spans only under an active parent. Prompt, reply and tool-argument text is opt-in via content rules; errors are always exported. Metrics are independent of tracing and served at `/metrics`. See [`docs/reference/telemetry.md`](../reference/telemetry.md) for the configuration, span and attribute vocabulary, content policy, and a TraceQL query for one agent tree.
+`rafikid` reads its own configuration — the `[telemetry]` section and the `[mcp_oauth]` destination policy above, more sections over time — from `rafikid.toml`, at `$RAFIKI_CONFIG` else `<ConfigDir>/rafikid.toml` (a missing file means defaults, and an unknown key fails startup). Setting an OTLP endpoint there, or in the standard `OTEL_EXPORTER_OTLP_*` environment variables that override it, exports OpenTelemetry traces: one trace per agent turn, `execute_tool` and `chat` spans nested under it, cross-agent causality as span links, and postgres spans only under an active parent. Prompt, reply and tool-argument text is opt-in via content rules; errors are always exported. Metrics are independent of tracing and served at `/metrics`. See [`docs/reference/telemetry.md`](../reference/telemetry.md) for the configuration, span and attribute vocabulary, content policy, and a TraceQL query for one agent tree.
