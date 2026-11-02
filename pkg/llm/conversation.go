@@ -251,8 +251,18 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 
 	// Resolve the model once: a "<family>-latest" alias pins to a concrete id
 	// for the whole conversation so the cached prefix can't drift with catalog
-	// refreshes.
-	resolved, err := routing.ResolveModel(c.catalog, c.defaultModel, cfg.model)
+	// refreshes. A provider-qualified `<name>-latest` (`gpt/gpt-terra-latest`)
+	// pins first, by the provider's kind; the catalog-only `anthropic/` arms
+	// follow.
+	requested := cfg.model
+	if requested == "" {
+		requested = c.defaultModel
+	}
+	pinned, err := ResolveProviderLatest(c.set, c.catalog, requested)
+	if err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
+	resolved, err := routing.ResolveModel(c.catalog, c.defaultModel, pinned)
 	if err != nil {
 		return nil, fmt.Errorf("llm: %w", err)
 	}
