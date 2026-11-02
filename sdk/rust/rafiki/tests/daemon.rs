@@ -465,15 +465,11 @@ fn http_call(method: &str, url: &str, body: &str) -> (u16, String, String) {
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or_else(|| panic!("no status line in the fixture response: {response:?}"));
-    let body = if headers
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked")
-    {
-        dechunk(&body)
-    } else {
-        body
-    };
-    (status, headers, body)
+    // `dechunk` is total — a body with no chunk framing comes back unchanged —
+    // so the read path does not depend on spotting a header spelling. The
+    // fixture sets Content-Length (see writeJSON), but a response that outgrew
+    // net/http's buffer used to arrive chunked and that must keep working.
+    (status, headers, dechunk(&body))
 }
 
 /// Decode a chunked body. The fixture sets Content-Length (so this normally does
@@ -548,6 +544,51 @@ fn chunked_bodies_are_decoded_and_plain_ones_pass_through() {
         json,
         dechunk(json),
         "a body without framing must pass through"
+    );
+}
+
+/// The whole read path over a real socket, which is what actually broke: a
+/// response with no Content-Length and `Transfer-Encoding: chunked` must arrive
+/// as the JSON it carries, not as a chunk-size line followed by JSON.
+///
+/// This is the offline regression test for it — the live fixture sets
+/// Content-Length now, so the live run alone would not notice if the read path
+/// went back to trusting the body verbatim.
+#[test]
+fn http_call_decodes_a_chunked_response() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
+    let addr = listener.local_addr().expect("the listener's address");
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().expect("accept one connection");
+        let mut request = [0u8; 512];
+        let _ = conn.read(&mut request);
+        let body = "{\"ok\":true}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+             {:x}\r\n{body}\r\n0\r\n\r\n",
+            body.len()
+        );
+        conn.write_all(response.as_bytes())
+            .expect("write the response");
+    });
+
+    let (status, headers, body) = http_call("GET", &format!("http://{addr}/_state"), "");
+    server.join().expect("the fixture thread");
+    assert_eq!(200, status, "status line");
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"),
+        "the test server is supposed to answer chunked: {headers}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|err| panic!("the body is not JSON: {err}: {body:?}"));
+    assert_eq!(
+        Some(true),
+        parsed["ok"].as_bool(),
+        "the chunked body: {body:?}"
     );
 }
 
