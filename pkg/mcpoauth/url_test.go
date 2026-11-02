@@ -65,6 +65,7 @@ func TestMcpOAuthURLRejects(t *testing.T) {
 		{"userinfo", "https://user:secret@example.com/mcp"},
 		{"fragment", "https://example.com/mcp#section"},
 		{"empty fragment", "https://example.com/mcp#"},
+		{"zoned IPv6 literal", "https://[2002::1%25eth0]/mcp"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -72,6 +73,33 @@ func TestMcpOAuthURLRejects(t *testing.T) {
 			collect := assert.NewCollecting(t)
 			collect.ErrorIs(err, ErrInvalidURL, c.in)
 			collect.Eq("", got, c.in)
+		})
+	}
+}
+
+// TestMcpOAuthURLRedactsCredentialsFromErrors is the secret-hygiene rule: this
+// package's errors end up in logs, so none of them may echo userinfo or a query —
+// those are exactly where a client secret and an access token live. The last case
+// is the unparsable path, where url.Parse's own error quotes the whole raw string.
+func TestMcpOAuthURLRedactsCredentialsFromErrors(t *testing.T) {
+	const (
+		password = "s3cr3t-password"
+		token    = "s3cr3t-access-token"
+	)
+	cases := []struct{ name, in string }{
+		{"userinfo", "https://user:" + password + "@example.com/token?access_token=" + token},
+		{"userinfo over cleartext", "http://user:" + password + "@example.com/token?access_token=" + token},
+		{"userinfo with a fragment", "https://user:" + password + "@example.com/mcp#section"},
+		{"query on a rejected scheme", "ftp://user:" + password + "@example.com/x?access_token=" + token},
+		{"unparsable with userinfo and query", "https://user:" + password + "@exa mple.com/token?access_token=" + token},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Canonicalize(c.in)
+			collect := assert.NewCollecting(t)
+			collect.ErrorIs(err, ErrInvalidURL, c.in)
+			collect.NotStrContains(err.Error(), password, "the password must never reach the error text")
+			collect.NotStrContains(err.Error(), token, "the token must never reach the error text")
 		})
 	}
 }

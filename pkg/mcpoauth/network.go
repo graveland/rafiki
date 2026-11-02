@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -22,8 +23,10 @@ import (
 // because a config that could would be a config that can make a redirect chain
 // or a response body unbounded.
 const (
-	// OperationTimeout bounds one non-streaming operation end to end,
-	// including reading the body.
+	// OperationTimeout bounds one non-streaming OPERATION end to end: the whole
+	// redirect chain and the body read, not one hop of it. It is installed as
+	// http.Client.Timeout on the Client, which is what makes a chain of
+	// MaxRedirects hops cost one bound rather than one bound each.
 	OperationTimeout = 30 * time.Second
 	// ConnectTimeout bounds the TCP connect to one already-checked address.
 	ConnectTimeout = 10 * time.Second
@@ -35,10 +38,11 @@ const (
 	// response: an SSE session may live as long as its caller's context, but it
 	// may not hang before the first byte.
 	ResponseHeaderTimeout = 30 * time.Second
-	// MaxResponseBytes caps a non-streaming response body. Reading past it is
-	// an ERROR, never a truncated success: a JSON body cut in half parses as
-	// garbage a caller cannot tell from a server bug, and a token response that
-	// happens to fit would hide the ones that did not.
+	// MaxResponseBytes caps a response body, on BOTH clients: the one exception is
+	// a text/event-stream reply, which has no natural end. Reading past it is an
+	// ERROR, never a truncated success: a JSON body cut in half parses as garbage
+	// a caller cannot tell from a server bug, and a token response that happens to
+	// fit would hide the ones that did not.
 	MaxResponseBytes = 1 << 20
 	// MaxRedirects is how many redirects one request may follow. Every hop is
 	// re-checked, and only same-origin hops are followed at all.
@@ -195,17 +199,18 @@ func (p *Policy) ValidateDestination(ctx context.Context, raw string) error {
 // Client returns the client every OAuth leg uses: discovery, dynamic client
 // registration, the code exchange, refresh and revocation.
 //
-// One request through it is bounded to OperationTimeout (body read included),
-// its body to MaxResponseBytes, its redirects to MaxRedirects hops, and its
-// destination to the policy — checked before the request and again at dial time.
-// A redirect hop is its own request, so a chain is bounded to MaxRedirects+1
-// such bounds; put a deadline on the context if you want one bound for the
-// whole chain. There is no proxy: see transport.
+// One request through it is one operation: the whole redirect chain, body read
+// included, is bounded to OperationTimeout (http.Client.Timeout, so a chain of
+// MaxRedirects hops cannot multiply it), its body to MaxResponseBytes, its
+// redirects to same-origin MaxRedirects hops, and its destination to the policy
+// — checked before the request and again at dial time. There is no proxy: see
+// transport.
 func (p *Policy) Client() *http.Client {
 	p = p.orDefault()
 	return &http.Client{
-		Transport:     &policyTransport{policy: p, base: p.baseTransport(), bounded: true},
+		Transport:     &policyTransport{policy: p, base: p.baseTransport()},
 		CheckRedirect: p.checkRedirect,
+		Timeout:       p.operationTimeout(),
 	}
 }
 
@@ -216,9 +221,10 @@ func (p *Policy) Client() *http.Client {
 // session lives as long as its caller's context instead of dying 30 seconds
 // after it connected; the initial response is still bounded
 // (ResponseHeaderTimeout), the destination is still checked before the request
-// and at dial time, and the redirect rules are identical. Response bodies are
-// NOT size-capped here — an event stream has no natural end — so a caller that
-// wants a cap meters the stream itself.
+// and at dial time, and the redirect rules are identical. A response body is
+// still capped at MaxResponseBytes UNLESS it is text/event-stream, because this
+// client also reads ordinary JSON replies and those are finite like any other; an
+// event stream has no natural end, so it stays uncapped and its caller meters it.
 func (p *Policy) StreamClient() *http.Client {
 	p = p.orDefault()
 	return &http.Client{
@@ -318,6 +324,16 @@ func (p *Policy) addrAllowed(addr netip.Addr) bool {
 // differently is exactly the bypass this check exists to close.
 func isPublicAddr(addr netip.Addr) bool {
 	if !addr.IsValid() {
+		return false
+	}
+	// A zone is a local interface scope (%eth0), never part of a remote
+	// destination, so it is REFUSED rather than stripped. netip.Prefix.Contains
+	// is false for any zoned address, so stripping would be the fix that keeps
+	// matching; refusing is the one that cannot silently weaken the check if a
+	// later edit reorders these tests. Without this, a zoned address walks past
+	// every reservedPrefixes entry: 2002::1%eth0 (6to4, embedding any IPv4) or
+	// 64:ff9b::1.2.3.4%eth0 (NAT64) would classify as public.
+	if addr.Zone() != "" {
 		return false
 	}
 	addr = addr.Unmap()
@@ -470,13 +486,13 @@ func (p *Policy) checkRedirect(req *http.Request, via []*http.Request) error {
 		// Checked before the allow_http_hosts gate and independent of it: an
 		// operator permitting cleartext somewhere must not turn any redirect
 		// into a downgrade.
-		return fmt.Errorf("%w: HTTPS downgrade to %s", ErrRedirectRefused, next.Redacted())
+		return fmt.Errorf("%w: HTTPS downgrade to %s", ErrRedirectRefused, redactTarget(next))
 	}
 	if err := checkTarget(next); err != nil {
 		return fmt.Errorf("%w: %w", ErrRedirectRefused, err)
 	}
 	if !SameOrigin(via[0].URL, next) {
-		return fmt.Errorf("%w: cross-origin redirect to %s", ErrRedirectRefused, next.Redacted())
+		return fmt.Errorf("%w: cross-origin redirect to %s", ErrRedirectRefused, redactTarget(next))
 	}
 	if err := p.checkScheme(next); err != nil {
 		return fmt.Errorf("%w: %w", ErrRedirectRefused, err)
@@ -489,10 +505,14 @@ func (p *Policy) checkRedirect(req *http.Request, via []*http.Request) error {
 // gives a typed refusal instead of a dial error and catches an unapproved host
 // without a socket; the dial then repeats the address check from its own
 // lookup, which is what survives DNS rebinding.
+//
+// It also owns the response-body cap for both clients: an uncapped body is a
+// hostile server's way to grow the daemon's heap, and only an event stream has
+// no natural end. The whole-operation deadline is the Client's own Timeout, so a
+// redirect chain is bounded once rather than once per hop.
 type policyTransport struct {
-	policy  *Policy
-	base    http.RoundTripper
-	bounded bool
+	policy *Policy
+	base   http.RoundTripper
 }
 
 func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -506,22 +526,25 @@ func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err := policy.checkScheme(req.URL); err != nil {
 		return nil, err
 	}
-	ctx := req.Context()
-	cancel := context.CancelFunc(func() {})
-	if t.bounded {
-		ctx, cancel = context.WithTimeout(ctx, policy.operationTimeout())
-	}
-	resp, err := t.base.RoundTrip(req.WithContext(ctx))
+	resp, err := t.base.RoundTrip(req)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
-	body := resp.Body
-	if t.bounded {
-		body = &limitedBody{rc: body}
+	if !isEventStream(resp.Header.Get("Content-Type")) {
+		resp.Body = &limitedBody{rc: resp.Body}
 	}
-	resp.Body = &cancelOnCloseBody{rc: body, cancel: cancel}
 	return resp, nil
+}
+
+// isEventStream reports whether ct is the one content type that is exempt from
+// the body cap. Everything else on either client — a JSON-RPC reply, an OAuth
+// error document, a redirect body — is finite and capped like any other response.
+func isEventStream(ct string) bool {
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mediaType, "text/event-stream")
 }
 
 // limitedBody fails a body that runs past MaxResponseBytes, reading one byte
@@ -555,9 +578,9 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 
 func (b *limitedBody) Close() error { return b.rc.Close() }
 
-// cancelOnCloseBody releases the operation's context when the caller is done
-// with the response, not when RoundTrip returns: the deadline covers the body
-// read.
+// cancelOnCloseBody releases a request's context when the caller is done with the
+// response rather than when RoundTrip returns, so a deadline or an abort also
+// covers the body read. The login flow's recorder uses it too.
 type cancelOnCloseBody struct {
 	rc     io.ReadCloser
 	cancel context.CancelFunc

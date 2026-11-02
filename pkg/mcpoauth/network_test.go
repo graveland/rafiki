@@ -327,6 +327,55 @@ func TestMcpOAuthNetworkDeniesNonPublicFamilies(t *testing.T) {
 	}
 }
 
+// TestMcpOAuthNetworkDeniesZonedAddresses is the zone rule: an address carrying a
+// local interface scope names no remote destination, so it is refused — never
+// classified public and never dialled. The zone is the whole point: netip.
+// Prefix.Contains is false for ANY zoned address, so without this every one of
+// these walks past the reserved families below, and a zoned 6to4 or NAT64
+// address embeds an arbitrary IPv4 address (10/8, 169.254.169.254) that the
+// address check cannot see. A zoned GLOBAL address is refused too: stripping the
+// zone instead of refusing it would be the weaker of the two fixes.
+func TestMcpOAuthNetworkDeniesZonedAddresses(t *testing.T) {
+	cases := []struct{ name, addr string }{
+		{"zoned 6to4", "2002::1%eth0"},
+		{"zoned NAT64", "64:ff9b::1.2.3.4%eth0"},
+		{"zoned Teredo", "2001::1%eth0"},
+		{"zoned documentation", "2001:db8::1%eth0"},
+		{"zoned link-local", "fe80::1%eth0"},
+		{"zoned unique-local", "fd00::1%eth0"},
+		{"zoned global unicast", "2606:4700:4700::1111%eth0"},
+	}
+	for _, c := range cases {
+		t.Run(c.name+" literal", func(t *testing.T) {
+			remote := newFixture(t, okHandler)
+			dial := newDialer().route(c.addr+":443", remote.addr)
+			p := testPolicy(t, Config{}, newResolver(), dial)
+
+			// The zone's '%' is written %25 inside a URL authority.
+			literal := strings.ReplaceAll(c.addr, "%", "%25")
+			_, _, err := get(p.Client(), "https://["+literal+"]/mcp")
+			collect := assert.NewCollecting(t)
+			collect.ErrorIs(err, ErrInvalidURL, "a zoned literal names no remote destination")
+			collect.ErrorContains(err, "zoned")
+			collect.Eq(0, remote.count(), "a zoned destination receives no request")
+			collect.Eq(0, len(dial.addresses()), "a zoned address is never dialled")
+		})
+
+		t.Run(c.name+" resolver answer", func(t *testing.T) {
+			remote := newFixture(t, okHandler)
+			resolve := newResolver().answer("zoned.example", c.addr)
+			dial := newDialer().route(c.addr+":443", remote.addr)
+			p := testPolicy(t, Config{}, resolve, dial)
+
+			_, _, err := get(p.Client(), "https://zoned.example/mcp")
+			collect := assert.NewCollecting(t)
+			collect.ErrorIs(err, ErrDestinationDenied, "an answer carrying a zone is refused even for a public address")
+			collect.Eq(0, remote.count())
+			collect.Eq(0, len(dial.addresses()))
+		})
+	}
+}
+
 // TestMcpOAuthNetworkNumericPrivateLiteralDenied covers the literal path: an IP
 // in the URL is refused without being handed to the resolver, which would only
 // be a chance for something else to answer for it.
@@ -629,55 +678,113 @@ func TestMcpOAuthNetworkHTTPNeedsItsOwnAllowance(t *testing.T) {
 	})
 }
 
-// TestMcpOAuthNetworkBoundsResponseBody pins the body cap: exactly the cap is a
-// success, one byte more is an explicit error rather than a body that decodes
-// into nothing useful.
+// TestMcpOAuthNetworkBoundsResponseBody pins the body cap, which both clients
+// carry: exactly the cap is a success, one byte more is an explicit error rather
+// than a body that decodes into nothing useful, and the only exemption is an
+// event stream, which has no natural end.
 func TestMcpOAuthNetworkBoundsResponseBody(t *testing.T) {
-	serve := func(n int) *fixture {
+	serve := func(n int, contentType string) *fixture {
 		body := strings.Repeat("x", n)
 		return newFixture(t, func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Type", contentType)
 			_, _ = io.WriteString(w, body)
 		})
 	}
-	build := func(remote *fixture, stream bool) (*http.Client, *Policy) {
+	build := func(remote *fixture, stream bool) *http.Client {
 		resolve := newResolver().answer("mcp.example", "93.184.216.34")
 		dial := newDialer().route("93.184.216.34:80", remote.addr)
 		p := testPolicy(t, Config{AllowHTTPHosts: []string{"mcp.example"}}, resolve, dial)
 		if stream {
-			return p.StreamClient(), p
+			return p.StreamClient()
 		}
-		return p.Client(), p
+		return p.Client()
 	}
 
 	t.Run("exactly the cap succeeds", func(t *testing.T) {
-		remote := serve(MaxResponseBytes)
-		client, _ := build(remote, false)
-		_, body, err := get(client, "http://mcp.example/mcp")
+		remote := serve(MaxResponseBytes, "application/json")
+		_, body, err := get(build(remote, false), "http://mcp.example/mcp")
 		collect := assert.NewCollecting(t)
 		collect.NoError(err)
 		collect.Eq(MaxResponseBytes, len(body))
 	})
 
 	t.Run("one byte past the cap is an error", func(t *testing.T) {
-		remote := serve(MaxResponseBytes + 1)
-		client, _ := build(remote, false)
-		_, _, err := get(client, "http://mcp.example/mcp")
+		remote := serve(MaxResponseBytes+1, "application/json")
+		_, _, err := get(build(remote, false), "http://mcp.example/mcp")
 		assert.NewCollecting(t).ErrorIs(err, ErrResponseTooLarge)
 	})
 
-	t.Run("a stream is not capped", func(t *testing.T) {
-		remote := serve(MaxResponseBytes + 1)
-		client, _ := build(remote, true)
-		_, body, err := get(client, "http://mcp.example/mcp")
+	t.Run("a JSON reply on the stream client is capped too", func(t *testing.T) {
+		// The SDK reads ordinary JSON POST replies through this client, so an
+		// uncapped body here is a hostile server's way to grow the daemon's heap.
+		remote := serve(MaxResponseBytes+1, "application/json")
+		_, _, err := get(build(remote, true), "http://mcp.example/mcp")
+		collect := assert.NewCollecting(t)
+		collect.ErrorIs(err, ErrResponseTooLarge)
+		collect.ErrorContains(err, "response body exceeds")
+	})
+
+	t.Run("a JSON reply of exactly the cap on the stream client succeeds", func(t *testing.T) {
+		remote := serve(MaxResponseBytes, "application/json")
+		_, body, err := get(build(remote, true), "http://mcp.example/mcp")
 		collect := assert.NewCollecting(t)
 		collect.NoError(err)
-		collect.Eq(MaxResponseBytes+1, len(body), "an event stream has no natural end")
+		collect.Eq(MaxResponseBytes, len(body))
+	})
+
+	t.Run("an event stream is not capped", func(t *testing.T) {
+		for _, contentType := range []string{"text/event-stream", "text/event-stream; charset=utf-8"} {
+			remote := serve(MaxResponseBytes+1, contentType)
+			_, body, err := get(build(remote, true), "http://mcp.example/mcp")
+			collect := assert.NewCollecting(t)
+			collect.NoError(err, contentType)
+			collect.Eq(MaxResponseBytes+1, len(body), "an event stream has no natural end: %s", contentType)
+		}
 	})
 }
 
+// TestMcpOAuthNetworkStreamsUncappedAndUndeadlined is the streaming client's
+// other half: an event stream is exempt from BOTH bounds. It runs past
+// MaxResponseBytes and takes longer than the operation timeout the non-streaming
+// client is held to, and the whole body still arrives — so no whole-session
+// deadline may be added to StreamClient.
+func TestMcpOAuthNetworkStreamsUncappedAndUndeadlined(t *testing.T) {
+	const chunk = 64 << 10
+	chunks := MaxResponseBytes/chunk + 3
+	line := []byte("data: " + strings.Repeat("x", chunk-8) + "\n\n")
+	remote := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for i := 0; i < chunks; i++ {
+			if _, err := w.Write(line); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	resolve := newResolver().answer("mcp.example", "93.184.216.34")
+	dial := newDialer().route("93.184.216.34:80", remote.addr)
+	p := testPolicy(t, Config{AllowHTTPHosts: []string{"mcp.example"}}, resolve, dial)
+	p.opTimeout = 100 * time.Millisecond
+
+	start := time.Now()
+	_, body, err := get(p.StreamClient(), "http://mcp.example/mcp")
+	elapsed := time.Since(start)
+	collect := assert.NewCollecting(t)
+	collect.NoError(err)
+	collect.Eq(len(line)*chunks, len(body), "an event stream is not capped")
+	collect.True(len(body) > MaxResponseBytes, "the stream exceeded the cap and still flowed")
+	collect.True(elapsed > p.opTimeout, "the stream outlived the operation timeout (%s)", elapsed)
+}
+
 // TestMcpOAuthNetworkBoundsOperation bounds one whole operation, body read
-// included: a server that answers headers and then stalls is still cut off.
+// included: a server that answers headers and then stalls is still cut off. The
+// bound is the client's Timeout, so the error is a timeout of some spelling
+// rather than one particular one.
 func TestMcpOAuthNetworkBoundsOperation(t *testing.T) {
 	remote := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -694,10 +801,47 @@ func TestMcpOAuthNetworkBoundsOperation(t *testing.T) {
 
 	start := time.Now()
 	_, _, err := get(p.Client(), "http://mcp.example/mcp")
+	var netErr net.Error
 	collect := assert.NewCollecting(t)
 	collect.Error(err, "the stalled body must be cut off")
-	collect.True(errors.Is(err, context.DeadlineExceeded), "want a deadline, got %v", err)
+	collect.True(errors.As(err, &netErr) && netErr.Timeout(), "want a timeout, got %v", err)
 	collect.True(time.Since(start) < 3*time.Second, "the bound is not the fixture's own delay")
+}
+
+// TestMcpOAuthNetworkBoundsTheWholeRedirectChain is the whole-chain rule: the
+// operation timeout covers ONE operation including every redirect, not each hop
+// separately. Every hop here is well inside the bound and the chain as a whole is
+// well past it, so a per-hop bound would let this request finish and a whole-chain
+// bound refuses it.
+func TestMcpOAuthNetworkBoundsTheWholeRedirectChain(t *testing.T) {
+	const (
+		hops  = 5
+		delay = 80 * time.Millisecond
+	)
+	remote := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		var n int
+		_, _ = fmt.Sscanf(r.URL.Path, "/%d", &n)
+		time.Sleep(delay)
+		if n < hops {
+			http.Redirect(w, r, fmt.Sprintf("/%d", n+1), http.StatusFound)
+			return
+		}
+		_, _ = io.WriteString(w, "end")
+	})
+	resolve := newResolver().answer("mcp.example", "93.184.216.34")
+	dial := newDialer().route("93.184.216.34:80", remote.addr)
+	p := testPolicy(t, Config{AllowHTTPHosts: []string{"mcp.example"}}, resolve, dial)
+	p.opTimeout = 150 * time.Millisecond
+
+	start := time.Now()
+	_, _, err := get(p.Client(), "http://mcp.example/0")
+	elapsed := time.Since(start)
+	var netErr net.Error
+	collect := assert.NewCollecting(t)
+	collect.Error(err, "the chain as a whole runs past the operation bound")
+	collect.True(errors.As(err, &netErr) && netErr.Timeout(), "want a timeout, got %v", err)
+	collect.True(elapsed < hops*delay, "refused by the whole-chain bound (%s), not after the last hop", elapsed)
+	collect.True(remote.count() > 1, "the chain really was followed before the bound fired")
 }
 
 // TestMcpOAuthNetworkBoundsInitialResponse bounds the wait for headers on both
