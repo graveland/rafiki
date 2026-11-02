@@ -185,6 +185,16 @@ refresh machinery are the factory's, and are documented where they live:
   a logout or a newer login wins over anything cached. Nothing in `pkg/fundi`
   holds a token across dials.
 
+One discovery interaction is worth knowing before pointing a login at a
+hand-rolled server. The login captures the metadata the SDK actually validated
+by replaying the recorded responses, so a URL answered **twice within one
+login** is accepted only when both answers are byte-identical; a second answer
+that differs fails that login as ambiguous rather than binding the credential to
+whatever the second copy said. A server that varies a response header or a
+timestamp between two fetches in the same login therefore reads as "start
+again", not as a silent success — retry the login, and if it repeats, the
+authorization server is not stable enough to bind to.
+
 ## Tests
 
 `pkg/fundi/tools/mcp_test.go`, all `TestMcpOAuth*`, driven against a real
