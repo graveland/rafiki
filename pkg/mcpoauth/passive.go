@@ -205,7 +205,10 @@ func (s *acquireSource) Token() (*oauth2.Token, error) {
 	ctx, cancel := s.engine.withLifetime(s.ctx)
 	defer cancel()
 
-	grant, err := s.engine.store.Acquire(ctx, s.owner, s.endpoint, s.generation, s.engine.refresh)
+	// refreshForStore, not refresh: the store wraps a refresh failure into its
+	// own error, and this is the one boundary where the engine guarantees the
+	// upstream text never travels past it (see sanitizeRefreshError).
+	grant, err := s.engine.store.Acquire(ctx, s.owner, s.endpoint, s.generation, s.engine.refreshForStore)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrMissing), errors.Is(err, ErrLoginRequired), errors.Is(err, ErrStaleFence):

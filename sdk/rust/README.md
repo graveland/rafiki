@@ -224,8 +224,10 @@ resolves the configured entry and invalidates its endpoint (fencing a first
 login still in flight), or `resource` names the canonical resource and touches
 no config at all, which is how a grant is removed after its project file is
 gone. Both or neither is `invalid_argument`; a grant the caller does not have is
-`not_found`. No token, client secret or callback code ever appears in a
-response — the daemon holds every credential.
+`not_found`. It returns the generated `pb::DeleteMcpCredentialResponse` (an
+empty message), matching `delete_provider_credential` rather than `()`. No token,
+client secret or callback code ever appears in a response — the daemon holds
+every credential.
 
 ## Errors: nothing is retried
 

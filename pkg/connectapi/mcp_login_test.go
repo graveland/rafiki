@@ -9,10 +9,12 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -375,13 +377,26 @@ func TestMcpOAuthErrorMapping(t *testing.T) {
 		"an uncoded failure's text is redacted")
 }
 
-// TestMcpOAuthResponsesCarryNoCredential makes the token-free promise explicit:
-// nothing in a Begin or Complete response can hold a token, a client secret or a
-// callback code. It walks the generated descriptors rather than a hand-written
-// list, so a future field with a credential-shaped name fails here.
+// TestMcpOAuthResponsesCarryNoCredential makes the token-free promise explicit
+// for EVERY message of the three verbs — request and response, Begin, Complete
+// and Delete — and by VALUE as well as by name.
+//
+// The name walk catches a field anyone might add later (a "bearer", a "jwt", a
+// "client_secret"); it is evidence only because it covers the whole
+// request/response set. The value walk is the other half: a credential smuggled
+// into a generically-named field (a string called "account_id", a repeated field
+// called "tools") would pass a name check, so every string and every repeated
+// string the handler actually produced is compared against the values it was
+// built from.
 func TestMcpOAuthResponsesCarryNoCredential(t *testing.T) {
 	c := assert.NewCollecting(t)
 
+	// Values a leak would carry: the callback the caller sent, and the material
+	// the backend never receives at all.
+	const (
+		callbackCode = "SEKRIT-callback-code"
+		secret       = "SEKRIT-client-secret"
+	)
 	f := &fakeMcpLogin{compRes: McpLoginComplete{
 		Server:   "linear",
 		Resource: "https://mcp.example.net/mcp",
@@ -394,11 +409,20 @@ func TestMcpOAuthResponsesCarryNoCredential(t *testing.T) {
 		connect.NewRequest(&rafikiv1.BeginMcpLoginRequest{ConfigPath: "/c.json", Server: "linear"}))
 	c.Require().NoError(err, "BeginMcpLogin")
 	complete, err := s.CompleteMcpLogin(mcpLoginUserCtx(),
-		connect.NewRequest(&rafikiv1.CompleteMcpLoginRequest{LoginId: "ml-1", CallbackQuery: "code=abc"}))
+		connect.NewRequest(&rafikiv1.CompleteMcpLoginRequest{LoginId: "ml-1", CallbackQuery: "code=" + callbackCode}))
 	c.Require().NoError(err, "CompleteMcpLogin")
+	deleted, err := s.DeleteMcpCredential(mcpLoginUserCtx(),
+		connect.NewRequest(&rafikiv1.DeleteMcpCredentialRequest{ConfigPath: "/c.json", Server: "linear"}))
+	c.Require().NoError(err, "DeleteMcpCredential")
 
-	forbidden := []string{"token", "secret", "code", "password", "authorization"}
-	for _, msg := range []proto.Message{begin.Msg, complete.Msg} {
+	// Every request/response message of the three verbs, by descriptor.
+	forbidden := []string{"token", "secret", "code", "password", "authorization", "bearer", "jwt"}
+	for _, msg := range []proto.Message{
+		&rafikiv1.BeginMcpLoginRequest{}, &rafikiv1.BeginMcpLoginResponse{},
+		&rafikiv1.CompleteMcpLoginRequest{}, &rafikiv1.CompleteMcpLoginResponse{},
+		&rafikiv1.DeleteMcpCredentialRequest{}, &rafikiv1.DeleteMcpCredentialResponse{},
+		begin.Msg, complete.Msg, deleted.Msg,
+	} {
 		fields := msg.ProtoReflect().Descriptor().Fields()
 		for i := 0; i < fields.Len(); i++ {
 			name := string(fields.Get(i).Name())
@@ -407,7 +431,33 @@ func TestMcpOAuthResponsesCarryNoCredential(t *testing.T) {
 			}
 		}
 	}
-	c.Eq("code=abc", f.query, "the callback query is an INPUT only; it never comes back")
+
+	// And by value: nothing the handlers produced may carry the callback code or
+	// a secret, whichever field it hides in.
+	for _, msg := range []proto.Message{begin.Msg, complete.Msg, deleted.Msg} {
+		msg.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+			if fd.IsList() {
+				list := v.List()
+				for i := 0; i < list.Len(); i++ {
+					val := list.Get(i).String()
+					c.False(strings.Contains(val, callbackCode) || strings.Contains(val, secret),
+						"%T.%s carries a credential: %q", msg, fd.Name(), val)
+				}
+				return true
+			}
+			if fd.Kind() != protoreflect.StringKind {
+				return true
+			}
+			val := v.String()
+			c.False(strings.Contains(val, callbackCode) || strings.Contains(val, secret),
+				"%T.%s carries a credential: %q", msg, fd.Name(), val)
+			return true
+		})
+	}
+
+	// The one place the callback legitimately goes: into the backend, verbatim,
+	// as an input.
+	c.Eq("code="+callbackCode, f.query, "the callback query is an INPUT only; it never comes back")
 }
 
 // containsFold is a tiny ASCII case-insensitive substring test, so this file

@@ -11,25 +11,31 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/mcpoauth"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rafikidconfig"
 	"go.graveland.dev/rafiki/pkg/secretbox"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -274,8 +280,13 @@ func TestMcpOAuthEngineErrorMapping(t *testing.T) {
 		{"store unavailable", mcpoauth.ErrUnavailable, protocol.ErrUnavailable},
 		{"engine closed", mcpoauth.ErrClosed, protocol.ErrUnavailable},
 		{"destination denied", mcpoauth.ErrDestinationDenied, protocol.ErrInvalidArgs},
+		{"redirect refused", mcpoauth.ErrRedirectRefused, protocol.ErrInvalidArgs},
+		{"response too large", mcpoauth.ErrResponseTooLarge, protocol.ErrInvalidArgs},
+		// A malformed --resource or config URL. Without this case the raw URL
+		// (userinfo and query included) fell through to the redacted internal.
+		{"invalid url", fmt.Errorf("mcpoauth: begin login: endpoint: %w", mcpoauth.ErrInvalidURL), protocol.ErrInvalidArgs},
 	} {
-		mapped := mcpLoginEngineError(tc.err)
+		mapped := mcpLoginEngineError(tc.err, "login")
 		var ce *connectapi.ControllerError
 		c.Require().True(errors.As(mapped, &ce), "%s: want a ControllerError, got %T", tc.name, mapped)
 		c.Eq(tc.want, ce.Code, "%s: code", tc.name)
@@ -283,11 +294,31 @@ func TestMcpOAuthEngineErrorMapping(t *testing.T) {
 			strings.Contains(ce.Message, "token"), "%s: the message must quote nothing secret: %s", tc.name, ce.Message)
 	}
 
-	// An error the daemon did not author stays uncoded, so the handler's
-	// fallthrough logs it and answers a redacted internal.
-	c.Error(mcpLoginEngineError(errors.New("dial tcp 10.0.0.1:5432: refused")), "an uncoded error is forwarded")
+	// A malformed URL never echoes the URL itself: the URL shape rules quote it,
+	// and a project URL can carry userinfo or a query the author meant to keep.
+	badURL := fmt.Errorf("%w: %q", mcpoauth.ErrInvalidURL, "https://user:hunter2@mcp.example.net/mcp")
+	mapped := mcpLoginEngineError(badURL, "logout")
 	var ce *connectapi.ControllerError
-	c.False(errors.As(mcpLoginEngineError(errors.New("x")), &ce), "an uncoded error must not become an authored refusal")
+	c.Require().True(errors.As(mapped, &ce), "invalid url: ControllerError")
+	c.Eq(protocol.ErrInvalidArgs, ce.Code, "invalid url: code")
+	c.False(strings.Contains(ce.Message, "hunter2") || strings.Contains(ce.Message, "mcp.example.net"),
+		"invalid url: the refusal must not echo the URL: %s", ce.Message)
+
+	// A failure nobody classified is still ACTIONABLE and still authored: the
+	// cause is logged, and the wire carries one sentence naming the operation —
+	// never the upstream text.
+	unclassified := fmt.Errorf("oauth: fetching metadata for %q: %q", "https://h", "SECRET-BODY")
+	mapped = mcpLoginEngineError(unclassified, "login")
+	c.Require().True(errors.As(mapped, &ce), "unclassified: want a ControllerError, got %T", mapped)
+	c.Eq(protocol.ErrInternal, ce.Code, "unclassified: code")
+	c.StrContains(ce.Message, "MCP OAuth login", "unclassified: names the operation: %s", ce.Message)
+	c.False(strings.Contains(ce.Message, "SECRET-BODY"), "unclassified: the upstream text must not ride the wire: %s", ce.Message)
+	if got := mcpLoginEngineError(unclassified, "logout"); !strings.Contains(got.Error(), "logout") {
+		c.Fail("the logout fallback must name the logout, got %q", got.Error())
+	}
+	if mcpLoginEngineError(nil, "login") != nil {
+		c.Fail("a nil error must map to nil")
+	}
 }
 
 // TestMcpOAuthPassiveFactoryIsOwnerBound is the fundi seam: a factory exists
@@ -505,4 +536,261 @@ func TestMcpOwnerCleanupIsBounded(t *testing.T) {
 	c := assert.NewCollecting(t)
 	c.True(mcpOwnerCleanupTimeout > 0, "the cleanup must be bounded")
 	c.True(mcpOwnerCleanupTimeout <= 30*time.Second, "the bound must stay a bound: %s", mcpOwnerCleanupTimeout)
+}
+
+// TestMcpOAuthEntryRefusalAdviceMatchesTheVerb pins the C-minor finding: an entry
+// this daemon will not resolve must not send a user who is logging OUT down the
+// login path. A header added after the login, a file that moved, a server since
+// made stdio — each traps the entry form, and `--resource` is the way out.
+func TestMcpOAuthEntryRefusalAdviceMatchesTheVerb(t *testing.T) {
+	c := assert.NewCollecting(t)
+	path := writeMCPConfig(t, `{"mcpServers":{"linear":{"url":"https://mcp.example.net/mcp","headers":{"Authorization":"Bearer x"}}}}`)
+
+	_, loginErr := mcpServerEndpoint(path, "linear")
+	c.Require().Error(loginErr, "the login form refuses the entry")
+	c.StrContains(loginErr.Error(), "log in again", "the login form gives login advice: %v", loginErr)
+	c.False(strings.Contains(loginErr.Error(), "--resource"), "the login form must not advertise the logout escape: %v", loginErr)
+
+	_, logoutErr := mcpServerEndpointFor(path, "linear", mcpEntryForLogout)
+	c.Require().Error(logoutErr, "the logout form refuses the same entry")
+	c.StrContains(logoutErr.Error(), "--resource", "the logout form names the escape hatch: %v", logoutErr)
+	c.False(strings.Contains(logoutErr.Error(), "log in again"), "the logout form must not tell the user to log in again: %v", logoutErr)
+
+	// Every entry-shape refusal carries it, not just the header one.
+	for _, tc := range []struct{ name, body string }{
+		{"stdio", `{"mcpServers":{"linear":{"command":"node"}}}`},
+		{"via_executor", `{"mcpServers":{"linear":{"via_executor":{"selector":"kind=native","command":"git"}}}}`},
+		{"no url", `{"mcpServers":{"linear":{"command":""}}}`},
+		{"undeclared", `{"mcpServers":{"other":{"url":"https://x/y"}}}`},
+	} {
+		p := writeMCPConfig(t, tc.body)
+		_, err := mcpServerEndpointFor(p, "linear", mcpEntryForLogout)
+		c.Require().Error(err, "%s: refused", tc.name)
+		c.StrContains(err.Error(), "--resource", "%s: the resource form is the way out: %v", tc.name, err)
+	}
+}
+
+// TestMcpOAuthDeleteOwnerInvalidatesLocallyOnly pins what the removal does
+// TODAY: the local invalidation is the whole of it, and the payload the store
+// detached is deliberately not spent here. Upstream revocation follows through
+// Engine.RevokeDetached once the engine exposes it (a second round owns that
+// file); until then nothing may reach an authorization server from a removal.
+func TestMcpOAuthDeleteOwnerInvalidatesLocallyOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	// A revocation endpoint that must never be called from this path.
+	revoker := &recordingRevocationEndpoint{}
+	srv := httptest.NewServer(revoker)
+	defer srv.Close()
+
+	store := &fakeMcpStore{revocations: []mcpoauth.Revocation{{
+		OwnerUserID: "u1",
+		Resource:    "https://mcp.example.net/mcp",
+		Issuer:      "https://auth.example.net",
+		Registration: mcpoauth.Registration{
+			ClientID:           "client-1",
+			RevocationEndpoint: srv.URL + "/revoke",
+		},
+		RefreshToken: "rt-detached",
+	}}}
+	broker := newTestBroker(t, store)
+
+	broker.deleteOwner(context.Background(), "u1")
+
+	store.mu.Lock()
+	c.Eq(1, store.invalidateCalls, "the local invalidation must happen exactly once")
+	c.EqDeep([]string{"u1"}, store.invalidatedOwners, "and for the removed user")
+	store.mu.Unlock()
+	c.Eq(0, revoker.count(), "a removal must not reach an authorization server until the engine exposes revocation")
+
+	// A store failure is the other half: the removal is not failed, and still
+	// nothing is revoked.
+	failing := &fakeMcpStore{invalidateErr: errors.New("store is down")}
+	broker2 := newTestBroker(t, failing)
+	broker2.deleteOwner(context.Background(), "u1")
+	c.Eq(0, revoker.count(), "a failed cleanup must not reach the authorization server")
+}
+
+// recordingRevocationEndpoint counts revocation posts, so a test can assert that
+// a path does NOT revoke.
+type recordingRevocationEndpoint struct {
+	mu  sync.Mutex
+	got int
+}
+
+func (r *recordingRevocationEndpoint) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	r.mu.Lock()
+	r.got++
+	r.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+}
+
+func (r *recordingRevocationEndpoint) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.got
+}
+
+// TestMcpOAuthRuntimeOptionsBindTheFactoryToTheCredentialOwner is the E-minor
+// gap: the fundi seam is bound from the CREDENTIAL owner, which is the stored
+// snapshot column on a resume and the authenticated identity at spawn — never the
+// ATTRIBUTION owner, which can come from an owner label. An absent credential
+// owner leaves the option nil, which is "this process holds no MCP credentials",
+// not "look up whatever is there".
+func TestMcpOAuthRuntimeOptionsBindTheFactoryToTheCredentialOwner(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	ctrl.mcpOAuth = newTestBroker(t, &fakeMcpStore{})
+
+	req := protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   t.TempDir(),
+		Model: "anthropic/claude-sonnet-4-5",
+	}
+
+	ro, err := ctrl.agentRuntimeOptionsFor(req, "c_mcp_seam", false,
+		"brent", "owner-attribution", "owner-credential", "")
+	c.Require().NoError(err, "agentRuntimeOptionsFor")
+	c.True(ro.MCPHTTP != nil, "a credential owner must get the engine's factory")
+
+	// The attribution owner alone is not enough: a resume whose snapshot has no
+	// owner column must not spend whatever a same-named label resolves to.
+	ro, err = ctrl.agentRuntimeOptionsFor(req, "c_mcp_seam2", false,
+		"brent", "owner-attribution", "", "")
+	c.Require().NoError(err, "agentRuntimeOptionsFor (no credential owner)")
+	c.True(ro.MCPHTTP == nil, "no credential owner means no factory, even when an attribution owner is present")
+
+	ro, err = ctrl.agentRuntimeOptionsFor(req, "c_mcp_seam3", false, "", "", "", "")
+	c.Require().NoError(err, "agentRuntimeOptionsFor (ownerless)")
+	c.True(ro.MCPHTTP == nil, "an ownerless child gets no factory")
+
+	// And no broker at all — the standalone `rafikid fundi` shape, and a daemon
+	// with no key or database — leaves the option nil rather than erroring.
+	bare := newTestController(t)
+	ro, err = bare.agentRuntimeOptionsFor(req, "c_mcp_seam4", false, "brent", "u1", "u1", "")
+	c.Require().NoError(err, "agentRuntimeOptionsFor (no broker)")
+	c.True(ro.MCPHTTP == nil, "a daemon without a broker must not bind a factory")
+}
+
+// recordingMcpLoginBackend answers the three verbs and records who asked, so a
+// mount test can prove the request reached the handler AND carried the identity
+// the mount resolved.
+type recordingMcpLoginBackend struct {
+	mu     sync.Mutex
+	begins []string
+}
+
+func (r *recordingMcpLoginBackend) BeginMcpLogin(_ context.Context, owner, _, server string, _ []string) (connectapi.ProviderLoginBegin, error) {
+	r.mu.Lock()
+	r.begins = append(r.begins, owner+"/"+server)
+	r.mu.Unlock()
+	return connectapi.ProviderLoginBegin{
+		LoginID:       "ml-1",
+		AuthorizeURL:  "https://auth.example.net/authorize",
+		RedirectPort:  1456,
+		CallbackPath:  "/mcp/oauth/callback",
+		RedirectHosts: []string{"127.0.0.1"},
+	}, nil
+}
+
+func (r *recordingMcpLoginBackend) CompleteMcpLogin(_ context.Context, _, _, _ string) (connectapi.McpLoginComplete, error) {
+	return connectapi.McpLoginComplete{Server: "linear"}, nil
+}
+
+func (r *recordingMcpLoginBackend) DeleteMcpCredential(_ context.Context, _ string, _ connectapi.McpDeleteSelector) error {
+	return nil
+}
+
+func (r *recordingMcpLoginBackend) reached() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.begins...)
+}
+
+// TestMcpOAuthIsReachableOnBothControlMounts is the I-gap that only the real
+// mount plumbing can close: the same Server, one backend, and one of these RPCs
+// sent through each authenticated Control route — the proxy face's (route
+// composed by connectControlRoute, identity from the token middleware OUTSIDE
+// it, epoch wrapper inside) and the local socket's (serveConnectUDS). Both must
+// reach the handler with the CALLER's user id, and the identity-less shapes must
+// not reach it at all.
+func TestMcpOAuthIsReachableOnBothControlMounts(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	want := users.Identity{UserID: "u1", Username: "brent"}
+	auth := server.NewUserTokenAuth(stubUserStore{token: "rfk_good", id: want}, "unused-child-secret", time.Minute)
+	backend := &recordingMcpLoginBackend{}
+	srv := connectapi.NewServer(nil)
+	srv.SetMcpLoginBackend(backend)
+	reg := newStreamRegistry()
+
+	// Mount A — the proxy face's shape.
+	routePath, handler := connectControlRoute(srv, reg, nil)
+	mux := http.NewServeMux()
+	mux.Handle(routePath, server.RequireEpoch(auth.Middleware(handler)))
+	face := httptest.NewServer(mux)
+	defer face.Close()
+	faceClient := rafikiv1connect.NewControlClient(face.Client(), face.URL)
+
+	// Mount B — the local socket.
+	sock := filepath.Join(shortTempDir(t), "m")
+	ln, err := serveConnectUDS(ctx, srv, auth, reg, nil, sock)
+	c.Require().NoError(err, "serveConnectUDS")
+	defer ln.Close()
+	udsClient := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
+
+	for _, tc := range []struct {
+		mount  string
+		client rafikiv1connect.ControlClient
+	}{
+		{"proxy face", faceClient},
+		{"unix socket", udsClient},
+	} {
+		req := connect.NewRequest(&rafikiv1.BeginMcpLoginRequest{
+			ConfigPath: "/srv/app/.mcp.json",
+			Server:     "linear",
+		})
+		req.Header().Set("Authorization", "Bearer rfk_good")
+		req.Header().Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
+		resp, err := tc.client.BeginMcpLogin(ctx, req)
+		c.Require().NoError(err, "%s: BeginMcpLogin", tc.mount)
+		c.Eq("ml-1", resp.Msg.GetLoginId(), "%s: descriptor", tc.mount)
+		c.Eq("https://auth.example.net/authorize", resp.Msg.GetAuthorizeUrl(), "%s: authorize_url", tc.mount)
+
+		// And a credential the mount cannot resolve never reaches it: the token
+		// middleware (proxy face) or the identity interceptor (socket) refuses
+		// before the policy gate. The gate-level refusal of every child
+		// credential is pinned in connect_policy_test.go.
+		childReq := connect.NewRequest(&rafikiv1.BeginMcpLoginRequest{
+			ConfigPath: "/srv/app/.mcp.json",
+			Server:     "linear",
+		})
+		childReq.Header().Set("Authorization", "Bearer rfk_child")
+		childReq.Header().Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
+		if _, err := tc.client.BeginMcpLogin(ctx, childReq); connect.CodeOf(err) == 0 {
+			c.Fail("%s: a child credential reached MCP login", tc.mount)
+		}
+	}
+
+	c.EqDeep([]string{"u1/linear", "u1/linear"}, backend.reached(),
+		"both mounts must reach the handler with the caller's own user id")
+
+	// A caller the socket cannot identify is not silently admitted: the handler
+	// refuses an identity-less caller (the socket's trust is admission, not a
+	// user to bind a grant to), and the proxy face never gets past its
+	// middleware at all.
+	anonymous := func() *connect.Request[rafikiv1.BeginMcpLoginRequest] {
+		req := connect.NewRequest(&rafikiv1.BeginMcpLoginRequest{ConfigPath: "/srv/app/.mcp.json", Server: "linear"})
+		req.Header().Set(protocol.EpochHeader, strconv.Itoa(protocol.Epoch))
+		return req
+	}
+	if _, err := udsClient.BeginMcpLogin(ctx, anonymous()); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		c.Fail("an identity-less UDS caller: got %v, want FailedPrecondition", err)
+	}
+	if _, err := faceClient.BeginMcpLogin(ctx, anonymous()); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		c.Fail("a tokenless proxy-face caller: got %v, want Unauthenticated", err)
+	}
+	c.Eq(2, len(backend.reached()), "neither refused caller may reach the backend")
 }

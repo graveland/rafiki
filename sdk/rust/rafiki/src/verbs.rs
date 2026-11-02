@@ -252,8 +252,10 @@ impl Client {
 
     /// Finish one consent round of the login [`Client::begin_mcp_login`]
     /// started, handing back the raw query string the server redirected to
-    /// loopback with (`callback_query`, leading `?` optional). A code is single
-    /// use: replaying one is `invalid_argument`.
+    /// loopback with (`callback_query`, WITHOUT the leading `?`: the daemon
+    /// parses it as a query string, so a `?` would become part of the first key
+    /// and the callback would be refused). A code is single use: replaying one
+    /// is `invalid_argument`.
     ///
     /// EXACTLY ONE OUTCOME. When `continuation` is set the login is not
     /// finished — nothing is stored yet, the same `login_id` carries on, and

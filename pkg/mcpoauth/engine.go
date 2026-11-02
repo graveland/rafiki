@@ -470,6 +470,94 @@ func (e *Engine) CancelOwner(owner string) int {
 	return e.dropFlows(func(f *flow) bool { return f.owner == strings.ToLower(strings.TrimSpace(owner)) })
 }
 
+// RevokeDetached best-effort revokes token material the store detached while
+// invalidating a grant: the payloads InvalidateResource, InvalidateEndpoint and
+// InvalidateOwner hand back AFTER they committed.
+//
+// It is the second half of a logout or a user removal, never the first. The
+// local invalidation has already happened — the rows are tombstoned, the blob is
+// wiped and the fences have advanced — so this call can only ever make the
+// upstream state agree with the local one, and it NEVER restores anything: an
+// authorization server that refuses, times out or was never reachable leaves the
+// local invalidation exactly as it was.
+//
+// Each revocation is bounded by the engine's own RevocationTimeout (5s, on a
+// context the caller cannot cancel — a client disconnecting mid-removal must not
+// abandon a token that is about to die) and its outcome is logged at Debug with
+// the resource and the status only, so no token, client secret or response body
+// reaches a log line.
+//
+// The error return exists so a caller that wants to record the attempt can; it
+// is never a reason to fail a removal. It reports only what the ENGINE can know
+// for certain — a nil receiver, i.e. nothing was attempted — because every
+// per-revocation outcome is already logged by the code that knows it, and there
+// is nothing a caller could repair.
+func (e *Engine) RevokeDetached(ctx context.Context, revocations []Revocation) error {
+	if e == nil {
+		return errors.New("mcpoauth: revoke detached credentials: no engine")
+	}
+	for _, rev := range revocations {
+		e.revokeDetached(ctx, rev)
+	}
+	return nil
+}
+
+// refreshFailedText is what EVERY refresh failure says once it leaves the
+// engine.
+//
+// A refresh failure's own text is not a message this daemon can forward. It is
+// built from stored registration material — the token endpoint, the client id,
+// the authorization server's protocol code — and from the transport's error,
+// which for a net/http failure quotes the request URL. Whatever it names, a
+// caller does not need it: the only actionable outcome of a failed refresh is
+// "log in again", and the cause belongs in the daemon's log, not on a wire that
+// reaches a child's tool list.
+const refreshFailedText = "cannot refresh this MCP credential; log in again"
+
+// sanitizeRefreshError replaces a refresh failure's message with authored text,
+// keeping whatever sentinel identity the error carries so callers can still
+// classify it (ErrLoginRequired, ErrMissing, ErrStaleFence, ErrUnavailable,
+// ErrDestinationDenied, ErrClosed). An error with none of those sentinels keeps
+// no identity at all — it becomes the plain authored text — because a refresh
+// failure nobody classified is not something a caller can branch on anyway.
+//
+// It never returns nil for a non-nil error: a silent success would leave a
+// caller holding a Grant it must not use.
+func sanitizeRefreshError(err error) error {
+	if err == nil {
+		return nil
+	}
+	for _, sentinel := range []error{
+		ErrLoginRequired,
+		ErrMissing,
+		ErrStaleFence,
+		ErrUnavailable,
+		ErrDestinationDenied,
+		ErrClosed,
+	} {
+		if errors.Is(err, sentinel) {
+			return fmt.Errorf("%w: %s", sentinel, refreshFailedText)
+		}
+	}
+	return errors.New(refreshFailedText)
+}
+
+// refreshForStore is the RefreshFunc this engine hands the store: the upstream
+// refresh, with any failure's text replaced before it leaves the engine.
+//
+// The store's Acquire wraps a refresh failure into its own error (and another
+// implementation might return it untouched), so this is the one boundary where
+// the engine can guarantee that an upstream message — a token endpoint carrying
+// userinfo, a redirect target, an error body a future codec might quote — never
+// travels any further.
+func (e *Engine) refreshForStore(ctx context.Context, cur Grant) (RefreshResult, error) {
+	result, err := e.refresh(ctx, cur)
+	if err != nil {
+		return RefreshResult{}, sanitizeRefreshError(err)
+	}
+	return result, nil
+}
+
 // Close terminates every pending login and waits for their tasks to finish. It
 // takes no lock while it waits: the flows are cancelled first, then the wait
 // runs against the groups those cancellations released.

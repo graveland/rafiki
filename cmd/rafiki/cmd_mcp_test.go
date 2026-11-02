@@ -48,6 +48,8 @@ type fakeMcpLoginRPC struct {
 	compReqs  []*connect.Request[rafikiv1.CompleteMcpLoginRequest]
 	delReqs   []*connect.Request[rafikiv1.DeleteMcpCredentialRequest]
 
+	auths []string
+
 	beginResp *rafikiv1.BeginMcpLoginResponse
 	beginErr  error
 	// compResps is consumed in order: round one, round two, … A test that wants
@@ -63,6 +65,7 @@ func (f *fakeMcpLoginRPC) BeginMcpLogin(
 	_ context.Context, req *connect.Request[rafikiv1.BeginMcpLoginRequest],
 ) (*connect.Response[rafikiv1.BeginMcpLoginResponse], error) {
 	f.mu.Lock()
+	f.record(req)
 	f.beginReqs = append(f.beginReqs, req)
 	resp, err := f.beginResp, f.beginErr
 	f.mu.Unlock()
@@ -76,6 +79,7 @@ func (f *fakeMcpLoginRPC) CompleteMcpLogin(
 	_ context.Context, req *connect.Request[rafikiv1.CompleteMcpLoginRequest],
 ) (*connect.Response[rafikiv1.CompleteMcpLoginResponse], error) {
 	f.mu.Lock()
+	f.record(req)
 	f.compReqs = append(f.compReqs, req)
 	round := len(f.compReqs) - 1
 	err := f.compErr
@@ -98,6 +102,7 @@ func (f *fakeMcpLoginRPC) DeleteMcpCredential(
 	_ context.Context, req *connect.Request[rafikiv1.DeleteMcpCredentialRequest],
 ) (*connect.Response[rafikiv1.DeleteMcpCredentialResponse], error) {
 	f.mu.Lock()
+	f.record(req)
 	f.delReqs = append(f.delReqs, req)
 	err := f.delErr
 	f.mu.Unlock()
@@ -125,6 +130,23 @@ func (f *fakeMcpLoginRPC) lastComplete(t *testing.T) *rafikiv1.CompleteMcpLoginR
 		return nil
 	}
 	return f.compReqs[len(f.compReqs)-1].Msg
+}
+
+// authorizations returns the Authorization header of every request the fake
+// saw, in order: the transport-carried credential is the one thing a CLI test
+// can assert that the endpoint resolution cannot fake.
+func (f *fakeMcpLoginRPC) authorizations() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.auths))
+	return append(out, f.auths...)
+}
+
+func (f *fakeMcpLoginRPC) record(raw connect.AnyRequest) {
+	if raw == nil {
+		return
+	}
+	f.auths = append(f.auths, raw.Header().Get("Authorization"))
 }
 
 func (f *fakeMcpLoginRPC) deleteCount() int {
@@ -165,6 +187,24 @@ func serveMcpScratch(t *testing.T, fake *fakeMcpLoginRPC) {
 	path, handler := rafikiv1connect.NewControlHandler(fake)
 	serveConnectOnUnixSocket(t, sock, path, handler)
 	writeTokenedProfile(t, sock, "")
+}
+
+// serveMcpScratchWithToken is serveMcpScratch with a profile credential, so a
+// test can see it arrive on the wire.
+func serveMcpScratchWithToken(t *testing.T, fake *fakeMcpLoginRPC, token string) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+
+	dir, err := os.MkdirTemp("", "rafiki-mcpt")
+	c.Require().NoError(err, "MkdirTemp")
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "controller.sock")
+
+	path, handler := rafikiv1connect.NewControlHandler(fake)
+	serveConnectOnUnixSocket(t, sock, path, handler)
+	writeTokenedProfile(t, sock, token)
 }
 
 // mcpCLIRoot runs the real `rafiki mcp` subtree behind the persistent flags the
@@ -516,4 +556,133 @@ func writeClientMCPConfig(t *testing.T, body string) string {
 	path := filepath.Join(t.TempDir(), ".mcp.json")
 	assert.NewAborting(t).NoError(os.WriteFile(path, []byte(body), 0o600), "write .mcp.json")
 	return path
+}
+
+// TestMcpOAuthLoginCarriesTheProfileBearer is the brief's "the fakes must assert
+// headers" gap: the commands resolve an endpoint through the profile, and the
+// profile's credential rides the TRANSPORT (bearerTransport), not a per-call
+// header. A verb that bypassed newConnectEndpoint would send nothing here.
+func TestMcpOAuthLoginCarriesTheProfileBearer(t *testing.T) {
+	c := assert.NewAborting(t)
+	port := freeCallbackPort(t)
+	fake := newFakeMcpLoginRPC()
+	fake.beginResp = &rafikiv1.BeginMcpLoginResponse{
+		LoginId:       "ml-bearer",
+		AuthorizeUrl:  "https://auth.example.net/authorize",
+		RedirectPort:  port,
+		CallbackPath:  "/mcp/oauth/callback",
+		RedirectHosts: []string{loopbackHost},
+	}
+	fake.compResps = []*rafikiv1.CompleteMcpLoginResponse{{Server: "linear"}}
+	serveMcpScratchWithToken(t, fake, "rfk_mcp_bearer")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root, _, stderr := mcpCLIRoot(t, ctx, strings.NewReader(""), "mcp", "login", "linear",
+		"--mcp-config", writeClientMCPConfig(t, `{"mcpServers":{}}`), "--no-browser")
+	exec := make(chan error, 1)
+	go func() { exec <- root.Execute() }()
+
+	resp := getCallbackWhenServing(t, &http.Client{Timeout: 2 * time.Second},
+		fmt.Sprintf("http://%s:%d/mcp/oauth/callback?code=c&state=s", loopbackHost, port))
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	c.Require().NoError(<-exec, "mcp login failed:\n%s", stderr.String())
+
+	for _, auth := range fake.authorizations() {
+		c.Eq("Bearer rfk_mcp_bearer", auth, "every RPC must carry the profile's bearer on its transport")
+	}
+	c.Eq(2, len(fake.authorizations()), "both calls must arrive, each with the credential")
+}
+
+// TestMcpOAuthLoginCancelReturnsPromptly pins the abort path: Ctrl-C (or any
+// caller cancellation) while the callback is still awaited stops the command
+// immediately and says so, rather than sitting on the listener until the 10
+// minute callback deadline. The daemon's own pending login is left to its TTL —
+// there is deliberately no cancel RPC.
+func TestMcpOAuthLoginCancelReturnsPromptly(t *testing.T) {
+	c := assert.NewAborting(t)
+	fake := newFakeMcpLoginRPC()
+	fake.beginResp = &rafikiv1.BeginMcpLoginResponse{
+		LoginId:       "ml-cancel",
+		AuthorizeUrl:  "https://auth.example.net/authorize",
+		RedirectPort:  freeCallbackPort(t),
+		CallbackPath:  "/mcp/oauth/callback",
+		RedirectHosts: []string{loopbackHost},
+	}
+	serveMcpScratch(t, fake)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	root, _, stderr := mcpCLIRoot(t, ctx, strings.NewReader(""), "mcp", "login", "linear",
+		"--mcp-config", writeClientMCPConfig(t, `{"mcpServers":{}}`), "--no-browser")
+	exec := make(chan error, 1)
+	go func() { exec <- root.Execute() }()
+
+	// Cancel once the daemon has answered Begin: by then the listener is bound
+	// and the flow is waiting for a browser that never comes.
+	deadline := time.Now().Add(10 * time.Second)
+	for fake.lastBegin(t) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the daemon never saw BeginMcpLogin")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-exec:
+		c.Require().Error(err, "a cancelled login must fail")
+		c.StrContains(err.Error(), "login canceled", "the cancellation reads as one: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("mcp login did not return after its context was cancelled")
+	}
+	c.Eq(0, fake.completeCount(), "a cancelled login must not complete")
+	c.StrContains(stderr.String(), "open this URL in a browser", "the prompt had been printed")
+}
+
+// TestMcpOAuthLoginStripsOneLeadingQuestionMark pins the normalisation against
+// the SDK contract: the engine parses the query with url.ParseQuery, which reads
+// "?code=x" as the key "?code". The listener path never produces one (RawQuery
+// is already stripped), so the helper is asserted directly and the flow is
+// asserted to send the stripped form end to end.
+func TestMcpOAuthLoginStripsOneLeadingQuestionMark(t *testing.T) {
+	c := assert.NewAborting(t)
+	fake := newFakeMcpLoginRPC()
+	fake.beginResp = &rafikiv1.BeginMcpLoginResponse{
+		LoginId:       "ml-qmark",
+		AuthorizeUrl:  "https://auth.example.net/authorize",
+		RedirectPort:  freeCallbackPort(t),
+		CallbackPath:  "/mcp/oauth/callback",
+		RedirectHosts: []string{loopbackHost},
+	}
+	fake.compResps = []*rafikiv1.CompleteMcpLoginResponse{{Server: "linear"}}
+	serveMcpScratch(t, fake)
+
+	// A pasted URL whose query keeps its "?" is what awaitCallback strips, so
+	// drive the flow the way an SDK caller would: the listener receives a
+	// redirect whose RawQuery has no "?", and the CLI's own normalisation is
+	// what guards the other entry point.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root, _, stderr := mcpCLIRoot(t, ctx, strings.NewReader(""), "mcp", "login", "linear",
+		"--mcp-config", writeClientMCPConfig(t, `{"mcpServers":{}}`), "--no-browser")
+	exec := make(chan error, 1)
+	go func() { exec <- root.Execute() }()
+
+	resp := getCallbackWhenServing(t, &http.Client{Timeout: 2 * time.Second},
+		fmt.Sprintf("http://%s:%d/mcp/oauth/callback?code=ok&state=s", loopbackHost, fake.beginResp.GetRedirectPort()))
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	c.Require().NoError(<-exec, "mcp login failed:\n%s", stderr.String())
+
+	c.Eq("code=ok&state=s", fake.lastComplete(t).GetCallbackQuery(),
+		"the daemon receives a raw query with no leading '?'")
+
+	// The helper itself, both directions: exactly ONE "?" goes, and a query that
+	// never had one is untouched.
+	c.Eq("code=ok&state=s", normalizeCallbackQuery("?code=ok&state=s"), "one leading ? is dropped")
+	c.Eq("code=ok&state=s", normalizeCallbackQuery("code=ok&state=s"), "a bare query is untouched")
+	c.Eq("?code=x", normalizeCallbackQuery("??code=x"), "only ONE ? is dropped")
+	c.Eq("", normalizeCallbackQuery("?"), "a lone ? becomes the empty query")
 }

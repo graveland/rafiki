@@ -2538,8 +2538,11 @@ exact file and that exact `mcpServers` entry; a relative path is refused
 caller's. A client on another machine cannot upload its project config through
 this RPC — that file must already exist where the daemon runs. The CLI resolves
 the path (`--mcp-config` > `./.mcp.json` > `$RAFIKI_MCP_CONFIG` >
-`<config-dir>/mcp.json`) and neither reads nor stats it, so a path that only
-exists on the daemon host works.
+`<config-dir>/mcp.json`) and neither reads nor parses the file; it stats
+`./.mcp.json` only to decide whether the working directory's copy applies. A
+path that exists only on the daemon host therefore works, and a run from a
+project directory names that directory's path even when the daemon has no such
+checkout.
 
 **Exactly one outcome per `CompleteMcpLogin`.** When `continuation` is set the
 login is NOT finished: nothing is stored, the same `login_id` carries on, and
@@ -2571,12 +2574,13 @@ operator's `[mcp_oauth]` policy decides, and it is checked by the engine.
 | a non-user credential (per-child secret, per-boot+session, `{notify}` token) | `CodePermissionDenied` |
 | unknown, expired or FOREIGN-owner `login_id` | `CodeNotFound` — one identical answer for all three |
 | malformed request, bad selector, unreadable path, unsupported entry shape | `CodeInvalidArgument` |
+| a malformed server/resource URL (`ErrInvalidURL`), a refused redirect or an oversize metadata document | `CodeInvalidArgument`, authored text only — the URL shape rules echo the raw URL, userinfo included, so it is never wrapped |
 | a rejected consent round: `access_denied`, a bad `state`/`iss`, a replayed callback, an oversized callback | `CodeInvalidArgument`, always with "start again" — the login is over and the SDK must not mint a second consent URL for the rejected input |
 | too many pending logins for the owner | `CodeResourceExhausted` (retryable) |
 | the login was superseded by a logout or a newer login | `CodeFailedPrecondition` |
 | the store is unavailable, or the daemon is shutting down | `CodeUnavailable` |
 | absent grant on `DeleteMcpCredential` | `CodeNotFound` |
-| any error the daemon did not author | `CodeInternal`, text redacted (`internal error`) |
+| a discovery, registration, token-exchange or transport failure nobody classified | `CodeInternal` with one AUTHORED sentence naming the operation; the cause is logged and never forwarded (`mcpAuthoredFailure`) |
 
 **`DeleteMcpCredential` selectors** are exclusive, and the handler refuses both
 or neither with `CodeInvalidArgument`:
@@ -2584,6 +2588,10 @@ or neither with `CodeInvalidArgument`:
 - `config_path` + `server` resolves the same direct-`url` endpoint a login
   would and invalidates that ENDPOINT — which advances its fence, so a first
   login still in flight cannot complete afterwards. It needs no stored grant.
+  An entry the daemon will not resolve (a stdio server, a `via_executor` entry,
+  a header added after the login, a file that moved) is still
+  `CodeInvalidArgument`, but its message names the `--resource` form, which
+  needs no config file at all.
 - `resource` names the canonical resource and touches NO config: that is how a
   grant is removed after its project file is gone.
 
@@ -2591,6 +2599,14 @@ Logout removes every endpoint binding to the deleted grant, keeps a
 generation-tombstone so a late completion or an older pending login cannot
 recreate it, and never resurrects anything by a client retry. Upstream
 revocation is best effort: the local invalidation is what logout means.
+
+Removing a USER takes the same two steps in the same order: the daemon cancels
+that owner's pending logins, invalidates every grant, binding and endpoint fence
+in one transaction (which works for an already-tombstoned user), and then
+revokes what the store detached, each revocation bounded by the engine's own
+5-second budget. A revocation that fails is logged and changes nothing: the
+users-row tombstone is the fail-closed authority, and no later read or write can
+resurrect a grant for a removed user.
 
 **Callback code secrecy.** `callback_query` is an INPUT only. It is never
 returned, never logged, and never quoted in an error — the daemon's refusals
@@ -2601,9 +2617,9 @@ code, and the CLI prints none of them either.
 **Related surfaces**. No anonymous login and no token RPC exist for MCP
 credentials: a grant is created only by an authenticated user's interactive
 flow and is spent only by that user's children (see `docs/guide/agents.md`).
-Rafiki's own MCP agent-control surface (`2.4`) is NOT an OAuth protected
-resource: it never serves `/.well-known/oauth-protected-resource` and never
-answers with a `WWW-Authenticate` challenge naming one.
+Rafiki's own MCP agent-control surface is NOT an OAuth protected resource: it
+never serves `/.well-known/oauth-protected-resource` and never answers with a
+`WWW-Authenticate` challenge naming one.
 
 ### The Login service (`rafiki.v1.Login`: `BeginLogin`, `CompleteLogin`)
 

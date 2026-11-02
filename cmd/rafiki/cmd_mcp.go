@@ -9,10 +9,13 @@ package main
 // Four rules shape the file:
 //
 //   - The config file is the DAEMON's, by absolute path. No project file is
-//     uploaded and none is read here: this client resolves a path and the
-//     daemon reads that exact file and entry. A remote profile therefore needs
-//     that file to exist on the daemon host — the CLI's own filesystem says
-//     nothing about it, so it never stats or parses one.
+//     uploaded and none is read or parsed here: this client resolves a path and
+//     the daemon reads that exact file and entry. Resolving the path is why the
+//     client does stat ONE candidate — `./.mcp.json`, to decide whether the
+//     working directory has one — and that stat is the only local filesystem
+//     knowledge involved. A remote profile therefore needs the file to exist on
+//     the daemon host, and running from a project directory names that
+//     directory's path even when the daemon has no such checkout.
 //   - Every message goes to stderr for a login (it leaves a credential behind,
 //     not command output) and the logout confirmation goes to stdout (it is
 //     the command's result). Neither ever prints a callback query, a code, a
@@ -29,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -68,7 +72,8 @@ explicit credential that stored OAuth must not override.
 The config file is read by the DAEMON, at the absolute path named here
 (--mcp-config, else ./.mcp.json, else $RAFIKI_MCP_CONFIG, else the config
 directory's mcp.json). With a remote profile that path must exist on the daemon
-host: this command never uploads a project file, and it never reads one either.
+host: this command never uploads a project file, and it never reads or parses
+one — it only stat's ./.mcp.json to decide which of those paths applies.
 
 Subcommands:
   login       start a login for one configured server
@@ -149,6 +154,18 @@ func mcpConfigPath(explicit string) (string, error) {
 	return abs, nil
 }
 
+// normalizeCallbackQuery drops ONE leading "?" from a callback query.
+//
+// The wire carries the raw query WITHOUT it: the listener hands over RawQuery
+// already stripped, but a pasted redirect URL can arrive with its "?" intact,
+// and an SDK caller reading "the raw query string" may hand one over too. The
+// engine parses the value with url.ParseQuery, which would read "?code=x" as
+// the key "?code" and refuse the callback — so the normalisation belongs here,
+// once, rather than in every consumer.
+func normalizeCallbackQuery(query string) string {
+	return strings.TrimPrefix(query, "?")
+}
+
 // runMCPLogin drives Begin → (loopback or paste) → Complete over ONE Control
 // client, looping while the daemon asks for another consent round.
 //
@@ -195,6 +212,7 @@ func runMCPLogin(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		query = normalizeCallbackQuery(query)
 		complete, err := ctrl.CompleteMcpLogin(ctx, connect.NewRequest(&rafikiv1.CompleteMcpLoginRequest{
 			LoginId:       descriptor.GetLoginId(),
 			CallbackQuery: query,

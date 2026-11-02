@@ -292,7 +292,10 @@ What a login is **not**:
 
 The config path is the **daemon's**: the daemon reads the absolute path the CLI
 resolves, so with a remote profile that file must exist on the daemon host.
-Nothing uploads a project file, and the CLI never reads one.
+Nothing uploads a project file and the CLI never reads or parses one; it only
+stat's `./.mcp.json` to decide whether the working directory's copy is the path
+to name — which is why running from a project directory points the daemon at
+that directory, whether or not it has one.
 
 A login may take more than one consent round (a server can ask for a wider
 scope once it has seen your tool list). Each round opens a new URL on the same

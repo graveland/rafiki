@@ -162,6 +162,33 @@ func (m *mcpOAuth) passiveFactory(owner string) tools.MCPHTTPFactory {
 // gets an endpoint and nothing else, so no configured secret can reach a
 // discovery, registration or token request.
 func mcpServerEndpoint(configPath, serverName string) (string, error) {
+	return mcpServerEndpointFor(configPath, serverName, mcpEntryForLogin)
+}
+
+// mcpEntryPurpose is what the caller is about to do with the entry. It changes
+// only the ADVICE on a refusal: a logout that meets an entry the daemon will not
+// touch must say how to remove the grant anyway, and a login must not.
+type mcpEntryPurpose int
+
+const (
+	mcpEntryForLogin mcpEntryPurpose = iota
+	mcpEntryForLogout
+)
+
+// mcpEntryRefused builds a refusal whose trailing advice matches the verb.
+func mcpEntryRefused(purpose mcpEntryPurpose, format string, args ...any) error {
+	msg := fmt.Sprintf(format, args...)
+	if purpose == mcpEntryForLogout {
+		// The alternative a logout always has: the resource form needs no config
+		// file at all, so an entry this daemon will not resolve (a header added
+		// after the login, a file that moved, a server since made stdio) cannot
+		// trap a grant that should be removable.
+		msg += "; to remove the grant without the config file, run `rafiki mcp logout --resource <resource URL>`"
+	}
+	return mcpInvalidArgument(msg)
+}
+
+func mcpServerEndpointFor(configPath, serverName string, purpose mcpEntryPurpose) (string, error) {
 	path := strings.TrimSpace(configPath)
 	if path == "" {
 		return "", mcpInvalidArgument("config_path is required")
@@ -170,47 +197,55 @@ func mcpServerEndpoint(configPath, serverName string) (string, error) {
 		// The daemon must not resolve a project path in its own working
 		// directory: that is a different directory from the caller's, so a
 		// relative path would silently name a file the user did not mean.
-		return "", mcpInvalidArgument(fmt.Sprintf(
-			"config_path %q must be an absolute path on the daemon host", configPath))
+		return "", mcpEntryRefused(purpose,
+			"config_path %q must be an absolute path on the daemon host", configPath)
 	}
 	if strings.TrimSpace(serverName) == "" {
-		return "", mcpInvalidArgument("server is required: name the .mcp.json entry to log in to")
+		return "", mcpEntryRefused(purpose, "server is required: name the .mcp.json entry")
 	}
 	cfg, err := tools.LoadMCPConfig(path)
 	if err != nil {
 		// LoadMCPConfig's text names the path and the parse problem; it never
 		// carries a header value, a command line or any other entry content.
-		return "", mcpInvalidArgument(fmt.Sprintf("cannot read the MCP config %q: %v", path, err))
+		return "", mcpEntryRefused(purpose, "cannot read the MCP config %q: %v", path, err)
 	}
 	entry, ok := cfg.MCPServers[serverName]
 	if !ok {
-		return "", mcpInvalidArgument(fmt.Sprintf("the MCP config %q has no mcpServers entry named %q", path, serverName))
+		return "", mcpEntryRefused(purpose, "the MCP config %q has no mcpServers entry named %q", path, serverName)
 	}
 	if entry.ViaExecutor != nil {
 		// The argv, the environment and any credential belong to the machine
 		// that runs the server. A daemon-side login would be a credential the
 		// executor never sees, so this entry cannot be logged in here.
-		return "", mcpInvalidArgument(fmt.Sprintf(
-			"server %q runs via_executor: its transport and credentials live on the executor machine, so it cannot be logged in from the daemon", serverName))
+		return "", mcpEntryRefused(purpose,
+			"server %q runs via_executor: its transport and credentials live on the executor machine, so the daemon cannot resolve or log it in", serverName)
 	}
 	if entry.Command != "" {
-		return "", mcpInvalidArgument(fmt.Sprintf(
-			"server %q is a stdio server (command): a local process needs no OAuth login; only a direct url entry can log in", serverName))
+		return "", mcpEntryRefused(purpose,
+			"server %q is a stdio server (command): a local process carries no OAuth grant, so this entry is not one the daemon can log in or out", serverName)
 	}
 	if entry.URL == "" {
-		return "", mcpInvalidArgument(fmt.Sprintf(
-			"server %q has no url: only a direct url entry can log in", serverName))
+		return "", mcpEntryRefused(purpose, "server %q has no url: only a direct url entry can carry an OAuth grant", serverName)
 	}
 	if key, ok := mcpAuthorizationHeader(entry.Headers); ok {
 		// Precedence, case-insensitive and even when the value is empty: an
 		// explicit Authorization header disables stored OAuth for that entry,
 		// so a login would store a grant nothing would ever spend. Removing the
 		// header is the user's decision to make, not ours.
-		return "", mcpInvalidArgument(fmt.Sprintf(
-			"server %q sets an %s header in the MCP config: an explicit header disables stored OAuth for that entry, so remove the header (or the entry) and log in again",
-			serverName, key))
+		return "", mcpEntryRefused(purpose,
+			"server %q sets an %s header in the MCP config: an explicit header disables stored OAuth for that entry, so remove the header (or the entry) and %s",
+			serverName, key, mcpEntryVerb(purpose))
 	}
 	return entry.URL, nil
+}
+
+// mcpEntryVerb is the advice half of a refusal: what to do after removing the
+// header, per verb.
+func mcpEntryVerb(purpose mcpEntryPurpose) string {
+	if purpose == mcpEntryForLogout {
+		return "run the logout again"
+	}
+	return "log in again"
 }
 
 // mcpAuthorizationHeader reports whether headers carries an Authorization key
@@ -245,11 +280,17 @@ var errUnknownMcpLogin = &connectapi.ControllerError{
 
 // mcpLoginEngineError classifies an engine/store error for the wire.
 //
-// Two things it must not do: forward a dependency's text (the handler's
-// fallthrough logs an uncoded error and answers "internal error"), and quote the
-// callback. Everything the engine rejects about a callback is therefore one
-// "start again" answer with no detail from the query.
-func mcpLoginEngineError(err error) error {
+// Three rules. It never forwards a dependency's text: every case below is
+// AUTHORED, and the one fallthrough logs the cause and answers one authored
+// sentence (mcpAuthoredFailure), because "internal error" is unactionable and the
+// raw text can quote a token endpoint, a redirect target or a body. It never
+// quotes the callback: everything the engine rejects about one is a single
+// "start again" answer. And it keeps the sentinel identity it was given, so a
+// caller can still branch on the Connect code.
+//
+// op names the operation ("login", "logout") so the fallthrough's sentence reads
+// as a diagnosis of the thing the user was doing.
+func mcpLoginEngineError(err error, op string) error {
 	var authErr *mcpoauth.AuthorizationError
 	switch {
 	case err == nil:
@@ -296,12 +337,44 @@ func mcpLoginEngineError(err error) error {
 			Message: "the daemon is shutting down",
 		}
 	case errors.Is(err, mcpoauth.ErrDestinationDenied):
-		// The operator's policy refused a discovered destination. The engine's
-		// own text names the host and the section, and is ours to forward.
-		return mcpInvalidArgument(fmt.Sprintf(
-			"MCP OAuth cannot reach that server: %v (the operator's [mcp_oauth] policy in rafikid.toml decides which destinations are allowed)", err))
+		// The operator's policy refused a destination. Authored text only: the
+		// engine's own error names the host, and a URL can carry userinfo or a
+		// query a project author meant to keep out of an error message.
+		return mcpInvalidArgument("the daemon's MCP OAuth policy refused a destination this login needs " +
+			"(the operator's [mcp_oauth] section in rafikid.toml decides which hosts, addresses and cleartext origins are allowed)")
+	case errors.Is(err, mcpoauth.ErrRedirectRefused):
+		return mcpInvalidArgument("the MCP authorization server redirected somewhere this daemon will not follow " +
+			"(a redirect may not change origin or leave HTTPS)")
+	case errors.Is(err, mcpoauth.ErrResponseTooLarge):
+		return mcpInvalidArgument("the MCP authorization server answered with a document that is too large to be metadata")
+	case errors.Is(err, mcpoauth.ErrInvalidURL):
+		// A malformed endpoint or resource. Never wrap the cause: the URL shape
+		// rules echo the raw URL, which can carry userinfo or a query.
+		return mcpInvalidArgument("the MCP server URL is not one this daemon can use " +
+			"(it must be an absolute http(s) URL with no userinfo and no fragment)")
 	}
-	return err
+	return mcpAuthoredFailure(err, op)
+}
+
+// mcpAuthoredFailure is the last resort for an engine error nobody classified: a
+// discovery, registration, token-exchange or transport failure.
+//
+// The cause is LOGGED and never forwarded. What the caller gets is one authored
+// sentence, because "internal error" is what the review found unactionable and
+// the raw text can quote an upstream body, a token endpoint or a redirect
+// target. what names the operation, so the sentence is still a diagnosis and an
+// operator can find the log line.
+func mcpAuthoredFailure(err error, what string) error {
+	if err == nil {
+		return nil
+	}
+	slog.Error("MCP OAuth failed", "operation", what, "error", err)
+	return &connectapi.ControllerError{
+		Code: protocol.ErrInternal,
+		Message: "the MCP OAuth " + what + " could not be completed: the server's OAuth metadata could not be " +
+			"fetched, or its authorization server refused discovery, registration or the token exchange. " +
+			"The daemon log names the cause.",
+	}
 }
 
 // BeginMcpLogin starts one explicit login against the exact entry named.
@@ -324,7 +397,7 @@ func (m *mcpOAuth) BeginMcpLogin(
 		Scopes:      scopes,
 	})
 	if err != nil {
-		return connectapi.ProviderLoginBegin{}, mcpLoginEngineError(err)
+		return connectapi.ProviderLoginBegin{}, mcpLoginEngineError(err, "login")
 	}
 	return mcpBeginDescriptor(descriptor), nil
 }
@@ -350,7 +423,7 @@ func (m *mcpOAuth) CompleteMcpLogin(
 			// consumed nothing to produce it.
 			return connectapi.McpLoginComplete{}, errUnknownMcpLogin
 		}
-		return connectapi.McpLoginComplete{}, mcpLoginEngineError(err)
+		return connectapi.McpLoginComplete{}, mcpLoginEngineError(err, "login")
 	}
 	if result.Continuation != nil {
 		descriptor := mcpBeginDescriptor(*result.Continuation)
@@ -382,7 +455,9 @@ func (m *mcpOAuth) DeleteMcpCredential(
 	if sel.Resource != "" {
 		selector = mcpoauth.DeleteSelector{Resource: sel.Resource}
 	} else {
-		endpoint, err := mcpServerEndpoint(sel.ConfigPath, sel.Server)
+		// The logout purpose: an entry this daemon will not resolve still has to
+		// tell the user about --resource, which needs no config file at all.
+		endpoint, err := mcpServerEndpointFor(sel.ConfigPath, sel.Server, mcpEntryForLogout)
 		if err != nil {
 			return err
 		}
@@ -401,7 +476,7 @@ func (m *mcpOAuth) DeleteMcpCredential(
 				Message: fmt.Sprintf("no MCP credential is stored for server %q", sel.Server),
 			}
 		}
-		return mcpLoginEngineError(err)
+		return mcpLoginEngineError(err, "logout")
 	}
 	return nil
 }
@@ -444,6 +519,14 @@ func (m *mcpOAuth) deleteOwner(ctx context.Context, ownerUserID string) {
 		m.log.Warn("MCP credentials: invalidating a removed user's grants failed",
 			"owner", ownerUserID, "error", err)
 		return
+	}
+	// The local invalidation has committed, so the payload is the only handle on
+	// tokens the authorization server may still honour. Spend it, bounded per
+	// revocation and best effort: a server that refuses, times out or has no
+	// revocation endpoint changes nothing here, and the tombstone stands.
+	if err := m.engine.RevokeDetached(ctx, detached); err != nil {
+		m.log.Warn("MCP credentials: revoking a removed user's detached grants failed",
+			"owner", ownerUserID, "grants", len(detached), "error", err)
 	}
 	if n := len(detached) + cancelled; n > 0 {
 		// Counts only: a revocation payload holds tokens, and a log line is not
