@@ -78,6 +78,13 @@ func resolveDSN(ctx context.Context, dsn string) (string, error) {
 func resolveEmbedded(ctx context.Context) (embedpg.Server, string, error) {
 	s := embeddedServer()
 	s.Progress = os.Stderr
+	// A live daemon holds open connections and in-flight turns, so it is never
+	// restarted from under; the service restart that follows an upgrade is what
+	// moves the server onto a new build, because that daemon is gone by then.
+	s.RestartStale = func() bool {
+		listening, _ := daemonListening()
+		return !listening
+	}
 	// Ensure starts the server; it does not create Database, because
 	// pkg/embedpg opens no connection and a CREATE DATABASE is one. A fresh
 	// cluster has only the maintenance database.

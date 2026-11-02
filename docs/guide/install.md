@@ -98,6 +98,14 @@ and never holds rafiki data. Embedded provisioning also sets the `rafiki` role's
 default on existing installs as well. `db psql` independently supplies the same
 session default (including for external databases); explicit DSN `options` can
 override it. `public` stays first so extension creation still uses that schema.
+A server keeps running the build it was started from, so a new build is picked up
+when `rafikid` next resolves the database with no daemon running — which is what a
+service restart after `rafiki upgrade` does: the new daemon finds the old server
+running from an older tree and restarts it onto the new one (a few seconds of
+downtime, and the point of shipping fixes in the server). A `rafikid` command run
+while the daemon is up never restarts the server under it; it prints that the old
+build is still running and to restart the service.
+
 Its extensions are managed for you. Each time `rafikid` resolves the embedded
 database it installs `vector` and `pg_textsearch` if they are missing and brings an
 installed one to the version the downloaded tree ships, so a new tree updates them

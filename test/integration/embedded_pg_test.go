@@ -940,6 +940,83 @@ func dsnForDatabase(t *testing.T, dsn, name string) string {
 	return dsn + " dbname=" + name
 }
 
+// TestEmbeddedPostgresMovesOntoANewBuild pins what an upgrade needs on a real
+// server: a server started from one tree is still running from it after a new
+// tree lands, unless Ensure is allowed to replace it. A second tree is a copy of
+// the first at another path, which is all a new build is to Ensure.
+func TestEmbeddedPostgresMovesOntoANewBuild(t *testing.T) {
+	if os.Getenv("RAFIKI_TEST_EMBEDPG") != "1" {
+		t.Skip("RAFIKI_TEST_EMBEDPG=1 runs the embedded-postgres end-to-end test (downloads the pinned artifact once)")
+	}
+	c := assert.NewAborting(t)
+
+	dirs := newEmbeddedDirs(t)
+	t.Setenv("XDG_DATA_HOME", dirs.data)
+	t.Setenv("XDG_STATE_HOME", dirs.state)
+	t.Setenv("XDG_CACHE_HOME", dirs.cache)
+	shared := embedpg.Default().BinDir
+	if _, err := os.Stat(filepath.Join(shared, "bin", "postgres")); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		_, err := embedpg.Default().Ensure(ctx)
+		c.NoError(err, "fetch the embedded binaries")
+	}
+	t.Setenv("XDG_DATA_HOME", filepath.Join(dirs.root, "data2"))
+	old := embedpg.Default() // BinDir = the shared tree
+	treeB := filepath.Join(dirs.root, "tree-b")
+	copyEmbeddedTree(t, old.BinDir, treeB, func(string) bool { return false })
+
+	t.Cleanup(func() {
+		if !stopEmbeddedServer(t, old) {
+			return // the data dir is what lets a human finish the job
+		}
+		if err := os.RemoveAll(dirs.root); err != nil {
+			t.Logf("remove %s: %v", dirs.root, err)
+		}
+	})
+	runningFrom := func() string {
+		b, err := os.ReadFile(filepath.Join(old.DataDir, "postmaster.opts"))
+		c.NoError(err, "read postmaster.opts")
+		first, _, _ := strings.Cut(string(b), " \"")
+		resolved, err := filepath.EvalSymlinks(first)
+		c.NoError(err, "resolve the running binary")
+		return resolved
+	}
+	resolve := func(dir string) string {
+		r, err := filepath.EvalSymlinks(filepath.Join(dir, "bin", "postgres"))
+		c.NoError(err, "resolve %s", dir)
+		return r
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	_, err := old.Ensure(ctx)
+	c.NoError(err, "start from the first tree")
+	c.Eq(resolve(old.BinDir), runningFrom(), "started from the first tree")
+
+	next := old
+	next.BinDir = treeB
+
+	// Not allowed to restart: left running on the old binaries, and told.
+	var progress strings.Builder
+	next.Progress = &progress
+	_, err = next.Ensure(ctx)
+	c.NoError(err, "Ensure without permission to restart")
+	c.Eq(resolve(old.BinDir), runningFrom(), "without permission the server keeps its binaries")
+	c.StrContains(progress.String(), "still running from", "the operator must be told")
+
+	// Allowed: replaced, and serving.
+	progress.Reset()
+	next.RestartStale = func() bool { return true }
+	_, err = next.Ensure(ctx)
+	c.NoError(err, "Ensure with permission to restart")
+	c.Eq(resolve(treeB), runningFrom(), "the server must now run from the new tree")
+	c.StrContains(progress.String(), "restarting embedded PostgreSQL")
+	running, err := next.Status(ctx)
+	c.NoError(err, "Status")
+	c.True(running, "the replaced server must be up")
+}
+
 // TestEmbeddedPostgresInstallsAndUpdatesExtensions pins the start-up reconcile on a
 // real server: the first resolve of a fresh install CREATEs vector and
 // pg_textsearch (nothing ran migrate, so only the reconcile could have), and a

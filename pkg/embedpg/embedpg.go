@@ -38,6 +38,12 @@ type Server struct {
 	BaseURL  string       // release download base; DefaultBaseURL when empty
 	Client   *http.Client // http.DefaultClient when nil
 	Progress io.Writer    // download progress lines; nil = silent
+	// RestartStale decides what Ensure does when the running server was started
+	// from another tree than BinDir (a new build was downloaded under it). True
+	// restarts the server onto BinDir's tree; nil or false leaves it running and
+	// says so on Progress. Restarting drops every open connection, which is why
+	// the caller owns the decision.
+	RestartStale func() bool
 }
 
 // Default is the per-user install: binaries in the cache (re-fetchable), data
@@ -150,12 +156,71 @@ func (s Server) EnsureLocked(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !running {
-		if err := s.start(ctx); err != nil {
+	if running {
+		if err := s.replaceStale(ctx); err != nil {
 			return "", err
 		}
+	} else if err := s.start(ctx); err != nil {
+		return "", err
 	}
 	return s.DSN(), nil
+}
+
+// runningBinary is the postgres executable the running postmaster was started
+// from, as the first token of postmaster.opts, or "" when the file is absent or
+// unreadable. The path is everything before the first quoted argument, so a
+// directory with a space in it survives.
+func (s Server) runningBinary() string {
+	b, err := os.ReadFile(filepath.Join(s.DataDir, "postmaster.opts"))
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(b), "\n")
+	path, _, _ := strings.Cut(line, ` "`)
+	return strings.TrimSpace(path)
+}
+
+// stale reports whether the running server was started from a different
+// postgres binary than this tree's. A new build is only ever downloaded into a
+// new directory, so without this a running server keeps its old binaries for as
+// long as it stays up, and a fix shipped in a new build never reaches it.
+func (s Server) stale() bool {
+	running := s.runningBinary()
+	if running == "" {
+		return false
+	}
+	want := filepath.Join(s.BinDir, "bin", "postgres")
+	if a, err := filepath.EvalSymlinks(running); err == nil {
+		running = a
+	}
+	if a, err := filepath.EvalSymlinks(want); err == nil {
+		want = a
+	}
+	return running != want
+}
+
+// replaceStale moves a running server onto this tree's binaries when it was
+// started from another one and RestartStale allows it; otherwise it only says so.
+func (s Server) replaceStale(ctx context.Context) error {
+	if !s.stale() {
+		return nil
+	}
+	from := s.runningBinary()
+	if s.RestartStale == nil || !s.RestartStale() {
+		if s.Progress != nil {
+			fmt.Fprintf(s.Progress, "embedded PostgreSQL is still running from %s; %s is installed. "+
+				"Restart the rafiki service (or stop the server) to move it onto the new build\n",
+				from, filepath.Join(s.BinDir, "bin", "postgres"))
+		}
+		return nil
+	}
+	if s.Progress != nil {
+		fmt.Fprintf(s.Progress, "restarting embedded PostgreSQL onto %s (was %s)\n", s.BinDir, from)
+	}
+	if err := s.StopLocked(ctx); err != nil {
+		return err
+	}
+	return s.start(ctx)
 }
 
 // lockPollInterval is how long lockFile waits between non-blocking attempts at
