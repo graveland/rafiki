@@ -472,6 +472,34 @@ func TestMcpOAuthRefreshUsesTheStyleResolvedAtLogin(t *testing.T) {
 			if fx.oauth.lastTokenHadBasicAuth != tc.wantBasic {
 				t.Fatalf("basic auth = %v, want %v", fx.oauth.lastTokenHadBasicAuth, tc.wantBasic)
 			}
+
+			// And through the path a session actually takes: an expired access token
+			// makes Store.Acquire call the engine's refresh with the STORED style, so
+			// the credential continues to work without a new login.
+			fx.store.mu.Lock()
+			stored := fx.store.grants[fakeKey(fx.owner, fx.oauth.endpoint())]
+			stored.Token.Expiry = time.Now().Add(-time.Minute)
+			fx.store.mu.Unlock()
+
+			handler, _, err := fx.eng.Passive(fx.owner)(context.Background(), "fixture", fx.oauth.endpoint(), nil)
+			if err != nil {
+				t.Fatalf("factory: %v", err)
+			}
+			ts, err := handler.TokenSource(context.Background())
+			if err != nil || ts == nil {
+				t.Fatalf("TokenSource = %v, %v", ts, err)
+			}
+			before = fx.oauth.tokenCallCount()
+			tok, err := ts.Token()
+			if err != nil {
+				t.Fatalf("acquisition after expiry = %v, want the stored style to refresh", err)
+			}
+			if tok.AccessToken == "" {
+				t.Fatal("acquisition returned no access token")
+			}
+			if got := fx.oauth.tokenCallCount() - before; got != 1 {
+				t.Fatalf("token requests = %d, want exactly one", got)
+			}
 		})
 	}
 }
