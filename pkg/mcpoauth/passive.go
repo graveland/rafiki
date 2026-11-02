@@ -44,6 +44,12 @@ import (
 // one decision: an explicit Authorization header — any case, even empty —
 // disables stored OAuth for that entry, and the returned handler then carries no
 // token source at all.
+//
+// The client is nil whenever no stored credential is in play, which is the
+// runtime's signal to keep its own transport: the guarded client this returns for
+// a bound credential enforces the operator's OAuth destination policy, and that
+// boundary must not reach an entry that never carries a bearer. Callers must
+// therefore treat a nil client as "leave the transport alone", not as an error.
 type PassiveFactory func(ctx context.Context, serverName, canonicalEndpoint string, headers map[string]string) (auth.OAuthHandler, *http.Client, error)
 
 // LoginRequiredError is what a passive session reports when the server answered
@@ -72,6 +78,21 @@ func (e *LoginRequiredError) Unwrap() error { return ErrLoginRequired }
 // Passive returns the owner-bound passive factory for one owner. The owner is
 // resolved once, here, from the authenticated connection — a session can only
 // ever read the grants its own owner logged in for.
+//
+// The returned HTTP client is nil for every entry that has no stored credential
+// in play: an explicit Authorization header, a connection with no owner, or a
+// lookup that found no usable binding. A nil client tells the runtime to keep the
+// transport it would have used without this feature at all.
+//
+// That is deliberate and load-bearing. The guarded client enforces the operator's
+// [mcp_oauth] destination policy, which exists for OAuth-backed requests: it
+// refuses private addresses and cleartext origins unless the operator allowed
+// them. Handing it to an entry with no credential would mean that merely ENABLING
+// MCP OAuth refuses the static and unauthenticated servers a deployment already
+// had — an internal MCP server on a private address, or one authenticated by a
+// configured header, would stop working with no credential anywhere in the
+// picture. The boundary belongs to the request that carries a bearer, so it is
+// returned only when one does.
 func (e *Engine) Passive(owner string) PassiveFactory {
 	owner = strings.ToLower(strings.TrimSpace(owner))
 	return func(ctx context.Context, serverName, canonicalEndpoint string, headers map[string]string) (auth.OAuthHandler, *http.Client, error) {
@@ -79,23 +100,20 @@ func (e *Engine) Passive(owner string) PassiveFactory {
 		if err != nil {
 			return nil, nil, fmt.Errorf("mcp: server %q: %w", serverName, err)
 		}
-		// The MCP client is the guarded streaming client: the destination policy
-		// is checked before the request and at every dial, and a redirect may not
-		// carry the bearer to another origin.
-		client := e.policy.StreamClient()
 		handler := &passiveHandler{engine: e, owner: owner, server: serverName, endpoint: endpoint}
 
 		// Precedence: a configured Authorization header wins, case-insensitively
 		// and even when its value is empty. Nothing is looked up, so a stored
 		// grant cannot displace it — and, for the same reason, this entry can never
-		// be told to go and log in: see passiveHandler.Authorize.
+		// be told to go and log in: see passiveHandler.Authorize. The NIL client is
+		// part of that: see the note on Passive about who gets the guarded one.
 		if headerKeyPresent(headers, "Authorization") {
-			return handler, client, nil
+			return handler, nil, nil
 		}
 		if owner == "" {
 			// No owner on this connection means no stored grant to offer. The
 			// entry still dials; a public server needs no credential.
-			return handler, client, nil
+			return handler, nil, nil
 		}
 
 		binding, err := e.store.LookupBinding(ctx, owner, endpoint)
@@ -104,9 +122,10 @@ func (e *Engine) Passive(owner string) PassiveFactory {
 			// Nothing usable is stored. That is not a reason to refuse the dial:
 			// a public server works, and a protected one will say 401 and get
 			// the hint from Authorize, because a login is exactly what would fix
-			// it.
+			// it. No credential is in play, so this entry keeps the transport it
+			// has always had.
 			handler.hintable = true
-			return handler, client, nil
+			return handler, nil, nil
 		case err != nil:
 			// A store that cannot answer must never be reported as "no
 			// credential": that would silently turn a database outage into an
@@ -117,7 +136,11 @@ func (e *Engine) Passive(owner string) PassiveFactory {
 		handler.generation = binding.GrantGeneration
 		handler.bound = true
 		handler.hintable = true
-		return handler, client, nil
+		// Only here is a credential in play, and only here does the destination
+		// policy belong: the guarded streaming client checks the destination before
+		// the request and at every dial, and refuses to carry the bearer across an
+		// origin-changing redirect.
+		return handler, e.policy.StreamClient(), nil
 	}
 }
 

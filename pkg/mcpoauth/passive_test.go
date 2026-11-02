@@ -23,8 +23,14 @@ func TestMcpOAuthPassiveMissingCredentialKeepsTheDial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
-	if handler == nil || client == nil {
-		t.Fatal("the factory returned no handler or client")
+	if handler == nil {
+		t.Fatal("the factory returned no handler")
+	}
+	// No credential is in play, so the entry keeps whatever transport it had: the
+	// guarded client would put an uncredentialed dial behind the OAuth destination
+	// policy.
+	if client != nil {
+		t.Fatal("the factory returned a guarded client for an entry with no stored credential")
 	}
 	ts, err := handler.TokenSource(context.Background())
 	if err != nil {
@@ -33,6 +39,13 @@ func TestMcpOAuthPassiveMissingCredentialKeepsTheDial(t *testing.T) {
 	if ts != nil {
 		t.Fatal("a login-less owner got a token source")
 	}
+	// The handler is still hintable: a protected server must be told to log in.
+	req, err := http.NewRequest(http.MethodPost, fx.oauth.endpoint(), strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	requireLoginHint(t, handler.Authorize(context.Background(), req,
+		&http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody}), "fixture")
 	for _, call := range fx.store.callLog() {
 		if call != "LookupBinding" {
 			t.Fatalf("the factory made a non-lookup store call: %v", fx.store.callLog())
@@ -53,10 +66,13 @@ func TestMcpOAuthPassiveExplicitAuthorizationDisablesOAuth(t *testing.T) {
 			fx.store.seed(fx.owner, fx.oauth.endpoint(), fx.oauth.endpoint(), fx.oauth.issuer(),
 				Token{AccessToken: "seeded", Expiry: time.Now().Add(time.Hour)})
 
-			handler, _, err := fx.eng.Passive(fx.owner)(context.Background(), "fixture", fx.oauth.endpoint(),
+			handler, client, err := fx.eng.Passive(fx.owner)(context.Background(), "fixture", fx.oauth.endpoint(),
 				map[string]string{key: ""})
 			if err != nil {
 				t.Fatalf("factory: %v", err)
+			}
+			if client != nil {
+				t.Fatal("an entry with an explicit Authorization header was handed the guarded client")
 			}
 			ts, err := handler.TokenSource(context.Background())
 			if err != nil {
@@ -302,8 +318,11 @@ func TestMcpOAuthPassiveExplicitAuthorizationNeverAsksForALogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory: %v", err)
 	}
-	if client == nil || handler == nil {
-		t.Fatal("the factory returned no handler or client")
+	if handler == nil {
+		t.Fatal("the factory returned no handler")
+	}
+	if client != nil {
+		t.Fatal("an explicitly authenticated entry was put behind the OAuth destination policy")
 	}
 	ts, err := handler.TokenSource(context.Background())
 	if err != nil || ts != nil {
@@ -353,4 +372,92 @@ func TestMcpOAuthPassiveExplicitAuthorizationNeverAsksForALogin(t *testing.T) {
 	if strings.Contains(ownerlessErr.Error(), "configured with") {
 		t.Fatalf("an owner-less connection was blamed for configured credentials: %v", ownerlessErr)
 	}
+}
+
+// The destination policy belongs to the requests that carry a bearer. This is the
+// contract that keeps enabling MCP OAuth from refusing the static and
+// unauthenticated servers a deployment already runs.
+func TestMcpOAuthPassiveGuardsOnlyCredentialedDials(t *testing.T) {
+	t.Run("no stored binding", func(t *testing.T) {
+		fx := newEngineFixture(t)
+		handler, client, err := fx.eng.Passive(fx.owner)(context.Background(), "fixture", fx.oauth.endpoint(), nil)
+		if err != nil {
+			t.Fatalf("factory: %v", err)
+		}
+		if handler == nil {
+			t.Fatal("no handler: a protected public server must still get the login hint")
+		}
+		if client != nil {
+			t.Fatal("an unbound entry was handed the guarded client")
+		}
+	})
+
+	t.Run("explicit Authorization header", func(t *testing.T) {
+		fx := newEngineFixture(t)
+		// A stored credential exists and the header still wins: the entry keeps the
+		// transport it had, and nothing about the OAuth destination policy applies.
+		fx.store.seed(fx.owner, fx.oauth.endpoint(), fx.oauth.endpoint(), fx.oauth.issuer(),
+			Token{AccessToken: "seeded", Expiry: time.Now().Add(time.Hour)})
+		handler, client, err := fx.eng.Passive(fx.owner)(context.Background(), "fixture", fx.oauth.endpoint(),
+			map[string]string{"Authorization": "Bearer explicit"})
+		if err != nil {
+			t.Fatalf("factory: %v", err)
+		}
+		if handler == nil {
+			t.Fatal("no handler")
+		}
+		if client != nil {
+			t.Fatal("an explicitly authenticated entry was handed the guarded client")
+		}
+	})
+
+	t.Run("no owner", func(t *testing.T) {
+		fx := newEngineFixture(t)
+		handler, client, err := fx.eng.Passive("")(context.Background(), "fixture", fx.oauth.endpoint(), nil)
+		if err != nil {
+			t.Fatalf("factory: %v", err)
+		}
+		if handler == nil {
+			t.Fatal("no handler")
+		}
+		if client != nil {
+			t.Fatal("an owner-less entry was handed the guarded client")
+		}
+	})
+
+	t.Run("stored binding", func(t *testing.T) {
+		fx := newEngineFixture(t)
+		fx.store.seed(fx.owner, fx.oauth.endpoint(), fx.oauth.endpoint(), fx.oauth.issuer(),
+			Token{AccessToken: "seeded", Expiry: time.Now().Add(time.Hour)})
+
+		handler, client, err := fx.eng.Passive(fx.owner)(context.Background(), "fixture", fx.oauth.endpoint(), nil)
+		if err != nil {
+			t.Fatalf("factory: %v", err)
+		}
+		if handler == nil || client == nil {
+			t.Fatal("a bound entry was not given the guarded client")
+		}
+		ts, tsErr := handler.TokenSource(context.Background())
+		if tsErr != nil || ts == nil {
+			t.Fatalf("TokenSource = %v, %v", ts, tsErr)
+		}
+
+		// It really is the guarded client, not merely some client: it refuses a
+		// destination outside the operator's policy before a socket is opened.
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://10.0.0.5/mcp", nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatal("the client dialled a private address the policy refuses")
+		}
+		if !errors.Is(err, ErrDestinationDenied) {
+			t.Fatalf("client refusal = %v, want ErrDestinationDenied", err)
+		}
+		if _, ok := client.Transport.(*policyTransport); !ok {
+			t.Fatalf("transport = %T, want the policy's own", client.Transport)
+		}
+	})
 }
