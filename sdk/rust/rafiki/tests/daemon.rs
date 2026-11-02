@@ -17,10 +17,11 @@
 //! this client does not — cannot be provoked against a real daemon, so it is
 //! covered by the stub tests in `tests/connect.rs`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use rafiki::{pb, Client, Error, FollowPolicy, Followed, Streaming};
+use rafiki::{pb, Client, Code, Error, FollowPolicy, Followed, Streaming};
 
 /// How long a stream may stay quiet before it counts as caught up.
 const IDLE: Duration = Duration::from_secs(2);
@@ -356,5 +357,275 @@ fn assert_daemon_refusal(codec: &str, err: &Error) {
         err.message.contains(DAEMON_REFUSAL),
         "{codec}: the daemon's own message, not ours: {}",
         err.message
+    );
+}
+
+// ─── MCP OAuth: the three verbs, against a live daemon ──────────────────────
+//
+// These are the same requests `rafiki mcp login` / `mcp logout` make, over the
+// Rust client, with a REAL daemon on the other end. They need a fake
+// authorization server the runner supplies — never a real vendor account —
+// because the login is explicit and interactive by design:
+//
+//   RAFIKI_SDK_TEST_MCP_CONFIG  absolute path to an .mcp.json on the daemon
+//                               host whose entry is a direct `url` server
+//                               backed by a fake authorization server that
+//                               answers its authorization endpoint with a 302
+//                               to loopback (the runner's fixture).
+//   RAFIKI_SDK_TEST_MCP_SERVER  the entry's name (default "fixture").
+//   RAFIKI_SDK_TEST_MCP_RESOURCE
+//                               optional: the canonical resource the runner
+//                               expects the login to bind.
+//
+// The browser step is performed here, over plain HTTP: the fake authorization
+// server answers the consent GET with the redirect a browser would follow, and
+// its query — carrying the state and PKCE-bound code — is handed to
+// `complete_mcp_login`. An https:// authorization endpoint is refused with a
+// message rather than guessed at: point these tests at the loopback fixture.
+
+/// The three MCP OAuth tests share ONE configured server and therefore ONE
+/// endpoint's login fence: a second login for the same endpoint supersedes the
+/// first (`failed_precondition`, "start again"), which is correct behaviour and
+/// would make a parallel run nondeterministic. This slot serializes them without
+/// holding a lock across an await (no `tokio::sync` feature here) and without
+/// requiring the runner to pass `--test-threads=1`.
+static MCP_LOGIN_BUSY: AtomicBool = AtomicBool::new(false);
+
+struct LoginSlot;
+
+impl Drop for LoginSlot {
+    fn drop(&mut self) {
+        MCP_LOGIN_BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
+async fn login_slot() -> LoginSlot {
+    while MCP_LOGIN_BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    LoginSlot
+}
+
+fn live_mcp_config() -> (String, String) {
+    let config = std::env::var("RAFIKI_SDK_TEST_MCP_CONFIG").expect(
+        "RAFIKI_SDK_TEST_MCP_CONFIG is unset: the live MCP OAuth tests need an .mcp.json \
+         on the daemon host whose entry is backed by a fake authorization server",
+    );
+    let server =
+        std::env::var("RAFIKI_SDK_TEST_MCP_SERVER").unwrap_or_else(|_| "fixture".to_string());
+    (config, server)
+}
+
+/// One plain-HTTP GET, returning (status, Location). Enough to play the browser
+/// against a loopback fake authorization server, and deliberately not a general
+/// HTTP client: the redirect is the only thing read.
+fn http_get_location(url: &str) -> (u16, Option<String>) {
+    use std::io::{Read, Write};
+    let rest = url
+        .strip_prefix("http://")
+        .unwrap_or_else(|| panic!("{url}: the MCP OAuth live tests need a loopback http:// authorization endpoint (the fake fixture)"));
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let mut stream = std::net::TcpStream::connect(authority)
+        .unwrap_or_else(|err| panic!("connect to {authority}: {err}"));
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .expect("write the consent request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read the consent response");
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("no status line in the consent response: {response:?}"));
+    let location = response.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("location") {
+            Some(value.trim().to_string())
+        } else {
+            None
+        }
+    });
+    (status, location)
+}
+
+/// Drive one whole explicit login: begin, play the browser (another round if the
+/// daemon asks for one), and return (server, resource, tools).
+async fn live_mcp_login(client: &Client) -> (String, String, Vec<String>) {
+    let _slot = login_slot().await;
+    let (config, server) = live_mcp_config();
+    let begin = client
+        .begin_mcp_login(&pb::BeginMcpLoginRequest {
+            config_path: config,
+            server: server.clone(),
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("begin_mcp_login against a live daemon");
+    assert!(!begin.login_id.is_empty(), "begin returned no login id");
+    assert!(
+        begin.redirect_port > 0
+            && !begin.callback_path.is_empty()
+            && !begin.redirect_hosts.is_empty(),
+        "begin returned no usable loopback callback: {begin:?}"
+    );
+
+    let mut descriptor = begin;
+    for round in 0..4 {
+        let (status, location) = http_get_location(&descriptor.authorize_url);
+        assert_eq!(
+            status, 302,
+            "round {round}: the fixture's authorization endpoint did not redirect (it answered {status})"
+        );
+        let location = location.expect("the consent redirect carries no Location");
+        let query = location
+            .split_once('?')
+            .map(|(_, q)| q.to_string())
+            .unwrap_or_else(|| panic!("the redirect {location} carries no query"));
+        let done = client
+            .complete_mcp_login(&pb::CompleteMcpLoginRequest {
+                login_id: descriptor.login_id.clone(),
+                callback_query: query,
+            })
+            .await
+            .expect("complete_mcp_login against a live daemon");
+        match done.continuation {
+            Some(next) => {
+                // A continuation is the WHOLE outcome of the round: nothing is
+                // stored yet and the same login id carries on.
+                assert_eq!(
+                    next.login_id, descriptor.login_id,
+                    "a continuation changed the login id"
+                );
+                descriptor = next;
+            }
+            None => {
+                assert_eq!(done.server, server, "the daemon named another server");
+                assert!(
+                    !done.resource.is_empty(),
+                    "a completed login carries no resource"
+                );
+                assert!(
+                    !done.tools.is_empty(),
+                    "a completed login verified no tools"
+                );
+                for secret_field in [&done.resource, &done.account_id, &done.server] {
+                    assert!(
+                        !secret_field.starts_with("access-")
+                            && !secret_field.starts_with("refresh-"),
+                        "a response field carries a credential: {done:?}"
+                    );
+                }
+                if let Ok(expected) = std::env::var("RAFIKI_SDK_TEST_MCP_RESOURCE") {
+                    assert_eq!(done.resource, expected, "the login bound another resource");
+                }
+                return (done.server, done.resource, done.tools);
+            }
+        }
+    }
+    panic!("the login still asked for consent after four rounds");
+}
+
+#[tokio::test]
+#[ignore = "needs a live rafikid + RAFIKI_SDK_TEST_MCP_CONFIG: run with --ignored"]
+async fn a_live_daemon_starts_and_completes_an_mcp_login() {
+    let client = live_client();
+    let (server, resource, tools) = live_mcp_login(&client).await;
+    println!(
+        "{server}: logged in for {resource} with {} tool(s): {tools:?}",
+        tools.len()
+    );
+
+    // The same login id is consumed: replaying the callback is refused, and an
+    // unknown id answers the SAME not_found (a caller cannot probe which logins
+    // exist).
+    let err = client
+        .complete_mcp_login(&pb::CompleteMcpLoginRequest {
+            login_id: "no-such-login".to_string(),
+            callback_query: "code=x&state=y".to_string(),
+        })
+        .await
+        .expect_err("an unknown login id completed");
+    assert!(err.is_not_found(), "an unknown login id: {err}");
+}
+
+#[tokio::test]
+#[ignore = "needs a live rafikid + RAFIKI_SDK_TEST_MCP_CONFIG: run with --ignored"]
+async fn a_live_daemon_logs_out_an_mcp_grant() {
+    let client = live_client();
+    let (_, resource, _) = live_mcp_login(&client).await;
+
+    // The resource form needs no config file at all, which is how a grant is
+    // removed once its project file is gone.
+    client
+        .delete_mcp_credential(&pb::DeleteMcpCredentialRequest {
+            resource: resource.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("delete_mcp_credential by resource");
+
+    // Logging the same grant out again is IDEMPOTENT: the tombstone is already
+    // there, so the local invalidation has nothing left to do and succeeds. A
+    // resource that was never logged in is the one that answers not_found.
+    client
+        .delete_mcp_credential(&pb::DeleteMcpCredentialRequest {
+            resource: resource.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("a second logout of the same grant is idempotent");
+    let err = client
+        .delete_mcp_credential(&pb::DeleteMcpCredentialRequest {
+            resource: "https://never-logged-in.invalid/mcp".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("a grant that was never logged in was removed");
+    assert!(err.is_not_found(), "an unknown resource: {err}");
+
+    // Giving BOTH selectors is refused before anything is looked up.
+    let (config, server) = live_mcp_config();
+    let err = client
+        .delete_mcp_credential(&pb::DeleteMcpCredentialRequest {
+            config_path: config,
+            server,
+            resource,
+        })
+        .await
+        .expect_err("both delete selectors were accepted");
+    assert_eq!(err.code, Code::InvalidArgument, "both selectors: {err}");
+}
+
+#[tokio::test]
+#[ignore = "needs a live rafikid + RAFIKI_SDK_TEST_MCP_CONFIG: run with --ignored"]
+async fn a_live_daemon_refuses_an_mcp_login_for_an_undeclared_server() {
+    let _slot = login_slot().await;
+    let client = live_client();
+    let (config, _) = live_mcp_config();
+    let err = client
+        .begin_mcp_login(&pb::BeginMcpLoginRequest {
+            config_path: config,
+            server: "no-such-server-in-this-config".to_string(),
+            scopes: Vec::new(),
+        })
+        .await
+        .expect_err("a login started for an undeclared server");
+    assert_eq!(
+        err.code,
+        Code::InvalidArgument,
+        "an undeclared server: {err}"
+    );
+    assert!(
+        !err.message.contains("access-") && !err.message.contains("refresh-"),
+        "a refusal carried a credential: {err}"
     );
 }
