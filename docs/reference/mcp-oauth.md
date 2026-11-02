@@ -193,7 +193,7 @@ streamable-HTTP fixture server wherever the wire matters:
 | Test | What it pins |
 |---|---|
 | `TestMcpOAuthAuthorizationHeaderSkipsTheFactory` | five spellings, including an empty value: factory never called, configured header on the wire |
-| `TestMcpOAuthUnrelatedHeadersCoexistWithTheBearer` | configured header and bearer on the same request; the factory's transport stays the base |
+| `TestMcpOAuthUnrelatedHeadersCoexistWithTheBearer` | a configured map with NO `Authorization` key still consults the factory; the unrelated header and the bearer travel on the same request, and the factory's transport stays the base |
 | `TestMcpOAuthPublicServerWorksWithoutACredential` | nil token source, no `Authorization`, tools registered |
 | `TestMcpOAuth401CarriesTheNamedLoginHintThroughTheSkipLog` | 401 at dial: hint on the skip line, no spawn failure |
 | `TestMcpOAuth401AfterARedialCarriesTheSameLoginHint` | 401 on a **later** call after a redial: hint on the tool-call error |
@@ -202,7 +202,8 @@ streamable-HTTP fixture server wherever the wire matters:
 | `TestMcpOAuthFactoryIsSuppliedOnRedial` | a 404-killed session redials through the factory and keeps its bearer |
 | `TestMcpOAuthConfiguredHeadersStayOnTheExactEndpoint` | client-level: endpoint vs another path vs same-hostname-other-port |
 | `TestMcpOAuthRedirectFromTheEndpointCarriesNoCredentials` | real SDK session, redirect **from** the configured endpoint: neither bearer nor configured header follows |
-| `TestMcpOAuthNonEndpointRequestsStripConfiguredHeaders` | the `Del` loop: a request arriving with the keys loses them |
+| `TestMcpOAuthNonEndpointRequestsStripConfiguredHeaders` | the `Del` loop on a cross-origin hop: the bearer is dropped and a request arriving with the configured keys loses them; a same-origin hop keeps them |
 | `TestMcpOAuthEndpointMatchCoversEveryURLPart` | `sameMCPEndpoint`/`sameMCPOrigin` on query, port, path, scheme, host |
 | `TestMcpOAuthWithoutAFactoryPreservesStandaloneBehaviour` | no factory: headers still sent, tools registered |
+| `TestMcpOAuthNilFactoryClientLeavesPrivateServersOffTheDestinationPolicy` | a nil client from the factory leaves the entry on `http.DefaultTransport`, so a private 127.0.0.1 server still dials with no `Authorization`; a client the factory DOES return becomes the transport and refuses |
 | `TestMcpOAuthRuntimeOptionThreadsTheFactory` (`pkg/fundi/runtime_test.go`) | `RuntimeOptions.MCPHTTP` is what reaches `ConnectMCP` |
