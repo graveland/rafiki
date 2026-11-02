@@ -186,7 +186,11 @@ allow_http_hosts = ["127.0.0.1"]
 The two gates are independent. A non-public address needs an `allow_hosts` or
 `allow_cidrs` entry; an `http://` URL needs, in addition, its exact host in
 `allow_http_hosts` — and that entry alone does not make a private address
-reachable. `https://` never needs an entry in `allow_http_hosts`. A malformed
+reachable. The two allowances differ in strictness: `allow_cidrs` matches
+resolved ADDRESSES, so a hostname that later answers from an unlisted address is
+still refused, while `allow_hosts` trusts that hostname's DNS for every answer it
+gives (including for a URL derived from remote metadata) — use a CIDR when you
+mean an address range and a hostname only when you mean the name itself. `https://` never needs an entry in `allow_http_hosts`. A malformed
 entry (a wildcard, a URL where a host belongs, a broken CIDR) fails daemon
 startup rather than becoming a permission that matches nothing.
 

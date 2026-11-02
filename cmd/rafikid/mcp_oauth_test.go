@@ -145,6 +145,7 @@ type fakeMcpStore struct {
 	revocations       []mcpoauth.Revocation
 
 	lookupBindingErr  error
+	binding           *mcpoauth.Binding
 	invalidateCalls   int
 	beginFenceCalls   int
 	invalidatedOfUser map[string]bool
@@ -173,6 +174,9 @@ func (s *fakeMcpStore) LookupBinding(_ context.Context, _, _ string) (mcpoauth.B
 	defer s.mu.Unlock()
 	if s.lookupBindingErr != nil {
 		return mcpoauth.Binding{}, s.lookupBindingErr
+	}
+	if s.binding != nil {
+		return *s.binding, nil
 	}
 	return mcpoauth.Binding{}, mcpoauth.ErrMissing
 }
@@ -346,7 +350,20 @@ func TestMcpOAuthPassiveFactoryIsOwnerBound(t *testing.T) {
 	handler, client, err := factory(context.Background(), "linear", "https://mcp.example.net/mcp", nil)
 	c.NoError(err, "a missing credential must not refuse the dial")
 	c.True(handler != nil, "handler")
-	c.True(client != nil, "client")
+	// No stored credential means no client of ours: the entry keeps the
+	// transport it had before MCP OAuth existed, so enabling the feature cannot
+	// put a private or static-header server behind the destination policy. The
+	// handler still carries the 401 hint. A BOUND endpoint is the only case that
+	// gets the guarded client.
+	c.True(client == nil, "no stored credential: no client, the existing transport stays")
+
+	store.mu.Lock()
+	store.lookupBindingErr = nil
+	store.binding = &mcpoauth.Binding{Resource: "https://mcp.example.net/mcp", Issuer: "https://auth.example.net"}
+	store.mu.Unlock()
+	_, bound, err := broker.passiveFactory("u1")(context.Background(), "linear", "https://mcp.example.net/mcp", nil)
+	c.NoError(err, "a bound endpoint dials")
+	c.True(bound != nil, "a stored credential gets the guarded client")
 }
 
 // TestMcpOAuthPassiveFactoryRefusesAStoreOutage is the other half: a database
