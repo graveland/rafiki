@@ -365,6 +365,7 @@ type Cockpit struct {
 	// transcript until the real one arrives.
 	pending    []pendingSend
 	showHelp   bool
+	helpTop    int
 	railHidden bool
 	expandArgs bool
 	// showInjected draws the harness-injected system-role blocks the transcript
@@ -1441,6 +1442,26 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, c.answerResumeAsk(msg.String())
 	}
 
+	// The help page is taller than a short terminal, so while it is up the
+	// transcript scroll keys scroll it instead: the transcript is hidden
+	// behind it anyway.
+	if c.showHelp {
+		switch {
+		case key.Matches(msg, k.ScrollPageUp):
+			c.helpTop -= max(1, c.bodyHeight()-2)
+			return c, nil
+		case key.Matches(msg, k.ScrollPageDown):
+			c.helpTop += max(1, c.bodyHeight()-2)
+			return c, nil
+		case key.Matches(msg, k.ScrollTop):
+			c.helpTop = 0
+			return c, nil
+		case key.Matches(msg, k.ScrollBottom):
+			c.helpTop = math.MaxInt32
+			return c, nil
+		}
+	}
+
 	// Any keystroke that is not the repeat disarms the end confirmation, for
 	// the same reason the quit confirmation disarms: a live destructive
 	// trigger must not survive an unrelated key.
@@ -1515,6 +1536,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, c.cyclePane(0)
 	case key.Matches(msg, k.Help):
 		c.showHelp = !c.showHelp
+		c.helpTop = 0
 		return c, nil
 	case key.Matches(msg, k.ExpandArgs):
 		c.expandArgs = !c.expandArgs
@@ -1632,12 +1654,11 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, nil
 	}
 	if key.Matches(msg, k.ClearInput) {
-		// The folded pastes go with it: their tokens are what referred to
-		// them, and leaving the text behind would attach it to the next
-		// prompt that happened to contain a matching token.
-		c.ta.Reset()
-		c.pastes = nil
-		c.attachments = nil
+		c.killLine()
+		return c, nil
+	}
+	if key.Matches(msg, k.ClearAll) {
+		c.clearInput()
 		return c, nil
 	}
 	if key.Matches(msg, k.ClipboardPaste) {
@@ -1731,6 +1752,43 @@ func (c *Cockpit) applyClipboardPaste(msg clipboardPasteMsg) tea.Cmd {
 		return nil
 	}
 	return c.handlePaste(msg.text)
+}
+
+// clearInput empties the box. The folded pastes and staged attachments go
+// with it: their tokens are what referred to them, and leaving the text behind
+// would attach it to the next prompt that happened to contain a matching token.
+func (c *Cockpit) clearInput() {
+	c.ta.Reset()
+	c.pastes = nil
+	c.attachments = nil
+}
+
+// killLine empties the cursor's line, whichever column the cursor is in. On a
+// line that is already empty it removes the line above instead, so repeating
+// it unrolls the input one line at a time. The box counts as cleared, tokens
+// and all, once nothing is left in it.
+func (c *Cockpit) killLine() {
+	kill := tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl}
+	lineEmpty := func() bool {
+		return c.ta.LineCount() == 0 || strings.Split(c.ta.Value(), "\n")[c.ta.Line()] == ""
+	}
+	c.ta.CursorEnd()
+	if lineEmpty() {
+		if c.ta.Line() == 0 {
+			return
+		}
+		// At column 0 the textarea's own kill joins this empty line onto the
+		// one above, which leaves the cursor at the end of that line.
+		c.ta, _ = c.ta.Update(kill)
+		c.ta.CursorEnd()
+	}
+	if !lineEmpty() {
+		c.ta, _ = c.ta.Update(kill)
+	}
+	if c.ta.Value() == "" {
+		c.pastes = nil
+		c.attachments = nil
+	}
 }
 
 // handlePaste folds a large paste into a token rather than unrolling it.
@@ -2747,7 +2805,7 @@ func (c *Cockpit) footerHints() string {
 	case focusRail:
 		bs = []key.Binding{k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Rename, k.Escape}
 	default:
-		bs = []key.Binding{k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort}
+		bs = []key.Binding{k.Send, k.Newline, k.ClearInput, k.ClearAll, k.Steer, k.Abort}
 	}
 	parts := make([]string, 0, len(bs)+3)
 	for _, b := range bs {
@@ -2778,28 +2836,74 @@ func (c *Cockpit) footerHints() string {
 // read it, so the key advertised in the footer and in `attach --help` did
 // nothing at all.
 func (c *Cockpit) helpLines(width int) []string {
-	group := func(title string, bs ...key.Binding) []string {
+	const keyCol = 11
+	colWidth := width / 2
+	descWidth := max(colWidth-keyCol-4, 16)
+	// The footer and the key bindings keep their one-word descriptions; this
+	// page is where each key gets the sentence that says what it does and what
+	// it leaves alone.
+	type entry struct {
+		b    key.Binding
+		long string
+	}
+	group := func(title string, es ...entry) []string {
 		out := []string{styleRailFocused.Render(title)}
-		for _, b := range bs {
-			h := b.Help()
-			out = append(out, "  "+padTo(h.Key, 10)+h.Desc)
+		for _, e := range es {
+			rows := strings.Split(ansi.Wordwrap(e.long, descWidth, ""), "\n")
+			out = append(out, "  "+padTo(e.b.Help().Key, keyCol)+rows[0])
+			for _, row := range rows[1:] {
+				out = append(out, "  "+strings.Repeat(" ", keyCol)+row)
+			}
 		}
 		return append(out, "")
 	}
 	k := c.keys
 	left := group("anywhere",
-		k.NextPane, k.PrevPane, k.NextAttention, k.PrevAttention,
-		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.ExpandArgs,
-		k.ToggleInjected, k.ToggleImages, k.Redraw, k.Quit)
-	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
-	right = append(right, group("agents",
-		k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Rename, k.Escape)...)
+		entry{k.NextPane, "Move focus between the input and the rail, the agent list."},
+		entry{k.PrevPane, "Same, the other way round."},
+		entry{k.NextAttention, "Jump to the next agent waiting on you: a question, or a failure."},
+		entry{k.PrevAttention, "Jump to the previous one."},
+		entry{k.HopPrev, "Switch to the agent above in the rail, without leaving the input."},
+		entry{k.HopNext, "Switch to the agent below."},
+		entry{k.ToggleRail, "Show or hide the rail (^B does the same). Hiding it leaves your agents running."},
+		entry{k.Help, "Show or hide this page."},
+		entry{k.ExpandArgs, "Expand or collapse tool-call details: full arguments and results."},
+		entry{k.ToggleInjected, "Show or hide injected messages: heartbeats and environment updates the harness added. Hidden by default."},
+		entry{k.ToggleImages, "Show or hide image thumbnails. Needs a terminal with Kitty graphics."},
+		entry{k.Redraw, "Repaint the screen. Try it when the display or the cursor looks wrong."},
+		entry{k.Quit, "Quit; press twice within two seconds to confirm. Your agents keep running."},
+	)
+	right := group("input",
+		entry{k.Send, "Send your message. If the agent is mid-turn, it queues for the next turn."},
+		entry{k.Newline, "Insert a line break (^J works in any terminal; ⇧⏎ needs one with Kitty keyboard support)."},
+		entry{k.ClipboardPaste, "Paste from the system clipboard, including images. Pasting a file path attaches the image."},
+		entry{k.ClearInput, "Clear the line the cursor is on. On an empty line, remove the line above, so repeating it unrolls the input."},
+		entry{k.ClearAll, "Clear the whole input, pasted blocks and attachments included."},
+		entry{k.Steer, "Steer: inject your message into the turn already running, instead of waiting for it to end (^S also works)."},
+		entry{k.Abort, "Stop the turn in progress. The agent stays alive (^X also works)."},
+	)
+	right = append(right, group("agents  (the rail: ⇥ to enter)",
+		entry{k.SelectUp, "Move the cursor; the transcript follows once it rests on a row."},
+		entry{k.SelectDown, "Move the cursor down."},
+		entry{k.FoldLeft, "Fold the row's subagents; on a row with none, go to its parent."},
+		entry{k.FoldRight, "Unfold the row's subagents."},
+		entry{k.Commit, "Open the agent and return to the input."},
+		entry{k.NewAgent, "Create an agent."},
+		entry{k.EndAgent, "Stop the agent; on an exited one, close it (the transcript is kept). Press twice to confirm."},
+		entry{k.Resume, "Resume an exited agent."},
+		entry{k.EditBudget, "Set the agent's cost budget."},
+		entry{k.Rename, "Rename the agent."},
+		entry{k.Escape, "Leave the rail without opening anything."},
+	)...)
 	right = append(right, group("reading",
-		k.ScrollPageUp, k.ScrollTop, k.ScrollBottom,
-		key.NewBinding(key.WithKeys("up", "down"),
-			key.WithHelp("↑/↓", "scroll (when the cursor cannot move)")))...)
+		entry{k.ScrollPageUp, "Scroll the transcript from the input, a page at a time (PgDn for the other way)."},
+		entry{k.ScrollTop, "Jump to the start of the transcript."},
+		entry{k.ScrollBottom, "Jump back to the latest message."},
+		entry{key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "")),
+			"Move the cursor in a multi-line input; at the top or bottom of it, scroll the transcript."},
+	)...)
+	right = append(right, styleMeta.Render("  A large paste folds into a [pasted #N] token; paste the same text again to expand it."), "")
 
-	colWidth := width / 2
 	if colWidth < 24 {
 		// Too narrow to sit side by side; stack and accept the clipping.
 		return append(append([]string{}, left...), right...)
@@ -2815,7 +2919,27 @@ func (c *Cockpit) helpLines(width int) []string {
 		}
 		out = append(out, padTo(l, colWidth)+r)
 	}
-	return append(out, styleMeta.Render("^G closes this."))
+	return out
+}
+
+// helpView is the visible window of helpLines: the page scrolled to helpTop,
+// with a last row that says how to leave and, when the page does not fit,
+// how to scroll it. helpTop is clamped here, where the page height is known.
+func (c *Cockpit) helpView(width, height int) string {
+	lines := c.helpLines(width)
+	visible := max(1, height-1)
+	c.helpTop = max(0, min(c.helpTop, len(lines)-visible))
+	end := min(len(lines), c.helpTop+visible)
+	out := append([]string{}, lines[c.helpTop:end]...)
+	hint := c.keys.Help.Help().Key + " closes this."
+	if len(lines) > visible {
+		hint = c.keys.ScrollPageUp.Help().Key + "/" + c.keys.ScrollPageDown.Help().Key +
+			" scroll (" + itoa(int64(len(lines)-end)) + " more below) · " + hint
+	}
+	for len(out) < visible {
+		out = append(out, "")
+	}
+	return strings.Join(append(out, styleMeta.Render(hint)), "\n")
 }
 
 func (c *Cockpit) View() tea.View {
@@ -2873,7 +2997,7 @@ func (c *Cockpit) View() tea.View {
 	case c.renameForm != nil:
 		conv = c.renameForm.view(convWidth)
 	case c.showHelp:
-		conv = strings.Join(c.helpLines(convWidth), "\n")
+		conv = c.helpView(convWidth, bodyHeight)
 	case f == "" && c.rail.Len() == 0:
 		conv = styleMeta.Render("No agents running. Start one with `rafiki create`.")
 	case f == "":

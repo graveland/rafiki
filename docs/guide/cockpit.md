@@ -75,7 +75,7 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | `^↑` / `^↓` | Hop up/down the rail without changing pane |
 | `esc` / `^X` | Abort the running turn |
 | `^R` / `^B` | Collapse/restore the agent rail; with one agent, peek it |
-| `^G` | Toggle the help overlay |
+| `^G` | Toggle the help page: every key with a sentence on what it does. `PgUp`/`PgDn`, `home`/`end` scroll it when it does not fit |
 | `^O` | Expand tool arguments in full rather than folded |
 | `^Y` | Toggle image thumbnails (Kitty-graphics terminals only) |
 | `^T` | Show the messages the agent's harness injected (hidden by default — see below) |
@@ -88,7 +88,8 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | `⏎` | Send a prompt — queues work for the agent |
 | `⇧⏎` / `^J` | Insert a newline (`⇧⏎` needs a Kitty-keyboard-protocol terminal — Ghostty, Kitty, WezTerm, recent iTerm2/Alacritty; `^J` works everywhere) |
 | paste | Over six lines or 800 characters folds to `[pasted #1: 40 lines]`; paste again to insert in full |
-| `^U` | Clear the whole input, folded pastes included |
+| `^U` | Kill the cursor's line; on an empty line, remove the line above, so repeating it unrolls the input |
+| `⌥K` | Clear the whole input, folded pastes included |
 | `⌥⏎` / `^S` | Steer — inject into the turn already running |
 | `PgUp`/`PgDn`, `home`/`end` | Scroll the transcript without leaving the input box |
 | `↑` / `↓` | Move the cursor; with nowhere to move, scroll the transcript |

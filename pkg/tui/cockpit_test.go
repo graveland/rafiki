@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"google.golang.org/protobuf/proto"
@@ -1414,12 +1415,47 @@ func TestHelpToggleRendersBindings(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	help := ansi.Strip(c.View().Content)
 	ck.Require().NotEq(before, help, "^G changed nothing on screen")
-	for _, want := range []string{"steer", "abort", "next pane"} {
+	for _, want := range []string{"Steer", "Stop the turn", "Move focus"} {
 		ck.StrContains(help, want, "help overlay is missing")
 	}
 
 	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	ck.Eq(before, ansi.Strip(c.View().Content), "^G twice did not return to the previous view")
+}
+
+// The page is taller than a short terminal, so the transcript scroll keys
+// scroll it while it is up, and ^G still closes it from anywhere in it.
+func TestHelpPageScrollsWhenItDoesNotFit(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	top := ansi.Strip(c.View().Content)
+	ck.StrContains(top, "scroll", "a page that does not fit must say how to scroll it")
+	ck.StrContains(top, "Move focus between the input and the rail", "the page opens at its top")
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	ck.NotEq(top, ansi.Strip(c.View().Content), "PgDn left the help page where it was")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	ck.StrContains(ansi.Strip(c.View().Content), "paste the same text again", "end must reach the last line of the page")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	ck.Eq(top, ansi.Strip(c.View().Content), "home must return to the top")
+}
+
+// Every binding a user can press in the input or the rail has a line on the
+// page; ^V and the budget key were once missing.
+func TestHelpPageNamesEveryInputAndRailKey(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 120, Height: 200})
+	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	help := ansi.Strip(c.View().Content)
+	k := c.keys
+	for _, b := range []key.Binding{k.Send, k.Steer, k.Newline, k.ClipboardPaste, k.ClearInput, k.ClearAll, k.Abort,
+		k.SelectUp, k.FoldLeft, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.EditBudget, k.Rename, k.Escape,
+		k.ToggleRail, k.ToggleInjected, k.ToggleImages, k.ExpandArgs, k.Redraw, k.Quit} {
+		ck.StrContains(help, b.Help().Key, "the help page is missing a key")
+	}
 }
 
 // ⇧⏎ is the standard newline in a send-on-⏎ input. It needs an explicit
@@ -2564,10 +2600,8 @@ func TestPasteUnderBothBoundsIsInsertedWhole(t *testing.T) {
 	assert.NewCollecting(t).Eq(small, c.ta.Value(), "a paste under both bounds must be inserted whole")
 }
 
-// ^U is the shell reflex for "kill the line", and the textarea's own ^U
-// (DeleteBeforeCursor) already clears the whole prompt in the common case of
-// one line with the cursor at the end — this widens it to the whole box.
-func TestClearInputEmptiesTheBoxAndItsPastes(t *testing.T) {
+// ⌥K empties the whole box, folded pastes included.
+func TestClearAllEmptiesTheBoxAndItsPastes(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -2577,14 +2611,50 @@ func TestClearInputEmptiesTheBoxAndItsPastes(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	ck.Require().False(c.ta.Value() == "" || len(c.pastes) == 0, "fixture is vacuous: nothing to clear")
 
-	c.Update(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	c.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModAlt})
 
 	ck.Eq("", c.ta.Value(), "box still holds")
-	// The folded pastes go with it: their tokens are what referred to them,
-	// and leaving the text behind would attach it to a later prompt that
-	// happened to contain a matching token.
 	ck.Empty(c.pastes, "folded pastes outlived the input that referenced them")
+	ck.False(c.quitting, "⌥K quit the cockpit")
+}
+
+// ^U kills the cursor's line wherever the cursor sits in it, and on an empty
+// line removes the line above, so repeating it unrolls the input.
+func TestKillLineUnrollsTheInputOneLineAtATime(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.ta.SetValue("one\ntwo\nthree")
+	c.ta.SetCursorColumn(2)
+	ctrlU := tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl}
+
+	c.Update(ctrlU)
+	ck.Eq("one\ntwo\n", c.ta.Value(), "the cursor's line, not the whole box, goes first")
+	c.Update(ctrlU)
+	ck.Eq("one\n", c.ta.Value(), "an empty line takes the line above with it")
+	c.Update(ctrlU)
+	ck.Eq("", c.ta.Value(), "the first line is the last to go")
+	ck.Eq(0, c.ta.Line(), "cursor left on a line that is gone")
+	c.Update(ctrlU)
+	ck.Eq("", c.ta.Value(), "nothing left to kill")
 	ck.False(c.quitting, "^U quit the cockpit")
+}
+
+// A kill that leaves text behind leaves the folded paste alone, and one that
+// empties the box drops it.
+func TestKillLineKeepsPastesUntilTheBoxIsEmpty(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.PasteMsg{Content: strings.Repeat("a line\r", 40)})
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	c.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	ctrlU := tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl}
+
+	c.Update(ctrlU)
+	ck.Len(c.pastes, 1, "the paste's token is still in the box")
+	c.Update(ctrlU)
+	ck.Empty(c.pastes, "folded pastes outlived the input that referenced them")
 }
 
 // ── attachments ──────────────────────────────────────────────────────────────
@@ -2643,8 +2713,9 @@ func TestAnAttachmentAloneCanBeSent(t *testing.T) {
 	ck.Empty(c.attachments, "attachments outlived the prompt they rode on")
 }
 
-// ^U clears staged attachments too — the token that referred to them is gone.
-func TestClearInputDropsStagedAttachments(t *testing.T) {
+// Emptying the box drops staged attachments too — the token that referred to
+// them is gone.
+func TestKillLineDropsStagedAttachments(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.png")

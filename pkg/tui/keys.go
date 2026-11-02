@@ -64,6 +64,7 @@ type keyMap struct {
 
 	// Input pane.
 	ClearInput key.Binding
+	ClearAll   key.Binding
 
 	// Input pane: scroll the transcript without leaving the input.
 	ScrollPageUp   key.Binding
@@ -132,7 +133,7 @@ func defaultKeyMap() keyMap {
 		// and the other two panes match their own Escape before this).
 		Abort: key.NewBinding(key.WithKeys("esc", "ctrl+x"), key.WithHelp("esc", "abort turn")),
 
-		Send:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send · steers if busy")),
+		Send:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send · queues if busy")),
 		Steer: key.NewBinding(key.WithKeys("alt+enter", "ctrl+s"), key.WithHelp("⌥⏎", "steer")),
 		// The textarea's own InsertNewline is bound to enter and ctrl+m --
 		// the SAME BYTE, and Send takes it -- so a send-on-⏎ input has no
@@ -155,14 +156,19 @@ func defaultKeyMap() keyMap {
 		// the way ⏎ already means commit on the rail and send in the input.
 		ClipboardPaste: key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("^V", "paste image")),
 
-		// ^U rather than ^Z. The textarea already binds ^U to
-		// DeleteBeforeCursor, which for the common case — one line, cursor at
-		// the end — clears the whole prompt already, so this widens a key that
-		// nearly does the job and matches every shell user's reflex for "kill
-		// the line". ^Z carries two conflicting reflexes and both are wrong
-		// here: it is SUSPEND in a terminal, and UNDO in every GUI editor —
-		// binding it to a destructive clear is precisely backwards.
-		ClearInput: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("^U", "clear")),
+		// ^U is the shell reflex for "kill the line", and the textarea binds it
+		// to DeleteBeforeCursor already; this widens it to the whole line
+		// whatever the column, and to the line above once the line is empty,
+		// so repeating it unrolls the box. ^Z carries two conflicting reflexes
+		// and both are wrong here: it is SUSPEND in a terminal, and UNDO in
+		// every GUI editor — binding it to a destructive clear is precisely
+		// backwards.
+		ClearInput: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("^U", "kill line")),
+
+		// Clearing everything in one stroke is the rarer wish, so it takes the
+		// modified key. alt+k is free in the textarea keymap, and sits beside
+		// its ctrl+k (delete to end of line).
+		ClearAll: key.NewBinding(key.WithKeys("alt+k"), key.WithHelp("⌥K", "clear all")),
 
 		// Scrolling from the INPUT pane. Reaching the transcript should not
 		// require leaving the box you type in: the whole point of reading back
