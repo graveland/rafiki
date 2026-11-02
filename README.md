@@ -48,6 +48,32 @@ for real](docs/guide/deployment.md).
 
 The long version is [Features](docs/guide/features.md).
 
+## Remote MCP servers
+
+A remote MCP server that requires OAuth is a direct `url` entry — the config
+names the server and nothing about its authentication:
+
+```json
+{ "mcpServers": { "linear": { "url": "https://mcp.linear.app/mcp" } } }
+```
+
+Log the daemon in once, as yourself:
+
+```sh
+rafiki mcp login linear
+```
+
+The daemon runs the whole flow and seals the grant against your user id, so no
+token is written into the file and no child process ever holds one. There is no
+`"oauth": true` switch. Your `fundi` children then spend the grant passively: a
+server they cannot authenticate is skipped with a hint naming that login, never
+a prompt mid-spawn. `rafiki mcp logout linear` forgets it.
+
+Only direct-`url` entries of a daemon-side `mcp.json` are in scope; executor
+entries keep their own static headers, and Claude Code logs in for itself on
+its own host. The user-facing picture is [Agents and subagents](docs/guide/agents.md#mcp-servers-and-oauth);
+the runtime seam and its scope are [MCP OAuth](docs/reference/mcp-oauth.md).
+
 ## Naming
 
 Three Swahili words, three roles:

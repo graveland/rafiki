@@ -172,7 +172,8 @@ docker run -d --name rafikid -p 8036:8036 \
 | `RAFIKI_CONTROL_LISTEN`, `RAFIKI_CONTROL_TLS_CERT`, `RAFIKI_CONTROL_TLS_KEY` | the remote control plane. All three or the daemon refuses to start; TLS is mandatory on TCP. Certificates are re-read on every handshake, so cert-manager rotation needs no restart |
 | `RAFIKI_EXECUTORS_ENABLED=1` | executor enrollment is **off** by default once a TCP control listener exists, so that opening the control plane does not silently open executor enrollment. Turn it on deliberately |
 | provider keys | `ANTHROPIC_API_KEY` for `fundi` children (and `OPENROUTER_API_KEY` for non-Anthropic models) in the daemon's environment, or a `providers.toml` in its config dir |
-| `RAFIKI_CONFIG` | optional path to `rafikid.toml` (telemetry) |
+| `RAFIKI_CONFIG` | optional path to `rafikid.toml` (telemetry, and the `[mcp_oauth]` destination policy) |
+| `RAFIKI_SECRETS_KEY` | optional; seals provider logins and MCP OAuth credentials at rest. Without it those logins answer `Unavailable` and the rest of the daemon runs normally |
 
 The whole variable list is in [Configuration](configuration.md#environment) and
 `.env.example`. Config files (`providers.toml`, `oidc.toml`, `rafikid.toml`,
@@ -257,6 +258,91 @@ host user. `--root` is a working directory, not a sandbox. Details, the relay
 for local inference servers and sandboxes are in
 [Executors, daraja and sandboxes](executors.md).
 
+## Remote MCP servers that need a login
+
+A `fundi` child's MCP servers come from `mcp.json` on the daemon, and a direct
+`url` entry may require OAuth 2.1. The daemon brokers that login: a user runs
+`rafiki mcp login <server>`, the daemon runs the whole flow, and children spend
+the sealed grant passively. [Agents and subagents](agents.md#mcp-servers-and-oauth)
+is the user's view, [MCP OAuth](../reference/mcp-oauth.md) the runtime contract,
+and [Configuration](configuration.md#mcp-oauth) the `[mcp_oauth]` keys. What a
+server deployment has to get right:
+
+- **The schema first.** `rafikid migrate` must reach migration 0067
+  (`conversations.mcp_credential`, `conversations.mcp_endpoint`) before a daemon
+  of this release starts — it is already the upgrade step, and skipping it lands
+  the login verbs on missing tables. The migration only ADDS two tables and their
+  indexes, so a previous-release daemon keeps running against the migrated
+  schema: no stop-the-world, just don't skip it.
+- **One secrets key, shared.** `RAFIKI_SECRETS_KEY` seals MCP client secrets and
+  access/refresh tokens exactly as it seals provider logins — one AES-256-GCM
+  ciphertext per grant, bound to its owner and canonical resource, so it cannot
+  be opened for another user or moved to another server. Every daemon serving
+  the same database needs the same key; replacing the value makes every stored
+  grant unreadable and everyone logs in again. There is no MCP-specific key.
+- **Reach: the MCP server AND its OAuth endpoints.** The daemon, not the client
+  and not the executor, contacts the configured MCP endpoint plus whatever
+  discovery points at — protected-resource metadata, authorization-server
+  metadata, dynamic client registration, the token endpoint, and revocation. All
+  of them must be reachable from the daemon host. The daemon's own
+  `HTTP_PROXY`/`HTTPS_PROXY` are ignored (a proxy resolves the name itself, so
+  the destination check would not see the address reached): route by DNS or
+  firewall, not by proxy env.
+- **Public HTTPS is the default; the opt-in is the operator's.** A destination
+  must resolve to a public unicast address, and a cleartext `http://` URL is
+  refused. An internal MCP server therefore needs its exact host in
+  `[mcp_oauth] allow_hosts` (or its range in `allow_cidrs`), and `http://` in
+  addition needs the host in `allow_http_hosts` — see
+  [Configuration](configuration.md#mcp-oauth) for all three lists and the
+  bounds. That file is the only thing that can widen the policy: a project
+  `.mcp.json`, a flag passed to `rafiki mcp login`, and a server's own metadata
+  cannot.
+- **The config file must exist on the daemon host.** `rafiki mcp login` resolves
+  an ABSOLUTE path (`--mcp-config` > `./.mcp.json` > `$RAFIKI_MCP_CONFIG` >
+  `<config dir>/mcp.json`) and then the daemon reads that exact file and entry;
+  a relative path is refused, and nothing uploads a project file. With a remote
+  profile, mount the file where the daemon can read it (or point
+  `RAFIKI_MCP_CONFIG` / the config dir's `mcp.json` at it). Running
+  `rafiki mcp login` from a project directory names a path that exists only
+  there unless the daemon has the same tree.
+- **The login callback is on the user's machine, at a fixed port.** The CLI
+  serves `127.0.0.1:1456` at `/mcp/oauth/callback` — the redirect URI the login
+  registered, so the port cannot move and a user needs it free. The URL is
+  always printed, and the redirect URL can always be pasted back; `--no-browser`
+  only skips opening a browser, which is the flow for a browser on another
+  machine (clipboard the URL across, paste the redirect back into the
+  terminal). Nothing is relayed through the daemon.
+- **Without the key, this feature is unavailable and nothing else degrades.**
+  The daemon logs it once (`MCP OAuth is unavailable` with the reason), the
+  three login verbs answer `Unavailable`, and children dial exactly as before: a
+  static-header or unauthenticated MCP server keeps working, and a protected one
+  is skipped with the login hint until an operator sets a key. A database-less
+  daemon gives the same answer; standalone `rafikid fundi` is unaffected, since
+  it holds no store and its direct-URL entries dial exactly as they always did.
+- **A refresh that cannot be completed fails closed.** Before spending a
+  single-use refresh token the store commits a durable intent, makes at most one
+  upstream attempt, and then re-checks the grant under the owner lock. A
+  refusal, a crash or a lost rotation leaves the grant login-required: there is
+  no automatic replay, even after a restart, and retrying the turn does not help
+  — the fix is `rafiki mcp login <server>` again. A database error refuses use
+  of the credential and is reported as a store failure, never as "no
+  credential".
+- **Logout is authoritative; upstream revocation is best effort.** `rafiki mcp
+  logout` drops every endpoint binding to the grant locally first, advancing a
+  fence so an older in-flight login cannot recreate it, and only then offers the
+  token back to the authorization server — one bounded attempt per grant (5s),
+  skipped when the issuer advertises no revocation endpoint. A failed revocation
+  changes nothing: the local invalidation already stands, and the child's next
+  request gets the re-login hint.
+- **Scope.** This is the direct-`url` `fundi` path only. `via_executor` entries
+  keep their static headers (their argv, environment and credentials live on the
+  executor machine), stdio servers keep their own credential management,
+  standalone `rafikid fundi` is unchanged, and a `claude` child authenticates
+  with Claude Code on its own host — a headless child cannot run that login for
+  anyone. Rafiki's own `/mcp` face stays a bearer-only agent-control surface and
+  advertises no protected-resource metadata: this is outbound OAuth, not a new
+  authorization server.
+
 ## Webhooks from third parties
 
 Put `rafiki-hooks` (a separate static, nonroot, distroless image) at the
@@ -279,7 +365,9 @@ response codes and the deploy-order rule for notify tokens are in
 ## Upgrading
 
 1. Upgrade the **daemon** first, and run `rafikid migrate` before starting it
-   (a production daemon does not migrate itself — only `--dev` does).
+   (a production daemon does not migrate itself — only `--dev` does). Migration
+   0067, the MCP OAuth credential tables, is part of this step: a daemon serving
+   `rafiki mcp login` needs it.
 2. Then upgrade executors and clients. The wire protocol carries an epoch that
    is bumped on every breaking change; a mismatched peer is refused loudly
    rather than misbehaving, so a client or executor left behind shows up as an
@@ -341,3 +429,5 @@ and 49 s for the check, about 2 minutes of downtime, 63 MB peak RSS.
 - [ ] Provider keys are in the daemon's environment or `providers.toml`, not on clients
 - [ ] `/healthz` wired to your probes, `/metrics` scraped, an OTLP endpoint configured if you want traces
 - [ ] The webhook gateway, if any, runs as its own image with only a notify-scoped token
+- [ ] `RAFIKI_SECRETS_KEY` is set, backed up and identical on every daemon sharing the database
+- [ ] `[mcp_oauth]` names any internal MCP server and its OAuth endpoints if they are not public HTTPS
