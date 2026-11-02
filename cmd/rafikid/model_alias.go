@@ -134,11 +134,23 @@ func (c *Controller) resolveModelAlias(ctx context.Context, ownerUserID, model s
 // is guessed: those ids are the ones people type bare ("claude-sonnet-5-5")
 // because the native sender accepts them everywhere else.
 //
+// A "<tier>-latest" name is the other bare spelling people reach for, and it is
+// refused here BEFORE routing.ResolveModel ever sees it (a slash-free name is an
+// alias or an error), so the hint has to name the provider-qualified form the
+// routing refusal names — same wording family, or the two paths disagree about
+// what the caller should have typed.
+//
 // A "did you mean openrouter/<id>" guess is deliberately NOT made: the catalog
 // has no exact-id lookup (entryFor resolves through ResolveModel, which applies
 // latest-family and prefix rewriting), so claiming a match would occasionally
 // point at an id the catalog never listed.
 func aliasMissHint(base string) string {
+	// Anthropic's "claude-" is optional in a tier name, and the canonical
+	// spelling drops it ("anthropic/opus-latest"), so this arm comes first.
+	if strings.HasSuffix(base, "-latest") {
+		return "; a bare -latest name is not a model; spell it with its provider, e.g. \"anthropic/" +
+			strings.TrimPrefix(base, "claude-") + "\""
+	}
 	if strings.HasPrefix(base, "claude-") {
 		return "; did you mean anthropic/" + base + "?"
 	}

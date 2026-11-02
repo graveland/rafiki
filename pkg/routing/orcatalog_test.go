@@ -75,6 +75,10 @@ func TestResolveModelBareLatestIsRefused(t *testing.T) {
 	for _, tc := range []struct{ req, hint string }{
 		{"haiku-latest", "anthropic/haiku-latest"},
 		{"claude-opus-latest", "anthropic/opus-latest"},
+		// A routing spec's bracket tail is not part of the id: the refusal reads
+		// the base, so the spec cannot smuggle a bare name past it.
+		{"haiku-latest[sort=price]", "anthropic/haiku-latest"},
+		{"claude-opus-latest[sort=price,nodata]", "anthropic/opus-latest"},
 	} {
 		got, err := ResolveModel(cat, "", tc.req)
 		ck.Require().Error(err, "ResolveModel(%q) must refuse a bare -latest name", tc.req)

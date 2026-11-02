@@ -181,6 +181,25 @@ func TestSpawnModelAliasMissRefused(t *testing.T) {
 			"message = %q", aliasErrMessage(t, err))
 		ck.Len(c.st.List(), 0, "a refused spawn must start nothing")
 	})
+
+	// The strict path refuses a bare "<tier>-latest" as an alias miss, BEFORE
+	// routing.ResolveModel's own refusal can run, so its hint must name the same
+	// provider-qualified spelling — a spec tail is not part of the id either.
+	t.Run("bare -latest hint", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		for _, tc := range []struct{ model, hint string }{
+			{"haiku-latest", `e.g. "anthropic/haiku-latest"`},
+			{"claude-opus-latest[sort=price]", `e.g. "anthropic/opus-latest"`},
+		} {
+			c := aliasController(t)
+			_, err := spawnAliasReq(t, c, users.Identity{UserID: "u1"}, protocol.SpawnRequest{Model: tc.model})
+			ck.Require().Error(err, "Spawn(%q)", tc.model)
+			ck.Eq(protocol.ErrInvalidArgs, aliasErrCode(t, err), "%q code", tc.model)
+			ck.True(strings.Contains(aliasErrMessage(t, err), tc.hint),
+				"Spawn(%q) message = %q", tc.model, aliasErrMessage(t, err))
+			ck.Len(c.st.List(), 0, "a refused spawn must start nothing")
+		}
+	})
 }
 
 // An alias-store outage is Unavailable, never a miss: reading an outage as

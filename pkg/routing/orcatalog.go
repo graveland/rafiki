@@ -119,9 +119,20 @@ func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, er
 	if stripped, ok := StripNativeAnthropicPrefix(requested); ok {
 		requested = stripped
 	}
-	if !strings.Contains(requested, "/") && !strings.HasPrefix(requested, "~") && strings.HasSuffix(requested, "-latest") {
+	// A bracketed tail is a routing spec, not part of the id, so the bare-name
+	// test reads the BASE: "haiku-latest[sort=price]" is refused like
+	// "haiku-latest". A spec ParseModel refuses is still cut at its "[" — the
+	// tail is no part of the id either way, and the parse error is the spec
+	// layer's to report, never this function's.
+	base := requested
+	if b, _, perr := ParseModel(requested); perr == nil {
+		base = b
+	} else if i := strings.IndexByte(base, '['); i > 0 {
+		base = base[:i]
+	}
+	if !strings.Contains(base, "/") && !strings.HasPrefix(base, "~") && strings.HasSuffix(base, "-latest") {
 		return "", fmt.Errorf("model %q: a bare -latest name is not a model; spell it with its provider, e.g. %q",
-			requested, "anthropic/"+strings.TrimPrefix(requested, "claude-"))
+			base, "anthropic/"+strings.TrimPrefix(base, "claude-"))
 	}
 	// A slash id routes to OpenRouter unchanged — except OpenRouter's auto-latest
 	// aliases carry a leading "~" (e.g. ~openai/gpt-latest) that AllIDs strips for
