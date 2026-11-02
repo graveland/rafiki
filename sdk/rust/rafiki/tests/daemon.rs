@@ -486,18 +486,22 @@ fn dechunk(body: &str) -> String {
     }
     let mut out: Vec<u8> = Vec::new();
     let mut rest = body.as_bytes();
+    let mut decoded_any = false;
     while let Some(pos) = find(rest, b"\r\n") {
         let size = match std::str::from_utf8(&rest[..pos])
             .ok()
             .and_then(|line| usize::from_str_radix(line.trim(), 16).ok())
         {
             Some(size) => size,
-            None => break,
+            // No chunk framing at the head of this body: it is not chunked, so
+            // hand it back whole rather than swallowing it.
+            None => return body.to_string(),
         };
         let after = &rest[pos + 2..];
         if size == 0 {
             break;
         }
+        decoded_any = true;
         if after.len() < size {
             out.extend_from_slice(after);
             break;
@@ -509,7 +513,42 @@ fn dechunk(body: &str) -> String {
             &[]
         };
     }
+    if !decoded_any {
+        // No chunk framing anywhere: this body was never chunked, so it is
+        // handed back whole rather than read as an empty one.
+        return body.to_string();
+    }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The framing rule behind `http_call`, pinned without a server.
+///
+/// The live fixture sets Content-Length, so a body normally arrives whole — but
+/// a response that outgrows net/http's small-response buffer used to arrive
+/// chunked, and a chunk-size line is not JSON. That produced "trailing
+/// characters at line 1 column 3" in a live run, from the fixture's side, with
+/// nothing pointing at framing. This test is why the next such change fails
+/// here, offline, instead.
+#[test]
+fn chunked_bodies_are_decoded_and_plain_ones_pass_through() {
+    let json = "{\"resource\":\"http://127.0.0.1:1/mcp\"}";
+    // The size is computed, not copied from a real capture: a stale literal
+    // would exercise the truncated-chunk path instead of framing.
+    let chunked = format!("{:x}\r\n{json}\r\n0\r\n\r\n", json.len());
+    let decoded = dechunk(&chunked);
+    assert_eq!(json, decoded, "the chunk framing was not removed");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&decoded).expect("the decoded body is JSON");
+    assert_eq!(
+        "http://127.0.0.1:1/mcp",
+        parsed["resource"].as_str().expect("resource")
+    );
+
+    assert_eq!(
+        json,
+        dechunk(json),
+        "a body without framing must pass through"
+    );
 }
 
 /// One plain-HTTP GET, returning (status, Location). The consent round's
@@ -554,9 +593,20 @@ fn fixture_base() -> String {
 /// nothing in it is secret the caller did not already hold.
 fn fixture_call(method: &str, path: &str) -> serde_json::Value {
     let url = format!("{}{path}", fixture_base());
-    let (status, _, body) = http_call(method, &url, "");
+    let (status, headers, body) = http_call(method, &url, "");
     assert_eq!(200, status, "{method} {url} answered {status}: {body}");
-    serde_json::from_str(&body).unwrap_or_else(|err| panic!("{method} {url}: {err}: {body}"))
+    // Parsing IS the assertion: a body that is not JSON here means the fixture's
+    // answer was not read whole. The message names the usual cause rather than
+    // leaving "trailing characters at line 1 column 3".
+    serde_json::from_str(&body).unwrap_or_else(|err| {
+        panic!(
+            "{method} {url}: the fixture's answer is not JSON ({err}); it began {:?}. \
+             A transfer-framing change — a chunked body whose chunk-size line leaked into the body, \
+             or a truncated response — is the usual cause. Response headers: {:?}",
+            body.chars().take(80).collect::<String>(),
+            headers
+        )
+    })
 }
 
 fn fixture_state() -> serde_json::Value {
