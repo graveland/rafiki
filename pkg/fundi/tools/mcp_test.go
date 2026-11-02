@@ -1296,68 +1296,157 @@ func (t *recordingBaseTransport) headers() []http.Header {
 	return append([]http.Header(nil), t.seen...)
 }
 
-// A request that is not at the configured endpoint has the configured header
-// keys REMOVED, not merely not added: a request can arrive already carrying them
-// (set by its caller, or copied onto a redirect by the HTTP client), and
-// forwarding it would hand a static credential to whatever answered. The
-// recording base sits below the wrapper, so deleting the Del loop fails here and
-// nowhere else.
+// Configured headers are attached to exactly the configured endpoint and to
+// nothing else, and their presence is the switch that decides whether stored
+// OAuth is consulted at all. The first half is asserted at the transport level
+// (a recording base sits BELOW the wrapper, so deleting the Del loop fails here
+// and nowhere else); the second half is asserted through a real session.
+//
+// The configured map deliberately has NO Authorization key. With one, every
+// strip below would be explained by the Del loop rather than by the origin rule,
+// and the "bearer the configuration never mentioned" case would be vacuous — the
+// test would be exercising the explicit-header path while claiming to exercise
+// unrelated headers coexisting with OAuth.
 func TestMcpOAuthNonEndpointRequestsStripConfiguredHeaders(t *testing.T) {
-	c := assert.NewAborting(t)
-	endpoint, err := url.Parse("https://mcp.example.test/mcp")
-	c.NoError(err, "parse endpoint")
-	configured := map[string]string{
-		"X-Api-Key":     "static-secret",
-		"Authorization": "Bearer configured",
-	}
-	base := &recordingBaseTransport{}
-	rt := headerRoundTripper{endpoint: endpoint, headers: configured, base: base}
-
-	// 1. Same origin, a different PATH. Every configured key is present on the
-	//    request the wrapper receives, and must be gone from the request it
-	//    forwards. sameMCPOrigin is true here, so only the Del loop can strip.
-	req, err := http.NewRequest(http.MethodPost, "https://mcp.example.test/elsewhere", nil)
-	c.NoError(err, "new request")
-	for k, v := range configured {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("X-Unrelated", "keep")
-	if _, err := rt.RoundTrip(req); err != nil {
-		t.Fatalf("RoundTrip(req): %v", err)
-	}
-
-	// 2. A different ORIGIN, carrying an Authorization that is not in the
-	//    configured map — the shape the SDK produces when it stamps a bearer.
-	req2, err := http.NewRequest(http.MethodPost, "https://other.example.test/mcp", nil)
-	c.NoError(err, "new request")
-	req2.Header.Set("Authorization", "Bearer sdk-bearer")
-	if _, err := rt.RoundTrip(req2); err != nil {
-		t.Fatalf("RoundTrip(req2): %v", err)
-	}
-
-	// 3. The configured endpoint itself: the configured keys ARE attached.
-	req3, err := http.NewRequest(http.MethodPost, "https://mcp.example.test/mcp", nil)
-	c.NoError(err, "new request")
-	if _, err := rt.RoundTrip(req3); err != nil {
-		t.Fatalf("RoundTrip(req3): %v", err)
-	}
-
-	seen := base.headers()
-	c.Eq(3, len(seen), "requests reaching the base transport")
-
-	for k := range configured {
-		if _, present := seen[0][http.CanonicalHeaderKey(k)]; present {
-			t.Fatalf("configured header %q was forwarded to a non-endpoint path: %v", k, seen[0])
+	t.Run("configured keys never leave their endpoint", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		endpoint, err := url.Parse("https://mcp.example.test/mcp")
+		c.NoError(err, "parse endpoint")
+		configured := map[string]string{
+			"X-Api-Key":    "static-secret",
+			"X-Mcp-Tenant": "acme",
 		}
-		if _, present := seen[2][http.CanonicalHeaderKey(k)]; !present {
-			t.Fatalf("configured header %q was not attached to its own endpoint: %v", k, seen[2])
+		base := &recordingBaseTransport{}
+		rt := headerRoundTripper{endpoint: endpoint, headers: configured, base: base}
+
+		// 1. Same origin, a different PATH. Every configured key is present on the
+		//    request the wrapper receives, and must be gone from the request it
+		//    forwards. sameMCPOrigin is true here, so only the Del loop can strip.
+		req, err := http.NewRequest(http.MethodPost, "https://mcp.example.test/elsewhere", nil)
+		c.NoError(err, "new request")
+		for k, v := range configured {
+			req.Header.Set(k, v)
 		}
-	}
-	c.Eq("keep", seen[0].Get("X-Unrelated"), "an unrelated header must survive on a non-endpoint request")
-	if _, present := seen[1][http.CanonicalHeaderKey("Authorization")]; present {
-		t.Fatalf("a bearer not in the configured headers followed the client to another origin: %v", seen[1])
-	}
-	c.Eq("Bearer configured", seen[2].Get("Authorization"), "the configured header on its own endpoint")
+		req.Header.Set("X-Unrelated", "keep")
+		if _, err := rt.RoundTrip(req); err != nil {
+			t.Fatalf("RoundTrip(req): %v", err)
+		}
+
+		// 2. A different ORIGIN, carrying an Authorization the configuration never
+		//    named — the shape the SDK produces when it stamps a bearer. Only the
+		//    origin rule can strip it, which is what makes this case the real test
+		//    of that rule.
+		req2, err := http.NewRequest(http.MethodPost, "https://other.example.test/mcp", nil)
+		c.NoError(err, "new request")
+		req2.Header.Set("Authorization", "Bearer sdk-bearer")
+		if _, err := rt.RoundTrip(req2); err != nil {
+			t.Fatalf("RoundTrip(req2): %v", err)
+		}
+
+		// 3. Same origin, a different path, carrying that same bearer: the origin
+		//    rule is origin-scoped, so a hop that stays on the origin KEEPS the
+		//    bearer. Pinning this is what stops case 2 from passing because the
+		//    wrapper strips Authorization everywhere.
+		req3, err := http.NewRequest(http.MethodPost, "https://mcp.example.test/elsewhere", nil)
+		c.NoError(err, "new request")
+		req3.Header.Set("Authorization", "Bearer sdk-bearer")
+		if _, err := rt.RoundTrip(req3); err != nil {
+			t.Fatalf("RoundTrip(req3): %v", err)
+		}
+
+		// 4. The configured endpoint itself: the configured keys ARE attached, and
+		//    the bearer alongside them.
+		req4, err := http.NewRequest(http.MethodPost, "https://mcp.example.test/mcp", nil)
+		c.NoError(err, "new request")
+		req4.Header.Set("Authorization", "Bearer sdk-bearer")
+		if _, err := rt.RoundTrip(req4); err != nil {
+			t.Fatalf("RoundTrip(req4): %v", err)
+		}
+
+		seen := base.headers()
+		c.Eq(4, len(seen), "requests reaching the base transport")
+
+		for k, v := range configured {
+			if _, present := seen[0][http.CanonicalHeaderKey(k)]; present {
+				t.Fatalf("configured header %q was forwarded to a non-endpoint path: %v", k, seen[0])
+			}
+			if _, present := seen[3][http.CanonicalHeaderKey(k)]; !present {
+				t.Fatalf("configured header %q was not attached to its own endpoint: %v", k, seen[3])
+			}
+			c.Eq(v, seen[3].Get(k), "the configured value on its own endpoint")
+		}
+		c.Eq("keep", seen[0].Get("X-Unrelated"), "an unrelated header must survive on a non-endpoint request")
+		if _, present := seen[1][http.CanonicalHeaderKey("Authorization")]; present {
+			t.Fatalf("a bearer not in the configured headers followed the client to another origin: %v", seen[1])
+		}
+		c.Eq("Bearer sdk-bearer", seen[2].Get("Authorization"), "a same-origin hop must keep the bearer")
+		c.Eq("Bearer sdk-bearer", seen[3].Get("Authorization"), "the bearer on the configured endpoint")
+	})
+
+	// The other half of the same rule: a configured map with no Authorization key
+	// does NOT disable OAuth for that entry — the factory is still consulted and
+	// its bearer rides alongside the configured header.
+	t.Run("unrelated headers keep the factory in play", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		fixture := newMCPOAuthFixture(t)
+		factory := &recordingMCPHTTPFactory{
+			handler: &testOAuthHandler{token: "tok-unrelated"},
+			client:  &http.Client{},
+		}
+		cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{
+			"srv": {URL: fixture.endpoint(), Headers: map[string]string{"X-Mcp-Tenant": "acme"}},
+		}}
+
+		r := NewRegistry()
+		shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil, nil, factory.factory)
+		c.NoError(err, "ConnectMCP")
+		defer shutdown()
+
+		c.Eq(1, factory.count(), "factory calls: an unrelated header must not disable stored OAuth")
+		tenant, present := fixture.headerOn("/mcp", "X-Mcp-Tenant")
+		c.True(present, "the unrelated configured header never reached its endpoint: %+v", fixture.requests())
+		c.Eq("acme", tenant, "X-Mcp-Tenant on the endpoint")
+		bearer, present := fixture.headerOn("/mcp", "Authorization")
+		c.True(present, "no bearer reached the endpoint with OAuth enabled: %+v", fixture.requests())
+		c.Eq("Bearer tok-unrelated", bearer, "Authorization on the endpoint")
+	})
+
+	// And the precedence side: an Authorization key in ANY casing, including an
+	// empty value, means the entry carries its own auth and the factory is never
+	// consulted.
+	t.Run("an authorization key skips the factory", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			key   string
+			value string
+		}{
+			{"canonical", "Authorization", "Bearer explicit"},
+			{"lowercase", "authorization", "Bearer explicit"},
+			{"uppercase", "AUTHORIZATION", "Bearer explicit"},
+			{"mixed", "AuThOrIzAtIoN", "Bearer explicit"},
+			{"empty value", "Authorization", ""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				c := assert.NewAborting(t)
+				fixture := newMCPOAuthFixture(t)
+				factory := &recordingMCPHTTPFactory{err: errors.New("the factory must not be called")}
+				cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{
+					"srv": {URL: fixture.endpoint(), Headers: map[string]string{tc.key: tc.value}},
+				}}
+
+				r := NewRegistry()
+				shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil, nil, factory.factory)
+				c.NoError(err, "ConnectMCP")
+				defer shutdown()
+
+				c.Eq(0, factory.count(), "factory calls for an entry with an explicit Authorization header")
+				got, present := fixture.headerOn("/mcp", "Authorization")
+				c.True(present, "the configured Authorization header never reached the endpoint: %+v", fixture.requests())
+				c.Eq(tc.value, got, "Authorization on the endpoint")
+			})
+		}
+	})
 }
 
 // sameMCPEndpoint is the containment rule, so every part of the URL it compares
@@ -1519,4 +1608,90 @@ func TestMcpOAuth401AfterARedialCarriesTheSameLoginHint(t *testing.T) {
 	c.Error(err, "a tool call refused with 401 must fail")
 	c.StrContains(err.Error(), hint, "the tool-call error must carry the named login hint")
 	c.Eq(2, factory.count(), "factory calls: one for the dial, one for the redial")
+}
+
+// refusingTransport stands in for the guarded OAuth client: it refuses every
+// destination, so only a dial that never reaches it can succeed.
+type refusingTransport struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (t *refusingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.n++
+	t.mu.Unlock()
+	return nil, errors.New("mcpoauth: destination refused")
+}
+
+func (t *refusingTransport) requests() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.n
+}
+
+// A factory that answers (handler, nil, nil) means "no stored credential, leave
+// the transport alone" — and that must be true end to end, not just by
+// construction. A nil client is how the passive factory says an entry carries no
+// bearer, and the guarded client it returns otherwise enforces the operator's
+// [mcp_oauth] destination policy, which REFUSES private addresses. Merely
+// enabling MCP OAuth must therefore not put a static server on 127.0.0.1 behind
+// that policy: this test dials exactly such a fixture through a real SDK
+// session and expects tools.
+//
+// The mirror subtest keeps the narrowing honest in the other direction — a
+// guarded client the factory DOES return is the transport, so an entry that
+// carries a bearer stays behind the policy.
+func TestMcpOAuthNilFactoryClientLeavesPrivateServersOffTheDestinationPolicy(t *testing.T) {
+	t.Run("no stored credential keeps the pre-existing transport", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		// httptest listens on 127.0.0.1: the address class the OAuth destination
+		// policy refuses, which is what makes a successful dial here meaningful.
+		fixture := newMCPOAuthFixture(t)
+		sc := MCPServerConfig{URL: fixture.endpoint()}
+		factory := &recordingMCPHTTPFactory{handler: &testOAuthHandler{}}
+
+		handler, client, err := mcpHTTPClient(context.Background(), "srv", sc, factory.factory)
+		c.NoError(err, "mcpHTTPClient")
+		c.Eq(1, factory.count(), "factory calls")
+		// A non-nil handler with no token source: consultable, but anonymous.
+		c.NotNil(handler, "the runtime must still be able to report a login hint")
+		c.NotNil(client, "a nil factory client must leave the runtime a usable client")
+		rt, ok := client.Transport.(headerRoundTripper)
+		c.True(ok, "the runtime must wrap its OWN client when the factory supplies none, got %T", client.Transport)
+		c.Eq(http.DefaultTransport, rt.base, "the base must stay the transport used before this feature existed")
+
+		r := NewRegistry()
+		shutdown, err := ConnectMCP(context.Background(), r, MCPConfig{MCPServers: map[string]MCPServerConfig{"srv": sc}}, OutputPolicy{}, nil, nil, factory.factory)
+		c.NoError(err, "ConnectMCP")
+		defer shutdown()
+
+		c.Eq(2, factory.count(), "factory calls: the struct-level probe plus the dial")
+		c.False(len(r.Definitions()) == 0, "a private static server lost its tools when MCP OAuth was enabled: %+v", r.Definitions())
+		c.True(len(fixture.requests()) > 0, "the private server was never reached")
+		if _, present := fixture.headerOn("/mcp", "Authorization"); present {
+			t.Fatalf("an Authorization header was sent with no stored credential: %+v", fixture.requests())
+		}
+	})
+
+	t.Run("a guarded client the factory returns is the transport", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		fixture := newMCPOAuthFixture(t)
+		guarded := &refusingTransport{}
+		factory := &recordingMCPHTTPFactory{
+			handler: &testOAuthHandler{token: "tok-guarded"},
+			client:  &http.Client{Transport: guarded},
+		}
+
+		r := NewRegistry()
+		shutdown, err := ConnectMCP(context.Background(), r, MCPConfig{MCPServers: map[string]MCPServerConfig{
+			"srv": {URL: fixture.endpoint()},
+		}}, OutputPolicy{}, nil, nil, factory.factory)
+		c.NoError(err, "ConnectMCP")
+		defer shutdown()
+
+		c.Empty(r.Definitions(), "a server behind a refusing guard must not register tools")
+		c.True(guarded.requests() > 0, "the factory's guarded transport was bypassed for an entry that carries a bearer")
+		c.Eq(0, len(fixture.requests()), "a request reached the private server past the factory's guard: %+v", fixture.requests())
+	})
 }
