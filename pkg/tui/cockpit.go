@@ -1371,6 +1371,7 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 		return
 	}
 	before := len(s.Blocks)
+	usersBefore := countUserBlocks(s.Blocks)
 	s.Apply(ev)
 	if s.HasCursor {
 		// Delivery to the displayed session IS reading.
@@ -1384,8 +1385,8 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	// having taken it into a turn. The echo belongs to the COMMITTED agent's
 	// conversation: while browsing, the streamed session is the viewed child's,
 	// and its user messages must not clear a send that went elsewhere.
-	if len(s.Blocks) > before && s.Blocks[len(s.Blocks)-1].Kind == session.KindUser {
-		c.ackPending(id, s.Blocks[len(s.Blocks)-1].Text)
+	if len(s.Blocks) > before && countUserBlocks(s.Blocks) > usersBefore {
+		c.ackPending(id, newestUserText(s.Blocks))
 	}
 	// A durable ledger mutation for the focused child is the refresh trigger;
 	// there is no polling.
@@ -3282,9 +3283,9 @@ func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
 	if len(blocks) == 0 {
 		return
 	}
-	if last := blocks[len(blocks)-1]; last.Kind == session.KindUser {
-		c.ackPending(child, last.Text)
-		blocks = blocks[:len(blocks)-1]
+	if i := trailingUserIndex(blocks); i >= 0 {
+		c.ackPending(child, blocks[i].Text)
+		blocks = slices.Delete(slices.Clone(blocks), i, i+1)
 	}
 	for i := len(blocks) - 1; i >= 0 && c.hasPending(child); i-- {
 		if blocks[i].Kind != session.KindUser {
@@ -3297,6 +3298,41 @@ func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
 			}
 		}
 	}
+}
+
+func countUserBlocks(blocks []session.Block) int {
+	n := 0
+	for _, b := range blocks {
+		if b.Kind == session.KindUser {
+			n++
+		}
+	}
+	return n
+}
+
+// newestUserText is the text of the last user block.
+func newestUserText(blocks []session.Block) string {
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if blocks[i].Kind == session.KindUser {
+			return blocks[i].Text
+		}
+	}
+	return ""
+}
+
+// trailingUserIndex is the index of the user block that ends the transcript,
+// looking past TurnStart's empty open assistant placeholder, which a user
+// message lands ahead of; -1 when the transcript ends on anything else.
+func trailingUserIndex(blocks []session.Block) int {
+	i := len(blocks) - 1
+	if i >= 0 && blocks[i].Kind == session.KindAssistant && !blocks[i].Final &&
+		blocks[i].Text == "" && blocks[i].ThinkText == "" && len(blocks[i].ToolCalls) == 0 && len(blocks[i].Content) == 0 {
+		i--
+	}
+	if i >= 0 && blocks[i].Kind == session.KindUser {
+		return i
+	}
+	return -1
 }
 
 func (c *Cockpit) hasPending(child string) bool {

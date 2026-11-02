@@ -2898,6 +2898,38 @@ func TestPendingSendIsGhostedInTheTranscriptUntilItsEchoArrives(t *testing.T) {
 	ck.Eq(1, strings.Count(ansi.Strip(c.View().Content), "hello there"), "the echo must replace the ghost, not stack with it")
 }
 
+// A claude child's TurnStart placeholder is open when the prompt's echo
+// arrives, and the echo lands AHEAD of it; the echo must still retire the ghost.
+func TestEchoLandingAheadOfThePlaceholderRetiresTheGhost(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello there", nil)
+	c.applyEvent(turnStartFor("c_1"))
+	c.applyEvent(userMessageEventFor("c_1", "hello there", 5))
+
+	ck.EqDeep([]string(nil), pendingTexts(c), "the echo left its ghost standing")
+	ck.Eq(1, strings.Count(ansi.Strip(c.View().Content), "hello there"), "ghost and real message both drawn")
+}
+
+// A fetched transcript that ends on the echo plus TurnStart's placeholder
+// still answers the pending send.
+func TestHistoryEndingOnEchoAndPlaceholderRetiresTheGhost(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.pending = []pendingSend{{"c_1", "hello there"}}
+	c.ackPendingFromHistory("c_1", []session.Block{
+		{Kind: session.KindUser, Text: "hello there", Final: true},
+		{Kind: session.KindAssistant},
+	})
+	ck.EqDeep([]string(nil), pendingTexts(c), "the fetched echo left its ghost standing")
+}
+
 // Two sends before either echoes both stay ghosted, and each echo retires its
 // own, not the other.
 func TestPendingSendsRetireInOrderOfTheirEchoes(t *testing.T) {
