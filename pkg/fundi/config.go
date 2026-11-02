@@ -326,6 +326,19 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		return nil, nil, fmt.Errorf("agent: %w", err)
 	}
 
+	// The catalog indexes concrete ids, and Conversation() pins a
+	// "<name>-latest" request to one before the first request. Resolve the same
+	// pin here so the compaction and pre-fill window lookups below ask the
+	// catalog about the model the child actually runs, not about a name no
+	// entry carries.
+	if pinned, perr := llm.ResolveProviderLatest(c.Providers, client.Catalog(), c.Model); perr == nil {
+		// Set.Split reports (provider, provider-local id, error); the pinned id
+		// came from this same registry, so the error arm is a guard, not a path.
+		if _, local, serr := c.Providers.Split(pinned); serr == nil && local != "" {
+			modelID = local
+		}
+	}
+
 	convOpts := []llm.ConvOption{
 		// NewConversation, never bare Entrypoint: it sets the entrypoint AND
 		// the owner, and is the only way cfg.ownerUserID is populated. Empty

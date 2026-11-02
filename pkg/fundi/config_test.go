@@ -198,14 +198,22 @@ func TestValidateRejectsMissingRegistry(t *testing.T) {
 // with. The caller owns closing the engine.
 func buildCatalogEngine(t *testing.T, cat *routing.ModelCatalog) *Engine {
 	t.Helper()
+	return buildEngineForModel(t, cat, providers.Default(), "anthropic/claude-x")
+}
+
+// buildEngineForModel is buildCatalogEngine with the registry and the requested
+// model chosen by the caller, for the tests that care which provider kind and
+// which model id reach the catalog lookups. The caller owns closing the engine.
+func buildEngineForModel(t *testing.T, cat *routing.ModelCatalog, set *providers.Set, model string) *Engine {
+	t.Helper()
 	silenceSlog(t)
 	cfg := Config{
-		Model:     "anthropic/claude-x",
+		Model:     model,
 		Cwd:       t.TempDir(),
 		Name:      "catalog-under-test",
 		FakeTurns: writeFakeTurns(t, sampleEndTurn),
 		Tools:     fakeToolSet{},
-		Providers: providers.Default(),
+		Providers: set,
 		Catalog:   cat,
 	}
 	eng, shutdown, err := cfg.BuildEngine(context.Background(), NewFrontend(strings.NewReader(""), &syncBuffer{}, nil))
@@ -320,6 +328,76 @@ func TestContextWindowOverrideReachesEngine(t *testing.T) {
 		"the catalog's window must still answer the compaction policy when no override is set")
 	c.Eq(1_000_000, prefillContextWindow(plain.client, plain.kind, plain.state.ModelID, plain.contextWindow),
 		"the catalog's window must still answer the pre-fill when no override is set")
+}
+
+// TestBuildEnginePinsALatestModelForCatalogLookups guards the second half of
+// the "-latest" pin. Conversation() pins the REQUEST, but the engine's
+// compaction and pre-fill window lookups run before it and through
+// EngineConfig.ModelID/StateData.ModelID — so without a pin of its own they ask
+// the catalog about a "<name>-latest" that no entry carries: 0 for an
+// Anthropic-kind provider's bare name, and only the "~" alias row's figures for
+// a Responses one. The alias rows here carry a DELIBERATELY different window
+// from the concrete models, so "the concrete model answered" and "the alias
+// row answered" are not the same observation.
+//
+// Deleting the ResolveProviderLatest block in BuildEngine fails both assertions
+// in both subtests: ModelID reverts to the requested "<name>-latest", and the
+// window comes back as the alias row's (or 0).
+func TestBuildEnginePinsALatestModelForCatalogLookups(t *testing.T) {
+	silenceSlog(t)
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "openai/gpt-6.1-terra", Created: 5, ContextLength: 400_000,
+			Pricing: &routing.ModelPricing{PromptUSD: 1.25e-06, CompletionUSD: 1e-05}},
+		{ID: "~openai/gpt-terra-latest", Created: 7, ContextLength: 1_000},
+		{ID: "anthropic/claude-opus-4.8", Created: 3, ContextLength: 200_000},
+		{ID: "~anthropic/claude-opus-latest", Created: 8, ContextLength: 777},
+	})
+
+	for _, tc := range []struct {
+		name       string
+		kind       providers.Kind
+		model      string
+		wantLocal  string
+		wantWindow int
+	}{
+		{
+			name:       "a Responses kind pins through its bare gpt- id",
+			kind:       providers.KindOpenAIResponses,
+			model:      "gpt/gpt-terra-latest",
+			wantLocal:  "gpt-6.1-terra",
+			wantWindow: 400_000,
+		},
+		{
+			name:       "an Anthropic kind pins through its claude- id",
+			kind:       providers.KindAnthropic,
+			model:      "work/opus-latest",
+			wantLocal:  "claude-opus-4-8",
+			wantWindow: 200_000,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			set := &providers.Set{
+				DefaultProvider: "work",
+				Providers: map[string]providers.Provider{
+					"gpt":  {Name: "gpt", Kind: providers.KindOpenAIResponses},
+					"work": {Name: "work", Kind: providers.KindAnthropic},
+				},
+			}
+			eng := buildEngineForModel(t, cat, set, tc.model)
+			defer eng.Close()
+
+			ck.Eq(tc.kind, eng.kind, "Engine.kind")
+			ck.Eq(tc.wantLocal, eng.State().ModelID,
+				"State().ModelID must carry the pinned provider-local id, not the requested -latest name")
+			ck.Eq(0, eng.contextWindow, "the fixture sets no override, so the catalog must answer")
+			ck.Eq(tc.wantWindow, compactionContextWindow(eng.client, eng.kind, eng.state.ModelID, eng.contextWindow),
+				"compaction window, read the way the policy closure reads it")
+			ck.Eq(tc.wantWindow, prefillContextWindow(eng.client, eng.kind, eng.state.ModelID, eng.contextWindow),
+				"pre-fill window, read the way runPrefill reads it")
+		})
+	}
 }
 
 // TestBuildEngineForksFromTheConfiguredNode pins Config.ForkFromNodeID →
