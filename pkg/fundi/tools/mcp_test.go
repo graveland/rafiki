@@ -9,9 +9,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1078,6 +1080,10 @@ func TestMcpOAuthFactoryIsNotCalledForStdioOrExecutor(t *testing.T) {
 	cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{
 		"stdio":  {Command: "definitely-not-a-real-command-xyz-fundi-test"},
 		"remote": {ViaExecutor: &MCPViaExecutor{Selector: "name=greyshift", Command: "srv"}},
+		// The proxy variant is the OTHER half of the executor shape, and the one
+		// that looks most like a direct URL: an operator-declared HTTP endpoint
+		// reached through the executor. It must never reach the factory either.
+		"proxied": {ViaExecutor: &MCPViaExecutor{Selector: "name=greyshift", Proxy: "codescan"}},
 	}}
 	dial := func(ctx context.Context, name string, _ MCPServerConfig) (mcp.Transport, error) {
 		serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -1093,7 +1099,13 @@ func TestMcpOAuthFactoryIsNotCalledForStdioOrExecutor(t *testing.T) {
 	defer shutdown()
 
 	c.Eq(0, factory.count(), "factory calls for stdio/via_executor entries")
-	c.False(len(r.Definitions()) == 0, "the via_executor server's tools were not registered: %+v", r.Definitions())
+
+	var names []string
+	for _, def := range r.Definitions() {
+		names = append(names, def.Name)
+	}
+	c.True(slices.Contains(names, "mcp__remote__add"), "the via_executor command server's tools were not registered: %v", names)
+	c.True(slices.Contains(names, "mcp__proxied__add"), "the via_executor proxy server's tools were not registered: %v", names)
 }
 
 // Configured headers reach exactly the configured endpoint: scheme, host (port
@@ -1255,4 +1267,256 @@ func TestMcpOAuthWithoutAFactoryPreservesStandaloneBehaviour(t *testing.T) {
 	got, present := fixture.headerOn("/mcp", "X-Mcp-Tenant")
 	c.True(present, "the configured header was not sent without a factory: %+v", fixture.requests())
 	c.Eq("acme", got, "X-Mcp-Tenant on the endpoint")
+}
+
+// recordingBaseTransport records the headers the wrapper forwarded, and answers
+// nothing meaningful. It sits UNDER headerRoundTripper, which is the only way to
+// observe what the wrapper DELETED: a live server sees the parsed result, and
+// cannot tell "removed" from "never added".
+type recordingBaseTransport struct {
+	mu   sync.Mutex
+	seen []http.Header
+}
+
+func (t *recordingBaseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.seen = append(t.seen, req.Header.Clone())
+	t.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusNoContent,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(nil)),
+		Request:    req,
+	}, nil
+}
+
+func (t *recordingBaseTransport) headers() []http.Header {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]http.Header(nil), t.seen...)
+}
+
+// A request that is not at the configured endpoint has the configured header
+// keys REMOVED, not merely not added: a request can arrive already carrying them
+// (set by its caller, or copied onto a redirect by the HTTP client), and
+// forwarding it would hand a static credential to whatever answered. The
+// recording base sits below the wrapper, so deleting the Del loop fails here and
+// nowhere else.
+func TestMcpOAuthNonEndpointRequestsStripConfiguredHeaders(t *testing.T) {
+	c := assert.NewAborting(t)
+	endpoint, err := url.Parse("https://mcp.example.test/mcp")
+	c.NoError(err, "parse endpoint")
+	configured := map[string]string{
+		"X-Api-Key":     "static-secret",
+		"Authorization": "Bearer configured",
+	}
+	base := &recordingBaseTransport{}
+	rt := headerRoundTripper{endpoint: endpoint, headers: configured, base: base}
+
+	// 1. Same origin, a different PATH. Every configured key is present on the
+	//    request the wrapper receives, and must be gone from the request it
+	//    forwards. sameMCPOrigin is true here, so only the Del loop can strip.
+	req, err := http.NewRequest(http.MethodPost, "https://mcp.example.test/elsewhere", nil)
+	c.NoError(err, "new request")
+	for k, v := range configured {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("X-Unrelated", "keep")
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip(req): %v", err)
+	}
+
+	// 2. A different ORIGIN, carrying an Authorization that is not in the
+	//    configured map — the shape the SDK produces when it stamps a bearer.
+	req2, err := http.NewRequest(http.MethodPost, "https://other.example.test/mcp", nil)
+	c.NoError(err, "new request")
+	req2.Header.Set("Authorization", "Bearer sdk-bearer")
+	if _, err := rt.RoundTrip(req2); err != nil {
+		t.Fatalf("RoundTrip(req2): %v", err)
+	}
+
+	// 3. The configured endpoint itself: the configured keys ARE attached.
+	req3, err := http.NewRequest(http.MethodPost, "https://mcp.example.test/mcp", nil)
+	c.NoError(err, "new request")
+	if _, err := rt.RoundTrip(req3); err != nil {
+		t.Fatalf("RoundTrip(req3): %v", err)
+	}
+
+	seen := base.headers()
+	c.Eq(3, len(seen), "requests reaching the base transport")
+
+	for k := range configured {
+		if _, present := seen[0][http.CanonicalHeaderKey(k)]; present {
+			t.Fatalf("configured header %q was forwarded to a non-endpoint path: %v", k, seen[0])
+		}
+		if _, present := seen[2][http.CanonicalHeaderKey(k)]; !present {
+			t.Fatalf("configured header %q was not attached to its own endpoint: %v", k, seen[2])
+		}
+	}
+	c.Eq("keep", seen[0].Get("X-Unrelated"), "an unrelated header must survive on a non-endpoint request")
+	if _, present := seen[1][http.CanonicalHeaderKey("Authorization")]; present {
+		t.Fatalf("a bearer not in the configured headers followed the client to another origin: %v", seen[1])
+	}
+	c.Eq("Bearer configured", seen[2].Get("Authorization"), "the configured header on its own endpoint")
+}
+
+// sameMCPEndpoint is the containment rule, so every part of the URL it compares
+// gets its own case: a match must fail on a differing query or port exactly as
+// it fails on a differing path. sameMCPOrigin is the weaker predicate that
+// decides only whether Authorization may follow.
+func TestMcpOAuthEndpointMatchCoversEveryURLPart(t *testing.T) {
+	c := assert.NewAborting(t)
+	const configured = "https://mcp.example.test:8443/mcp?tenant=acme"
+	endpoint, err := url.Parse(configured)
+	c.NoError(err, "parse endpoint")
+
+	cases := []struct {
+		name       string
+		raw        string
+		wantEndpt  bool
+		wantOrigin bool
+	}{
+		{"identical", configured, true, true},
+		{"host case only", "https://MCP.Example.Test:8443/mcp?tenant=acme", true, true},
+		{"differing query value", "https://mcp.example.test:8443/mcp?tenant=other", false, true},
+		{"extra query parameter", "https://mcp.example.test:8443/mcp?tenant=acme&x=1", false, true},
+		{"no query at all", "https://mcp.example.test:8443/mcp", false, true},
+		{"differing port", "https://mcp.example.test:9443/mcp?tenant=acme", false, false},
+		{"implicit default port", "https://mcp.example.test/mcp?tenant=acme", false, false},
+		{"trailing slash", "https://mcp.example.test:8443/mcp/?tenant=acme", false, true},
+		{"differing path", "https://mcp.example.test:8443/v2/mcp?tenant=acme", false, true},
+		{"differing scheme", "http://mcp.example.test:8443/mcp?tenant=acme", false, false},
+		{"differing host", "https://other.example.test:8443/mcp?tenant=acme", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := url.Parse(tc.raw)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.raw, err)
+			}
+			c.Eq(tc.wantEndpt, sameMCPEndpoint(got, endpoint), "sameMCPEndpoint(%q)", tc.raw)
+			c.Eq(tc.wantOrigin, sameMCPOrigin(got, endpoint), "sameMCPOrigin(%q)", tc.raw)
+		})
+	}
+
+	c.False(sameMCPEndpoint(nil, endpoint), "a nil request URL must never match the endpoint")
+	c.False(sameMCPOrigin(nil, endpoint), "a nil request URL must never match the origin")
+}
+
+// The realistic leak: the CONFIGURED endpoint itself answers with a Location
+// pointing somewhere else, and a real SDK session follows it. The bearer the SDK
+// stamps on every request is the dangerous one — net/http copies Authorization
+// across a redirect by HOSTNAME (ports ignored), so a hop to the same name on
+// another port would carry it — and the configured headers ride on the request
+// the client replays. Neither may reach the target.
+func TestMcpOAuthRedirectFromTheEndpointCarriesNoCredentials(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	var evilMu sync.Mutex
+	var evil []mcpFixtureRequest
+	evilSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilMu.Lock()
+		evil = append(evil, mcpFixtureRequest{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone()})
+		evilMu.Unlock()
+		http.Error(w, "not an MCP server", http.StatusInternalServerError)
+	}))
+	t.Cleanup(evilSrv.Close)
+
+	fixture := newMCPOAuthFixture(t, func(_ http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Same hostname (127.0.0.1), different port: exactly the hop
+			// net/http's hostname-only Authorization rule copies the token to.
+			http.Redirect(w, r, evilSrv.URL+"/mcp", http.StatusTemporaryRedirect)
+		})
+	})
+
+	factory := &recordingMCPHTTPFactory{
+		handler: &testOAuthHandler{token: "tok-redirect"},
+		client:  &http.Client{},
+	}
+	cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{
+		"srv": {URL: fixture.endpoint(), Headers: map[string]string{"X-Mcp-Tenant": "acme"}},
+	}}
+
+	r := NewRegistry()
+	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil, nil, factory.factory)
+	c.NoError(err, "ConnectMCP")
+	defer shutdown()
+
+	// The SDK really did stamp the bearer on its own request to the configured
+	// endpoint, which is what makes its absence at the target meaningful.
+	bearer, present := fixture.headerOn("/mcp", "Authorization")
+	c.True(present, "the SDK sent no bearer to the configured endpoint: %+v", fixture.requests())
+	c.Eq("Bearer tok-redirect", bearer, "bearer on the configured endpoint")
+
+	evilMu.Lock()
+	received := append([]mcpFixtureRequest(nil), evil...)
+	evilMu.Unlock()
+	c.True(len(received) > 0, "the redirect was not followed, so nothing was tested")
+	for _, req := range received {
+		if _, ok := req.Header[http.CanonicalHeaderKey("Authorization")]; ok {
+			t.Fatalf("the SDK bearer followed a redirect off the configured endpoint: %v", req.Header)
+		}
+		if _, ok := req.Header[http.CanonicalHeaderKey("X-Mcp-Tenant")]; ok {
+			t.Fatalf("a configured header followed a redirect off the configured endpoint: %v", req.Header)
+		}
+	}
+}
+
+// A 401 on a LATER call — after the session was redialed — surfaces the same
+// named login hint as the first dial does. That is the second half of the
+// documented route (skip log at dial, tool-call error afterwards), and it is the
+// one a user meets when a credential is revoked mid-session.
+func TestMcpOAuth401AfterARedialCarriesTheSameLoginHint(t *testing.T) {
+	c := assert.NewAborting(t)
+	const hint = "server srv needs a login: run `rafiki mcp login srv`"
+
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	fixture := newMCPOAuthFixture(t, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("reading request body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if r.Method == http.MethodPost && strings.Contains(string(body), "tools/call") {
+				mu.Lock()
+				calls++
+				n := calls
+				mu.Unlock()
+				switch n {
+				case 1:
+					// The server terminated the session: call() redials.
+					w.WriteHeader(http.StatusNotFound)
+				default:
+					// The redialed session's credential is no longer accepted.
+					w.WriteHeader(http.StatusUnauthorized)
+				}
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	factory := &recordingMCPHTTPFactory{
+		handler: &testOAuthHandler{token: "tok-revoked", authorize: errors.New(hint)},
+		client:  &http.Client{},
+	}
+	cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{
+		"srv": {URL: fixture.endpoint()},
+	}}
+
+	r := NewRegistry()
+	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil, nil, factory.factory)
+	c.NoError(err, "ConnectMCP")
+	defer shutdown()
+
+	_, err = r.Execute(context.Background(), "mcp__srv__add", json.RawMessage(`{"a": 1, "b": 2}`))
+	c.Error(err, "a tool call refused with 401 must fail")
+	c.StrContains(err.Error(), hint, "the tool-call error must carry the named login hint")
+	c.Eq(2, factory.count(), "factory calls: one for the dial, one for the redial")
 }
