@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"syscall"
 
 	"go.graveland.dev/rafiki/pkg/child"
 )
@@ -105,4 +106,25 @@ func selfKillDispositionFor(mark killMark, caused bool) selfKillDisposition {
 		return selfKillDisposition{}
 	}
 	return selfKillDisposition{suppressParent: mark.parent, excludeMCPUser: mark.mcpUser}
+}
+
+// sigtermExitCode is the shell convention for a process that handled SIGTERM
+// and exited (128+15), which is how claude answers the ladder's SIGTERM rung.
+const sigtermExitCode = 128 + int(syscall.SIGTERM)
+
+// recordedExit is the (code, signal) a child's exit is recorded and published
+// under. A stop the shutdown ladder drove and the child answered at the
+// SIGTERM rung — claude's handled SIGTERM (143, "") or a plain death by it
+// ("terminated") — is the requested outcome, not a failure, so it reads as a
+// clean exit instead of the ✗ every nonzero or signalled exit renders as.
+// A SIGKILL, an abandoned wait, or any other code stays as reaped: those were
+// not clean, and a crash racing the kill is still news. exitCausedByShutdown
+// keeps reading the raw result.
+func recordedExit(res child.ShutdownResult) (int, string) {
+	if res.ByShutdown && !res.Abandoned {
+		if (res.Signal == "" && res.ExitCode == sigtermExitCode) || res.Signal == syscall.SIGTERM.String() {
+			return 0, ""
+		}
+	}
+	return res.ExitCode, res.Signal
 }

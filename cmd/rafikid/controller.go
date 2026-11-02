@@ -5030,6 +5030,7 @@ const renameCheckTimeout = 5 * time.Second
 
 func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	res := ch.ExitResult()
+	recCode, exitSignal := recordedExit(res)
 	now := time.Now()
 
 	// A spontaneous exit KEEPS its rate-limit watch: the fire path relaunches
@@ -5075,7 +5076,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// MarkExited sets Status, ExitedAt, ExitCode, ExitSignal, and ExitedRing
 	// atomically under one sess.mu hold so a concurrent Snapshot() cannot
 	// observe Status=Exited with ExitedRing still nil.
-	c.st.MarkExited(childID, now, res.ExitCode, res.Signal, ringSnapshot, renderEvents)
+	c.st.MarkExited(childID, now, recCode, exitSignal, ringSnapshot, renderEvents)
 	// The grace clock starts now: this exit's timestamp is what the deadline
 	// and the callback's staleness guard are both derived from.
 	c.armGrace(childID, now)
@@ -5109,13 +5110,13 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 			SessionFile: dumpSnap.SessionFile,
 			SpawnedAt:   dumpSnap.StartedAt.Unix(),
 			ExitedAt:    now.Unix(),
-			ExitCode:    res.ExitCode,
-			ExitSignal:  res.Signal,
+			ExitCode:    recCode,
+			ExitSignal:  exitSignal,
 			Argv:        dumpSnap.ExtraArgs,
 		}
 		exitInfo := persist.ExitInfo{
-			ExitCode:   res.ExitCode,
-			Signal:     res.Signal,
+			ExitCode:   recCode,
+			Signal:     exitSignal,
 			LastStatus: lastStatus,
 		}
 		renderBytes := make([][]byte, len(renderEvents))
@@ -5133,8 +5134,8 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	c.exitNativeChildrenOf(childID)
 
 	var exitCode *int
-	if res.Signal == "" {
-		code := res.ExitCode
+	if exitSignal == "" {
+		code := recCode
 		exitCode = &code
 	}
 
@@ -5159,7 +5160,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{
 			ChildId:  childID,
 			ExitCode: exitCodePtr,
-			Signal:   res.Signal,
+			Signal:   exitSignal,
 		}},
 	})
 

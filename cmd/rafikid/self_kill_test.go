@@ -229,3 +229,27 @@ func TestForeignDeathDuringASelfKillStillNotifies(t *testing.T) {
 	batches := cap.batches()
 	c.False(len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited"), "a foreign kill during a self-kill must still notify the coordinator: %+v", batches)
 }
+
+func TestRecordedExitReadsARequestedStopAsClean(t *testing.T) {
+	cases := []struct {
+		name     string
+		res      child.ShutdownResult
+		wantCode int
+		wantSig  string
+	}{
+		{"claude handled SIGTERM", child.ShutdownResult{ExitCode: 143, ByShutdown: true}, 0, ""},
+		{"died by SIGTERM", child.ShutdownResult{Signal: "terminated", ByShutdown: true}, 0, ""},
+		{"escalated to SIGKILL", child.ShutdownResult{Signal: "killed", ByShutdown: true, Escalated: true}, 0, "killed"},
+		{"abandoned", child.ShutdownResult{Signal: "killed", ByShutdown: true, Abandoned: true}, 0, "killed"},
+		{"foreign 143", child.ShutdownResult{ExitCode: 143}, 143, ""},
+		{"foreign SIGTERM", child.ShutdownResult{Signal: "terminated"}, 0, "terminated"},
+		{"crash during the kill", child.ShutdownResult{ExitCode: 2, ByShutdown: true}, 2, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, sig := recordedExit(tc.res)
+			assert.NewAborting(t).False(code != tc.wantCode || sig != tc.wantSig,
+				"recordedExit(%+v) = (%d, %q), want (%d, %q)", tc.res, code, sig, tc.wantCode, tc.wantSig)
+		})
+	}
+}
