@@ -496,11 +496,30 @@ type fakeOAuthServer struct {
 	servePRMRoot    bool
 	prmResourcePath string
 	prmResourceRoot string
-	serveASM        bool
-	asmScopes       []string
-	serveASMRevoke  bool
-	issueIss        bool
-	asmIssuer       string
+	// prmVaryOnSecondHit makes the path location answer with the ENDPOINT as its
+	// resource after its first hit, which is how a server makes one URL answer
+	// differently twice inside a single consent round.
+	prmVaryOnSecondHit bool
+	serveASM           bool
+	asmScopes          []string
+	// authorizationEndpoint overrides the authorization endpoint the AS metadata
+	// advertises, which is how a consent URL outside the operator's policy is
+	// produced.
+	authorizationEndpoint string
+	// dcrFailure makes dynamic client registration fail: "error" answers 400 with
+	// dcrSentinel embedded in the error body, "malformed" answers 201 with an
+	// undecodable body that carries it.
+	dcrFailure  string
+	dcrSentinel string
+	// tokenRefuseStatus/tokenRefuseBody answer every token request with a refusal,
+	// which is how a refresh is made to fail at the endpoint.
+	tokenRefuseStatus int
+	tokenRefuseBody   string
+	// omitRefreshExpiry drops expires_in from refresh answers.
+	omitRefreshExpiry bool
+	serveASMRevoke    bool
+	issueIss          bool
+	asmIssuer         string
 	// issuerURL overrides the authorization server the metadata names, which is
 	// how a changed issuer is exercised.
 	issuerURL string
@@ -692,6 +711,9 @@ func (f *fakeOAuthServer) handlePRMPath(w http.ResponseWriter, r *http.Request) 
 	if resource == "" {
 		resource = f.endpoint()
 	}
+	if f.prmVaryOnSecondHit && f.prmHits[r.URL.Path] > 1 {
+		resource = f.endpoint()
+	}
 	scopes := append([]string(nil), f.prmScopes...)
 	f.mu.Unlock()
 	if !serve {
@@ -754,9 +776,15 @@ func (f *fakeOAuthServer) handleASM(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no metadata here", http.StatusNotFound)
 		return
 	}
+	f.mu.Lock()
+	authorizationEndpoint := f.authorizationEndpoint
+	f.mu.Unlock()
+	if authorizationEndpoint == "" {
+		authorizationEndpoint = f.srv.URL + "/authorize"
+	}
 	meta := map[string]any{
 		"issuer":                                issuer,
-		"authorization_endpoint":                f.srv.URL + "/authorize",
+		"authorization_endpoint":                authorizationEndpoint,
 		"token_endpoint":                        f.srv.URL + "/token",
 		"registration_endpoint":                 f.srv.URL + "/register",
 		"scopes_supported":                      scopes,
@@ -782,7 +810,25 @@ func (f *fakeOAuthServer) handleRegister(w http.ResponseWriter, r *http.Request)
 	f.dcrBodies = append(f.dcrBodies, body)
 	clientID := fmt.Sprintf("client-%d", len(f.dcrBodies))
 	f.dcrClients = append(f.dcrClients, clientID)
+	failure, sentinel := f.dcrFailure, f.dcrSentinel
 	f.mu.Unlock()
+	switch failure {
+	case "error":
+		// The shape oauthex.RegisterClient reports verbatim, with a sentinel where a
+		// real server would put anything it likes.
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":             "invalid_client_metadata",
+			"error_description": sentinel,
+		})
+		return
+	case "malformed":
+		// A "successful" registration the SDK cannot decode. oauthex quotes the raw
+		// body in that error, which is exactly how a client secret would leak.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"client_secret":"` + sentinel + `"`))
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  clientID,
 		"redirect_uris":              body["redirect_uris"],
@@ -798,6 +844,17 @@ func (f *fakeOAuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	form := r.PostForm
 	f.mu.Lock()
+	if f.tokenRefuseStatus != 0 {
+		status, refuseBody := f.tokenRefuseStatus, f.tokenRefuseBody
+		f.tokenForms = append(f.tokenForms, form)
+		f.tokenCalls++
+		f.lastTokenHadBasicAuth = strings.HasPrefix(strings.ToLower(r.Header.Get("Authorization")), "basic ")
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(refuseBody))
+		return
+	}
 	f.tokenForms = append(f.tokenForms, form)
 	f.tokenCalls++
 	f.lastTokenHadBasicAuth = strings.HasPrefix(strings.ToLower(r.Header.Get("Authorization")), "basic ")
@@ -861,15 +918,19 @@ func (f *fakeOAuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 		n := len(f.tokens) + 1
 		access := fmt.Sprintf("access-%d", n)
 		f.tokens[access] = []string{"read", "write"}
+		omitExpiry := f.omitRefreshExpiry
 		// Deliberately omit a replacement refresh token: the store must keep the
 		// stored one rather than stranding the grant.
 		f.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{
+		answer := map[string]any{
 			"access_token": access,
 			"token_type":   tokenType,
-			"expires_in":   3600,
 			"scope":        "read write",
-		})
+		}
+		if !omitExpiry {
+			answer["expires_in"] = 3600
+		}
+		writeJSON(w, http.StatusOK, answer)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unsupported_grant_type"})
 	}
@@ -1903,15 +1964,17 @@ func TestMcpOAuthEngineSecretsNeverReachErrors(t *testing.T) {
 
 func TestMcpOAuthEngineScrubsAnOAuthRetrieveError(t *testing.T) {
 	inner := &oauth2.RetrieveError{ErrorCode: "invalid_grant", Body: []byte(`{"error":"invalid_grant","error_description":"secret-ish body"}`)}
-	err := scrubAuthError(fmt.Errorf("token exchange failed: %w", inner))
+	err := upstreamFailure("authenticating to https://mcp.example/mcp", fmt.Errorf("token exchange failed: %w", inner))
 	if err == nil {
-		t.Fatal("scrubAuthError dropped the error")
+		t.Fatal("upstreamFailure dropped the error")
 	}
 	if strings.Contains(err.Error(), "secret-ish body") {
-		t.Fatalf("scrubbed error kept the response body: %v", err)
+		t.Fatalf("classified error kept the response body: %v", err)
 	}
+	// A protocol code is a code, not a body: it survives, because it is the part a
+	// human can act on.
 	if !strings.Contains(err.Error(), "invalid_grant") {
-		t.Fatalf("scrubbed error lost the protocol code: %v", err)
+		t.Fatalf("classified error lost the protocol code: %v", err)
 	}
 }
 
@@ -1986,5 +2049,216 @@ func TestMcpOAuthEngineANewLoginRetiresTheOtherEndpointsBinding(t *testing.T) {
 	// ... and the other endpoint's binding is stale rather than silently moved.
 	if _, err := fx.store.LookupBinding(context.Background(), fx.owner, other); !errors.Is(err, ErrLoginRequired) {
 		t.Fatalf("the older binding = %v, want ErrLoginRequired (a new login must not adopt it)", err)
+	}
+}
+
+func TestMcpOAuthEngineRefusesAConsentURLOutsideThePolicy(t *testing.T) {
+	fx := newEngineFixture(t)
+	// The SDK accepts this: "localhost" is a loopback address, so its own
+	// HTTPS-or-loopback check passes. The daemon's policy does not — the operator
+	// allowed 127.0.0.1 by address and allowed no cleartext for "localhost" — and
+	// a browser must not be sent anywhere the daemon did not validate.
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.authorizationEndpoint = "http://localhost" + portOf(f.srv.URL) + "/authorize"
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	d, err := fx.eng.Begin(ctx, BeginRequest{OwnerUserID: fx.owner, Server: "fixture", Endpoint: fx.oauth.endpoint()})
+	if err == nil {
+		t.Fatalf("Begin returned consent URL %q for an endpoint outside the policy", d.AuthorizeURL)
+	}
+	if d.AuthorizeURL != "" {
+		t.Fatalf("a refused login still returned %q", d.AuthorizeURL)
+	}
+	if !errors.Is(err, ErrDestinationDenied) && !errors.Is(err, ErrInvalidURL) {
+		t.Fatalf("Begin = %v, want a destination refusal", err)
+	}
+	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
+		t.Fatal("a grant was committed for a refused consent URL")
+	}
+	if got := fx.engineFlows(); got != 0 {
+		t.Fatalf("%d flows survived a refused consent URL", got)
+	}
+}
+
+// engineFlows reports how many flows the engine still tracks.
+func (fx *engineFixture) engineFlows() int {
+	fx.eng.mu.Lock()
+	defer fx.eng.mu.Unlock()
+	return len(fx.eng.flows)
+}
+
+// portOf returns the ":port" of an absolute URL, or "" when it has none.
+func portOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Port() == "" {
+		return ""
+	}
+	return ":" + u.Port()
+}
+
+func TestMcpOAuthEngineValidatesTheConsentURLItPublishes(t *testing.T) {
+	policy := publicPolicy(t)
+	discovery := validatedDiscovery{AuthorizationEndpoint: "https://as.example/authorize"}
+
+	cases := []struct {
+		name    string
+		url     string
+		refused bool
+	}{
+		{
+			// The query is the part a consent URL legitimately adds: client id, PKCE
+			// challenge, state, resource, scopes.
+			name: "same endpoint with consent parameters",
+			url:  "https://as.example/authorize?client_id=c1&code_challenge=x&state=s&resource=https%3A%2F%2Fmcp.example%2Fmcp",
+		},
+		{
+			name:    "another host",
+			refused: true,
+			url:     "https://elsewhere.example/authorize?client_id=c1",
+		},
+		{
+			name:    "another path",
+			refused: true,
+			url:     "https://as.example/consent?client_id=c1",
+		},
+		{
+			name:    "cleartext on a host the operator did not allow",
+			refused: true,
+			url:     "http://mcp.example/authorize?client_id=c1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateConsentURL(context.Background(), policy, tc.url, discovery)
+			if tc.refused {
+				if err == nil {
+					t.Fatal("validateConsentURL accepted a URL it must refuse")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateConsentURL = %v, want the URL accepted", err)
+			}
+		})
+	}
+
+	// A divergence between what discovery validated and what the SDK built is
+	// refused with both sides named, so the failure is diagnosable without
+	// guessing which one moved.
+	err := validateConsentURL(context.Background(), policy, "https://elsewhere.example/authorize", discovery)
+	if err == nil {
+		t.Fatal("validateConsentURL accepted a URL from another origin")
+	}
+	if !strings.Contains(err.Error(), "as.example") || !strings.Contains(err.Error(), "elsewhere.example") {
+		t.Fatalf("error = %v, want it to name both endpoints", err)
+	}
+
+	// The destination check is the policy's own, including the address the host
+	// resolves to: a public name that resolves to a private address is refused.
+	private := newResolver().answer("mcp.example", "10.0.0.5")
+	strict := testPolicy(t, Config{}, private, nil)
+	if err := validateConsentURL(context.Background(), strict, "https://mcp.example/authorize", validatedDiscovery{
+		AuthorizationEndpoint: "https://mcp.example/authorize",
+	}); !errors.Is(err, ErrDestinationDenied) {
+		t.Fatalf("validateConsentURL = %v, want ErrDestinationDenied for a private address", err)
+	}
+}
+
+func TestMcpOAuthEngineNeverRepeatsARegistrationResponseBody(t *testing.T) {
+	const sentinel = "sentinel-client-secret-9f2c"
+	for _, mode := range []string{"error", "malformed"} {
+		t.Run(mode, func(t *testing.T) {
+			fx := newEngineFixture(t)
+			fx.oauth.set(func(f *fakeOAuthServer) {
+				f.dcrFailure = mode
+				f.dcrSentinel = sentinel
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, err := fx.eng.Begin(ctx, BeginRequest{OwnerUserID: fx.owner, Server: "fixture", Endpoint: fx.oauth.endpoint()})
+			if err == nil {
+				t.Fatal("Begin succeeded although registration failed")
+			}
+			// The SDK's DCR errors embed the raw registration response body — which
+			// is where a client secret is issued. None of it may leave this engine.
+			if strings.Contains(err.Error(), sentinel) {
+				t.Fatalf("the registration body reached the caller: %v", err)
+			}
+			if strings.Contains(fx.logs.String(), sentinel) {
+				t.Fatalf("the registration body reached the log: %s", fx.logs.String())
+			}
+			// It is still a usable message: it names the step that failed.
+			if !strings.Contains(err.Error(), "authenticating to") {
+				t.Fatalf("error = %v, want an authored step description", err)
+			}
+			if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
+				t.Fatal("a grant was committed after a failed registration")
+			}
+		})
+	}
+}
+
+func TestMcpOAuthEngineRevokeDetachedIsBestEffort(t *testing.T) {
+	fx := newEngineFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Nothing to revoke: an empty batch is not an error.
+	if err := fx.eng.RevokeDetached(ctx, nil); err != nil {
+		t.Fatalf("empty batch = %v, want nil", err)
+	}
+
+	revocation := Revocation{
+		OwnerUserID: fx.owner,
+		Resource:    fx.oauth.endpoint(),
+		Issuer:      fx.oauth.issuer(),
+		Registration: Registration{
+			ClientID:           "client-1",
+			AuthStyle:          AuthStyleInParams,
+			RevocationEndpoint: fx.oauth.srv.URL + "/revoke",
+		},
+		RefreshToken: "refresh-secret-value",
+		AccessToken:  "access-secret-value",
+	}
+
+	// A refusal is reported and changes nothing.
+	fx.oauth.set(func(f *fakeOAuthServer) { f.revokeStatus = http.StatusInternalServerError })
+	err := fx.eng.RevokeDetached(ctx, []Revocation{revocation})
+	if err == nil {
+		t.Fatal("RevokeDetached reported success for a refused revocation")
+	}
+	if strings.Contains(err.Error(), "refresh-secret-value") || strings.Contains(err.Error(), "access-secret-value") {
+		t.Fatalf("the revocation error quoted token material: %v", err)
+	}
+	if got := fx.oauth.revokeCount(); got != 1 {
+		t.Fatalf("revocations attempted = %d, want 1", got)
+	}
+	// It never touches the store: the local invalidation already committed.
+	if calls := fx.store.callLog(); len(calls) != 0 {
+		t.Fatalf("RevokeDetached touched the store: %v", calls)
+	}
+
+	// A revocation with no advertised endpoint is skipped, not guessed.
+	silent := revocation
+	silent.Registration.RevocationEndpoint = ""
+	if err := fx.eng.RevokeDetached(ctx, []Revocation{silent}); err != nil {
+		t.Fatalf("a revocation with no endpoint = %v, want nil", err)
+	}
+	if got := fx.oauth.revokeCount(); got != 1 {
+		t.Fatalf("revocations attempted = %d, want the skipped one not to have been sent", got)
+	}
+
+	// The good one is attempted even when its neighbour is refused, and the
+	// failure never stops the batch.
+	fx.oauth.set(func(f *fakeOAuthServer) { f.revokeStatus = 0 })
+	both := []Revocation{revocation, silent, revocation}
+	if err := fx.eng.RevokeDetached(ctx, both); err != nil {
+		t.Fatalf("batch with a refused neighbour = %v, want nil", err)
+	}
+	if got := fx.oauth.revokeCount(); got != 3 {
+		t.Fatalf("revocations attempted = %d, want 2 more", got)
 	}
 }

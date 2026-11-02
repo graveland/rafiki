@@ -5,6 +5,7 @@ package mcpoauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -320,8 +321,13 @@ func TestMcpOAuthDiscoveryRefusesMetadataWithoutAnIssuer(t *testing.T) {
 	if err == nil {
 		t.Fatal("Begin published a consent URL for metadata with no issuer")
 	}
-	if !strings.Contains(err.Error(), "authorization server") {
-		t.Fatalf("error = %v, want it to name the missing authorization server", err)
+	// The failure is authored and coarse: the step, never the SDK's own text about
+	// the document it could not use.
+	if !strings.Contains(err.Error(), "authenticating to") {
+		t.Fatalf("error = %v, want an authored step description", err)
+	}
+	if strings.Contains(err.Error(), "authorization server metadata") {
+		t.Fatalf("error repeats the SDK's own text: %v", err)
 	}
 	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
 		t.Fatal("a grant was committed")
@@ -332,3 +338,218 @@ func TestMcpOAuthDiscoveryRefusesMetadataWithoutAnIssuer(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// scriptedExchange is one response the SDK is pretended to have been handed.
+type scriptedExchange struct {
+	method string
+	url    string
+	status int
+	header http.Header
+	body   string
+}
+
+// recordScript records a scripted set of responses, in order, and returns the
+// recorder holding them. It is how a test states exactly what the SDK saw,
+// without a live server in the way.
+func recordScript(t *testing.T, ctx context.Context, script []scriptedExchange) *recordRequest {
+	t.Helper()
+	queue := map[string][]scriptedExchange{}
+	for _, ex := range script {
+		key := ex.method + " " + ex.url
+		queue[key] = append(queue[key], ex)
+	}
+	rec := newRecordRequest(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		key := req.Method + " " + req.URL.String()
+		pending := queue[key]
+		if len(pending) == 0 {
+			return nil, fmt.Errorf("unscripted request %s", key)
+		}
+		ex := pending[0]
+		queue[key] = pending[1:]
+		header := ex.header
+		if header == nil {
+			header = http.Header{"Content-Type": []string{"application/json"}}
+		}
+		return &http.Response{
+			StatusCode: ex.status,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(ex.body)),
+			Request:    req,
+		}, nil
+	}), ctx)
+
+	for _, ex := range script {
+		req, err := http.NewRequestWithContext(ctx, ex.method, ex.url, nil)
+		if err != nil {
+			t.Fatalf("scripted request: %v", err)
+		}
+		resp, err := rec.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("recording %s: %v", ex.method+" "+ex.url, err)
+		}
+		if _, err := io.ReadAll(resp.Body); err != nil {
+			t.Fatalf("reading %s: %v", ex.method+" "+ex.url, err)
+		}
+		_ = resp.Body.Close()
+	}
+	return rec
+}
+
+const scriptedASM = `{"issuer":"https://as.example","authorization_endpoint":"https://as.example/authorize",` +
+	`"token_endpoint":"https://as.example/token","code_challenge_methods_supported":["S256"]}`
+
+// publicPolicy resolves the scripted metadata hosts to public addresses, so the
+// destination gate is exercised rather than bypassed.
+func publicPolicy(t *testing.T) *Policy {
+	t.Helper()
+	resolver := newResolver().
+		answer("mcp.example", "93.184.216.34").
+		answer("as.example", "93.184.216.35").
+		answer("other.example", "93.184.216.36")
+	return testPolicy(t, Config{}, resolver, nil)
+}
+
+func TestMcpOAuthDiscoveryRequiresTheResourceTheSDKRequested(t *testing.T) {
+	ctx := context.Background()
+	policy := publicPolicy(t)
+
+	script := func() []scriptedExchange {
+		return []scriptedExchange{
+			{
+				method: "POST", url: "https://mcp.example/mcp", status: http.StatusUnauthorized,
+				header: http.Header{"Www-Authenticate": []string{
+					`Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource/mcp"`,
+				}},
+			},
+			{
+				method: "GET", url: "https://mcp.example/.well-known/oauth-protected-resource/mcp",
+				status: http.StatusOK,
+				body:   `{"resource":"https://mcp.example/mcp","authorization_servers":["https://as.example"]}`,
+			},
+			{method: "GET", url: "https://as.example/.well-known/oauth-authorization-server", status: http.StatusOK, body: scriptedASM},
+		}
+	}
+
+	t.Run("the resource the SDK asked for", func(t *testing.T) {
+		rec := recordScript(t, ctx, script())
+		got, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint:         "https://mcp.example/mcp",
+			AuthorizationURL: "https://as.example/authorize?resource=" + url.QueryEscape("https://mcp.example/mcp"),
+			Recorder:         rec,
+			Policy:           policy,
+		})
+		if err != nil {
+			t.Fatalf("captureDiscovery: %v", err)
+		}
+		if got.RawResource != "https://mcp.example/mcp" {
+			t.Fatalf("raw resource = %q", got.RawResource)
+		}
+		if got.Issuer != "https://as.example" {
+			t.Fatalf("issuer = %q", got.Issuer)
+		}
+	})
+
+	t.Run("a different resource", func(t *testing.T) {
+		// The mirror's replay accepts this document (it is valid metadata for the
+		// endpoint), but the SDK requested authorization for another resource. That
+		// divergence is the whole reason the capture exists: it must refuse.
+		rec := recordScript(t, ctx, script())
+		_, err := captureDiscovery(ctx, discoveryInput{
+			Endpoint:         "https://mcp.example/mcp",
+			AuthorizationURL: "https://as.example/authorize?resource=" + url.QueryEscape("https://other.example/resource"),
+			Recorder:         rec,
+			Policy:           policy,
+		})
+		if err == nil {
+			t.Fatal("captureDiscovery bound metadata for a resource the SDK never requested")
+		}
+		if !strings.Contains(err.Error(), "other.example") {
+			t.Fatalf("error = %v, want it to name the resource the SDK asked for", err)
+		}
+	})
+}
+
+func TestMcpOAuthDiscoveryRefusesADuplicateRecording(t *testing.T) {
+	ctx := context.Background()
+	// One URL, two different answers inside one round: the recorder cannot say
+	// which one the SDK read.
+	rec := recordScript(t, ctx, []scriptedExchange{
+		{method: "GET", url: "https://mcp.example/.well-known/oauth-protected-resource", status: http.StatusOK,
+			body: `{"resource":"https://mcp.example","authorization_servers":["https://as.example"]}`},
+		{method: "GET", url: "https://mcp.example/.well-known/oauth-protected-resource", status: http.StatusOK,
+			body: `{"resource":"https://mcp.example/mcp","authorization_servers":["https://as.example"]}`},
+	})
+
+	client := newReplayClient(nil, rec.since(0))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://mcp.example/.well-known/oauth-protected-resource", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("replay picked one of two recorded responses for the same URL")
+	}
+	if !errors.Is(err, errorReplayAmbiguous) {
+		t.Fatalf("replay = %v, want errorReplayAmbiguous", err)
+	}
+}
+
+func TestMcpOAuthDiscoveryRefusesAVaryingDuplicateRecording(t *testing.T) {
+	fx := newEngineFixture(t)
+	// The challenge's resource_metadata URL and the path well-known URL are the
+	// same URL here. The first answer describes the ROOT resource (which the SDK
+	// rejects for that candidate) and the second describes the endpoint (which it
+	// accepts). One URL, two answers, one round: nothing about the round can be
+	// replayed, so no binding may be made.
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.prmVaryOnSecondHit = true
+		f.prmResourcePath = f.rootResource()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := fx.eng.Begin(ctx, BeginRequest{OwnerUserID: fx.owner, Server: "fixture", Endpoint: fx.oauth.endpoint()})
+	if err == nil {
+		t.Fatal("Begin published a consent URL from an ambiguous recording")
+	}
+	if !strings.Contains(err.Error(), "different answers") && !strings.Contains(err.Error(), "cannot be replayed") {
+		t.Fatalf("error = %v, want it to name the duplicate recording", err)
+	}
+	if _, ok := fx.store.grant(fx.owner, fx.oauth.endpoint()); ok {
+		t.Fatal("a grant was bound from an ambiguous recording")
+	}
+	if got := fx.oauth.prmRequestCount("/.well-known/oauth-protected-resource/mcp"); got < 2 {
+		t.Fatalf("the fixture only answered %d times; the duplicate was not exercised", got)
+	}
+}
+
+func TestMcpOAuthDiscoveryReplaysAnIdenticalDuplicate(t *testing.T) {
+	ctx := context.Background()
+	// The same URL answered twice with the same bytes is not ambiguous: either
+	// recording is what the SDK read.
+	rec := recordScript(t, ctx, []scriptedExchange{
+		{method: "GET", url: "https://mcp.example/.well-known/oauth-protected-resource", status: http.StatusOK,
+			body: `{"resource":"https://mcp.example","authorization_servers":["https://as.example"]}`},
+		{method: "GET", url: "https://mcp.example/.well-known/oauth-protected-resource", status: http.StatusOK,
+			body: `{"resource":"https://mcp.example","authorization_servers":["https://as.example"]}`},
+	})
+
+	client := newReplayClient(nil, rec.since(0))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://mcp.example/.well-known/oauth-protected-resource", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("replay of an identical duplicate: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("body: %v", err)
+	}
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), `"https://mcp.example"`) {
+		t.Fatalf("replayed body = %q", body)
+	}
+}

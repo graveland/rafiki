@@ -52,10 +52,23 @@ import (
 const discoveryMaxRecordedResponses = 64
 
 // errorReplayUnavailable reports that a replay could not be answered from
-// recorded evidence: the request was never made, was made twice, or its body was
-// not captured whole. It is always a reason to distrust a candidate, never a
-// reason to go and ask again.
+// recorded evidence: the request was never made, or its body was not captured
+// whole. It is always a reason to distrust a candidate, never a reason to go and
+// ask again.
 var errorReplayUnavailable = errors.New("mcpoauth: no recorded response")
+
+// errorReplayAmbiguous reports that one request was recorded more than once in
+// the same consent round, with no way to tell which response the SDK was handed.
+//
+// This is the one observation failure that is fatal to a whole round rather than
+// to one candidate. A duplicate means the same URL answered differently twice
+// inside a single round — a hostile server's cheapest way to make a recorder see
+// one body and the SDK see another. Replaying "the first one" would then be
+// replaying a response the SDK may never have read, and the difference would end
+// up in the persisted binding. Nothing about the round can be trusted after that,
+// so the login is refused with an error that says why instead of falling back to
+// a resource nobody validated.
+var errorReplayAmbiguous = errors.New("mcpoauth: a request was recorded more than once")
 
 // recordedResponse is one response the SDK consumed during a login round.
 //
@@ -83,6 +96,29 @@ func (r *recordedResponse) complete() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.bodySeen && r.bodyOK && !r.overflow
+}
+
+// equivalentTo reports whether another recording of the same request carries the
+// same answer: same status, same body, same media type.
+//
+// Identical duplicates are not ambiguous — replaying either one replays what the
+// SDK saw, because both are the same bytes. It is the SDK asking the same URL
+// twice and getting the SAME answer, which is ordinary for a server that answers
+// a challenge-URL candidate and a well-known candidate with one document.
+func (r *recordedResponse) equivalentTo(other *recordedResponse) bool {
+	if other == nil || r.status != other.status {
+		return false
+	}
+	if r.header.Get("Content-Type") != other.header.Get("Content-Type") {
+		return false
+	}
+	r.mu.Lock()
+	mine := r.body.Bytes()
+	r.mu.Unlock()
+	other.mu.Lock()
+	theirs := other.body.Bytes()
+	other.mu.Unlock()
+	return bytes.Equal(mine, theirs)
 }
 
 // usable reports whether this entry may answer a replay.
@@ -240,20 +276,44 @@ func (t *replayTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		t.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s was requested more than once", errorReplayUnavailable, key)
 	}
+	var match *recordedResponse
+	duplicates := 0
 	for _, e := range t.entries {
 		if e.key() != key {
 			continue
 		}
-		if !e.usable() {
-			t.mu.Unlock()
-			return nil, fmt.Errorf("%w: %s has no complete recorded body", errorReplayUnavailable, key)
+		duplicates++
+		if match == nil {
+			match = e
 		}
-		t.served[key] = true
-		t.mu.Unlock()
-		return e.replay(req), nil
 	}
+	// Two DIFFERENT recorded answers for one request are ambiguous evidence: the
+	// SDK may have been handed either of them, so replaying the first would be
+	// replaying a body the SDK might not have consumed. Refusing is the only safe
+	// answer — picking one silently is how a mirror binds a resource the SDK never
+	// saw. Identical duplicates are fine: either one IS what the SDK read.
+	if duplicates > 1 {
+		for _, e := range t.entries {
+			if e.key() != key || e == match {
+				continue
+			}
+			if !match.equivalentTo(e) {
+				t.mu.Unlock()
+				return nil, fmt.Errorf("%w: %s was fetched %d times with different answers, so which response the SDK read is unknown", errorReplayAmbiguous, key, duplicates)
+			}
+		}
+	}
+	if match == nil {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("%w: %s was never fetched", errorReplayUnavailable, key)
+	}
+	if !match.usable() {
+		t.mu.Unlock()
+		return nil, fmt.Errorf("%w: %s has no complete recorded body", errorReplayUnavailable, key)
+	}
+	t.served[key] = true
 	t.mu.Unlock()
-	return nil, fmt.Errorf("%w: %s was never fetched", errorReplayUnavailable, key)
+	return match.replay(req), nil
 }
 
 func (r *recordedResponse) replay(req *http.Request) *http.Response {
@@ -361,6 +421,15 @@ func captureDiscovery(ctx context.Context, in discoveryInput) (validatedDiscover
 	if err != nil {
 		return validatedDiscovery{}, err
 	}
+	// The cross-check that makes this a mirror and not a second opinion: whatever
+	// this replay accepted must be the resource the SDK itself went on to request
+	// authorization for. The comparison is RAW — the SDK passes the metadata's own
+	// spelling as `resource`, so any difference means the mirror and the SDK picked
+	// different metadata, and the flow must not bind anything. Canonicalisation
+	// happens only below, after this passes.
+	if prm.Resource != expected {
+		return validatedDiscovery{}, fmt.Errorf("mcpoauth: the protected resource metadata this login would bind is for %q, but the authorization request is for %q", prm.Resource, expected)
+	}
 	// The SDK reads AuthorizationServers[0] and nothing else, and its scheme
 	// check lets an empty string through, so an empty first entry is not
 	// "an issuer we did not check" — it is an issuer-less resource.
@@ -423,7 +492,16 @@ func recordedChallengeMetadataURL(entries []*recordedResponse, endpoint string) 
 func replayProtectedResourceMetadata(ctx context.Context, p *Policy, entries []*recordedResponse, candidates []prmCandidate, expected, endpoint string) (*oauthex.ProtectedResourceMetadata, error) {
 	for _, candidate := range candidates {
 		prm, err := oauthex.GetProtectedResourceMetadata(ctx, candidate.URL, candidate.Resource, newReplayClient(p, entries))
-		if err != nil || prm == nil {
+		if err != nil {
+			// Ambiguity is not a reason to try the next candidate: it means this
+			// round's evidence cannot be reproduced at all, and the fallback below
+			// would be built on the same ambiguity.
+			if errors.Is(err, errorReplayAmbiguous) {
+				return nil, fmt.Errorf("mcpoauth: the metadata for %s cannot be replayed: %w", candidate.URL, err)
+			}
+			continue
+		}
+		if prm == nil {
 			continue
 		}
 		if len(prm.AuthorizationServers) == 0 {
@@ -468,7 +546,10 @@ func replayProtectedResourceMetadata(ctx context.Context, p *Policy, entries []*
 func replayAuthServerMetadata(ctx context.Context, p *Policy, entries []*recordedResponse, issuer string) (*oauthex.AuthServerMeta, error) {
 	asm, err := auth.GetAuthServerMetadata(ctx, issuer, newReplayClient(p, entries))
 	if err != nil {
-		return nil, fmt.Errorf("mcpoauth: authorization server metadata for %s: %w", issuer, err)
+		// Authored, never wrapped: the SDK's own metadata errors quote whatever the
+		// server sent, and an error message is not a place to repeat it. The issuer
+		// is named because it is public, and the reason is not.
+		return nil, fmt.Errorf("mcpoauth: the authorization server metadata for %s is not usable", displayURL(issuer))
 	}
 	if asm == nil {
 		// The SDK's fallback for an issuer that publishes no metadata at all.

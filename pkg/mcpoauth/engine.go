@@ -714,13 +714,13 @@ func (e *Engine) login(f *flow) (result CompleteResult, err error) {
 	session, err := mcp.NewClient(&mcp.Implementation{Name: mcpOAuthClientName, Version: "1"}, nil).
 		Connect(f.ctx, transport, nil)
 	if err != nil {
-		return CompleteResult{}, fmt.Errorf("mcpoauth: authenticating to %s: %w", displayURL(f.endpoint), scrubAuthError(err))
+		return CompleteResult{}, upstreamFailure("authenticating to "+displayURL(f.endpoint), err)
 	}
 	defer func() { _ = session.Close() }()
 
 	tools, err := session.ListTools(f.ctx, nil)
 	if err != nil {
-		return CompleteResult{}, fmt.Errorf("mcpoauth: verifying the tools of %s: %w", displayURL(f.endpoint), scrubAuthError(err))
+		return CompleteResult{}, upstreamFailure("verifying the tools of "+displayURL(f.endpoint), err)
 	}
 	return e.commit(f, tools)
 }
@@ -783,6 +783,14 @@ func (e *Engine) fetch(f *flow, args *auth.AuthorizationArgs) (*auth.Authorizati
 	if err != nil {
 		return nil, f.fail(err)
 	}
+	// The URL about to be handed to a browser is checked against the endpoint
+	// discovery validated and against the operator's policy — including the
+	// address its host resolves to. Everything else in this flow is derived from
+	// what the SDK said; this is the one check that the URL a human is about to
+	// open is the URL this daemon validated, not merely a URL the SDK built.
+	if err := validateConsentURL(f.ctx, e.policy, args.URL, discovery); err != nil {
+		return nil, f.fail(err)
+	}
 	// The fence moves to the resource and exact issuer BEFORE a browser is told
 	// where to go: a logout that lands afterwards advances the fence and this
 	// login can no longer commit.
@@ -821,6 +829,38 @@ func (e *Engine) fetch(f *flow, args *auth.AuthorizationArgs) (*auth.Authorizati
 		State: values.Get("state"),
 		Iss:   values.Get("iss"),
 	}, nil
+}
+
+// validateConsentURL refuses a consent URL that is not the authorization endpoint
+// discovery validated, or that the operator's policy would not let a browser be
+// sent to.
+//
+// Two independent checks, and both are needed:
+//
+//   - Same origin and same path as the discovered authorization endpoint. The
+//     query is free — it carries the client id, the PKCE challenge, the state, the
+//     resource and the scopes — but the part that decides who will receive the
+//     user's grant may not drift.
+//   - The policy's own destination check on the URL as built, which resolves the
+//     host and refuses a non-public address. Validating the metadata's endpoint
+//     earlier is not the same thing: this is the string that leaves the daemon.
+func validateConsentURL(ctx context.Context, p *Policy, raw string, discovery validatedDiscovery) error {
+	consent, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("mcpoauth: the authorization URL is not a URL: %w", ErrInvalidURL)
+	}
+	endpoint, err := url.Parse(discovery.AuthorizationEndpoint)
+	if err != nil || discovery.AuthorizationEndpoint == "" {
+		return fmt.Errorf("mcpoauth: the discovered authorization endpoint is not a URL: %w", ErrInvalidURL)
+	}
+	if !SameOrigin(consent, endpoint) || consent.EscapedPath() != endpoint.EscapedPath() {
+		return fmt.Errorf("mcpoauth: the authorization URL is for %s, but discovery validated %s",
+			displayURL(raw), displayURL(discovery.AuthorizationEndpoint))
+	}
+	if err := p.ValidateURL(ctx, consent); err != nil {
+		return fmt.Errorf("mcpoauth: the authorization URL %s: %w", displayURL(raw), err)
+	}
+	return nil
 }
 
 // capture is the SDK's NewTokenSource hook: the post-DCR configuration and the
@@ -907,10 +947,6 @@ func authStyleOf(style oauth2.AuthStyle) AuthStyle {
 	}
 }
 
-// safeOAuthCode keeps an OAuth protocol error code and nothing else: a short
-// token of the characters the specification allows. Anything else — which an
-// authorization server is free to send, because it echoes what the user's
-// browser handed it — becomes "unknown".
 // displayURL is a URL safe to name in an error or a log line: scheme, host and
 // path, with any query or userinfo dropped. A configured endpoint may carry a
 // credential in its query, and an error message is not a place to repeat one.
@@ -926,6 +962,10 @@ func displayURL(raw string) string {
 	return u.String()
 }
 
+// safeOAuthCode keeps an OAuth protocol error code and nothing else: a short
+// token of the characters the specification allows. Anything else — which an
+// authorization server is free to send, because it echoes what the user's
+// browser handed it — becomes "unknown".
 func safeOAuthCode(code string) string {
 	if code == "" || len(code) > 64 {
 		return "unknown"
@@ -940,20 +980,65 @@ func safeOAuthCode(code string) string {
 	return code
 }
 
-// scrubAuthError replaces an oauth2 token-endpoint failure with a message that
-// carries the status and the protocol error code only. oauth2's own error
-// quotes the response body, which is attacker-influenced text that may repeat
-// the authorization code or a token.
-func scrubAuthError(err error) error {
+// engineSentinels are the failures this daemon owns. They survive classification
+// so a caller keeps the branch it was written against; everything else does not.
+var engineSentinels = []error{
+	ErrMissing,
+	ErrLoginRequired,
+	ErrStaleFence,
+	ErrUnavailable,
+	ErrClosed,
+	ErrPendingLimit,
+	ErrCallbackReplayed,
+	ErrCallbackTooLarge,
+	ErrInvalidCallback,
+	ErrConsentRejected,
+	ErrDestinationDenied,
+	ErrRedirectRefused,
+	ErrInvalidURL,
+	context.Canceled,
+	context.DeadlineExceeded,
+}
+
+// upstreamFailure is the only way an upstream failure leaves this engine: a
+// sentence the daemon wrote, never the text of the thing that failed.
+//
+// The SDK makes this a hard rule rather than a preference. Its DCR path returns
+// `registration failed with status %s: %s` and `failed to decode successful
+// registration response: %w (%s)` — the raw registration response body, which is
+// precisely where a client secret is issued — and that error surfaces through
+// Connect straight into a Begin/Complete result. A resource server or an
+// authorization server is likewise free to put anything at all into its error
+// bodies and JSON-RPC messages.
+//
+// what names the step ("authenticating to <endpoint>"), which is authored. The
+// identity of a failure the daemon owns is preserved: a sentinel still unwraps,
+// and an OAuth protocol code is still reported as a code. Everything else is
+// deliberately coarse, because the alternative is repeating text this daemon did
+// not write and cannot vouch for.
+func upstreamFailure(what string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var authorization *AuthorizationError
+	if errors.As(err, &authorization) {
+		return authorization
+	}
 	var retrieve *oauth2.RetrieveError
 	if errors.As(err, &retrieve) {
 		status := 0
 		if retrieve.Response != nil {
 			status = retrieve.Response.StatusCode
 		}
-		return fmt.Errorf("mcpoauth: the authorization server refused the token request (status %d, error %q)", status, safeOAuthCode(retrieve.ErrorCode))
+		return fmt.Errorf("mcpoauth: %s: the authorization server refused the token request (status %d, error %q)",
+			what, status, safeOAuthCode(retrieve.ErrorCode))
 	}
-	return err
+	for _, sentinel := range engineSentinels {
+		if errors.Is(err, sentinel) {
+			return fmt.Errorf("mcpoauth: %s: %w", what, sentinel)
+		}
+	}
+	return fmt.Errorf("mcpoauth: %s failed", what)
 }
 
 // eventKind is what a flow's task has to report to a caller.

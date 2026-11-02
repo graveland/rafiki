@@ -289,3 +289,50 @@ func requireLoginHint(t *testing.T, err error, server string) {
 		t.Fatalf("hint names %q, want %q", lr.Server, server)
 	}
 }
+
+func TestMcpOAuthPassiveExplicitAuthorizationNeverAsksForALogin(t *testing.T) {
+	fx := newEngineFixture(t)
+	// A stored credential exists, so this test proves the HEADER decided the
+	// outcome, not the absence of one.
+	fx.store.seed(fx.owner, fx.oauth.endpoint(), fx.oauth.endpoint(), fx.oauth.issuer(),
+		Token{AccessToken: "seeded", Expiry: time.Now().Add(time.Hour)})
+
+	handler, client, err := fx.eng.Passive(fx.owner)(context.Background(), "fixture", fx.oauth.endpoint(),
+		map[string]string{"Authorization": "Bearer explicit"})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	if client == nil || handler == nil {
+		t.Fatal("the factory returned no handler or client")
+	}
+	ts, err := handler.TokenSource(context.Background())
+	if err != nil || ts != nil {
+		t.Fatalf("TokenSource = %v, %v; an explicit header must disable stored OAuth", ts, err)
+	}
+	// The store was never consulted, so there was no credential to miss.
+	if calls := fx.store.callLog(); len(calls) != 0 {
+		t.Fatalf("the factory consulted the store anyway: %v", calls)
+	}
+
+	// And if such a handler is used anyway — the runtime skips the factory for
+	// these entries, but this is a public seam — a 401 must NOT tell the user to
+	// run a login that cannot help them.
+	req, err := http.NewRequest(http.MethodPost, fx.oauth.endpoint(), strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	authErr := handler.Authorize(context.Background(), req,
+		&http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody})
+	if authErr == nil {
+		t.Fatal("Authorize accepted a 401 on an explicit-header entry")
+	}
+	if errors.Is(authErr, ErrLoginRequired) {
+		t.Fatalf("a 401 on an explicit-header entry reported ErrLoginRequired: %v", authErr)
+	}
+	if strings.Contains(authErr.Error(), "rafiki mcp login") || strings.Contains(authErr.Error(), "needs a login") {
+		t.Fatalf("an explicit-header entry was told to log in: %v", authErr)
+	}
+	if !strings.Contains(authErr.Error(), "fixture") {
+		t.Fatalf("the refusal does not name the server: %v", authErr)
+	}
+}

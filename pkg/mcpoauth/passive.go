@@ -87,7 +87,8 @@ func (e *Engine) Passive(owner string) PassiveFactory {
 
 		// Precedence: a configured Authorization header wins, case-insensitively
 		// and even when its value is empty. Nothing is looked up, so a stored
-		// grant cannot displace it.
+		// grant cannot displace it — and, for the same reason, this entry can never
+		// be told to go and log in: see passiveHandler.Authorize.
 		if headerKeyPresent(headers, "Authorization") {
 			return handler, client, nil
 		}
@@ -102,7 +103,9 @@ func (e *Engine) Passive(owner string) PassiveFactory {
 		case errors.Is(err, ErrMissing), errors.Is(err, ErrLoginRequired):
 			// Nothing usable is stored. That is not a reason to refuse the dial:
 			// a public server works, and a protected one will say 401 and get
-			// the hint from Authorize.
+			// the hint from Authorize, because a login is exactly what would fix
+			// it.
+			handler.hintable = true
 			return handler, client, nil
 		case err != nil:
 			// A store that cannot answer must never be reported as "no
@@ -113,6 +116,7 @@ func (e *Engine) Passive(owner string) PassiveFactory {
 
 		handler.generation = binding.GrantGeneration
 		handler.bound = true
+		handler.hintable = true
 		return handler, client, nil
 	}
 }
@@ -123,9 +127,16 @@ type passiveHandler struct {
 	owner    string
 	server   string
 	endpoint string
-	// bound is false when this entry must not use stored OAuth: no login, an
-	// explicit Authorization header, or no owner.
+	// bound is false when this entry must not use stored OAuth: an explicit
+	// Authorization header, or no owner.
 	bound bool
+	// hintable is whether a 401 may be answered with "run rafiki mcp login".
+	//
+	// It is narrower than "not bound" on purpose. An entry whose credentials were
+	// configured explicitly — or whose connection has no owner to look a grant up
+	// for — must never be told to run a login: the advice would be wrong, and the
+	// login it names cannot help.
+	hintable bool
 	// generation pins the binding this session resolved. A binding that moves —
 	// a logout, a newer login — is refused rather than silently adopted.
 	generation int64
@@ -149,15 +160,25 @@ func (h *passiveHandler) TokenSource(ctx context.Context) (oauth2.TokenSource, e
 }
 
 // Authorize is the non-interactive half: it never discovers, never registers and
-// never prompts. Whatever the server said, the answer to a 401 or a refused scope
-// is the login hint.
+// never prompts.
+//
+// A 401 or a refused scope on an entry that carries stored OAuth is answered with
+// the login hint, because a login is exactly what would fix it. An entry with NO
+// stored credential because OAuth was deliberately not attached — an explicit
+// Authorization header, or a connection with no owner — must not receive that
+// advice: telling somebody to run `rafiki mcp login` for an entry whose header
+// disabled OAuth is wrong, and the login it names cannot help. That case gets an
+// authored, non-interactive refusal instead.
 func (h *passiveHandler) Authorize(_ context.Context, req *http.Request, resp *http.Response) error {
 	if resp != nil && resp.Body != nil {
 		// The handler owns the body it was handed.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxResponseBytes))
 		_ = resp.Body.Close()
 	}
-	return &LoginRequiredError{Server: h.server}
+	if h.hintable {
+		return &LoginRequiredError{Server: h.server}
+	}
+	return fmt.Errorf("mcp: server %q rejected the credentials it was configured with", h.server)
 }
 
 // acquireSource is the passive token source: one database consultation per

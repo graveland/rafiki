@@ -200,3 +200,137 @@ func TestMcpOAuthRefreshRevocationFailureKeepsTheLocalInvalidation(t *testing.T)
 		t.Fatalf("Delete of an absent resource = %v, want ErrMissing", err)
 	}
 }
+
+func TestMcpOAuthRefreshPublicClientSendsNoBasicAuth(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.oauth.set(func(f *fakeOAuthServer) { f.refreshOK["refresh-1"] = true })
+	// A public client: dynamic registration asked for token_endpoint_auth_method
+	// "none", and the issuer issued no secret. AuthStyleAuto is what an issuer that
+	// named no method leaves us with.
+	grant := refreshableGrant(fx, "refresh-1")
+	grant.Registration.ClientSecret = ""
+	grant.Registration.AuthStyle = AuthStyleAuto
+
+	result, err := fx.eng.refresh(context.Background(), grant)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if result.AccessToken == "" {
+		t.Fatal("refresh returned no access token")
+	}
+	if got := fx.oauth.tokenCallCount(); got != 1 {
+		t.Fatalf("token requests = %d, want exactly one", got)
+	}
+	if fx.oauth.lastTokenHadBasicAuth {
+		t.Fatal("a public client was sent HTTP Basic with an empty secret")
+	}
+	form := fx.oauth.tokenForm(0)
+	if got, want := form.Get("client_id"), grant.Registration.ClientID; got != want {
+		t.Fatalf("client_id = %q, want %q in the body", got, want)
+	}
+	if form.Get("client_secret") != "" {
+		t.Fatal("a public client sent a client_secret")
+	}
+}
+
+func TestMcpOAuthRefreshNeverRetriesUnderAnotherAuthStyle(t *testing.T) {
+	fx := newEngineFixture(t)
+	// The endpoint refuses the credentials' placement. A retry would re-send a
+	// single-use refresh token that the first attempt has already spent.
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.refreshOK["refresh-1"] = true
+		f.tokenRefuseStatus = http.StatusUnauthorized
+		f.tokenRefuseBody = `{"error":"invalid_client"}`
+	})
+	grant := refreshableGrant(fx, "refresh-1")
+	grant.Registration.AuthStyle = AuthStyleAuto
+
+	if _, err := fx.eng.refresh(context.Background(), grant); err == nil {
+		t.Fatal("refresh succeeded against an endpoint that refused the client")
+	}
+	if got := fx.oauth.tokenCallCount(); got != 1 {
+		t.Fatalf("token requests = %d, want exactly one (a retry would double-spend the rotation)", got)
+	}
+	if !fx.oauth.lastTokenHadBasicAuth {
+		t.Fatal("a confidential client with no established style was not sent the RFC 7591 default (Basic)")
+	}
+}
+
+func TestMcpOAuthRefreshWithoutALifetimeExpiresImmediately(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.refreshOK["refresh-1"] = true
+		f.omitRefreshExpiry = true
+	})
+	grant := refreshableGrant(fx, "refresh-1")
+
+	result, err := fx.eng.refresh(context.Background(), grant)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	// The store treats a zero expiry as "never refreshes again". An answer with no
+	// lifetime must not become an immortal token: it is immediately expired, so the
+	// next acquisition refreshes.
+	if result.Expiry.IsZero() {
+		t.Fatal("a refresh answer with no expires_in produced a zero (never-expiring) expiry")
+	}
+	if result.Expiry.After(time.Now()) {
+		t.Fatalf("expiry = %v, want a lifetime that has already elapsed", result.Expiry)
+	}
+
+	// End to end through the passive source: every acquisition refreshes, because
+	// the token it just received is already expired.
+	fx.store.seed(fx.owner, fx.oauth.endpoint(), fx.oauth.endpoint(), fx.oauth.issuer(),
+		Token{AccessToken: "expired", RefreshToken: "refresh-1", TokenType: "Bearer", Expiry: time.Now().Add(-time.Minute)})
+	handler, _, err := fx.eng.Passive(fx.owner)(context.Background(), "fixture", fx.oauth.endpoint(), nil)
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	ts, err := handler.TokenSource(context.Background())
+	if err != nil || ts == nil {
+		t.Fatalf("TokenSource = %v, %v", ts, err)
+	}
+	first, err := ts.Token()
+	if err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	second, err := ts.Token()
+	if err != nil {
+		t.Fatalf("second Token: %v", err)
+	}
+	if first.AccessToken == second.AccessToken {
+		t.Fatalf("both acquisitions reused %q: a token with no lifetime was treated as valid", first.AccessToken)
+	}
+	if got := fx.store.refreshes; got != 2 {
+		t.Fatalf("refreshes = %d, want one per acquisition", got)
+	}
+}
+
+func TestMcpOAuthRefreshErrorTextIsAuthored(t *testing.T) {
+	const sentinel = "sentinel-upstream-body-4b71"
+	fx := newEngineFixture(t)
+	fx.oauth.set(func(f *fakeOAuthServer) {
+		f.tokenRefuseStatus = http.StatusBadRequest
+		f.tokenRefuseBody = `{"error":"invalid_client","error_description":"` + sentinel + `"}`
+	})
+	grant := refreshableGrant(fx, "refresh-1")
+
+	_, err := fx.eng.refresh(context.Background(), grant)
+	if err == nil {
+		t.Fatal("refresh succeeded against a refusing endpoint")
+	}
+	if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("the refresh error repeated the endpoint's body: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid_client") {
+		t.Fatalf("the refresh error lost the protocol code: %v", err)
+	}
+
+	// A body that is not a token answer at all is refused without quoting it.
+	fx.oauth.set(func(f *fakeOAuthServer) { f.tokenRefuseBody = sentinel })
+	if _, err := fx.eng.refresh(context.Background(), grant); err == nil {
+		t.Fatal("refresh accepted a body that is not a token answer")
+	} else if strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("the refresh error repeated an undecodable body: %v", err)
+	}
+}

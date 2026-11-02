@@ -88,6 +88,14 @@ func (e *Engine) refresh(ctx context.Context, cur Grant) (RefreshResult, error) 
 	}
 	if answer.ExpiresIn > 0 {
 		result.Expiry = e.now().Add(time.Duration(answer.ExpiresIn) * time.Second)
+	} else {
+		// No lifetime at all — absent, zero or negative. The store treats a zero
+		// expiry as "never refreshes", which would hand out a token nothing can
+		// renew the moment the server stops honoring it. Expiring it immediately
+		// is the honest reading: the next acquisition refreshes again, and the
+		// rotated refresh token this answer may carry has already been persisted
+		// by the time it does.
+		result.Expiry = e.now()
 	}
 	if scopes := strings.Fields(answer.Scope); len(scopes) > 0 {
 		result.Scopes = scopes
@@ -99,44 +107,43 @@ func (e *Engine) refresh(ctx context.Context, cur Grant) (RefreshResult, error) 
 type clientAuthStyle int
 
 const (
-	// clientAuthAuto tries the header form and falls back to the body form.
-	clientAuthAuto clientAuthStyle = iota
-	clientAuthParams
+	// clientAuthParams sends client_id (and the secret, when there is one) in the
+	// form body. It is also the public/none style: a client with no secret sends
+	// only its id.
+	clientAuthParams clientAuthStyle = iota
+	// clientAuthHeader sends them as HTTP Basic, which requires a secret.
 	clientAuthHeader
 )
 
-func clientAuthStyleOf(style AuthStyle) clientAuthStyle {
-	switch style {
-	case AuthStyleInParams:
+// clientAuthStyleOf resolves ONE style for a refresh, before the request is
+// sent.
+//
+// There is deliberately no detection pass. A refresh token is single-use: a first
+// attempt that the server refuses has already spent it, so retrying the same
+// rotation under another credential placement cannot succeed — it can only make a
+// second request with a dead token. What we resolve instead:
+//
+//   - A client with no secret is a public client (RFC 7591 "none"): its id goes in
+//     the body, without a secret and without an Authorization header. Sending
+//     Basic with an empty secret is not a thing a correct server accepts.
+//   - A stored style the login established (in_params / in_header) is honoured.
+//   - Anything else (AuthStyleAuto, or an unmodelled value) is a confidential
+//     client whose method discovery did not name; RFC 7591's default for that is
+//     client_secret_basic, chosen once and not second-guessed.
+func clientAuthStyleOf(reg Registration) clientAuthStyle {
+	if reg.ClientSecret == "" {
 		return clientAuthParams
-	case AuthStyleInHeader:
-		return clientAuthHeader
-	default:
-		return clientAuthAuto
 	}
+	if reg.AuthStyle == AuthStyleInParams {
+		return clientAuthParams
+	}
+	return clientAuthHeader
 }
 
-// postToken performs one token endpoint request under the grant's stored client
+// postToken performs exactly one token endpoint request under the resolved client
 // authentication style, over the guarded client.
 func (e *Engine) postToken(ctx context.Context, endpoint string, reg Registration, form url.Values) (*http.Response, error) {
-	style := clientAuthStyleOf(reg.AuthStyle)
-	if style != clientAuthAuto {
-		return e.tokenRequest(ctx, endpoint, reg, form, style)
-	}
-	// Auto-detect is the oauth2 library's own probe: header form first, then the
-	// body form if the endpoint refuses the credentials' placement. It is the
-	// last resort — a stored registration normally records which method its
-	// issuance chose.
-	resp, err := e.tokenRequest(ctx, endpoint, reg, form, clientAuthHeader)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnauthorized {
-		return resp, nil
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxResponseBytes))
-	resp.Body.Close()
-	return e.tokenRequest(ctx, endpoint, reg, form, clientAuthParams)
+	return e.tokenRequest(ctx, endpoint, reg, form, clientAuthStyleOf(reg))
 }
 
 func (e *Engine) tokenRequest(ctx context.Context, endpoint string, reg Registration, form url.Values, style clientAuthStyle) (*http.Response, error) {
@@ -160,13 +167,18 @@ func (e *Engine) tokenRequest(ctx context.Context, endpoint string, reg Registra
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	if style == clientAuthHeader && (reg.ClientID != "" || reg.ClientSecret != "") {
-		// RFC 6749 section 2.3.1: form-encode before base64.
+	if style == clientAuthHeader && reg.ClientSecret != "" {
+		// RFC 6749 section 2.3.1: form-encode before base64. A public client never
+		// reaches this branch: Basic with an empty secret is a credential the server
+		// should refuse, and it is not a credential this daemon sends.
 		req.SetBasicAuth(url.QueryEscape(reg.ClientID), url.QueryEscape(reg.ClientSecret))
 	}
 	resp, err := e.policy.Client().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("mcpoauth: contacting the token endpoint: %w", err)
+		// Authored: a transport error names the URL it dialled, and this one may be
+		// an endpoint a project entry chose. The caller learns the step failed; the
+		// dial's own text goes no further.
+		return nil, errors.New("mcpoauth: the token endpoint could not be reached")
 	}
 	return resp, nil
 }
@@ -189,7 +201,9 @@ func decodeTokenResponse(resp *http.Response) (tokenResponse, error) {
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
 	if err != nil {
-		return tokenResponse{}, fmt.Errorf("mcpoauth: reading the token endpoint answer: %w", err)
+		// Never wrapped: a body read can fail with a transport or codec error whose
+		// text is not ours to repeat.
+		return tokenResponse{}, fmt.Errorf("mcpoauth: the token endpoint answered status %d and the answer could not be read", resp.StatusCode)
 	}
 	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if mediaType == "application/x-www-form-urlencoded" || mediaType == "text/plain" {
@@ -251,40 +265,88 @@ func isBearerType(tokenType string) bool {
 		strings.EqualFold(tokenType, "bearer-token")
 }
 
-// revokeDetached best-effort revokes a token the store detached during a logout.
+// RevokeDetached best-effort revokes credentials the store detached during a
+// local invalidation — a logout, or the cleanup that follows a removed user.
 //
-// It runs AFTER the local invalidation has committed and can only ever fail
-// quietly: the rows are gone, the generation is tombstoned, and a revoke that
-// does not answer is never a reason to restore anything. It is bounded by
-// RevocationTimeout because the server may be the very thing the user logged out
-// of.
-func (e *Engine) revokeDetached(ctx context.Context, rev Revocation) {
-	if rev.Registration.RevocationEndpoint == "" || (rev.RefreshToken == "" && rev.AccessToken == "") {
-		return
+// It exists so a caller that has already committed the invalidation can offer the
+// token back to the authorization server without that offer being able to change
+// the outcome: the rows are gone, the generation is tombstoned, and a revocation
+// that fails or hangs is never a reason to restore anything or to fail the
+// removal. The returned error is for the caller to log, and it is authored (the
+// resource and a status, never the token or a response body).
+//
+// Each revocation is bounded by RevocationTimeout, the same budget a logout's
+// revoke uses, and the loop stops as soon as the caller's own context ends. A
+// caller that wants one bound for the whole batch passes a deadline of its own.
+func (e *Engine) RevokeDetached(ctx context.Context, revocations []Revocation) error {
+	if len(revocations) == 0 {
+		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The local invalidation has already committed: none of this may be abandoned
+	// because the request that triggered it went away.
+	base := context.WithoutCancel(ctx)
+	var errs []error
+	for _, rev := range revocations {
+		if ctx.Err() != nil {
+			break
+		}
+		itemCtx, cancel := context.WithTimeout(base, RevocationTimeout)
+		err := e.revokeOne(itemCtx, rev)
+		cancel()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// revokeDetached is the logout path: one revocation, bounded, logged and never
+// returned. It is the same attempt RevokeDetached makes.
+func (e *Engine) revokeDetached(ctx context.Context, rev Revocation) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), RevocationTimeout)
 	defer cancel()
+	if err := e.revokeOne(ctx, rev); err != nil {
+		e.log.Debug("mcp oauth revocation failed", "resource", displayURL(rev.Resource), "reason", err.Error())
+	}
+}
+
+// revokeOne makes one bounded revocation attempt and describes the outcome.
+//
+// Nothing here logs or returns the token, and nothing here touches the store: a
+// revocation is an offer to a server that may already have forgotten it, so the
+// only thing it may change is what that server believes.
+func (e *Engine) revokeOne(ctx context.Context, rev Revocation) error {
+	endpoint := rev.Registration.RevocationEndpoint
+	if endpoint == "" {
+		// The issuer advertised none. Revocation is then skipped, never guessed.
+		return nil
+	}
 	token, hint := rev.RefreshToken, "refresh_token"
 	if token == "" {
 		token, hint = rev.AccessToken, "access_token"
 	}
-	if err := e.policy.ValidateDestination(ctx, rev.Registration.RevocationEndpoint); err != nil {
-		e.log.Debug("mcp oauth revocation skipped", "resource", rev.Resource, "reason", "endpoint is outside [mcp_oauth]")
-		return
+	if token == "" {
+		return nil
+	}
+	if err := e.policy.ValidateDestination(ctx, endpoint); err != nil {
+		return fmt.Errorf("%w: revocation endpoint for %s", ErrDestinationDenied, displayURL(rev.Resource))
 	}
 	form := url.Values{}
 	form.Set("token", token)
 	form.Set("token_type_hint", hint)
-	resp, err := e.postToken(ctx, rev.Registration.RevocationEndpoint, rev.Registration, form)
+	resp, err := e.postToken(ctx, endpoint, rev.Registration, form)
 	if err != nil {
-		e.log.Debug("mcp oauth revocation failed", "resource", rev.Resource, "reason", "request failed")
-		return
+		return fmt.Errorf("mcpoauth: revocation for %s could not be sent", displayURL(rev.Resource))
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxResponseBytes))
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		e.log.Debug("mcp oauth revocation refused", "resource", rev.Resource, "status", resp.StatusCode)
+		return fmt.Errorf("mcpoauth: revocation for %s was refused (status %d)", displayURL(rev.Resource), resp.StatusCode)
 	}
+	return nil
 }
 
 // revokeProvisional drops token material from a login that will never be
