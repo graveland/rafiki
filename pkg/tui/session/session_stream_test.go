@@ -115,3 +115,33 @@ func TestASteerEchoMidStreamDoesNotDuplicateTheReply(t *testing.T) {
 	c.False(s.Blocks[1].Kind != session.KindUser || s.Blocks[1].Text != "hold on",
 		"the steer echo must keep its place after the assistant block: %+v", s.Blocks[1])
 }
+
+// TurnStart opens its placeholder when the prompt is delivered, but the user
+// message is published afterwards (claude: from the captured row, once the
+// response is in; fundi: once the prompt's row is inserted). The prompt must
+// still sit ABOVE the reply it started, so the empty placeholder has to stay
+// the last block rather than be left behind by the user's block.
+func TestUserMessageLandsAheadOfTheTurnStartPlaceholder(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for name, reply := range map[string]func(*session.Session){
+		"committed message only": func(s *session.Session) {
+			s.Apply(assistantEvent("c1", "the answer"))
+		},
+		"streamed then committed": func(s *session.Session) {
+			s.Apply(deltaEvent("c1", "the ans"))
+			s.Apply(assistantEvent("c1", "the answer"))
+		},
+	} {
+		s := session.New("c1")
+		s.Apply(turnStartEvent("c1"))
+		s.Apply(textEvent("c1", "the question"))
+		reply(s)
+		s.Apply(turnEndEvent("c1"))
+
+		c.Require().Len(s.Blocks, 2, "%s: blocks = %+v", name, s.Blocks)
+		c.Eq(session.KindUser, s.Blocks[0].Kind, "%s: first block", name)
+		c.Eq("the question", s.Blocks[0].Text, "%s: prompt", name)
+		c.Eq(session.KindAssistant, s.Blocks[1].Kind, "%s: second block", name)
+		c.Eq("the answer", s.Blocks[1].Text, "%s: reply", name)
+	}
+}

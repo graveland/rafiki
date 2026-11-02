@@ -15,6 +15,7 @@ import (
 	_ "image/gif"  // registered for DecodeConfig
 	_ "image/jpeg" // registered for DecodeConfig
 	_ "image/png"  // registered for DecodeConfig
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -447,8 +448,9 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 	// Injected blocks precede the user's own: they are the harness's words, and
 	// the wire's order within each list is the order they happened. Never
 	// interleave the two lists.
+	var added []Block
 	for _, cb := range um.GetInjected() {
-		s.Blocks = append(s.Blocks, Block{
+		added = append(added, Block{
 			Kind:  KindInjected,
 			At:    time.Now(),
 			Text:  TextFromContent([]*rafikiv1.ContentBlock{cb}),
@@ -469,22 +471,45 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 	text := TextFromContent(um.GetContent())
 	images := imagesFrom(um.GetContent())
 	if text == "" && len(images) == 0 && (results > 0 || len(um.GetInjected()) > 0) {
-		// A results-only message appends no block, but it just answered tool
-		// calls -- which is exactly what unsticks the watermark. An
+		// A results-only message appends no KindUser block, but it just answered
+		// tool calls -- which is exactly what unsticks the watermark. An
 		// injected-only message likewise appends no KindUser block: a user-role
 		// block is what clears the cockpit's ⏳ pending echo, and the harness
-		// speaking on its own behalf acknowledges no prompt.
+		// speaking on its own behalf acknowledges no prompt. Its injected blocks
+		// still land.
+		s.insertBeforePlaceholder(added)
 		s.recomputeFinalized()
 		return
 	}
-	s.Blocks = append(s.Blocks, Block{
+	added = append(added, Block{
 		Kind:   KindUser,
 		At:     time.Now(),
 		Text:   text,
 		Images: images,
 		Final:  true,
 	})
+	s.insertBeforePlaceholder(added)
 	s.recomputeFinalized()
+}
+
+// insertBeforePlaceholder adds blocks at the end of the transcript, except that
+// they go AHEAD of a trailing assistant block that is open and still empty.
+//
+// That block is TurnStart's placeholder, opened when the prompt is delivered;
+// the user message it answers is published later (a claude prompt from its
+// captured row, once the response is in), and the reply then fills the
+// placeholder in place. Appending behind it would leave the reply above the
+// prompt that asked for it. A block that already holds streamed content is a
+// reply in progress, and a steer's echo correctly lands after it.
+func (s *Session) insertBeforePlaceholder(blocks []Block) {
+	if n := len(s.Blocks); n > 0 {
+		if last := s.Blocks[n-1]; last.Kind == KindAssistant && !last.Final &&
+			last.Text == "" && last.ThinkText == "" && len(last.ToolCalls) == 0 && len(last.Content) == 0 {
+			s.Blocks = slices.Insert(s.Blocks, n-1, blocks...)
+			return
+		}
+	}
+	s.Blocks = append(s.Blocks, blocks...)
 }
 
 // attachToolResult files one result against its call, searching backwards:
