@@ -126,6 +126,45 @@ func TestResolveTierOffersOnlyAdvertisedTiers(t *testing.T) {
 	ck.Eq("openai/gpt-5-pro", orID)
 }
 
+// TestResolveTierAliasMatchIsExact pins the comparison behind the gate: the row
+// that offers a tier is matched WHOLE and case-sensitively. A lookalike alias —
+// a ":free" twin, another vendor's prefix, an uppercase tier, a row with no
+// "-latest" — offers nothing, and a tier word that is merely a prefix or a
+// superset of an advertised one is not advertised by it.
+func TestResolveTierAliasMatchIsExact(t *testing.T) {
+	ck := assert.NewAborting(t)
+	lookalikes := newSeededCatalog(
+		CatalogEntry{ID: "openai/gpt-6.1-terra", Created: 5},
+		CatalogEntry{ID: "~openai/gpt-terra-latest:free", Created: 1},
+		CatalogEntry{ID: "~other/gpt-terra-latest", Created: 1},
+		CatalogEntry{ID: "~openai/gpt-Terra-latest", Created: 1},
+		CatalogEntry{ID: "~openai/gpt-terra", Created: 1},
+	)
+
+	_, _, ok := lookalikes.ResolveTier(VendorOpenAI, "terra")
+	ck.False(ok, "a lookalike alias row must not offer the tier")
+
+	// Uppercase (case-sensitive), and words that merely bracket the advertised
+	// tier: none of them is the alias row's tier.
+	for _, tier := range []string{"Terra", "TERRA", "terra-latest", "terr", "terras"} {
+		_, _, ok := lookalikes.ResolveTier(VendorOpenAI, tier)
+		ck.False(ok, "tier %q is not the advertised one", tier)
+	}
+	ck.Empty(lookalikes.LatestNames(VendorOpenAI), "no lookalike row lists a name")
+
+	// The same catalog WITH the exact row does resolve, so the assertions above
+	// are about the comparison and not about the tier being absent.
+	exact := newSeededCatalog(
+		CatalogEntry{ID: "openai/gpt-6.1-terra", Created: 5},
+		CatalogEntry{ID: "~openai/gpt-terra-latest", Created: 1},
+	)
+	direct, orID, ok := exact.ResolveTier(VendorOpenAI, "terra")
+	ck.True(ok, "the exact alias row does offer the tier")
+	ck.Eq("gpt-6.1-terra", direct)
+	ck.Eq("openai/gpt-6.1-terra", orID)
+	ck.EqDeep([]string{"gpt-terra-latest"}, exact.LatestNames(VendorOpenAI))
+}
+
 func TestResolveTierAnthropicDelegates(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newSeededCatalog(

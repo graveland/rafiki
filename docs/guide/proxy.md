@@ -11,15 +11,13 @@ OTLP tracing. `rafikid` serves the proxy face itself and applies the schema
 
 ## Model selection
 
-Requests on the `/v1/messages` face (and `llm.Conversation`s) take:
+Requests on the `/v1/messages` face take:
 
 - a concrete Anthropic id (`claude-opus-4-8`) — sent to the Anthropic
   primary, with breaker-gated OpenRouter failover when configured;
-- a `<tier>-latest` name — `anthropic/<tier>-latest` (`anthropic/opus-latest`),
-  OpenRouter's `~anthropic/claude-<tier>-latest`, or
-  `<provider>/gpt-<tier>-latest` for a provider of kind `openai-responses` /
-  `openai-responses-chatgpt` — resolved live from the OpenRouter catalog to
-  that tier's newest model;
+- a `<tier>-latest` name — `anthropic/<tier>-latest` (`anthropic/opus-latest`)
+  or OpenRouter's `~anthropic/claude-<tier>-latest` — resolved live from the
+  OpenRouter catalog to that tier's newest Anthropic model;
 - any OpenRouter slash id (`moonshotai/kimi-k3`) — routed directly to
   OpenRouter with no failover;
 - one of your **model aliases** (`ds`) — a slash-free name you saved with
@@ -33,6 +31,15 @@ name nor one of your model aliases is passed through as written — and a bare
 a slash-free name is a model alias or an error (the refusal names the
 provider-qualified spelling). The daemon ships no built-in per-line provider
 pin.
+
+A **child's** model (`llm.Conversation`, which every `fundi` child and the
+daemon's own jobs run on) takes the same names plus one more: a
+`<provider>/gpt-<tier>-latest` for a provider of kind `openai-responses` /
+`openai-responses-chatgpt` (`gpt/gpt-terra-latest`), pinned to a concrete id at
+conversation start by that provider's KIND (`llm.ResolveProviderLatest`). That
+spelling is NOT a `/v1/messages` one: the proxy face calls only
+`routing.ResolveModel`, has no provider registry, and resolves the `anthropic/`
+arms above.
 
 ### Routing specs
 

@@ -81,10 +81,15 @@ func TestResolveModelBareLatestIsRefused(t *testing.T) {
 	cat.SeedForTest([]CatalogEntry{
 		{ID: "anthropic/claude-haiku-4.5", Created: 1},
 		{ID: "anthropic/claude-opus-4.8", Created: 2},
+		// The sonnet tier is advertised AND has a model behind it, so the
+		// refusal below is a SPELLING rule rather than a catalog miss.
+		{ID: "anthropic/claude-sonnet-5", Created: 3},
+		{ID: "~anthropic/claude-sonnet-latest", Created: 4},
 	})
 	for _, tc := range []struct{ req, hint string }{
 		{"haiku-latest", "anthropic/haiku-latest"},
 		{"claude-opus-latest", "anthropic/opus-latest"},
+		{"sonnet-latest", "anthropic/sonnet-latest"},
 		// A routing spec's bracket tail is not part of the id: the refusal reads
 		// the base, so the spec cannot smuggle a bare name past it.
 		{"haiku-latest[sort=price]", "anthropic/haiku-latest"},
@@ -95,6 +100,14 @@ func TestResolveModelBareLatestIsRefused(t *testing.T) {
 		ck.Eq("", got, "ResolveModel(%q) resolved despite being refused, got", tc.req)
 		ck.StrContains(err.Error(), tc.hint, "ResolveModel(%q) refusal must name the spelling to use, got", tc.req)
 	}
+
+	// The same catalog resolves that tier through its provider-qualified spelling,
+	// which is what makes the rows above a spelling rule: no catalog state — an
+	// entry, an alias row, a warm snapshot — can make a bare name resolve, so a
+	// future normalizeTilde or catalog rescue cannot quietly reintroduce it.
+	got, err := ResolveModel(cat, "", "anthropic/sonnet-latest")
+	ck.Require().NoError(err, "the provider-qualified spelling must resolve")
+	ck.Eq("claude-sonnet-5", got, "ResolveModel(anthropic/sonnet-latest) =")
 }
 
 // TestOpenRouterModel covers the catalog-backed reverse lookup that replaced the
