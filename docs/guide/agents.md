@@ -272,6 +272,15 @@ CLI only ferries the consent URL to a browser and the redirect query back, so
 the access token, the refresh token and the client secret never leave the
 daemon and never enter a child process.
 
+Two things the CLI does print, which are worth knowing before you run it: the
+authorization URL (so you can open it, or paste it when the browser is on
+another machine) and, on success, the server, resource and tool names. The
+authorization URL carries the configured endpoint **verbatim** as its RFC 8707
+`resource` parameter — that is the protocol's own requirement, not an extra
+field — so an endpoint whose own query holds something you would not paste into
+a browser is visible to whoever reads that output. Nothing else about the
+credential is.
+
 What a login is **not**:
 
 - **Not interactive during a spawn.** Nothing prompts while a child starts.
