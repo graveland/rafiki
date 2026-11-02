@@ -60,10 +60,9 @@ func LatestTier(v Vendor, local string) (string, bool) {
 		if !spec.prefixOptional {
 			return "", false
 		}
-		// The prefix may be omitted, but it may not be reduced to its stem: once
-		// the stem is removed "claude-latest" has an empty middle, and omitting the
-		// prefix is not a licence to re-read a longer id ("claudesonnet-latest") as
-		// a tier.
+		// The prefix may be omitted, but the middle may not be exactly the prefix
+		// stem: "claude-latest" carries nothing but "claude" between the name's
+		// ends, and "claude" is not a tier (it is the vendor's own id prefix).
 		if name == strings.TrimSuffix(spec.localPrefix, "-") {
 			return "", false
 		}
@@ -77,9 +76,23 @@ func LatestTier(v Vendor, local string) (string, bool) {
 
 // ResolveTier returns the newest catalog model in tier for vendor v as
 // (direct, orID): direct is the id the vendor's own API takes, orID the
-// OpenRouter id. ok=false when the vendor is unknown or nothing matches.
-// Newest is by the catalog's created stamp.
+// OpenRouter id. Newest is by the catalog's created stamp. ok=false on a nil
+// receiver, a cold catalog, an unknown vendor, a tier that is not tier-shaped,
+// or nothing to match.
+//
+// A tier is OFFERED only when the catalog advertises it with a
+// "~<catalogPrefix><tier>-latest" alias entry — the same rows LatestNames
+// reads — so a variant suffix that no alias names ("-pro", "-fast", "-chat")
+// can never be pinned by a "<tier>-latest" name, and a tier OpenRouter starts
+// listing works the day it appears, with no vendor vocabulary in this package.
+// The Anthropic arm delegates to ResolveLatest, whose native-id filter is what
+// keeps "-fast" variants out; it takes no alias gate because the
+// "<family>-latest" names it serves are ResolveModel's long-standing contract.
 func (c *ModelCatalog) ResolveTier(v Vendor, tier string) (direct, orID string, ok bool) {
+	spec, known := vendorSpecs[v]
+	if !known || c == nil || !tierRe.MatchString(tier) {
+		return "", "", false
+	}
 	switch v {
 	case VendorAnthropic:
 		return c.ResolveLatest(tier)
@@ -87,8 +100,16 @@ func (c *ModelCatalog) ResolveTier(v Vendor, tier string) (direct, orID string, 
 		c.refresh()
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		// One scan of the locked snapshot answers both questions: whether the
+		// catalog offers this tier at all, and which of its models is newest.
+		alias := "~" + spec.catalogPrefix + tier + "-latest"
+		var offered bool
 		var best orModel
 		for _, m := range c.models {
+			if m.ID == alias {
+				offered = true
+				continue
+			}
 			sub := openAIModelRe.FindStringSubmatch(m.ID)
 			if sub == nil || sub[1] != tier {
 				continue
@@ -97,7 +118,7 @@ func (c *ModelCatalog) ResolveTier(v Vendor, tier string) (direct, orID string, 
 				best = m
 			}
 		}
-		if best.ID == "" {
+		if !offered || best.ID == "" {
 			return "", "", false
 		}
 		return strings.TrimPrefix(best.ID, "openai/"), best.ID, true
