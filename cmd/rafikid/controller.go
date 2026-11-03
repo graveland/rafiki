@@ -375,6 +375,10 @@ type Controller struct {
 	// capturePub dedupes the message events CaptureReported publishes.
 	capturePub capturePublisher
 
+	// publishLocks serializes append+publish per child, so a child's durable
+	// events reach subscribers in ordinal order (see publishEvent).
+	publishLocks publishLocks
+
 	// gateLookup resolves the live child whose message gate a capture report
 	// releases; nil means the child manager. A test seam.
 	gateLookup func(childID string) (heldEventReleaser, bool)
@@ -1030,6 +1034,13 @@ func (c *Controller) Stop() {
 func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
 	// Spans are built from the same single path every consumer reads.
 	c.observeEvent(childID, ev)
+	// ONE publisher per child across BOTH the append and the publish. Allocation
+	// is serialized by the log's own advisory lock; without this the publish
+	// that follows it is not, and a late publish of a lower ordinal is silently
+	// dropped by every cursor-based consumer as an already-delivered duplicate.
+	// See publishLocks.
+	unlock := c.publishLocks.lock(childID)
+	defer unlock()
 	if eventlog.TierOf(ev) == eventlog.TierDurable && c.evlog != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		ord, err := c.evlog.Append(ctx, childID, ev)
@@ -1038,6 +1049,14 @@ func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
 			// Best-effort, and deliberately so: a log write must never stop a
 			// turn. The consequence is a hole in one child's ordinal sequence,
 			// which a resuming consumer sees as a gap rather than as silence.
+			//
+			// The ordinal is CLEARED rather than left as it came. A capture-built
+			// event carries its CONVERSATION ordinal (eventconv.EventsFromNodes),
+			// a small number every consumer has long passed: left in place the
+			// event is dropped as a duplicate by delivery.live and by the
+			// cockpit's session, and the message it carries vanishes with no
+			// error anywhere. Ordinal-less, it is delivered and applied.
+			ev.Ordinal = nil
 			slog.Warn("event log append", "childId", childID,
 				"type", eventlog.TypeName(ev), "error", err)
 		} else {
