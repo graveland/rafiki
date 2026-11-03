@@ -159,16 +159,28 @@ with permission denied on its first query, which is why the flag follows the
 role. A role the archive names that does not exist on the target fails the
 whole restore, loudly, rather than having its objects reassigned.
 
-A dump restore needs no extension hook: since `0068` the archive holds ordinary
-tables, so `pg_restore --clean` never meets the statement TimescaleDB refuses,
-whether or not the target has the extension installed. (A dump taken before
-`0068` still needs the extension's hooks run by hand — see [Deploying rafiki →
+A post-`0068` dump restore needs no extension hook: the archive holds ordinary
+tables, so `pg_restore --clean` never meets the statement TimescaleDB refuses.
+Two conditions come with that.
+
+**The target must be empty or already past `0068`.** Restoring over a database
+migrated before `0068` makes `--clean` drop and recreate that database's own
+TimescaleDB tables, which fails on `ALTER TABLE ONLY` however ordinary the archive
+is. Restore into a fresh database, or migrate the target to `0068` first.
+
+**The archive can still carry `CREATE EXTENSION timescaledb`.** A dump taken while
+the source database still had the extension installed contains that statement, so
+any target database without it needs the extension files on that server and a
+role allowed to create it — an existing database is no different from a fresh one
+here. A dump taken after the extension was dropped carries no Timescale object at
+all. (A dump taken before `0068` still needs the extension's hooks run by hand,
+with an exact procedure and a shell `trap` — see [Deploying rafiki →
 Backups](deployment.md#backups).)
 
-A restore into a FRESH database is a superuser operation all the same: rafiki's
-own dump creates `vector` and `pg_textsearch` as well, and both are UNTRUSTED
-extensions only a superuser may create — so a non-superuser attempt fails at that
-`CREATE EXTENSION` and rolls back.
+A restore that creates extensions is a superuser operation, and that is not only a
+fresh database: rafiki's own dump creates `vector` and `pg_textsearch` as well,
+and both are UNTRUSTED extensions only a superuser may create — so a
+non-superuser attempt fails at that `CREATE EXTENSION` and rolls back.
 
 Stop the rafikid service before a dump restore: it replaces tables a running
 daemon keeps writing to, so those writes are lost. A dump restore also REFUSES to

@@ -686,20 +686,29 @@ cutover is a restart.
    what makes the backup and the rehearsal copy cheap.
 2. Stop the daemon. `pg_dump -Fc` the database.
 3. **Rehearse:** restore the dump into a new database `rafiki_migrate`
-   (`rafikid db restore --force --db <new database> <dump>`; a dump restore
-   needs no extension hook, so a target without `timescaledb` restores it the
-   same way, which is what a database created from `template0` gives you).
+   (`rafikid db restore --force --db <new database> <dump>`; a post-`0068` dump
+   needs no extension hook, so a target database created from `template0`
+   restores it the same way — provided the target has no TimescaleDB tables of
+   its own, since `--clean` would have to drop and recreate those and fails on
+   `ALTER TABLE ONLY`. If the dump's source still had `timescaledb` installed,
+   the archive also carries `CREATE EXTENSION timescaledb`, which needs the
+   extension files on that server and a role allowed to create it.)
    Restoring, rather than `CREATE DATABASE … TEMPLATE`, is the point: it proves
    the backup restores. Run `rafikid migrate` against it, then `rafikid tree
    check`, and record the time of each step. Repeat from the dump until clean.
-   A dump taken before migration `0068` still holds hypertable definitions: that
-   one restores only into a server with `timescaledb` installed, needs prod's
-   extension versions, and needs `timescaledb_pre_restore()` and
-   `timescaledb_post_restore()` run by hand as a superuser around pg_restore —
-   the verb does not run them. Pass `--db` to every `rafikid` command:
-   `service.env` sets `RAFIKI_DB` to prod and every invocation loads it. Earlier
-   iterations run against a data-only shadow copy instead (schema from our own
-   migrations, so the version skew does not apply).
+   A dump taken before migration `0068` still holds hypertable definitions and
+   the extension's catalog, so it restores only into a server with `timescaledb`
+   installed at the same version, and only with the extension's hooks around
+   `pg_restore`: `SELECT timescaledb_pre_restore();`, then
+   `pg_restore -d <db> --clean --if-exists --single-transaction <dump>`, then
+   `SELECT timescaledb_post_restore();` — as a superuser, and with the post call
+   in a shell `trap` so it runs even when `pg_restore` fails or is interrupted,
+   or `timescaledb.restoring` stays set for every later session on that database.
+   The verb does not run them; the full script is in [Deploying rafiki →
+   Backups](../guide/deployment.md#backups). Pass `--db` to every `rafikid`
+   command: `service.env` sets `RAFIKI_DB` to prod and every invocation loads it.
+   Earlier iterations run against a data-only shadow copy instead (schema from our
+   own migrations, so the version skew does not apply).
 4. Migrate the real database, run `rafikid tree check`, `VACUUM FULL
    conversations.conversation` (repacks the pages `fillfactor 85` only applies to
    new writes), start the new daemon. Keep the dump until the new daemon has run
