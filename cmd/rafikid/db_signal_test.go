@@ -17,12 +17,11 @@ import (
 
 // A signal must CANCEL a db verb, not kill the process.
 //
-// Both destructive verbs finish their safety work in a defer: `db restore` runs
-// timescaledb_post_restore() from it (and rolls a physical restore back), and
-// `db backup` restarts the embedded server from it. Go's default disposition for
-// SIGINT/SIGTERM/SIGHUP skips every defer, so an interrupt would leave a
-// TimescaleDB database with the extension's DDL hooks switched off for every
-// later session, or the embedded server stopped.
+// Both destructive verbs finish their safety work in a defer: `db restore`
+// rolls a physical restore back from it, and `db backup` restarts the embedded
+// server from it. Go's default disposition for SIGINT/SIGTERM/SIGHUP skips every
+// defer, so an interrupt would leave a physical restore's data directory
+// displaced, or the embedded server stopped.
 func TestDbVerbsCancelOnASignal(t *testing.T) {
 	c := assert.NewAborting(t)
 
@@ -56,6 +55,6 @@ func TestDbVerbsCancelOnASignal(t *testing.T) {
 	case <-leaf.Context().Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("SIGTERM did not cancel the db verb's context: an interrupt would kill the process, " +
-			"skipping the TimescaleDB post hook, the physical rollback and the server restart")
+			"skipping the physical rollback and the server restart")
 	}
 }

@@ -51,14 +51,12 @@ physical copy of the embedded data directory), restore (put one back — it need
 // path rather than killing the process underneath it.
 //
 // It matters because both destructive verbs finish their safety work in a defer:
-// `db restore` runs timescaledb_post_restore() from it (and rolls a physical
-// restore back), and `db backup` restarts the embedded server from it. Go's
-// default disposition for SIGINT/SIGTERM/SIGHUP kills the process outright, so
-// a Ctrl-C during `db restore` would leave a TimescaleDB database with
-// timescaledb.restoring on — the extension's DDL hooks off for every later
-// session — and a Ctrl-C during a physical backup would leave the embedded
-// server stopped. Cancelling the context instead makes `exec.CommandContext`
-// kill pg_restore, unwinds into the rollback/restart, and then exits non-zero.
+// `db restore` rolls a physical restore back from it, and `db backup` restarts
+// the embedded server from it. Go's default disposition for SIGINT/SIGTERM/
+// SIGHUP kills the process outright, so a Ctrl-C during a physical restore would
+// leave the data directory displaced (or half-swapped), and a Ctrl-C during a
+// physical backup would leave the embedded server stopped. Cancelling the
+// context instead unwinds into the rollback/restart, and then exits non-zero.
 //
 // It is scoped to the db group rather than wrapped around Execute in main(),
 // because the daemon (`rafikid` with no verb) has its own signal handling for a

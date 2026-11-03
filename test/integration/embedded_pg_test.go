@@ -17,8 +17,9 @@ package integration_test
 // Nothing here touches the suite's shared RAFIKI_TEST_DSN database: every XDG
 // base points into this test's own /tmp tree, so the cluster, its socket and
 // the daemon's state are thrown away with it. The one test that does reach that
-// server — the TimescaleDB backup round trip — creates and drops a scratch
-// database of its own and never reads or writes rafiki_test's rows.
+// server — the dump backup round trip on a server with timescaledb installed —
+// creates and drops a scratch database of its own and never reads or writes
+// rafiki_test's rows.
 
 import (
 	"context"
@@ -687,7 +688,8 @@ func TestEmbeddedPostgresMigratesWithoutExtensions(t *testing.T) {
 // situation and exactly why the command needs --force: it stops the server for
 // the copy and starts it again afterwards. The restore makes the same trade,
 // and this is the PHYSICAL path; the dump path is proved against a migrated
-// TimescaleDB database in TestDbBackupRestoreRoundTripOnTimescaleDB.
+// database of a server with timescaledb installed in
+// TestDbBackupRestoreRoundTripOnAServerWithTimescaleInstalled.
 //
 // The format is xz: tgz exists for a consumer that only speaks gzip and is
 // never chosen automatically, so txz is what a physical backup is by default.
@@ -807,23 +809,19 @@ func TestEmbeddedPostgresBackupRestoreRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDbBackupRestoreRoundTripOnTimescaleDB is the same round trip against the
-// database most installs actually run: a migrated TimescaleDB database on the
-// test server. It is the only test that exercises the extension's restore hooks
-// and the only one that runs `pg_restore --clean` against a hypertable, so a
-// restore that only works on plain tables is caught here rather than on an
-// operator's real database.
-//
-// No chunk ROW is written: the claim is about the hypertable's parent table and
-// its foreign keys, which --clean has to drop and recreate through TimescaleDB's
-// hooks, and about the extension's catalog surviving the restore (a --clean that
-// recreated the parent as an ordinary table would still return the row, and
-// would still be a broken install). The row itself goes into a plain table.
+// TestDbBackupRestoreRoundTripOnAServerWithTimescaleInstalled is the same round
+// trip on a migrated database of a server that has timescaledb installed — the
+// server most installs actually run. The database has no hypertable: 0068 leaves
+// the three formerly-hypertable tables ordinary, so the restore needs no
+// TimescaleDB hook to succeed, and this test is what says so against a real
+// server rather than a stub. `pg_restore --clean` still drops and recreates every
+// object the archive holds, the extension's catalog included, which is the part
+// a plain-server round trip cannot reach.
 //
 // It uses its OWN scratch database, created and dropped here. The shared
 // RAFIKI_TEST_DSN database is not reset between runs (CLAUDE.md), and a restore
 // is precisely the operation that must not touch rows another run left behind.
-func TestDbBackupRestoreRoundTripOnTimescaleDB(t *testing.T) {
+func TestDbBackupRestoreRoundTripOnAServerWithTimescaleInstalled(t *testing.T) {
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -853,19 +851,19 @@ func TestDbBackupRestoreRoundTripOnTimescaleDB(t *testing.T) {
 	c.NoError(scratch.QueryRow(ctx, "SELECT current_database()").Scan(&dbname), "current_database")
 	c.Eq(name, dbname, "the round trip must run against the scratch database, not RAFIKI_TEST_DSN's own")
 
-	// The extension is what this test exists for. A plain server would run the
-	// restore with beginTimescaleRestore's no-op and pass — proving nothing
-	// about the hooks, while looking exactly like a pass.
+	// The extension is what this test exists for: a server without it would run
+	// the restore against a database nothing distinguishes from a plain one, and
+	// pass while proving nothing about the server it names.
 	c.Require().Eq(int64(1), queryInt(t, scratch, "is timescaledb installed",
 		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`),
-		"RAFIKI_TEST_DSN's server must have timescaledb installed (and in template1): this round trip "+
-			"is the only test of the extension's restore hooks, and it proves nothing without them")
-	// Before the backup, so a restore that silently turned the parent into a
-	// plain table is a difference rather than a coincidence.
-	c.Eq(int64(1), queryInt(t, scratch, "the hypertable before the backup",
+		"RAFIKI_TEST_DSN's server must have the extension installed (and in template1), or this test "+
+			"proves nothing about the server it names")
+	// Before the backup, so a restore that silently rebuilt the table as something
+	// else is a difference rather than a coincidence.
+	c.Eq(int64(0), queryInt(t, scratch, "the formerly-hypertable table before the backup",
 		`SELECT count(*) FROM timescaledb_information.hypertables
 		  WHERE hypertable_name = 'conversation_turn'`),
-		"conversations.conversation_turn must be a hypertable here, or the restore proves nothing")
+		"conversation_turn must be an ordinary table before the backup")
 
 	const (
 		username = "bk-roundtrip"
@@ -914,16 +912,10 @@ func TestDbBackupRestoreRoundTripOnTimescaleDB(t *testing.T) {
 		"read the memory back after the restore")
 	c.Eq(memBody, body, "the row a dump restore brings back must be the one the backup wrote")
 
-	c.Eq(int64(1), queryInt(t, readback, "the hypertable after the restore",
+	c.Eq(int64(0), queryInt(t, readback, "the formerly-hypertable table after the restore",
 		`SELECT count(*) FROM timescaledb_information.hypertables
 		  WHERE hypertable_name = 'conversation_turn'`),
-		"conversations.conversation_turn must still be a hypertable after a dump restore")
-	// The hooks put the extension back: a restore that left the database in
-	// restoring mode would have the extension's DDL hooks off for every new
-	// session, which is the failure the bracket exists to prevent.
-	var restoring string
-	c.NoError(readback.QueryRow(ctx, "SHOW timescaledb.restoring").Scan(&restoring), "SHOW timescaledb.restoring")
-	c.Eq("off", restoring, "the restore must leave the extension's restore mode off, got %q", restoring)
+		"conversation_turn must be an ordinary table after a dump restore")
 }
 
 // dsnForDatabase points a test DSN at another database on the same server,
@@ -1278,17 +1270,17 @@ func scratchDatabase(t *testing.T, admin *pgxpool.Pool, dsn, prefix, template st
 	return name, dsnForDatabase(t, dsn, name)
 }
 
-// TestDbRestoreIntoAFreshDatabaseWithoutTheExtension pins the one Timescale
-// restore path that needs NO hooks: a target where the extension is available
-// but not installed. The archive's own CREATE EXTENSION creates it, so --clean
-// finds nothing to drop and pg_restore's ALTER TABLE ONLY statements never reach
-// a hypertable — which is what makes the documented rehearsal ("restore the
-// dump into a new database") work.
+// TestDbRestoreIntoAFreshDatabaseWithoutTheExtension pins the restore path whose
+// target lacks the extension altogether: timescaledb is available on the server
+// but not installed in the database. The archive's own CREATE EXTENSION creates
+// it, so --clean finds nothing to drop, and the archive carries no hypertable to
+// trip over either (0068 leaves conversation_turn an ordinary table) — which is
+// what makes the documented rehearsal ("restore the dump into a new database")
+// work.
 //
 // It still runs as a superuser, deliberately: the same archive creates the
 // UNTRUSTED vector and pg_textsearch extensions, and a non-superuser cannot
-// CREATE EXTENSION them, so a fresh-database restore is a superuser step
-// whatever the timescaledb hook question is.
+// CREATE EXTENSION them, so a fresh-database restore is a superuser step.
 //
 // The target is created from template0 ON PURPOSE: rafiki's test container puts
 // timescaledb in template1, so an ordinary new database would have it installed
@@ -1346,8 +1338,8 @@ func TestDbRestoreIntoAFreshDatabaseWithoutTheExtension(t *testing.T) {
 		"db", "restore", "--force", "--db", targetDSN, backupPath)
 	c.NoError(err, "rafikid db restore into a fresh database: %v\noutput: %s", err, out)
 
-	// The archive carried the extension, so the database is a TimescaleDB one
-	// now — and it is whole, not the half-built result of a refused `ONLY`.
+	// The archive carried the extension, so the database has it now, and the
+	// restored schema is whole — every object the archive holds came back.
 	var body string
 	c.NoError(target.QueryRow(ctx, `SELECT body FROM conversations.memory
 		WHERE owner_user_id = $1 AND name = $2`, ownerID, memName).Scan(&body),
@@ -1356,10 +1348,10 @@ func TestDbRestoreIntoAFreshDatabaseWithoutTheExtension(t *testing.T) {
 	c.Eq(int64(1), queryInt(t, target, "the extension the archive created",
 		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`),
 		"the archive's CREATE EXTENSION must have installed timescaledb")
-	c.Eq(int64(1), queryInt(t, target, "the hypertable in the fresh database",
+	c.Eq(int64(0), queryInt(t, target, "the formerly-hypertable table in the fresh database",
 		`SELECT count(*) FROM timescaledb_information.hypertables
 		  WHERE hypertable_name = 'conversation_turn'`),
-		"conversations.conversation_turn must be a hypertable in the restored database")
+		"conversation_turn must be an ordinary table in the restored database")
 }
 
 // dsnAsUser points a test DSN at another role on the same server. It is the

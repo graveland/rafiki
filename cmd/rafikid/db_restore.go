@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/spf13/cobra"
 	"github.com/ulikunitz/xz"
 
@@ -111,27 +110,12 @@ file is, sniffed from its content rather than its extension:
       and then ownership has to be fixed by hand or the daemon cannot read the
       data.
 
-      On a database with the timescaledb extension it is bracketed by that
-      extension's own timescaledb_pre_restore()/timescaledb_post_restore()
-      calls: pg_restore --clean issues ALTER TABLE ONLY statements, which
-      TimescaleDB refuses against a hypertable, so without them the restore
-      fails on the first foreign key it tries to drop. The post call runs even
-      when the restore fails, because pre_restore leaves the extension's DDL
-      hooks off database-wide until it does. Those hooks need a SUPERUSER
-      connection: they run ALTER DATABASE ... SET timescaledb.restoring, which
-      no other role may set, and then stop background workers, which only a
-      superuser may do (a GRANT SET ON PARAMETER covers the setting and not the
-      workers). So a restore of a non-empty TimescaleDB database is refused
-      cleanly, before anything is touched, unless --db names a superuser's
-      connection. A database where the extension is NOT installed needs no hooks
-      — the archive's own CREATE EXTENSION makes it — but rafiki's own dump
-      creates the untrusted vector and pg_textsearch extensions too, so a
-      non-superuser restore into a fresh database fails at that CREATE EXTENSION
-      and rolls back. Whichever way: stop the daemon first if the database has
-      the extension (a session opened while the restore runs inherits
-      timescaledb.restoring for its whole life), and a dump restore REFUSES to
-      start while a local rafikid answers on its socket unless --force accepts
-      that.
+      Restoring into a FRESH database is a superuser step: rafiki's own dump
+      creates the untrusted vector and pg_textsearch extensions, so a
+      non-superuser restore fails at that CREATE EXTENSION and rolls back. And a
+      dump restore REFUSES to start while a local rafikid answers on its socket,
+      because that daemon keeps writing to the tables this restore replaces:
+      stop it first (rafiki service stop), or pass --force to accept it.
 
   a physical archive (a tar, or a gzip/xz stream of one)
       the embedded server's data directory is replaced: the server is stopped
@@ -176,16 +160,15 @@ outcome worth refusing outright.
 
 SIGINT, SIGTERM and SIGHUP cancel a restore rather than killing the process, so
 an interrupted run takes the failure path and says so: a dump restore stops
-pg_restore (whose single transaction rolls back) and puts TimescaleDB's hooks
-back, and a physical one never starts the swap — before the first rename, and
-again after a stop that took up to 90 seconds — restarting the server it stopped
-and leaving the data directory untouched. Once the two renames have begun the
-command finishes the swap — the renames themselves are not interruptible — and an
-interrupt that arrives then rolls the completed swap BACK: the previous data
-directory is put in place again, the restored tree is discarded, and the command
-exits non-zero. A SECOND signal kills the process outright, which can leave a
-TimescaleDB database in restoring mode (the manual remedy is SELECT
-timescaledb_post_restore()) or a physical restore's marker in place.`,
+pg_restore (whose single transaction rolls back), and a physical one never starts
+the swap — before the first rename, and again after a stop that took up to 90
+seconds — restarting the server it stopped and leaving the data directory
+untouched. Once the two renames have begun the command finishes the swap — the
+renames themselves are not interruptible — and an interrupt that arrives then
+rolls the completed swap BACK: the previous data directory is put in place again,
+the restored tree is discarded, and the command exits non-zero. A SECOND signal
+kills the process outright, which can leave a physical restore's marker in
+place.`,
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -228,23 +211,18 @@ func runRestore(ctx context.Context, configured, path string, force, noOwner boo
 			"only thing that restores into it", path)
 	}
 
-	// A dump restore into a database with the TimescaleDB extension changes a
-	// DATABASE-level default (timescaledb.restoring), and a daemon connection
-	// opened while the restore runs keeps it for its whole life: its DDL hooks
-	// stay off after the restore has "succeeded", which is not something the
-	// docs can be trusted to prevent. So a local daemon is refused here, before
-	// anything is touched, unless the operator accepts it explicitly.
+	// A dump restore replaces the tables a running daemon keeps writing to, so a
+	// local daemon is refused here, before anything is touched, unless the
+	// operator accepts it explicitly.
 	if kind == restoreDump {
 		if listening, socket := daemonListening(); listening {
 			if !force {
 				return fmt.Errorf("rafikid db restore: rafikid is running on this host (%s accepts connections), "+
-					"and a connection it opens while this restore runs keeps timescaledb.restoring on for its "+
-					"whole life — the extension's DDL hooks stay off in that session. Stop it first (rafiki "+
-					"service stop), or re-run with --force to accept that a live daemon may hold a session in "+
-					"restore mode", socket)
+					"and it keeps writing to the tables this restore replaces. Stop it first (rafiki service "+
+					"stop), or re-run with --force to restore under a live daemon", socket)
 			}
-			fmt.Fprintf(stderr, "rafikid db restore: warning: rafikid is running on this host (%s); a database "+
-				"session it opens while this restore runs can keep timescaledb.restoring on until it is closed\n", socket)
+			fmt.Fprintf(stderr, "rafikid db restore: warning: rafikid is running on this host (%s); it may "+
+				"write to the tables this restore replaces\n", socket)
 		}
 	}
 
@@ -422,169 +400,18 @@ func restoreDumpArchive(ctx context.Context, configured, path string, noOwner bo
 	}
 	fmt.Fprintln(stderr, inv.target)
 
-	// TimescaleDB has to be told the restore is coming, or pg_restore's own
-	// `ALTER TABLE ONLY` statements are refused against every hypertable. See
-	// beginTimescaleRestore: a database without the extension gets a no-op.
-	post, err := timescaleRestoreHooks(ctx, dsn, database)
-	if err != nil {
-		return fmt.Errorf("rafikid db restore: %w", err)
-	}
-
-	runErr := func() error {
-		cmd := exec.CommandContext(ctx, inv.path, inv.argv[1:]...)
-		cmd.Env = inv.env
-		// pg_restore's own stderr is passed straight through: a refusal such as
-		// an unsupported archive version is the only place it is explained.
-		// stdout stays clean, so a script's output is unaffected.
-		cmd.Stdout = io.Discard
-		cmd.Stderr = stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("rafikid db restore: pg_restore: %w", err)
-		}
-		return nil
-	}()
-
-	// The post hook runs on BOTH paths. timescaledb_pre_restore sets a
-	// DATABASE-level GUC, so a restore that died between the two calls would
-	// leave the extension's DDL hooks off for every later session on that
-	// database — a hypertable created afterwards would silently be a plain
-	// table, which is a worse outcome than the restore failing loudly. Its
-	// context is detached and bounded for the same reason: a cancelled command
-	// still has to put the extension back.
-	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timescalePostRestoreTimeout)
-	defer cancel()
-	if perr := post(pctx); perr != nil {
-		return errors.Join(runErr, fmt.Errorf("rafikid db restore: %w", perr))
-	}
-	if runErr != nil {
-		return runErr
+	// pg_restore's own stderr is passed straight through: a refusal such as an
+	// unsupported archive version is the only place it is explained. stdout stays
+	// clean, so a script's output is unaffected.
+	run := exec.CommandContext(ctx, inv.path, inv.argv[1:]...)
+	run.Env = inv.env
+	run.Stdout = io.Discard
+	run.Stderr = stderr
+	if rerr := run.Run(); rerr != nil {
+		return fmt.Errorf("rafikid db restore: pg_restore: %w", rerr)
 	}
 
 	fmt.Fprintf(stderr, "rafikid db restore: restored %s (format %s)\n", path, formatDump)
-	return nil
-}
-
-// timescalePostRestoreTimeout bounds the post hook, which runs detached from the
-// restore's own context: it must complete even when the operator interrupted the
-// restore.
-const timescalePostRestoreTimeout = 30 * time.Second
-
-// timescaleRestoreHooks brackets a dump restore with TimescaleDB's own pre/post
-// restore calls when the target database has the extension. It is a variable so
-// the dump path's tests can stand in for the server: what has to be right is the
-// ORDER — pre before pg_restore, post even when pg_restore fails — and that is
-// observable without a database. The third argument is the database NAME (already
-// printed with the target), used by the error that says the database was left in
-// restoring mode; it is never a DSN.
-var timescaleRestoreHooks = beginTimescaleRestore
-
-// beginTimescaleRestore runs timescaledb_pre_restore() when the database dsn
-// names has the extension, and returns the matching post call. A database
-// without it gets a no-op, because there are no hooks to disable there.
-//
-// It exists because `pg_restore --clean` drops and recreates every object in the
-// archive with `ALTER TABLE ONLY`, and TimescaleDB refuses those against a
-// hypertable: "ONLY option not supported on hypertable operations". The
-// extension's own hooks are the supported way through — pre_restore sets the
-// DATABASE-level timescaledb.restoring GUC, which makes the extension leave
-// hypertables alone while pg_restore works, and post_restore clears it. Without
-// them a dump restore into a TimescaleDB install fails on the first foreign key
-// it tries to drop, and TimescaleDB is what the deployment guide describes.
-func beginTimescaleRestore(ctx context.Context, dsn, database string) (func(context.Context) error, error) {
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("connecting to the server: %w", err)
-	}
-	var installed bool
-	if err := conn.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')`).Scan(&installed); err != nil {
-		_ = conn.Close(context.WithoutCancel(ctx))
-		return nil, fmt.Errorf("reading the installed extensions: %w", err)
-	}
-	if !installed {
-		_ = conn.Close(context.WithoutCancel(ctx))
-		return func(context.Context) error { return nil }, nil
-	}
-	if _, err := conn.Exec(ctx, `SELECT timescaledb_pre_restore()`); err != nil {
-		_ = conn.Close(context.WithoutCancel(ctx))
-		// The hint is the remedy for ONE failure, the privilege refusal; a
-		// cancelled context or a lost connection gets the real error instead.
-		// Those can still have COMMITTED the setting before the error reached
-		// us, and it is database state, so putting it back is attempted on
-		// every other failure path too (post_restore is idempotent).
-		if isPermissionDenied(err) {
-			return nil, fmt.Errorf("timescaledb_pre_restore: %w; %s", err, timescaleSuperuserHint)
-		}
-		return nil, errors.Join(fmt.Errorf("timescaledb_pre_restore: %w", err),
-			clearTimescaleRestoring(ctx, dsn, database))
-	}
-	// The session stays open across pg_restore: the flag it set is database-wide,
-	// but the post call belongs to the same server. It may die meanwhile (an idle
-	// timeout, a proxy, a server restart), which is why the post call redials
-	// once: the flag it clears is database state, so a fresh connection is as
-	// good as the old one, and the alternative is a database left in restoring
-	// mode.
-	return func(fctx context.Context) error {
-		defer func() { _ = conn.Close(context.WithoutCancel(fctx)) }()
-		first := execPostRestore(fctx, conn)
-		if first == nil {
-			return nil
-		}
-		fresh, derr := pgx.Connect(fctx, dsn)
-		if derr != nil {
-			return postRestoreLeftTheDatabase(database, first, derr)
-		}
-		defer func() { _ = fresh.Close(context.WithoutCancel(fctx)) }()
-		if rerr := execPostRestore(fctx, fresh); rerr != nil {
-			return postRestoreLeftTheDatabase(database, first, rerr)
-		}
-		return nil
-	}, nil
-}
-
-// execPostRestore runs the post hook on one session.
-func execPostRestore(ctx context.Context, conn *pgx.Conn) error {
-	if _, err := conn.Exec(ctx, `SELECT timescaledb_post_restore()`); err != nil {
-		return fmt.Errorf("timescaledb_post_restore: %w", err)
-	}
-	return nil
-}
-
-// timescaleSuperuserHint is the remedy for the refusal a production install WILL
-// hit: timescaledb_pre_restore() runs `ALTER DATABASE ... SET
-// timescaledb.restoring`, and that setting is superuser-only, so the hook cannot
-// run as the daemon's own role (which the deployment guide deliberately keeps
-// unprivileged). Naming it here saves an operator from reading the hook's own
-// CONTEXT lines.
-const timescaleSuperuserHint = "the hook runs ALTER DATABASE ... SET timescaledb.restoring, a superuser-only " +
-	"setting, so the restore has to connect as a superuser (the daemon's own role deliberately is not one)"
-
-// postRestoreLeftTheDatabase is the error for a post hook that could not be run
-// at all, even after a redial. It names the state the database is in and the
-// manual remedy, because there is nothing left to try automatically and silence
-// would leave every later session with the extension's DDL hooks switched off.
-func postRestoreLeftTheDatabase(database string, errs ...error) error {
-	return fmt.Errorf("the extension could not be put back into service (%v): the database %q "+
-		"is left with timescaledb.restoring on, which switches the extension's DDL hooks off for every "+
-		"session started from now on — clear it with `rafikid db psql -- -c 'SELECT timescaledb_post_restore()'` "+
-		"as a superuser", errors.Join(errs...), database)
-}
-
-// clearTimescaleRestoring puts the extension back after a pre_restore whose
-// outcome is unknown, on its OWN connection: the session that ran it is gone,
-// which is usually why the outcome is unknown. nil means the database is back to
-// normal.
-func clearTimescaleRestoring(ctx context.Context, dsn, database string) error {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timescalePostRestoreTimeout)
-	defer cancel()
-	conn, err := pgx.Connect(cctx, dsn)
-	if err != nil {
-		return postRestoreLeftTheDatabase(database, err)
-	}
-	defer func() { _ = conn.Close(context.WithoutCancel(cctx)) }()
-	if perr := execPostRestore(cctx, conn); perr != nil {
-		return postRestoreLeftTheDatabase(database, perr)
-	}
 	return nil
 }
 
@@ -639,14 +466,6 @@ func syncDir(dir string) error {
 	}
 	defer f.Close()
 	return f.Sync()
-}
-
-// isPermissionDenied reports whether err is PostgreSQL's own refusal (SQLSTATE
-// 42501) rather than a cancellation or a lost connection — the one case where
-// the superuser requirement is the remedy the operator needs told.
-func isPermissionDenied(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "42501"
 }
 
 // embeddedRestoreOps are the operations a physical restore performs on the

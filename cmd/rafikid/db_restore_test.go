@@ -893,7 +893,6 @@ exit 0
 func TestRestoreDumpPutsArchiveInArgvNotTheDSN(t *testing.T) {
 	c := assert.NewAborting(t)
 	argvFile, envFile := fakePgRestoreDir(t)
-	hooks := stubTimescaleHooks(t)
 	stubRestoreGates(t)
 
 	dir := t.TempDir()
@@ -927,11 +926,6 @@ func TestRestoreDumpPutsArchiveInArgvNotTheDSN(t *testing.T) {
 	c.StrContains(stderr.String(), archive, "the report must name the archive, got: %s", stderr.String())
 	c.StrContains(stderr.String(), "format "+formatDump, "the report must name the format, got: %s", stderr.String())
 	c.NotStrContains(stderr.String(), "s3cret", "the report must not echo the DSN, got: %s", stderr.String())
-
-	// The TimescaleDB hooks bracket THIS database — the one the DSN resolved to —
-	// and the post call runs once, after the restore.
-	c.Eq("postgres://alice:s3cret@db.example:6543/app", hooks.dsn, "the hooks must run against the resolved DSN")
-	c.Eq(1, hooks.postCalls, "the post hook must run exactly once")
 }
 
 // A restore of a REMOTE database with no pg_restore on PATH refuses in a
@@ -1002,7 +996,6 @@ func TestRestoreDumpRefusesADSNWithNoDatabase(t *testing.T) {
 // unsupported archive version is only explained there.
 func TestRestoreDumpReportsAFailure(t *testing.T) {
 	c := assert.NewAborting(t)
-	hooks := stubTimescaleHooks(t)
 	stubRestoreGates(t)
 	dir := t.TempDir()
 	script := "#!/bin/sh\necho 'pg_restore: error: unsupported version (1.15) in file header' >&2\nexit 1\n"
@@ -1019,10 +1012,6 @@ func TestRestoreDumpReportsAFailure(t *testing.T) {
 	c.ErrorContains(err, "pg_restore", "error, got: %v", err)
 	c.StrContains(stderr.String(), "unsupported version", "pg_restore's own diagnosis must reach the operator, got: %s",
 		stderr.String())
-
-	// The extension's hooks are put back even though the restore failed: leaving
-	// timescaledb.restoring on disables its DDL hooks for every later session.
-	c.Eq(1, hooks.postCalls, "the post hook must run even when pg_restore fails")
 }
 
 // --- the unpacker, against the producer's output -----------------------------
@@ -1247,7 +1236,6 @@ func TestRestorePhysicalRollsBackAFailedStartOnAFreshInstall(t *testing.T) {
 func TestRestoreDumpPassesAFlagShapedPathAfterADoubleDash(t *testing.T) {
 	c := assert.NewAborting(t)
 	argvFile, _ := fakePgRestoreDir(t)
-	stubTimescaleHooks(t)
 	stubRestoreGates(t)
 
 	dir := t.TempDir()
@@ -1296,57 +1284,6 @@ func TestRestorePhysicalLeavesBothTreesWhenTheRollbackCannotStop(t *testing.T) {
 	c.FileExists(dataDir+embedpg.RestoreInProgressSuffix, "the marker must stay while the install is displaced")
 }
 
-// timescaleHookRecorder stands in for beginTimescaleRestore. It appends "pre"
-// and "post" to a file the fake pg_restore appends to as well, which is how the
-// ORDER is checked across the two processes: an in-memory slice could only say
-// that both ran, and the property that matters is that the extension is put back
-// AFTER the restore, whatever it did.
-type timescaleHookRecorder struct {
-	t         *testing.T
-	order     string
-	dsn       string
-	database  string
-	preErr    error
-	postErr   error
-	postCalls int
-}
-
-// stubTimescaleHooks replaces the TimescaleDB bracketing for the duration of the
-// test, so a dump test does not dial the DSN it names. Its order file is
-// recorded; the fake pg_restore has to append to the same one.
-func stubTimescaleHooks(t *testing.T) *timescaleHookRecorder {
-	t.Helper()
-	r := &timescaleHookRecorder{t: t, order: filepath.Join(t.TempDir(), "order.txt")}
-	orig := timescaleRestoreHooks
-	t.Cleanup(func() { timescaleRestoreHooks = orig })
-	timescaleRestoreHooks = func(_ context.Context, dsn, database string) (func(context.Context) error, error) {
-		r.dsn = dsn
-		r.database = database
-		if r.preErr != nil {
-			return nil, r.preErr
-		}
-		r.append("pre")
-		return func(context.Context) error {
-			r.postCalls++
-			r.append("post")
-			return r.postErr
-		}, nil
-	}
-	return r
-}
-
-// append records one step of the sequence the restore performed.
-func (r *timescaleHookRecorder) append(line string) {
-	f, err := os.OpenFile(r.order, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		r.t.Fatalf("record %q: %v", line, err)
-	}
-	defer f.Close()
-	if _, err := fmt.Fprintln(f, line); err != nil {
-		r.t.Fatalf("record %q: %v", line, err)
-	}
-}
-
 // stubRestoreGates replaces the dump path's two other server-facing seams: the
 // role probe (which would dial the DSN) and the local-daemon probe (which would
 // find a DEVELOPER's rafikid on the real socket and refuse the test's restore).
@@ -1369,87 +1306,6 @@ type restoreGates struct {
 	roleErr      error
 	daemonAlive  bool
 	daemonSocket string
-}
-
-// steps returns the recorded sequence, one entry per line.
-func (r *timescaleHookRecorder) steps() []string {
-	body, err := os.ReadFile(r.order)
-	if err != nil {
-		r.t.Fatalf("read the order file: %v", err)
-	}
-	return strings.Fields(string(body))
-}
-
-// fakeOrderedPgRestore puts a pg_restore on PATH that appends one line to the
-// recorder's order file and exits with status, so a test can see where the
-// restore itself falls in the sequence.
-func fakeOrderedPgRestore(t *testing.T, r *timescaleHookRecorder, status int) {
-	t.Helper()
-	dir := t.TempDir()
-	script := fmt.Sprintf("#!/bin/sh\nprintf 'pg_restore\\n' >> %q\nexit %d\n", r.order, status)
-	if err := os.WriteFile(filepath.Join(dir, "pg_restore"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake pg_restore: %v", err)
-	}
-	t.Setenv("PATH", dir)
-}
-
-// The TimescaleDB hooks bracket the restore, in that order: pre before
-// pg_restore (or its ALTER TABLE ONLY statements are refused against a
-// hypertable), and post after it. This is the ordering the real command was
-// found to need against a migrated TimescaleDB database — a restore without it
-// fails with "ONLY option not supported on hypertable operations".
-func TestRestoreDumpBracketsTheTimescaleRestore(t *testing.T) {
-	c := assert.NewAborting(t)
-	hooks := stubTimescaleHooks(t)
-	fakeOrderedPgRestore(t, hooks, 0)
-	stubRestoreGates(t)
-
-	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
-	var stderr bytes.Buffer
-
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
-	c.NoError(err, "runRestore returned error: %s", stderr.String())
-	c.EqDeep([]string{"pre", "pg_restore", "post"}, hooks.steps(),
-		"the extension must be told before pg_restore runs and put back after it")
-}
-
-// A failed pg_restore still gets the post call: timescaledb_pre_restore sets a
-// DATABASE-level flag that switches the extension's DDL hooks off, so a restore
-// that gave up between the two would leave the database silently treating every
-// later hypertable as a plain table.
-func TestRestoreDumpRestoresTheTimescaleHooksWhenPgRestoreFails(t *testing.T) {
-	c := assert.NewAborting(t)
-	hooks := stubTimescaleHooks(t)
-	fakeOrderedPgRestore(t, hooks, 1)
-	stubRestoreGates(t)
-
-	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
-	var stderr bytes.Buffer
-
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
-	c.Error(err, "want the pg_restore failure, got nil")
-	c.EqDeep([]string{"pre", "pg_restore", "post"}, hooks.steps(),
-		"the post hook must run after a FAILED restore too")
-}
-
-// A database the extension cannot be prepared on is refused before pg_restore
-// runs, because a restore that starts without the hooks fails on the first
-// foreign key it drops — and the failure would look like a broken archive.
-func TestRestoreDumpRefusesWhenTheTimescaleHooksFail(t *testing.T) {
-	c := assert.NewAborting(t)
-	hooks := stubTimescaleHooks(t)
-	hooks.preErr = errors.New("timescaledb_pre_restore: permission denied")
-	argvFile, _ := fakePgRestoreDir(t)
-	stubRestoreGates(t)
-
-	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
-	var stderr bytes.Buffer
-
-	err := runRestore(context.Background(), "postgres://u@h/app", archive, true, false, &stderr)
-	c.Error(err, "want the hook failure, got nil")
-	c.ErrorContains(err, "timescaledb_pre_restore", "error, got: %v", err)
-	c.NoFileExists(argvFile, "pg_restore must not run when the extension could not be prepared")
-	c.Eq(0, hooks.postCalls, "no post call is owed when the pre call never succeeded")
 }
 
 // A restore that has been interrupted BEFORE the swap does not perform it. The
@@ -1489,22 +1345,6 @@ func TestRestorePhysicalRefusesACancelledContext(t *testing.T) {
 	c.NoFileExists(dataDir+embedpg.RestoreInProgressSuffix, "no marker may be left behind")
 }
 
-// A post hook that cannot run leaves the database in restoring mode, and that is
-// the one thing an operator cannot work out from a bare error: the message has
-// to name the state and the manual remedy.
-func TestPostRestoreErrorNamesTheManualRemedy(t *testing.T) {
-	c := assert.NewAborting(t)
-	err := postRestoreLeftTheDatabase("rafiki",
-		errors.New("conn closed"), errors.New("dial tcp 10.0.0.1:5432: connect: refused"))
-	c.Require().NotNil(err)
-
-	msg := err.Error()
-	c.StrContains(msg, "timescaledb.restoring", "the error must name the setting, got: %s", msg)
-	c.StrContains(msg, "SELECT timescaledb_post_restore()", "the error must carry the remedy, got: %s", msg)
-	c.StrContains(msg, `"rafiki"`, "the error must name the database, got: %s", msg)
-	c.NotStrContains(msg, "postgres://", "the error must not leak a DSN, got: %s", msg)
-}
-
 // --- ownership, the daemon gate, the interrupt and the flush ---------------
 
 // Ownership follows the role that connects. pg_restore --no-owner makes the
@@ -1527,7 +1367,6 @@ func TestRestoreDumpPassesNoOwnerOnlyForANonSuperuser(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewAborting(t)
 			argvFile, _ := fakePgRestoreDir(t)
-			stubTimescaleHooks(t)
 			gates := stubRestoreGates(t)
 			gates.superuser = tc.superuser
 
@@ -1559,7 +1398,6 @@ func TestRestoreDumpPassesNoOwnerOnlyForANonSuperuser(t *testing.T) {
 // has to be predictable. Pinned through the seam: pg_restore reports it.
 func TestRestoreDumpPropagatesAMissingOwnerRole(t *testing.T) {
 	c := assert.NewAborting(t)
-	stubTimescaleHooks(t)
 	gates := stubRestoreGates(t)
 	gates.superuser = true
 
@@ -1577,13 +1415,12 @@ func TestRestoreDumpPropagatesAMissingOwnerRole(t *testing.T) {
 		stderr.String())
 }
 
-// A daemon left running while a TimescaleDB dump restore runs is refused, not
-// merely warned about: a connection it opens during the restore keeps
-// timescaledb.restoring on for its whole life, after the restore reports
-// success. --force is the escape hatch, and it says what it accepted.
+// A daemon left running while a dump restore runs is refused, not merely warned
+// about: it keeps writing to the tables the restore replaces, so the two would
+// race and the restore would silently lose those writes. --force is the escape
+// hatch, and it says what it accepted.
 func TestRestoreDumpRefusesUnderALiveDaemon(t *testing.T) {
 	c := assert.NewAborting(t)
-	stubTimescaleHooks(t)
 	stubRestoreGates(t).daemonAlive = true
 	argvFile, _ := fakePgRestoreDir(t)
 
@@ -1593,7 +1430,8 @@ func TestRestoreDumpRefusesUnderALiveDaemon(t *testing.T) {
 
 	c.Error(err, "want a refusal while a local daemon is running, got nil")
 	c.ErrorContains(err, "rafikid is running", "the refusal must name the daemon, got: %v", err)
-	c.ErrorContains(err, "timescaledb.restoring", "the refusal must name the hazard, got: %v", err)
+	c.ErrorContains(err, "keeps writing to the tables this restore replaces",
+		"the refusal must name the hazard, got: %v", err)
 	c.ErrorContains(err, "--force", "the refusal must name the escape hatch, got: %v", err)
 	c.NoFileExists(argvFile, "a refused restore must not run pg_restore")
 }
@@ -1601,7 +1439,6 @@ func TestRestoreDumpRefusesUnderALiveDaemon(t *testing.T) {
 // ...and with --force it proceeds, having said so. Same socket, same restore.
 func TestRestoreDumpProceedsUnderALiveDaemonWithForce(t *testing.T) {
 	c := assert.NewAborting(t)
-	stubTimescaleHooks(t)
 	stubRestoreGates(t).daemonAlive = true
 	argvFile, _ := fakePgRestoreDir(t)
 
@@ -1612,6 +1449,8 @@ func TestRestoreDumpProceedsUnderALiveDaemonWithForce(t *testing.T) {
 
 	c.FileExists(argvFile, "an accepted restore must run pg_restore")
 	c.StrContains(stderr.String(), "warning", "the accepted run must say what it accepted, got: %s", stderr.String())
+	c.StrContains(stderr.String(), "may write to the tables this restore replaces",
+		"the warning must name the hazard it accepted, got: %s", stderr.String())
 }
 
 // A stop can take up to 90 seconds, so an interrupt during it lands after the
@@ -1706,7 +1545,6 @@ func TestRestoreDumpNoOwnerFlagOverridesArchiveOwnership(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewAborting(t)
 			argvFile, _ := fakePgRestoreDir(t)
-			stubTimescaleHooks(t)
 			stubRestoreGates(t).superuser = true
 
 			var stderr bytes.Buffer
