@@ -303,15 +303,20 @@ func dropScratchRole(t *testing.T, role string) {
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, dsn)
 	if err != nil {
+		// The role is cluster-wide: a silent failure here leaves it behind for
+		// every later run to collide with, so say so instead of swallowing it.
+		t.Logf("drop scratch role %s: connect: %v", role, err)
 		return
 	}
 	defer admin.Close()
+	var dropErr error
 	for attempt := 0; attempt < 5; attempt++ {
-		if _, err := admin.Exec(ctx, "DROP ROLE IF EXISTS "+role); err == nil {
+		if _, dropErr = admin.Exec(ctx, "DROP ROLE IF EXISTS "+role); dropErr == nil {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	t.Logf("drop scratch role %s: %v", role, dropErr)
 }
 
 // adorn0068 gives the fixture state 0068 could not produce by accident: a
