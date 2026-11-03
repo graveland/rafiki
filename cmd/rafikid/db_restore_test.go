@@ -886,6 +886,43 @@ exit 0
 	return argvFile, envFile
 }
 
+// fakeBlockingPgRestore puts a pg_restore on PATH that says it has started and
+// then blocks, so a test can cancel the context WHILE the restore is in flight —
+// the case exec.CommandContext exists for, and the one a fake that exits at once
+// cannot express. The marker is the proof it really started.
+func fakeBlockingPgRestore(t *testing.T) (started string) {
+	t.Helper()
+	dir := t.TempDir()
+	started = filepath.Join(dir, "started")
+	// `exec` replaces the shell with sleep, so the kill lands on the process that
+	// would otherwise keep running rather than on its parent.
+	script := `#!/bin/sh
+: > "$FAKE_PGRESTORE_STARTED"
+exec sleep 30
+`
+	if err := os.WriteFile(filepath.Join(dir, "pg_restore"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake pg_restore: %v", err)
+	}
+	// The real PATH stays behind the fake's directory: the script needs `sleep`,
+	// and pg_restore is still found here first.
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_PGRESTORE_STARTED", started)
+	return started
+}
+
+// waitForPath blocks until path exists, or fails the test at the deadline.
+func waitForPath(t *testing.T, path string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s did not appear within %s", path, within)
+}
+
 // The dump path against a real subprocess: the archive path is on argv (it is what
 // the operator typed), the connection is not, and the flags are the ones the
 // command documents — --single-transaction included, which is what makes a failed
@@ -1011,6 +1048,50 @@ func TestRestoreDumpReportsAFailure(t *testing.T) {
 	c.Error(err, "want the pg_restore failure, got nil")
 	c.ErrorContains(err, "pg_restore", "error, got: %v", err)
 	c.StrContains(stderr.String(), "unsupported version", "pg_restore's own diagnosis must reach the operator, got: %s",
+		stderr.String())
+}
+
+// A context cancelled while pg_restore is RUNNING stops it, and the run reports
+// the cancellation instead of a restore. The command's own help text promises
+// this ("a dump restore stops pg_restore, whose single transaction rolls back"),
+// and nothing else pins it.
+//
+// What this proves: pg_restore is really started, the cancellation reaches the
+// child — runRestore returns in the moment after the cancel, not the 30 seconds
+// the fake would otherwise run for — the error names the cancellation rather
+// than an archive problem, and no success line is printed. What it does NOT
+// prove: the server-side rollback, which is `--single-transaction` on argv
+// (TestRestoreDumpPutsArchiveInArgvNotTheDSN) and the server's own behaviour.
+func TestRestoreDumpStopsPgRestoreWhenTheContextIsCancelled(t *testing.T) {
+	c := assert.NewAborting(t)
+	started := fakeBlockingPgRestore(t)
+	stubRestoreGates(t)
+
+	archive := writeBytes(t, filepath.Join(t.TempDir(), "app.dump"), "PGDMP\x01\x0e\x00archive")
+	var stderr bytes.Buffer
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runRestore(ctx, "postgres://u@h/app", archive, true, false, &stderr) }()
+
+	// Cancelled only once pg_restore is known to be RUNNING: a context cancelled
+	// beforehand would prove the weaker property that it never starts at all.
+	waitForPath(t, started, 10*time.Second)
+	cancel()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("runRestore did not return after the context was cancelled: pg_restore was not stopped")
+	}
+
+	c.Error(err, "a cancelled restore must report the cancellation, got nil")
+	c.True(errors.Is(err, context.Canceled), "the error must be the context's own, got: %v", err)
+	c.StrContains(err.Error(), "pg_restore", "the error must name what was stopped, got: %v", err)
+	c.NotStrContains(stderr.String(), "restored ", "a cancelled restore must not report success, got: %s",
 		stderr.String())
 }
 
@@ -1416,9 +1497,13 @@ func TestRestoreDumpPropagatesAMissingOwnerRole(t *testing.T) {
 }
 
 // A daemon left running while a dump restore runs is refused, not merely warned
-// about: it keeps writing to the tables the restore replaces, so the two would
-// race and the restore would silently lose those writes. --force is the escape
-// hatch, and it says what it accepted.
+// about: a daemon that keeps writing to the tables this restore replaces makes
+// the run something other than the restore the operator meant to perform, and
+// that is not a choice to make for them. The run is not corrupt for it —
+// `pg_restore --clean --single-transaction` takes ACCESS EXCLUSIVE locks, so the
+// daemon's writers block, and whatever it wrote before the drop is replaced by
+// design — which is precisely why the refusal has to be stated rather than left
+// to be noticed. --force is the escape hatch, and it says what it accepted.
 func TestRestoreDumpRefusesUnderALiveDaemon(t *testing.T) {
 	c := assert.NewAborting(t)
 	stubRestoreGates(t).daemonAlive = true

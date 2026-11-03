@@ -50,13 +50,15 @@ physical copy of the embedded data directory), restore (put one back — it need
 // operator uses to stop one, so an interrupt takes the verbs' NORMAL failure
 // path rather than killing the process underneath it.
 //
-// It matters because both destructive verbs finish their safety work in a defer:
-// `db restore` rolls a physical restore back from it, and `db backup` restarts
-// the embedded server from it. Go's default disposition for SIGINT/SIGTERM/
-// SIGHUP kills the process outright, so a Ctrl-C during a physical restore would
-// leave the data directory displaced (or half-swapped), and a Ctrl-C during a
-// physical backup would leave the embedded server stopped. Cancelling the
-// context instead unwinds into the rollback/restart, and then exits non-zero.
+// It matters because the destructive verbs do their safety work on the failure
+// path, which Go's default disposition for SIGINT/SIGTERM/SIGHUP skips by killing
+// the process outright. Three things depend on it: `db restore` rolls a physical
+// restore back from a defer (a killed process leaves the data directory displaced,
+// or half-swapped), `db backup` restarts the embedded server from a defer (a killed
+// process leaves it stopped), and `writeBackupFile` removes the temporary file it
+// was writing when the write fails (a killed process leaves a stray
+// `.partial-<random>` beside the backup). Cancelling the context instead unwinds
+// into the rollback, the restart and the removal, and then exits non-zero.
 //
 // It is scoped to the db group rather than wrapped around Execute in main(),
 // because the daemon (`rafikid` with no verb) has its own signal handling for a

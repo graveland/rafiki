@@ -408,6 +408,15 @@ func restoreDumpArchive(ctx context.Context, configured, path string, noOwner bo
 	run.Stdout = io.Discard
 	run.Stderr = stderr
 	if rerr := run.Run(); rerr != nil {
+		// An interrupt is named as the cause, not the exit status: exec.Cmd.Wait
+		// prefers the killed child's own error ("signal: killed") over the
+		// context's, and an operator who pressed Ctrl-C needs to read that the
+		// interrupt stopped the restore rather than that the archive is bad.
+		// pg_restore's stderr above still carries whatever it said. The physical
+		// path reports a cancellation the same way.
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("rafikid db restore: pg_restore: %w", cerr)
+		}
 		return fmt.Errorf("rafikid db restore: pg_restore: %w", rerr)
 	}
 

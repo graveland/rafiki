@@ -912,6 +912,14 @@ func TestDbBackupRestoreRoundTripOnAServerWithTimescaleInstalled(t *testing.T) {
 		"read the memory back after the restore")
 	c.Eq(memBody, body, "the row a dump restore brings back must be the one the backup wrote")
 
+	// The extension's catalog is what `pg_restore --clean` drops and recreates along
+	// with everything else the archive holds, and what a plain-server round trip
+	// cannot reach. Checked AFTER the restore: the premise check above only says
+	// the scratch database started with it.
+	c.Eq(int64(1), queryInt(t, readback, "the extension after the restore",
+		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`),
+		"the archive's extension catalog must come back whole, or the database is broken")
+
 	c.Eq(int64(0), queryInt(t, readback, "the formerly-hypertable table after the restore",
 		`SELECT count(*) FROM timescaledb_information.hypertables
 		  WHERE hypertable_name = 'conversation_turn'`),
