@@ -282,12 +282,12 @@ func TestSetupDBCreatePasswordNotInArgv(t *testing.T) {
 func TestSetupDBCreateArgvPreloadsWhatTheImageAndRafikiNeed(t *testing.T) {
 	args := dockerRunArgs(6543)
 	joined := strings.Join(args, " ")
-	for _, want := range []string{
-		"-c shared_preload_libraries=timescaledb,pg_textsearch",
-		"-c timescaledb.telemetry_level=off",
+	for _, want := range []struct{ arg, why string }{
+		{"-c shared_preload_libraries=timescaledb,pg_textsearch", "the image's initdb creates the extension and cannot without its library preloaded"},
+		{"-c timescaledb.telemetry_level=off", "the library is loaded again, so its telemetry must stay off"},
 	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("docker run argv must carry %q, or the image's initdb cannot create its extension: %v", want, args)
+		if !strings.Contains(joined, want.arg) {
+			t.Errorf("docker run argv must carry %q: %s: %v", want.arg, want.why, args)
 		}
 	}
 }
