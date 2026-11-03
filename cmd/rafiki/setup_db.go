@@ -254,8 +254,7 @@ func dockerRunArgs(port int) []string {
 		"--health-retries", "120",
 		managedPGImage,
 		"postgres",
-		"-c", "shared_preload_libraries=timescaledb,pg_textsearch",
-		"-c", "timescaledb.telemetry_level=off",
+		"-c", "shared_preload_libraries=pg_textsearch",
 	}
 }
 
@@ -361,7 +360,7 @@ func migrateDatabase(ctx context.Context, r runner, rafikidPath, dsn string, mod
 		_, stderr, err = r.Run(ctx, env, rafikidPath, "migrate")
 	}
 	if err != nil {
-		hint := "hint: a bring-your-own database needs vector and pg_textsearch (with shared_preload_libraries=pg_textsearch) for recall search; timescaledb is optional and only turns the large tables into hypertables"
+		hint := "hint: a bring-your-own database needs vector and pg_textsearch (with shared_preload_libraries=pg_textsearch) for recall search"
 		if mode == installstate.DBModeEmbedded {
 			hint = fmt.Sprintf("hint: rafikid runs this PostgreSQL itself, so a failure here is usually the binary download, its checksum, or an unwritable data directory. It keeps its data under %s and the server's own log under %s", paths.DataDir(), paths.StateDir())
 		}
