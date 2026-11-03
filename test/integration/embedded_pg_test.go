@@ -1372,9 +1372,9 @@ func dsnAsUser(t *testing.T, dsn, user string) string {
 //
 // pg_restore --no-owner makes the CONNECTING user the owner of everything it
 // creates. That is right for the daemon's own unprivileged role, which can only
-// own what it creates, and catastrophic for the superuser restore the docs give
-// for a TimescaleDB install: the whole schema would come back owned by the
-// superuser, and the daemon would get permission denied on its first query. So
+// own what it creates, and catastrophic for the superuser restore a fresh
+// database needs: the whole schema would come back owned by the superuser, and
+// the daemon would get permission denied on its first query. So
 // this restores AS superuser and then READS as a separate unprivileged role —
 // the role a real install's daemon runs as.
 func TestDbRestoreKeepsObjectOwnershipForTheDaemonRole(t *testing.T) {
