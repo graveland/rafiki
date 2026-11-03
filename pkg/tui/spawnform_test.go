@@ -203,6 +203,26 @@ func TestCtrlCCancelsTheFormWithoutArmingQuit(t *testing.T) {
 	ck.True(c.quitArmed.IsZero(), "^C armed quit from inside a modal")
 }
 
+// ^A/^E are line-start/line-end in EVERY text surface, and a modal's rows are
+// bubbles/textinputs like any other. The executor browser used to sit on ^E,
+// which silently took end-of-line away from the fields the form was editing;
+// it is ⌥E now. Both keys are driven through the REAL key path so a future
+// modal binding that claims one of them fails here.
+func TestFormCtrlAAndCtrlEAreLineEnds(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := formCockpit(t)
+	in := &c.form.inputs[fieldName]
+	in.SetValue("hello world")
+	in.CursorEnd()
+
+	c.handleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	ck.Eq(0, in.Position(), "ctrl+a did not reach line-start; cursor position")
+
+	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	ck.Eq(len("hello world"), in.Position(), "ctrl+e did not reach line-end; cursor position")
+	ck.Nil(c.execPicker, "ctrl+e opened the executor picker instead of moving to end-of-line")
+}
+
 // cwd is required by the server. Catching it here keeps the values on screen
 // instead of spending a round trip to be told.
 func TestEmptyCwdIsRefusedLocally(t *testing.T) {

@@ -493,7 +493,7 @@ The default depends on the kind:
   remembered per (profile, kind), so this costs a decision once per machine.
 
 Passing any of these (or any other shaping flag) spawns directly; `-i` opens
-the interactive form anyway, prefilled — where the executor field, `^E`'s
+the interactive form anyway, prefilled — where the executor field, `⌥E`'s
 picker, and the same kind-aware default apply.
 
 ### Batch models (`:batch`)

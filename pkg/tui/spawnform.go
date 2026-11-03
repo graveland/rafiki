@@ -372,7 +372,7 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 	b.WriteString("\n")
 	// The ⏎ hint is contextual because ⏎ genuinely does two things, and a
 	// static footer would be wrong on one row out of four.
-	hints := "↑/↓ field   ⇥ complete   ←/→ kind   ^E executor   ⏎ create   esc cancel"
+	hints := "↑/↓ field   ⇥ complete   ←/→ kind   ⌥E executor   ⏎ create   esc cancel"
 	if f.focus == fieldModel {
 		// The model row has its own vocabulary and it is worth the line: ↑/↓
 		// mean the list here rather than the field ring, and ^F is the only
@@ -574,11 +574,17 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 		c.picker = newModelPicker(f.kind(), strings.TrimSpace(f.inputs[fieldModel].Value()),
 			rows, loaded, c.modelsErr[f.kind()], c.modelView)
 		return c, tea.Batch(c.fetchModelsCmd(f.kind()), textinput.Blink)
-	case "ctrl+e":
+	case "alt+e":
 		// The executor browser, for the CURRENT kind regardless of which field
 		// has focus, matching ctrl+f's own behavior for the model picker. Shows
 		// every row the daemon reported, eligible or not -- the reason line is
 		// what tells you why the one you want reads ✗.
+		//
+		// ⌥E, not ^E: every text row here is a bubbles/textinput, whose LineEnd
+		// is ctrl+e (LineStart is ctrl+a). A modal claiming ^E takes end-of-line
+		// away from the very fields it is editing, which is the one thing no
+		// text surface may do. The mnemonic survives the modifier; see keys.go's
+		// ExpandArgs comment for the same trade.
 		rows, loaded := c.executorsFor(f.kind())
 		c.execPicker = newExecutorPicker(f.kind(), rows, loaded, c.executorsErr[f.kind()])
 		return c, c.fetchExecutorsCmd(f.kind())
@@ -605,7 +611,7 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 			// the daemon resolves that silently (documented first-match), and
 			// re-asking over a choice already made is noise. Uses whatever
 			// ListExecutors has already cached -- fetched proactively by
-			// kindChanged/Init/ctrl+e, so this never costs an extra round trip
+			// kindChanged/Init/alt+e, so this never costs an extra round trip
 			// on the common (already-fetched) path. An answer that has not
 			// arrived yet is NOT "no executors": the check skips and the
 			// daemon's own spawn path decides.

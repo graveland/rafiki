@@ -25,7 +25,7 @@ type executorsLoadedMsg struct {
 // unless that answer is already cached or already in flight. See
 // fetchModelsCmd — same shape, same reasoning. It returns nil when there is
 // nothing to do, so callers can issue it on every event that might need the
-// rows (form open, kind change, ctrl+e) without tracking state themselves.
+// rows (form open, kind change, alt+e) without tracking state themselves.
 func (c *Cockpit) fetchExecutorsCmd(kind string) tea.Cmd {
 	if c.executors == nil {
 		c.executors = map[string][]*rafikiv1.ExecutorRow{}

@@ -472,7 +472,7 @@ type Cockpit struct {
 	// filled in.
 	picker *modelPicker
 	// execPicker mirrors picker for the executor field: the full browser
-	// opened from the form's executor row (ctrl+e), or auto-opened when a
+	// opened from the form's executor row (alt+e), or auto-opened when a
 	// submit would leave the daemon to guess between several eligible
 	// executors. Same stacking rule: esc returns to the form.
 	execPicker *executorPicker

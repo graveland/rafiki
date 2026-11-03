@@ -69,16 +69,17 @@ func TestExecutorPickerCommitSetsFormFieldAndAdvancesFocus(t *testing.T) {
 	ck.NotEq(before, c.form.focus, "focus should have advanced")
 }
 
-// ctrl+e must open the picker through the REAL key path, not just exist as a
+// alt+e must open the picker through the REAL key path, not just exist as a
 // case in a switch: bubbletea spells keys in ways a case can silently miss
-// ("space" vs " " shipped exactly that way once).
-func TestCtrlEOpensTheExecutorPickerFromTheForm(t *testing.T) {
+// ("space" vs " " shipped exactly that way once). It is ⌥E rather than ^E
+// because ^E is every text row's end-of-line (TestFormCtrlAAndCtrlEAreLineEnds).
+func TestAltEOpensTheExecutorPickerFromTheForm(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 
-	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModAlt})
 
-	ck.Require().NotNil(c.execPicker, "^E did not open the executor picker")
+	ck.Require().NotNil(c.execPicker, "⌥E did not open the executor picker")
 	ck.Eq(c.form.kind(), c.execPicker.kind, "picker kind")
 	ck.False(!c.executorsBusy[c.form.kind()], "no fetch was issued for the picker's kind")
 }
@@ -88,7 +89,7 @@ func TestCtrlEOpensTheExecutorPickerFromTheForm(t *testing.T) {
 func TestExecutorPickerEscReturnsToTheForm(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := formCockpit(t)
-	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModAlt})
 	c.execPicker.rows = []*rafikiv1.ExecutorRow{{Id: "exec-1", Machine: "greyshift", Eligible: true}}
 
 	c.handleKey(keyMsg("esc"))
@@ -102,7 +103,7 @@ func TestExecutorPickerEscReturnsToTheForm(t *testing.T) {
 func TestExecutorPickerEnterCommitsThroughTheKeyPath(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := formCockpit(t)
-	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModAlt})
 	c.applyExecutorsLoaded(executorsLoadedMsg{kind: c.form.kind(), rows: []*rafikiv1.ExecutorRow{
 		{Id: "exec-1", Machine: "greyshift", Eligible: true},
 		{Id: "exec-2", Machine: "otherbox", Eligible: false},
@@ -138,7 +139,7 @@ func TestExecutorPickerOwnsTheBodyPane(t *testing.T) {
 	c.handleKey(keyMsg("n"))
 	c.width, c.height, c.ready = 100, 30, true
 
-	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	c.handleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModAlt})
 
 	ck.Eq(0, c.railCols(), "the rail is still drawn behind the executor picker")
 	out := ansi.Strip(c.View().Content)
@@ -146,10 +147,10 @@ func TestExecutorPickerOwnsTheBodyPane(t *testing.T) {
 	ck.NotStrContains(out, "c_2", "a rail row rendered behind the modal")
 }
 
-// The form's hint line names ^E: a binding nobody can discover is a binding
+// The form's hint line names ⌥E: a binding nobody can discover is a binding
 // that does not exist.
 func TestFormHintsNameTheExecutorPicker(t *testing.T) {
 	c := formCockpit(t)
 	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
-	assert.NewCollecting(t).StrContains(out, "^E executor", "the hint line does not name ^E:\n")
+	assert.NewCollecting(t).StrContains(out, "⌥E executor", "the hint line does not name ⌥E:\n")
 }
