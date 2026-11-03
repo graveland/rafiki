@@ -17,11 +17,6 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-const (
-	legacyTimescaleExtension = "timescaledb"
-	legacyToolkitExtension   = "timescaledb_toolkit"
-)
-
 // The notice's three texts, asserted verbatim: they are what an operator greps
 // the daemon log for, and which one appears is the difference between safe
 // advice and destructive advice.
@@ -121,7 +116,7 @@ func TestLegacyTimescaleWarnsOnce(t *testing.T) {
 			"the extensions the probe found, comma-joined in drop order")
 		c.Eq("SELECT * FROM timescaledb_information.hypertables", records[0].Attrs["check_first"],
 			"the check that must precede a drop: a hypertable listed there that is not one of rafiki's three is not rafiki's")
-		c.Eq("run as a superuser: "+legacyTimescaleDrop(names)+" and remove timescaledb from shared_preload_libraries",
+		c.Eq("run as a superuser: "+legacyTimescaleDrop(names)+"; removing timescaledb from shared_preload_libraries is cluster-wide, so follow the documented procedure and check every database on the server first",
 			records[0].Attrs["remove"], "the removal instructions")
 	})
 

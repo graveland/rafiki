@@ -11,14 +11,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// legacyTimescaleExtension and legacyToolkitExtension are the two extensions
+// rafiki stopped needing, named once so the probe, the notice and the tests
+// cannot drift apart.
+const (
+	legacyTimescaleExtension = "timescaledb"
+	legacyToolkitExtension   = "timescaledb_toolkit"
+)
+
 // legacyTimescaleExtensionsQuery lists the extensions rafiki no longer needs,
-// toolkit first — the order they must be dropped in, because timescaledb_toolkit
-// depends on timescaledb.
+// toolkit first — the safe order to drop them in, since the toolkit is installed
+// alongside timescaledb.
 const legacyTimescaleExtensionsQuery = `SELECT extname FROM pg_extension WHERE extname IN ('timescaledb_toolkit','timescaledb') ORDER BY CASE extname WHEN 'timescaledb_toolkit' THEN 0 ELSE 1 END`
 
 // legacyHypertablesQuery is what an operator should look at BEFORE dropping
 // anything: a hypertable listed here that is not one of rafiki's three is not
-// rafiki's, and dropping the extension destroys it.
+// rafiki's, and it must be dealt with before the extension goes — a DROP
+// EXTENSION without CASCADE refuses while such a dependent remains.
 const legacyHypertablesQuery = "SELECT * FROM timescaledb_information.hypertables"
 
 // legacyRafikiHypertablesQuery names rafiki's three former hypertables. It is
@@ -155,6 +164,6 @@ func warnLegacyTimescale(ctx context.Context, pool *pgxpool.Pool) {
 	slog.Warn(legacyRemoveMessage,
 		"extensions", extensions,
 		"check_first", legacyHypertablesQuery,
-		"remove", "run as a superuser: "+legacyTimescaleDrop(names)+" and remove timescaledb from shared_preload_libraries",
+		"remove", "run as a superuser: "+legacyTimescaleDrop(names)+"; removing timescaledb from shared_preload_libraries is cluster-wide, so follow the documented procedure and check every database on the server first",
 	)
 }
