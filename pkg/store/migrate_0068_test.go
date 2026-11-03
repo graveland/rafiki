@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -705,4 +706,169 @@ func TestMigrate0068RefusesAnUnknownDependent(t *testing.T) {
 	c.True(isHypertable(t, ctx, pool, "openrouter.broadcast"),
 		"the refused migration left openrouter.broadcast an ordinary table")
 	c.False(migrationRecorded(t, ctx, pool, 68), "the refused migration recorded version 68")
+}
+
+// rowContentExpr0068 renders one row of a converted table as text. The
+// migration's own verification counts rows and two nullable columns; this is the
+// value-level check, which is what a compressed row lost by the copy changes.
+var rowContentExpr0068 = map[string]string{
+	"conversations.conversation_turn": `id::text || '|' || ordinal::text
+		|| '|' || coalesce(model, '(null)') || '|' || coalesce(response::text, '(null)')
+		|| '|' || coalesce(request_head_id::text, '(null)') || '|' || coalesce(author_user_id::text, '(null)')`,
+	"openrouter.broadcast":           `id::text || '|' || model || '|' || coalesce(raw_payload::text, '(null)')`,
+	"conversations.raw_http_request": `id::text || '|' || source || '|' || req_method || '|' || req_path`,
+}
+
+// rowContent0068 returns every row of one of the three converted tables, ordered
+// by id so two captures compare directly.
+func rowContent0068(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string) []string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	expr, ok := rowContentExpr0068[table]
+	c.True(ok, "no row expression for %s", table)
+	if !ok {
+		return nil
+	}
+	return queryStrings(t, ctx, pool, `SELECT `+expr+` FROM `+table+` ORDER BY id`)
+}
+
+// compressAllChunks0068 compresses every chunk of a hypertable, so all of its
+// rows have to come back through the decompression path.
+func compressAllChunks0068(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	chunks := queryStrings(t, ctx, pool, `
+		SELECT format('%I.%I', chunk_schema, chunk_name)
+		  FROM timescaledb_information.chunks
+		 WHERE hypertable_schema = split_part($1, '.', 1)
+		   AND hypertable_name = split_part($1, '.', 2)`, table)
+	c.NotEmpty(chunks, "%s has no chunks; the fixture is wrong", table)
+	for _, chunk := range chunks {
+		_, err := pool.Exec(ctx, `SELECT compress_chunk($1::regclass, true)`, chunk)
+		c.Require().NoError(err, "compress %s of %s", chunk, table)
+	}
+	var compressed int
+	c.Require().NoError(pool.QueryRow(ctx, `
+		SELECT count(*) FROM timescaledb_information.chunks
+		 WHERE hypertable_schema = split_part($1, '.', 1)
+		   AND hypertable_name = split_part($1, '.', 2)
+		   AND is_compressed`, table).Scan(&compressed), "probe the compression of %s", table)
+	c.Eq(len(chunks), compressed, "%s: %d of %d chunks are compressed", table, compressed, len(chunks))
+}
+
+// scratchDatabaseName is the database the pool is connected to.
+func scratchDatabaseName(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	var name string
+	c.Require().NoError(pool.QueryRow(ctx, `SELECT current_database()`).Scan(&name), "read the scratch database name")
+	return name
+}
+
+// freshPoolTo opens a pool to a database on the test server. A NEW pool is the
+// point: a connection an existing pool already holds keeps the settings it
+// connected with, so a database-level setting changed after that pool was built
+// reaches only the sessions opened afterwards.
+func freshPoolTo(t *testing.T, dbname string) *pgxpool.Pool {
+	t.Helper()
+	c := assert.NewAborting(t)
+	cfg, err := pgxpool.ParseConfig(os.Getenv("RAFIKI_TEST_DSN"))
+	c.Require().NoError(err, "parse the test dsn")
+	cfg.ConnConfig.Database = dbname
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	c.Require().NoError(err, "connect %s", dbname)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// missingStrings returns the entries of want that got does not contain, in want's
+// order and keeping duplicates.
+func missingStrings(want, got []string) []string {
+	have := make(map[string]int, len(got))
+	for _, s := range got {
+		have[s]++
+	}
+	var out []string
+	for _, s := range want {
+		if have[s] > 0 {
+			have[s]--
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestMigrate0068CopiesCompressedRowsWhenColumnarScanIsOff pins the columnar-scan
+// guard at the top of the migration's DO block. A compressed chunk's rows are
+// invisible to an ordinary scan while timescaledb.enable_columnarscan is off, and
+// an operator can set that at DATABASE level, which the migration's own session
+// then inherits. The copy and the row-count check both read through that path, so
+// without the guard the copy is short, the counts agree, and DROP TABLE destroys
+// every row of every compressed chunk. This test compresses every chunk of all
+// three tables, turns the setting off at database level, and requires the
+// migration to carry every row across anyway — and to leave the operator's
+// setting exactly as it found it.
+func TestMigrate0068CopiesCompressedRowsWhenColumnarScanIsOff(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := testPool(t)
+
+	c.Require().NoError(migrateTo(ctx, pool, 67), "migrate to 0067")
+	makeHypertables(t, ctx, pool)
+	seed0068(t, ctx, pool)
+	for _, ht := range hypertables0068 {
+		compressAllChunks0068(t, ctx, pool, ht.table)
+	}
+
+	// Ground truth, read with the columnar scan path on.
+	truth := map[string][]string{}
+	for _, ht := range hypertables0068 {
+		truth[ht.table] = rowContent0068(t, ctx, pool, ht.table)
+		c.NotEmpty(truth[ht.table], "%s has no rows; the fixture is wrong", ht.table)
+	}
+
+	dbName := scratchDatabaseName(t, ctx, pool)
+	_, err := pool.Exec(ctx,
+		`ALTER DATABASE `+pgx.Identifier{dbName}.Sanitize()+` SET timescaledb.enable_columnarscan = off`)
+	c.Require().NoError(err, "turn the columnar scan off at database level")
+
+	off := freshPoolTo(t, dbName)
+	var setting string
+	c.Require().NoError(off.QueryRow(ctx, `SELECT current_setting('timescaledb.enable_columnarscan')`).Scan(&setting),
+		"read the setting on a session opened after the change")
+	c.Eq("off", setting, "a new session did not inherit the database-level setting; the test proves nothing")
+
+	// What the migration would silently drop without the guard: the rows of the
+	// compressed chunks are exactly the ones this session cannot see.
+	hidden := map[string][]string{}
+	for _, ht := range hypertables0068 {
+		hidden[ht.table] = missingStrings(truth[ht.table], rowContent0068(t, ctx, off, ht.table))
+		c.NotEmpty(hidden[ht.table],
+			"with the columnar scan off %s still read all %d of its rows, so the fixture does not reproduce the hazard",
+			ht.table, len(truth[ht.table]))
+	}
+
+	c.Require().NoError(Migrate(ctx, off), "migrate with the columnar scan off")
+
+	for _, ht := range hypertables0068 {
+		c.False(isHypertable(t, ctx, off, ht.table), "%s is still a hypertable after 0068", ht.table)
+		after := rowContent0068(t, ctx, off, ht.table)
+		c.EqDeep(truth[ht.table], after,
+			"%s lost %d of its %d rows in the copy; the compressed rows were invisible to it (%s)",
+			ht.table, len(truth[ht.table])-len(after), len(truth[ht.table]), strings.Join(hidden[ht.table], ", "))
+	}
+	c.True(migrationRecorded(t, ctx, off, 68), "version 68 was not recorded")
+
+	// The setting is transaction-local: nothing the migration did reaches the
+	// operator's database settings or a session opened afterwards.
+	later := freshPoolTo(t, dbName)
+	c.Require().NoError(later.QueryRow(ctx, `SELECT current_setting('timescaledb.enable_columnarscan')`).Scan(&setting),
+		"read the setting on a session opened after the migration")
+	c.Eq("off", setting, "0068 changed the columnar scan setting of later sessions")
+	c.Contains(queryStrings(t, ctx, later, `
+		SELECT unnest(s.setconfig) FROM pg_db_role_setting s
+		  JOIN pg_database d ON d.oid = s.setdatabase
+		 WHERE d.datname = current_database()`), "timescaledb.enable_columnarscan=off",
+		"0068 rewrote the operator's database-level columnar scan setting")
 }

@@ -159,6 +159,17 @@ BEGIN
 		RETURN;
 	END IF;
 
+	-- A compressed chunk's rows are only visible to an ordinary scan while the
+	-- columnar scan path is enabled, and an operator can turn it off at DATABASE
+	-- level, which this migration's own session then inherits. The copy and the
+	-- count checks below both read through that path, so with it off a compressed
+	-- chunk looks empty: the copy is short, the counts agree, and DROP TABLE
+	-- destroys the rows. Force it on for this transaction only. A TimescaleDB
+	-- without the parameter leaves it unset and migrates as before.
+	IF EXISTS (SELECT 1 FROM pg_settings WHERE name = 'timescaledb.enable_columnarscan') THEN
+		PERFORM set_config('timescaledb.enable_columnarscan', 'on', true);
+	END IF;
+
 	PERFORM pg_temp.rafiki_unhypertable('conversations', 'raw_http_request', '{}');
 	PERFORM pg_temp.rafiki_unhypertable('openrouter', 'broadcast', '{}');
 
