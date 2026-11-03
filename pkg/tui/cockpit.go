@@ -2879,7 +2879,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.Quit, "Quit; press twice within two seconds to confirm. Your agents keep running."},
 	)
 	right := group("input",
-		entry{k.Send, "Send your message. If the agent is mid-turn, it queues for the next turn."},
+		entry{k.Send, "Send your message. If the agent is mid-turn, it steers into the running turn instead of queueing for the next one."},
 		entry{k.Newline, "Insert a line break (^J works in any terminal; ⇧⏎ needs one with Kitty keyboard support)."},
 		entry{k.ClipboardPaste, "Paste from the system clipboard, including images. Pasting a file path attaches the image."},
 		entry{k.ClearInput, "Clear the line the cursor is on. On an empty line, remove the line above, so repeating it unrolls the input."},
@@ -3376,21 +3376,7 @@ func (c *Cockpit) ghostRows(child string, width int) []string {
 // of is retired. With no such run an exact match wins, else the oldest send
 // (an image-only message echoes no text to match).
 func (c *Cockpit) ackPending(child, text string) {
-	rest := strings.TrimSpace(text)
-	retired := false
-	for rest != "" {
-		i := slices.IndexFunc(c.pending, func(p pendingSend) bool {
-			t := strings.TrimSpace(p.text)
-			return p.childID == child && t != "" && strings.HasPrefix(rest, t)
-		})
-		if i < 0 {
-			break
-		}
-		rest = strings.TrimSpace(strings.TrimPrefix(rest, strings.TrimSpace(c.pending[i].text)))
-		c.pending = slices.Delete(c.pending, i, i+1)
-		retired = true
-	}
-	if retired {
+	if c.ackPendingRun(child, text) {
 		return
 	}
 	first := -1
@@ -3411,12 +3397,45 @@ func (c *Cockpit) ackPending(child, text string) {
 	}
 }
 
+// ackPendingRun is ackPending's matching half, and its only exacting one: it
+// retires the pending sends to child that text reads as a consecutive run of,
+// oldest first, reporting whether it retired any. One echo answers several
+// sends when the daemon merged them into one user message, and that message's
+// text is exactly the sends joined in order.
+//
+// It never falls back to "retire something anyway": a caller that matches
+// against HISTORY must not retire a ghost on an unrelated block, so the
+// oldest-send fallback lives in ackPending, where the text is known to be the
+// message that just arrived.
+func (c *Cockpit) ackPendingRun(child, text string) bool {
+	rest := strings.TrimSpace(text)
+	retired := false
+	for rest != "" {
+		i := slices.IndexFunc(c.pending, func(p pendingSend) bool {
+			t := strings.TrimSpace(p.text)
+			return p.childID == child && t != "" && strings.HasPrefix(rest, t)
+		})
+		if i < 0 {
+			break
+		}
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, strings.TrimSpace(c.pending[i].text)))
+		c.pending = slices.Delete(c.pending, i, i+1)
+		retired = true
+	}
+	return retired
+}
+
 // ackPendingFromHistory retires pending sends to child that a fetched
 // transcript already holds. The echo is not necessarily the last block -- the
 // agent may have answered before the fetch landed -- so every user block is
-// checked, newest first, each retiring at most one send and only on an exact
-// text match. The last block alone keeps ackPending's oldest-send fallback,
-// which is what an image-only message (no text to match) needs.
+// checked, newest first.
+//
+// The newest user block gets ackPendingRun, because it is still the likeliest
+// echo and one row can carry several merged sends ("a\nb"). An OLDER user
+// block only ever matches exactly: a prefix match against history would retire
+// the ghost of a message that merely starts the same way. The trailing block
+// alone keeps ackPending's oldest-send fallback, which is what an image-only
+// message (no text to match) needs.
 func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
 	if len(blocks) == 0 {
 		return
@@ -3425,8 +3444,19 @@ func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
 		c.ackPending(child, blocks[i].Text)
 		blocks = slices.Delete(slices.Clone(blocks), i, i+1)
 	}
+	newest := -1
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if blocks[i].Kind == session.KindUser {
+			newest = i
+			break
+		}
+	}
 	for i := len(blocks) - 1; i >= 0 && c.hasPending(child); i-- {
 		if blocks[i].Kind != session.KindUser {
+			continue
+		}
+		if i == newest {
+			c.ackPendingRun(child, blocks[i].Text)
 			continue
 		}
 		for j, p := range c.pending {

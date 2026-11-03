@@ -133,7 +133,7 @@ func defaultKeyMap() keyMap {
 		// and the other two panes match their own Escape before this).
 		Abort: key.NewBinding(key.WithKeys("esc", "ctrl+x"), key.WithHelp("esc", "abort turn")),
 
-		Send:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send · queues if busy")),
+		Send:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send · steers if busy")),
 		Steer: key.NewBinding(key.WithKeys("alt+enter", "ctrl+s"), key.WithHelp("⌥⏎", "steer")),
 		// The textarea's own InsertNewline is bound to enter and ctrl+m --
 		// the SAME BYTE, and Send takes it -- so a send-on-⏎ input has no

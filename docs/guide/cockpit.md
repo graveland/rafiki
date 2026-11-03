@@ -85,18 +85,21 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 
 | Key | Does |
 |---|---|
-| `⏎` | Send a prompt — queues work for the agent |
+| `⏎` | Send a prompt. Against an agent that is mid-turn it steers into the running turn instead of waiting for it to end |
 | `⇧⏎` / `^J` | Insert a newline (`⇧⏎` needs a Kitty-keyboard-protocol terminal — Ghostty, Kitty, WezTerm, recent iTerm2/Alacritty; `^J` works everywhere) |
 | paste | Over six lines or 800 characters folds to `[pasted #1: 40 lines]`; paste again to insert in full |
 | `^U` | Kill the cursor's line; on an empty line, remove the line above, so repeating it unrolls the input |
 | `⌥K` | Clear the whole input, folded pastes included |
-| `⌥⏎` / `^S` | Steer — inject into the turn already running |
+| `⌥⏎` / `^S` | Steer — inject into the turn already running. Against an idle agent the text simply starts a turn |
 | `PgUp`/`PgDn`, `home`/`end` | Scroll the transcript without leaving the input box |
 | `↑` / `↓` | Move the cursor; with nowhere to move, scroll the transcript |
 
-Prompt and steer are separate keys rather than one that guesses from agent
-state, since only you know whether you mean "queue this for later" or
-"interrupt now."
+`⏎` does not queue behind a running turn: the cockpit upgrades it to a steer
+(`sendModeFor`), because a queued prompt waits for the turn to end — and so does
+the ghost line standing in for it until then. Over-applying steer is safe: an
+agent that is between turns treats a steer as a prompt. `⌥⏎` is the explicit
+spelling of the same thing — against a busy agent both keys steer, and against
+an idle one both start a turn.
 
 **Rail pane**
 

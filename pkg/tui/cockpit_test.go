@@ -3003,6 +3003,39 @@ func TestHistoryEndingOnEchoAndPlaceholderRetiresTheGhost(t *testing.T) {
 	ck.EqDeep([]string(nil), pendingTexts(c), "the fetched echo left its ghost standing")
 }
 
+// Two sends made before the agent's next turn are merged into ONE user message
+// (the API forbids consecutive user turns), and the agent may have replied
+// before the fetch landed -- so the merged echo is neither trailing nor equal
+// to either send. Both ghosts must still retire: a fetch that leaves them
+// standing leaves them standing until the child is closed.
+func TestHistoryHoldsAMergedEchoBehindAReply(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.pending = []pendingSend{{"c_1", "first"}, {"c_1", "second"}}
+	c.ackPendingFromHistory("c_1", []session.Block{
+		{Kind: session.KindUser, Text: "first\nsecond", Final: true},
+		{Kind: session.KindAssistant, Text: "done", Final: true},
+	})
+	ck.EqDeep([]string(nil), pendingTexts(c), "the merged echo behind a reply left its ghosts standing")
+}
+
+// The newest user block is matched as a run of sends, but an OLDER one only
+// exactly: a prefix match against history would retire the ghost of a message
+// that merely starts the same way.
+func TestHistoryDoesNotRetireAGhostOnAnOlderPrefixMatch(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.pending = []pendingSend{{"c_1", "yes"}}
+	c.ackPendingFromHistory("c_1", []session.Block{
+		{Kind: session.KindUser, Text: "yes please, go ahead", Final: true},
+		{Kind: session.KindUser, Text: "another message", Final: true},
+		{Kind: session.KindAssistant, Text: "ok", Final: true},
+	})
+	ck.EqDeep([]string{"yes"}, pendingTexts(c), "an older block that starts with the ghost's text retired it")
+}
+
 // Two sends before either echoes both stay ghosted, and each echo retires its
 // own, not the other.
 func TestPendingSendsRetireInOrderOfTheirEchoes(t *testing.T) {
