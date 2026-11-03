@@ -273,6 +273,25 @@ func TestSetupDBCreatePasswordNotInArgv(t *testing.T) {
 	}
 }
 
+// The managed image's own initdb runs CREATE EXTENSION timescaledb, and that
+// extension cannot be created without its library preloaded: the server FATALs
+// and the container exits, which makes every fresh `rafiki setup --db-mode
+// managed` fail. rafiki no longer uses TimescaleDB, but the image's preload
+// list must keep it (with telemetry off, since the library is loaded again) and
+// keep pg_textsearch. Pinned here because nothing else asserts this argv.
+func TestSetupDBCreateArgvPreloadsWhatTheImageAndRafikiNeed(t *testing.T) {
+	args := dockerRunArgs(6543)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"-c shared_preload_libraries=timescaledb,pg_textsearch",
+		"-c timescaledb.telemetry_level=off",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("docker run argv must carry %q, or the image's initdb cannot create its extension: %v", want, args)
+		}
+	}
+}
+
 func TestSetupDBVolumeWithPasswordReusesIt(t *testing.T) {
 	isolatedDBTest(t)
 	r := newFakeRunner()

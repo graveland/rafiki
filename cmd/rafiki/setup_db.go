@@ -254,7 +254,13 @@ func dockerRunArgs(port int) []string {
 		"--health-retries", "120",
 		managedPGImage,
 		"postgres",
-		"-c", "shared_preload_libraries=pg_textsearch",
+		// The managed image keeps preloading timescaledb even though rafiki no
+		// longer uses it: the image's own initdb runs CREATE EXTENSION
+		// timescaledb, and that extension cannot be created without its library
+		// loaded — the server FATALs and the container exits. Telemetry stays
+		// off because the library is loaded again.
+		"-c", "shared_preload_libraries=timescaledb,pg_textsearch",
+		"-c", "timescaledb.telemetry_level=off",
 	}
 }
 
