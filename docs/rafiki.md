@@ -10,7 +10,7 @@
 
 Rafiki is designed to be the **central LLM system for the whole company**. Every agent, every Slack bot, every TUI, every automated workflow — all LLM traffic routes through rafiki. It is the single place where:
 
-- **Conversations are captured.** Every request and response, every tool call, every token — stored in a Postgres conversations database (TimescaleDB hypertables where the extension is installed, plain tables otherwise). The DB is the canonical record of all LLM activity across the company.
+- **Conversations are captured.** Every request and response, every tool call, every token — stored in a Postgres conversations database (ordinary tables). The DB is the canonical record of all LLM activity across the company.
 
 - **Multiple clients connect to the same conversation.** An incident fires via Rootly → a conversation starts from savannah-admin, Eon, or another bot. An engineer joins from Slack. Another connects from a TUI. They all see the same transcript, the same tools, the same state. Rafiki is the shared conversation bus, not a point-to-point pipe.
 
@@ -91,9 +91,9 @@ Prompt caching is a 90% discount on input tokens, and input tokens are 86-98% of
                              │
                              ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  PostgreSQL (TimescaleDB optional)                            │
+│  PostgreSQL                                                   │
 │                                                               │
-│  conversations schema — hypertables where timescaledb exists  │
+│  conversations schema — ordinary tables                       │
 │  ┌──────────────┐ ┌──────────────────┐ ┌──────────────────┐   │
 │  │ conversation │ │ conversation_turn│ │ conversation_msg │   │
 │  └──────────────┘ └──────────────────┘ └──────────────────┘   │
@@ -151,7 +151,7 @@ Prompt caching is a 90% discount on input tokens, and input tokens are 86-98% of
 
 - **Routing:** Per-upstream circuit breaker. OpenRouter catalog with live model resolution. Per-owner model aliases (slash-free names for full model strings, resolved at spawn). Provider pins (`only`) on open-weight model declarations. Runtime effort adaptation. SSE capture parsing.
 
-- **Storage:** schema for `conversation`, `conversation_turn`, `conversation_msg` — TimescaleDB hypertables where the extension is installed, plain tables otherwise. Price-correct token cost tracking. Schema migration chain with baseline adoption of existing data.
+- **Storage:** schema for `conversation`, `conversation_turn`, `conversation_msg` — ordinary Postgres tables. Price-correct token cost tracking. Schema migration chain with baseline adoption of existing data.
 
 - **Analysis:** `analyze/` pipeline — detection, drafting, ranking, compaction. `insights/` — stats, search, transcript export, per-model cost rollups. `rafiki agent analyze --corpus DIR` runs corpus-only (no API credentials needed).
 

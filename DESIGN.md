@@ -13,7 +13,8 @@ Rafiki is designed to be the **central LLM system for a whole organization**. Ev
 every automated workflow, all LLM traffic routes through rafiki. It is the single place where:
 
 - **Conversations are captured.** Every request and response, every tool call, every token, stored in a
-  TimescaleDB-backed conversations database. The DB is the canonical record of all LLM activity across the company.
+  Postgres conversations database of ordinary tables. The DB is the canonical record of all LLM activity across
+  the company.
 
 - **Multiple clients connect to the same conversation.** An incident fires → a conversation starts. An engineer joins
   from Slack. Another connects from a TUI. They all see the same transcript, the same tools, the same state. Rafiki is
@@ -129,9 +130,9 @@ to get caching wrong than right.
                              │
                              ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Postgres / TimescaleDB                                      │
+│  Postgres                                                    │
 │                                                              │
-│  conversations schema, hypertables for time-series scaling   │
+│  conversations schema, ordinary tables                       │
 │  ┌──────────────┐ ┌──────────────────┐ ┌──────────────────┐  │
 │  │ conversation │ │ conversation_turn│ │ conversation_msg │  │
 │  └──────────────┘ └──────────────────┘ └──────────────────┘  │
@@ -204,8 +205,8 @@ to get caching wrong than right.
   **and** on an out-of-credit primary account: a 400 that is pointless to retry but leaves the primary unusable, so it
   fails over immediately and trips the breaker (`routing.CreditExhausted`).
 
-- **Storage:** TimescaleDB hypertable schema for `conversation`, `conversation_turn`, `conversation_msg`. Price-correct
-  token cost tracking. Schema migration chain with baseline adoption of existing data.
+- **Storage:** Postgres schema for `conversation`, `conversation_turn`, `conversation_msg`, all ordinary
+  tables. Price-correct token cost tracking. Schema migration chain with baseline adoption of existing data.
 
 - **Analysis:** `analyze/` pipeline, detection, drafting, ranking, compaction. `insights/`, stats, search, transcript
   export, per-model cost rollups. `rafiki agent analyze --corpus DIR` runs corpus-only (no API credentials needed).

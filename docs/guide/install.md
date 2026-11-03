@@ -159,26 +159,19 @@ with permission denied on its first query, which is why the flag follows the
 role. A role the archive names that does not exist on the target fails the
 whole restore, loudly, rather than having its objects reassigned.
 
-On a database with the `timescaledb` extension the dump restore is bracketed by
-that extension's own `timescaledb_pre_restore()`/`timescaledb_post_restore()`
-calls, without which TimescaleDB refuses pg_restore's `ALTER TABLE ONLY`
-statements. Those hooks run `ALTER DATABASE ... SET timescaledb.restoring` (a
-superuser-only setting) and then stop and restart the extension's background
-workers (which only a superuser may do — `GRANT SET ON PARAMETER
-timescaledb.restoring` covers the setting and not the workers), so restoring in
-place over a real TimescaleDB database needs a `--db` whose role is a superuser.
-The daemon's own role deliberately is not one, and without that privilege the
-restore is refused before anything is touched.
+A dump restore needs no extension hook: since `0068` the archive holds ordinary
+tables, so `pg_restore --clean` never meets the statement TimescaleDB refuses,
+whether or not the target has the extension installed. (A dump taken before
+`0068` still needs the extension's hooks run by hand — see [Deploying rafiki →
+Backups](deployment.md#backups).)
 
-A database where the extension is not installed yet needs no hooks (the archive's
-`CREATE EXTENSION` makes it), but rafiki's own dump creates `vector` and
-`pg_textsearch` as well, and both are UNTRUSTED extensions only a superuser may
-create — so a restore into a fresh database is a superuser operation too, and a
-non-superuser attempt fails at that `CREATE EXTENSION` and rolls back.
+A restore into a FRESH database is a superuser operation all the same: rafiki's
+own dump creates `vector` and `pg_textsearch` as well, and both are UNTRUSTED
+extensions only a superuser may create — so a non-superuser attempt fails at that
+`CREATE EXTENSION` and rolls back.
 
-Whenever the target database has the extension, stop the rafikid service first: a
-connection opened while the restore runs inherits the restoring flag for its
-whole life, and only new sessions see it cleared. A dump restore also REFUSES to
+Stop the rafikid service before a dump restore: it replaces tables a running
+daemon keeps writing to, so those writes are lost. A dump restore also REFUSES to
 start while a local `rafikid` answers on its socket, for exactly that reason —
 `--force` accepts it if you have decided you can.
 
@@ -190,16 +183,15 @@ deleted — and unpacks the archive in its place. It does not stop a running
 rafikid: stopping the server drops its connections, so stop the service first.
 
 Interrupting a backup or a restore (Ctrl-C, SIGHUP, SIGTERM) cancels it rather
-than killing it, so the safety work still happens — a dump restore puts the
-TimescaleDB hooks back, and a physical one never starts the swap (it checks
-again after a stop that can take 90 seconds), restarts the server it stopped and
-leaves the data directory untouched — and the command exits non-zero. Once the
-two renames have begun the command finishes the swap — the renames themselves are
-not interruptible — and an interrupt that arrives then rolls the completed swap
-back: the previous data directory is put back, the restored tree is discarded,
-and the command exits non-zero. A second interrupt kills the process outright, which can leave a
-TimescaleDB database in restoring mode (`SELECT timescaledb_post_restore();` as
-a superuser is the remedy) or a physical restore's marker in place.
+than killing it, so the safety work still happens — a physical restore never
+starts the swap (it checks again after a stop that can take 90 seconds), restarts
+the server it stopped and leaves the data directory untouched — and the command
+exits non-zero. Once the two renames have begun the command finishes the swap —
+the renames themselves are not interruptible — and an interrupt that arrives then
+rolls the completed swap back: the previous data directory is put back, the
+restored tree is discarded, and the command exits non-zero. A second interrupt
+kills the process outright, which can leave a physical restore's marker in
+place.
 
 An interrupted physical restore leaves `<data dir>.restore-in-progress` and a
 `.replaced-<unix>` sibling, and `rafikid` then refuses to initialise an empty

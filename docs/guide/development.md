@@ -18,14 +18,18 @@ make install  # copy them to ~/.local/bin (override with DESTDIR=)
 make help     # every target
 ```
 
-Integration tests (migrator, capture store) need TimescaleDB >= 2.22 on
-PostgreSQL 18 with `vector` and `pg_textsearch` — the test database carries all
-three so the extension-present branch of the chain is what the suite asserts,
-while the migrations create hypertables, embedding columns and bm25 indexes only
-where those extensions are installed (see [Recall and memory](recall.md)).
-Run a dedicated, disposable
-server for them: every DB-backed test creates and drops its own scratch
-database, and with durability off a drop costs ~20ms instead of ~1s.
+Integration tests (migrator, capture store) need PostgreSQL 18 with `vector`
+and `pg_textsearch` — the test database carries both so the extension-present
+branch of the chain is what the suite asserts, while the migrations create
+embedding columns and bm25 indexes only where those extensions are installed
+(see [Recall and memory](recall.md)). Run a dedicated, disposable server for
+them: every DB-backed test creates and drops its own scratch database, and with
+durability off a drop costs ~20ms instead of ~1s.
+
+The test server also keeps `timescaledb` preloaded and installed, though the
+migrations themselves create ordinary tables: `TestMigrate0068*` builds
+hypertables for `0068` to convert, and the backup/restore round trip runs on a
+server that has the extension installed.
 
 ```bash
 docker run -d --name pg-test --restart unless-stopped \

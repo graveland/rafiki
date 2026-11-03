@@ -33,7 +33,7 @@ A **node** is one `conversations.conversation_message` row.
 - `provider_message_id` is the provider's id for an assistant reply (`msg_…`) —
   the value a later request names in `diagnostics.previous_message_id`, copied
   onto the node from `conversation_turn.response_message_id` so the lookup does
-  not touch the hypertable.
+  not touch the table.
 - `origin` is the harness that wrote the node (`claude-code` for a captured
   proxy session, `fundi` for a `pkg/llm` turn), NULL when unclassified. It is
   NOT part of `path_hash`: an identical node at the same position is only
@@ -686,20 +686,20 @@ cutover is a restart.
    what makes the backup and the rehearsal copy cheap.
 2. Stop the daemon. `pg_dump -Fc` the database.
 3. **Rehearse:** restore the dump into a new database `rafiki_migrate`
-   (`timescaledb_pre_restore()` before, `timescaledb_post_restore()` after —
-   `rafikid db restore --force --db <new database> <dump>` does both itself when
-   the target database has the extension, and needs neither when it does not,
-   which is what a database created from `template0` gives you).
+   (`rafikid db restore --force --db <new database> <dump>`; a dump restore
+   needs no extension hook, so a target without `timescaledb` restores it the
+   same way, which is what a database created from `template0` gives you).
    Restoring, rather than `CREATE DATABASE … TEMPLATE`, is the point: it proves
    the backup restores. Run `rafikid migrate` against it, then `rafikid tree
    check`, and record the time of each step. Repeat from the dump until clean.
-   The restore needs prod's extension versions (timescaledb 2.30.1,
-   pg_textsearch 1.5.0-dev at the time of writing): restore on prod's own host as
-   a superuser, or on a local server upgraded to match — the local `pg` container
-   (timescaledb 2.28.3, pg_textsearch 1.3.0) is not one. Pass `--db` to every
-   `rafikid` command: `service.env` sets `RAFIKI_DB` to prod and every invocation
-   loads it. Earlier iterations run against a data-only shadow copy instead
-   (schema from our own migrations, so the version skew does not apply).
+   A dump taken before migration `0068` still holds hypertable definitions: that
+   one restores only into a server with `timescaledb` installed, needs prod's
+   extension versions, and needs `timescaledb_pre_restore()` and
+   `timescaledb_post_restore()` run by hand as a superuser around pg_restore —
+   the verb does not run them. Pass `--db` to every `rafikid` command:
+   `service.env` sets `RAFIKI_DB` to prod and every invocation loads it. Earlier
+   iterations run against a data-only shadow copy instead (schema from our own
+   migrations, so the version skew does not apply).
 4. Migrate the real database, run `rafikid tree check`, `VACUUM FULL
    conversations.conversation` (repacks the pages `fillfactor 85` only applies to
    new writes), start the new daemon. Keep the dump until the new daemon has run

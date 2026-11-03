@@ -68,9 +68,15 @@ database, below.)
   `conversation_summary`, plus the three bm25 `CREATE INDEX` statements, run by
   hand — the exact DDL is in `pkg/store/migrations/0036_recall.up.sql` — or a
   database migrated from empty.
-- **TimescaleDB is optional.** Migrations create a hypertable only where
-  `timescaledb` is installed, and a plain table otherwise, so a database
-  without it migrates and runs.
+- **rafiki needs no TimescaleDB; the migrations create ordinary tables.** A
+  database that still holds the three hypertables —
+  `conversations.conversation_turn`, `openrouter.broadcast` and
+  `conversations.raw_http_request` — is converted by migration `0068`, which
+  rewrites each one under `ACCESS EXCLUSIVE` inside the migration transaction:
+  stop the daemon, take a `rafikid db backup`, and leave free disk roughly the
+  size of the largest table (2.1 GB on a large install). The copy takes a while
+  on a table that size, and a failure rolls the whole migration back, leaving
+  every table exactly as it was.
 - **The daemon owns the schema.** `rafikid migrate` brings the database to the
   head of the embedded migration chain. It is idempotent, and concurrent callers
   are serialized by an advisory lock, so two daemons booting together apply it
@@ -95,27 +101,22 @@ The restore is `pg_restore --clean --if-exists --no-owner --single-transaction`:
 every object the ARCHIVE contains is dropped and recreated in one transaction, so
 a failure rolls back, and everything the archive does not contain is left alone.
 It destroys what it covers, so `--force` is required; a run without it only
-names the database it would replace. On a database with `timescaledb` the
-command brackets the restore with that extension's own
-`timescaledb_pre_restore()`/`timescaledb_post_restore()` calls, which is what
-lets `--clean` drop and recreate a hypertable's constraints at all — without
-them pg_restore stops at the first `ALTER TABLE ONLY ... DROP CONSTRAINT` with
-"ONLY option not supported on hypertable operations". The post call runs even
-when the restore fails, because `pre_restore` leaves the extension's DDL hooks
-off database-wide until it does.
+names the database it would replace.
 
-That bracketing has consequences a production operator at this privilege level
-will meet.
+**A dump restore needs no extension hook.** Since `0068` the archive holds
+ordinary tables, so `pg_restore --clean` never meets the `ALTER TABLE ONLY`
+statement TimescaleDB refuses ("ONLY option not supported on hypertable
+operations"), whether or not the target has the extension installed.
 
-**The hooks need a superuser connection**: they run `ALTER DATABASE ... SET
-timescaledb.restoring`, which no other role may set, and then stop and restart
-the extension's background workers, which only a superuser may do. `GRANT SET ON
-PARAMETER timescaledb.restoring TO <role>` does not get you there — it clears the
-setting and then fails on the workers (measured on a TimescaleDB 2.x server). So
-an in-place restore over a TimescaleDB database is refused cleanly, before
-anything is touched, unless `--db` names a superuser's connection. The daemon's
-own role deliberately is not one, which is why this verb is an operator step and
-not something the daemon runs.
+**A dump taken BEFORE `0068` is restored by hand.** It still holds hypertable
+definitions, so it restores only into a server that has `timescaledb` installed,
+and `pg_restore --clean` needs the extension's own hooks around it. `rafikid db
+restore` does not run them: connect to the target database as a superuser and
+run `SELECT timescaledb_pre_restore();`, then pg_restore, then
+`SELECT timescaledb_post_restore();`. The post call runs even when pg_restore
+failed, because `pre_restore` leaves the extension's DDL hooks off database-wide
+until it does. Run `rafikid migrate` against the restored database afterwards —
+that is the step that makes its tables ordinary.
 
 **Ownership is the connecting role's, decided rather than constant.** `pg_restore
 --no-owner` makes that role the owner of everything it creates, so a superuser
@@ -127,15 +128,51 @@ during an incident. If the archive names a role this server does not have, the
 restore fails whole rather than reassigning.
 
 **A restore into a fresh database is a superuser operation too**, even though it
-needs none of those hooks: rafiki's dump creates the untrusted `vector` and
-`pg_textsearch` extensions, and only a superuser may `CREATE EXTENSION` them.
+needs no hook: rafiki's dump creates the untrusted `vector` and `pg_textsearch`
+extensions, and only a superuser may `CREATE EXTENSION` them.
 
-**Stop every daemon on the database first**, dump restores included: `pre_restore`
-works by setting a database-level default, so a connection opened while the
-restore runs inherits the restoring flag for its whole life, and the post call
-cannot clear a session that is already open. `rafikid db restore` refuses to
-start while a local daemon answers on its socket for that reason, and `--force`
-is the acknowledgement.
+**Stop every daemon on the database first**, dump restores included: a restore
+replaces tables a running daemon keeps writing to, so those writes are lost and
+the rows it adds afterwards need not match the restored schema. `rafikid db
+restore` refuses to start while a local daemon answers on its socket for that
+reason, and `--force` is the acknowledgement.
+
+### Removing TimescaleDB
+
+rafiki no longer uses TimescaleDB. The migrations create ordinary tables, and
+`0068` converted the three hypertables an older database still had. The
+extension is harmless where it is installed — a post-`0068` database has no
+hypertable left for it to manage — and the daemon logs one WARN per start, and
+`rafikid migrate` one after migrating, while `timescaledb` or
+`timescaledb_toolkit` is present, naming the statements below.
+
+**rafiki never drops it itself.** Dropping the extension needs a superuser, and
+the daemon's role deliberately is not one; the server may also hold hypertables
+that are not rafiki's, and dropping `timescaledb` takes every one of them with
+it. So look before you drop:
+
+```sql
+SELECT * FROM timescaledb_information.hypertables;
+```
+
+On a database `rafikid migrate` has taken to `0068` or later, the answer is no
+rows, because rafiki's three are ordinary tables. Anything listed here belongs
+to something else on this server: it is not rafiki's, and dropping the
+extension destroys it.
+
+With that answer known to be empty, connect to the `rafiki` database as a
+superuser and drop the toolkit first, because it depends on `timescaledb`:
+
+```sql
+DROP EXTENSION timescaledb_toolkit;
+DROP EXTENSION timescaledb;
+```
+
+`timescaledb_toolkit` is absent on many installs; when that first statement
+reports it does not exist, skip it and run the second. Then remove
+`timescaledb` from `shared_preload_libraries` in `postgresql.conf` and restart
+the server. rafiki's own managed setup (`rafiki setup`) no longer preloads or
+installs it, so this is a step for a database that already had it.
 
 ## The daemon image
 
@@ -424,9 +461,7 @@ order that matters:
    daemon host has a matching `pg_dump`). **The dump is the rollback** — a
    migration that rewrites data has no down path worth trusting.
 2. Rehearse the restore (into a fresh database, or in place as `rafikid db
-   restore --force <path>`, which runs `timescaledb_pre_restore()` and
-   `timescaledb_post_restore()` around pg_restore itself when the target has the
-   extension), migrate, `rafikid tree check`, repeat until clean.
+   restore --force <path>`), migrate, `rafikid tree check`, repeat until clean.
 3. On the real database: stop every daemon writing to it, `rafikid migrate`
    (capture the log — the backfill's own validity signal is a line only it
    prints), `rafikid tree check` (must exit 0), `VACUUM FULL` the rewritten table
