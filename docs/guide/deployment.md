@@ -334,9 +334,11 @@ failure — a lock timeout, a row count that does not match, a volume that fille
 rolls the whole of it back and leaves the three tables exactly as they were. The
 rollback writes no second copy: it logs an abort record and unlinks the
 relfilenodes the copy created, so it gives that space back. The hazard is the copy
-itself — a data or WAL volume that fills during it PANICs the server, and crash
-recovery then needs the space back before it can finish. That is what the measured
-peak and its headroom are for, and what the backup is for.
+itself — a WAL volume that fills during it PANICs the server, and crash
+recovery then needs the space back before it can finish; a data volume that
+fills stops the copy with an ordinary error, which rolls the migration back.
+That is what the measured peak and its headroom are for, and what the backup is
+for.
 
 **Start the daemon, then take the dump you would actually restore from.**
 

@@ -32,10 +32,9 @@ const (
 )
 
 // TestLegacyTimescaleDropOrdersToolkitFirst pins the statement text and the
-// drop ORDER. timescaledb_toolkit depends on timescaledb, so dropping the other
-// way round fails with a dependency error; the names arrive already in that
-// order (legacyTimescaleExtensions sorts them) and this function must not
-// reorder them.
+// drop ORDER: the toolkit is installed alongside timescaledb, so it goes first.
+// The names arrive already in that order (legacyTimescaleExtensions sorts them)
+// and this function must not reorder them.
 func TestLegacyTimescaleDropOrdersToolkitFirst(t *testing.T) {
 	c := assert.NewCollecting(t)
 	cases := []struct {
@@ -61,8 +60,8 @@ func TestLegacyTimescaleDropOrdersToolkitFirst(t *testing.T) {
 
 // TestLegacyTimescaleExtensionsReportsInstalled pins the probe against a real
 // server on both sides of its branch: a database with the extension installed
-// must be reported (toolkit first, because it depends on timescaledb and must
-// be dropped first), and a database without it must answer nothing. A probe
+// must be reported (toolkit first, the order they are dropped in), and a
+// database without it must answer nothing. A probe
 // that always returns a name fails the second half; one that never does fails
 // the first.
 func TestLegacyTimescaleExtensionsReportsInstalled(t *testing.T) {
@@ -77,7 +76,7 @@ func TestLegacyTimescaleExtensionsReportsInstalled(t *testing.T) {
 		if haveToolkit {
 			want = []string{legacyToolkitExtension, legacyTimescaleExtension}
 		}
-		c.EqDeep(want, names, "the installed extensions, toolkit first: it depends on timescaledb")
+		c.EqDeep(want, names, "the installed extensions, toolkit first: the order they are dropped in")
 	})
 
 	t.Run("absent", func(t *testing.T) {
