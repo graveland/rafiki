@@ -34,7 +34,8 @@ func appendNode(t *testing.T, pool *pgxpool.Pool, convID string, message msg.Mes
 	ck.NoError(err, "append node")
 }
 
-// Integration tests need TimescaleDB (RAFIKI_TEST_DSN, see store/migrate_test.go).
+// Integration tests need a real PostgreSQL 18 (for uuidv7()); RAFIKI_TEST_DSN,
+// see store/migrate_test.go.
 func convTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	c := assert.NewAborting(t)

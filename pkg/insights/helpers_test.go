@@ -17,8 +17,8 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// Integration tests need a real TimescaleDB (>= 2.22, PostgreSQL 18 for
-// uuidv7()). Set RAFIKI_TEST_DSN to run them, e.g.:
+// Integration tests need a real PostgreSQL 18 (for uuidv7()). Set
+// RAFIKI_TEST_DSN to run them, e.g.:
 //
 //	RAFIKI_TEST_DSN="postgres://postgres@localhost:5432/postgres?sslmode=disable" go test ./insights/...
 //

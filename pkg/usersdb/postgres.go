@@ -189,9 +189,9 @@ func (s *pgStore) List(ctx context.Context, includeDeleted bool, limit int) ([]u
 }
 
 func (s *pgStore) Delete(ctx context.Context, username string) error {
-	// A tombstone, never a DELETE: hard-deleting would cascade an UPDATE
-	// across every historical turn's author_user_id, inside compressed
-	// hypertable chunks. See the design doc, Decision 6.
+	// A tombstone, never a DELETE: author_user_id references this row from
+	// every historical turn, so a hard delete would either fail on that foreign
+	// key or force a rewrite of all of them. See the design doc, Decision 6.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin delete user: %w", err)

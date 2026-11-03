@@ -106,9 +106,8 @@ func SyncModelPricing(ctx context.Context, pool *pgxpool.Pool, src PriceSource) 
 // distinctTurnModels returns the model strings worth pricing: those seen on a
 // turn recently, plus every model already in model_pricing.
 //
-// The window is not an optimization detail — conversation_turn is a columnstore
-// hypertable segmented by conversation_id with no index on model, so an
-// unbounded DISTINCT decompresses every chunk ever written, growing without
+// The window is not an optimization detail — conversation_turn has no index on
+// model, so an unbounded DISTINCT scans every turn ever written, growing without
 // bound while the set of distinct model strings does not.
 //
 // The union is what makes the window safe: without it, a model that stopped

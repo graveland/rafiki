@@ -141,7 +141,7 @@ const (
 	BroadcastListen = "RAFIKI_BROADCAST_LISTEN"
 
 	// RecordRequests, when "1", enables raw HTTP request/response capture to
-	// the conversations.raw_http_request hypertable. Debug-only; off by default.
+	// the conversations.raw_http_request table. Debug-only; off by default.
 	RecordRequests = "RAFIKI_RECORD_REQUESTS"
 
 	// LogLevel selects the daemon's log verbosity: "debug", "info" (default),

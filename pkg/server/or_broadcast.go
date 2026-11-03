@@ -212,10 +212,10 @@ func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan
 
 	createdAt, ok := parseNanos(sp.StartUnix)
 	if !ok {
-		// created_at is TIMESTAMPTZ NOT NULL and the hypertable's
-		// tsdb.partition_column: the zero time.Time (0001-01-01) would create a
-		// far-past chunk and poison every time-ordered query and retention
-		// policy on openrouter.broadcast. Fall back to "now" and log it loudly
+		// created_at is TIMESTAMPTZ NOT NULL and the column every read of
+		// openrouter.broadcast is ordered by (broadcast_session_idx): the zero
+		// time.Time (0001-01-01) would sort far outside any real session and
+		// poison every time-ordered query. Fall back to "now" and log it loudly
 		// enough to notice if OpenRouter starts omitting the attribute.
 		createdAt = time.Now()
 		logger.Warn("or_broadcast: missing/invalid startTimeUnixNano, falling back to now",

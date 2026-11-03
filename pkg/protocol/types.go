@@ -402,7 +402,7 @@ type SpawnRequest struct {
 	ResumedFromSession string `json:"resumedFromSession,omitempty"`
 
 	// RecordRequests, when true, records raw LLM API request/response pairs
-	// to the debug raw_http_request hypertable (agent-kind only; requires
+	// to the debug raw_http_request table (agent-kind only; requires
 	// RAFIKI_RECORD_REQUESTS=1 at daemon startup).
 	RecordRequests bool `json:"recordRequests,omitempty"`
 

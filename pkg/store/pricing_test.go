@@ -391,7 +391,7 @@ func TestTurnNullDimensionsReadAsSentinelNotNull(t *testing.T) {
 
 // conversation_turn has no foreign key on conversation_id, and deleting a
 // conversation cascades to conversation_message and conversation_analysis but
-// not to the turn hypertable. An orphaned turn must still appear on the spend
+// not to conversation_turn. An orphaned turn must still appear on the spend
 // surface with its tokens: real money was spent, and an INNER JOIN made it
 // vanish instead.
 func TestTurnOrphanedTurnStillAppearsUnattributed(t *testing.T) {
@@ -526,7 +526,7 @@ func TestSyncModelPricingWritesNullForAbsentCachePrice(t *testing.T) {
 }
 
 // The observed-models scan is bounded to a recent window, because an unbounded
-// DISTINCT decompresses every chunk of the turn hypertable ever written. The
+// DISTINCT scans every turn ever written. The
 // union with model_pricing is what keeps that safe: a model that stopped being
 // used must keep getting its price refreshed instead of silently drifting.
 func TestSyncModelPricingBoundsObservedModelsButKeepsKnownOnes(t *testing.T) {

@@ -283,8 +283,8 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 
 // TestHandleOTLP_MissingTimestampFallsBackToNow verifies that a span missing
 // startTimeUnixNano gets created_at set to roughly "now" rather than the zero
-// time.Time (0001-01-01), which would poison the hypertable's time
-// partitioning and retention policy.
+// time.Time (0001-01-01), which would sort far outside any real session and
+// poison every time-ordered read of the broadcast table.
 func TestHandleOTLP_MissingTimestampFallsBackToNow(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := testBroadcastPool(t)

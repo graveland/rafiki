@@ -203,7 +203,7 @@ type Controller struct {
 	heldLeases   map[string]store.Lease
 
 	// rawTrace, when non-nil, is the store raw LLM API request/response
-	// capture writes to (the debug raw_http_request hypertable). Created at
+	// capture writes to (the debug raw_http_request table). Created at
 	// daemon startup whenever a DB pool exists, independent of
 	// RAFIKI_RECORD_REQUESTS — whether a given spawn actually records is
 	// req.RecordRequests OR rawTraceAll, decided in agentRuntimeOptionsFor.

@@ -27,13 +27,13 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// TestCaptureStore requires a real PostgreSQL/TimescaleDB instance. Set
+// TestCaptureStore requires a real PostgreSQL 18 (for uuidv7()). Set
 // RAFIKI_TEST_DSN to a connection string to run it, e.g.:
 //
 //	RAFIKI_TEST_DSN="postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable" go test ./capture/...
 //
-// It is skipped by default so plain unit test runs (and CI without a
-// TimescaleDB instance) stay green.
+// It is skipped by default so plain unit test runs (and CI without a database)
+// stay green.
 func TestCaptureStore(t *testing.T) {
 	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -928,11 +928,11 @@ func TestAppendResponseMessage(t *testing.T) {
 
 // TestAppendResponseMessageFailsWhenTheTurnKeyMoved drives the zero-rows branch
 // of AppendResponseMessage's response_ordinal UPDATE. The turn's key is
-// (id, created_at) — created_at is the hypertable's partition column — so moving
-// created_at leaves the UPDATE matching nothing. That is the state a lost turn
-// row puts the reply in: the node is already committed by AppendChain, and
-// without the pointer nothing on the turn names it. The call must fail the turn
-// rather than return success over a half-recorded response.
+// (id, created_at), so moving created_at leaves the UPDATE matching nothing.
+// That is the state a lost turn row puts the reply in: the node is already
+// committed by AppendChain, and without the pointer nothing on the turn names
+// it. The call must fail the turn rather than return success over a
+// half-recorded response.
 func TestAppendResponseMessageFailsWhenTheTurnKeyMoved(t *testing.T) {
 	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -958,12 +958,9 @@ func TestAppendResponseMessageFailsWhenTheTurnKeyMoved(t *testing.T) {
 	c.NoError(err, "DecomposeRequest")
 
 	// Move the turn's key out from under the caller's createdAt, which is what a
-	// row that was rewritten or re-partitioned underneath the append looks like.
-	// The move is deliberately sub-second: created_at is the hypertable's
-	// partition column and each chunk carries a check constraint bounding it, so
-	// a whole-hour move crosses the chunk boundary and Postgres refuses the
-	// UPDATE. Any difference in the key produces the zero-row match this test
-	// needs.
+	// row that was rewritten underneath the append looks like. The key is
+	// (id, created_at), and a sub-second move is enough to make the two differ:
+	// any difference in the key produces the zero-row match this test needs.
 	_, err = pool.Exec(ctx, `
 		UPDATE conversations.conversation_turn SET created_at = created_at + interval '1 millisecond'
 		 WHERE id = $1 AND created_at = $2`, turnID, createdAt)

@@ -358,7 +358,7 @@ type TurnIntent struct {
 
 // InsertTurnIntent write-aheads the turn's request row and returns its
 // surrogate id plus created_at, which together are the update key for the later
-// CompleteTurn/FailTurn call (the pair prunes the update to a single chunk).
+// CompleteTurn/FailTurn call (the pair narrows the update to exactly one row).
 // t.ID, when set, reserves that UUID as the row's id instead of the uuidv7()
 // default: the proxy pre-mints a founding turn's id so it can route the
 // founding request to the branch named after it before the row exists.
@@ -430,8 +430,8 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 		if err != nil {
 			return err
 		}
-		// The (id, created_at) pair must match exactly one chunk-resident row; zero
-		// rows means a skewed/stale key silently no-op'd the capture write.
+		// The (id, created_at) pair must match exactly one row; zero rows means a
+		// skewed/stale key silently no-op'd the capture write.
 		if n := tag.RowsAffected(); n != 1 {
 			return fmt.Errorf("complete-turn: expected 1 row, updated %d (stale/skewed key)", n)
 		}
@@ -1044,7 +1044,7 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 			return fmt.Errorf("append response: set response_ordinal: %w", err)
 		}
 		// Zero rows means the turn row is gone or its key moved (id + created_at is
-		// the hypertable's primary key), so the reply is stored with no pointer back
+		// the turn's primary key), so the reply is stored with no pointer back
 		// to it from the turn. Fail the turn rather than complete it half-recorded;
 		// setRequestHead checks the same thing for the request side.
 		if n := tag.RowsAffected(); n != 1 {

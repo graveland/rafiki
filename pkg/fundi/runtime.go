@@ -300,7 +300,7 @@ type RuntimeOptions struct {
 	Halted func() (bool, string)
 
 	// RawTrace, when non-nil, enables raw LLM API request/response capture to
-	// the debug raw_http_request hypertable. Created at daemon startup when
+	// the debug raw_http_request table. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
 	RawTrace *rawtrace.RawTraceStore
 

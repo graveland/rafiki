@@ -184,7 +184,7 @@ func (c *Client) spec() routing.Spec {
 }
 
 // WithRecordRequests enables raw HTTP request/response capture to the debug
-// raw_http_request hypertable. Pass nil to disable (the default). The nil
+// raw_http_request table. Pass nil to disable (the default). The nil
 // check happens here, not just at the call site: c.rawTrace is an interface
 // (rawTraceRecorder) so tests can fake it, and assigning a nil
 // *rawtrace.RawTraceStore straight into an interface field would produce a
