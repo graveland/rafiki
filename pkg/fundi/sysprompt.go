@@ -20,13 +20,26 @@ const defaultBasePrompt = `You are fundi, a coding agent working directly agains
 // true.
 const recallSection = "## Recall\n\nBefore non-trivial work, search past conversations and saved memories with recall, expand a promising hit with recall_context, and save durable facts with memory_put."
 
-// waitSection tells a child that can start subagents or background jobs how to
-// wait for them. Tool descriptions already say "do not poll", but a rule there
-// only forbids; this names the alternative. A turn kept alive by `sleep` cannot
-// receive a settlement until the sleep returns, so the child that waits by
-// polling is the one that hears about nothing. Emitted only when
-// SysPromptConfig.Wait is true, for the same reason recallSection is.
-const waitSection = "## Waiting\n\nSubagents and background jobs report back on their own: when one settles you receive a message and, if your turn has ended, a new turn starts. When everything left to do is waiting on them, end your turn. Do not sleep or loop to wait; a turn kept alive that way cannot receive the message until the sleep finishes."
+// waitSection tells a child that can leave work running how to wait for it.
+// Tool descriptions already say "do not poll", but a rule there only forbids;
+// this names the alternative. A turn kept alive by `sleep` cannot receive a
+// settlement until the sleep returns, so the child that waits by polling is the
+// one that hears about nothing.
+//
+// It deliberately names NO tools. The gate (canWait, runtime.go) is "any tool
+// that can leave work running", so a child reading this may have `bash` alone
+// and no agent_* tools at all — naming one it does not have is worse than
+// naming none. The tool-specific instruction lives in each tool's own
+// description, which is emitted only when that tool is.
+const waitSection = "## Waiting\n\n" +
+	"Everything you start reports back on its own: a subagent, a bash command promoted to a " +
+	"background job at its timeout, and a script child each settle into a message to you, and " +
+	"if your turn has ended that message starts a new turn. So when waiting is all that is " +
+	"left, end your turn and say what you are waiting for. Do not sleep, poll in a loop, or " +
+	"re-check the tools that would tell you it finished, and do not schedule a wakeup as a " +
+	"polling clock: a turn held open by sleeping cannot receive the message until it ends, so " +
+	"polling is the one behaviour guaranteed to miss it. If you cannot end your turn, look " +
+	"once and act on what you see."
 
 // WorkspaceInfo describes where a child actually landed. Every field is
 // resolved by the daemon at spawn; none of it is asked of the model.
@@ -50,8 +63,8 @@ type SysPromptConfig struct {
 	// and memory tools. It is false for a child that does not, which must not
 	// pay for the nudge.
 	Recall bool
-	// Wait, when true, emits the waiting section: the child has agent_spawn or
-	// bash_start, so it will have something to wait on.
+	// Wait, when true, emits the waiting section: the child has at least one
+	// tool that can leave work running (canWait, runtime.go).
 	Wait         bool
 	Cwd, ModelID string
 	// Workspace, when non-nil and Isolation != "none", appends a per-child

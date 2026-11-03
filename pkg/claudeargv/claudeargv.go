@@ -51,7 +51,30 @@ const CoordinationPrompt = "You are running under rafiki, which exposes its agen
 	" If recall tools (recall, recall_context, memory_get/memory_put) are listed, search your " +
 	"owner's past conversations and saved memories with recall before non-trivial work, expand " +
 	"a promising hit with recall_context, and save durable facts with memory_put." +
-	" For timed work — a reminder, a recurring check, waking yourself later — use rafiki's CronCreate, CronDelete, CronList and ScheduleWakeup tools: their jobs persist with this conversation and survive daemon restarts."
+	" For timed work — a reminder, a recurring check, waking yourself later — use rafiki's CronCreate, CronDelete, CronList and ScheduleWakeup tools: their jobs persist with this conversation and survive daemon restarts." +
+	coordinationWaiting
+
+// coordinationWaiting is the waiting rule, stated on THIS surface because the
+// MCP tool descriptions cannot state it correctly: every one of them carries
+// mcpNotificationNote, which warns that a settlement push may be dropped and
+// that the caller should check agent_list/task_list deliberately. That warning
+// is true of the log channel and false of the channel a child's own subagents
+// use — a parented child's settlement skips the log fan-out entirely
+// (notifyMCPSettled returns for a child with a parent) and is delivered into
+// the parent's event buffer, which becomes a message and, if the parent's turn
+// has ended, a new turn. Without this paragraph a claude child reads the only
+// waiting advice it has as "poll", which is exactly what it then does.
+//
+// Kept as its own const so a test can pin the rule without matching the whole
+// prompt, and appended rather than woven in so the existing sentences keep
+// their byte-for-byte wording (the two argv producers are compared for
+// equality).
+const coordinationWaiting = " Waiting: a subagent you spawn is not announced on the MCP log channel — " +
+	"its report is delivered to you as a message, and if your turn has ended that message " +
+	"starts a new turn. So end your turn instead of sleeping, polling agent_list/agent_view, " +
+	"or scheduling a wakeup to re-check. The \"settlement notification may be dropped\" " +
+	"warnings on MCP tools describe the best-effort log channel a client relies on for a " +
+	"TOP-LEVEL agent it spawned; they are not your channel and are not a reason to poll."
 
 // NativeSchedulerTools are Claude Code's own scheduling tools. A daemon-managed
 // child that carries the MCP surface gets rafiki's same-named tools instead

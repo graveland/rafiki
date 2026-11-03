@@ -157,7 +157,14 @@ from a tool argument, since arguments come from a model that can be
 prompt-injected. Completion is a **signal**: `agent_spawn` returns as soon as
 the child is registered, and settlement lands as one coalesced digest per
 parent turn regardless of how many descendants finished together. Background
-jobs (`bash_start`) settle the same way.
+jobs (`bash_start`, and a `bash` command promoted to a job at its timeout)
+settle the same way. That is why both runtimes' prompts tell a coordinator to
+end its turn instead of polling — fundi's `## Waiting` section and
+`claudeargv.CoordinationPrompt`'s waiting paragraph: a turn held open by
+`sleep` cannot receive the settlement until it ends. The MCP log channel is a
+different channel and no substitute: it carries a *top-level* child's
+settlement to its owner's sessions, is dropped unless the client negotiated
+`logging/setLevel`, and never carries a worker's own children.
 
 ### Scheduling
 

@@ -506,14 +506,25 @@ var mcpBlueprints = []tools.Tool{
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint
 // descriptions carry. The push this surface delivers is best-effort by
-// construction — the SDK silently drops every notifications/message until the
-// client has sent logging/setLevel — so an agent told to wait for a message
-// could still wait forever; every override that would otherwise promise a
-// notification carries this instead.
+// construction — the SDK's ServerSession.Log returns nil WITHOUT writing until
+// the client has sent logging/setLevel, and drops anything below the level it
+// set — so an agent told to wait for a message could still wait forever; every
+// override that would otherwise promise a notification carries this instead.
+//
+// It says which channel it is talking about, because a daemon-managed claude
+// child reads these same descriptions and this is the ONLY waiting advice it
+// used to get. The log fan-out is for a TOP-LEVEL child's owner
+// (notifyMCPSettled returns early for a child with a parent); a worker's own
+// subagents reach that worker through its event buffer, as messages. Without
+// the distinction "never wait for one, check agent_list deliberately" reads as
+// the whole rule, and the child polls. The positive half of the rule lives in
+// claudeargv.CoordinationPrompt (coordinationWaiting).
 const mcpNotificationNote = "A settlement notification may be pushed to your client as a " +
 	"best-effort log message, and many clients drop those unless they have set a logging " +
-	"level (logging/setLevel), so never wait for one: when you need to know whether an agent " +
-	"finished, check agent_list or task_list deliberately."
+	"level (logging/setLevel), so never wait for one. This channel carries a TOP-LEVEL agent " +
+	"your client spawned; a worker's own children reach that worker as messages instead. " +
+	"When you need to know whether a top-level agent finished, check agent_list or task_list " +
+	"deliberately, not in a loop."
 
 // mcpSpawnPrefix reframes agent_spawn for a client that has its own native
 // subagent tool. It asserts the preference the surface exists to create: an

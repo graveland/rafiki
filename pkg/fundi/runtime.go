@@ -603,6 +603,44 @@ func splitToolList(s string) []string {
 	return out
 }
 
+// waitTools are the tools whose presence means this child can leave work
+// running and be told about it later — the gate for the system prompt's
+// waiting section.
+//
+// bash belongs here even though it reads as a synchronous tool: every bash
+// call is auto-background-eligible (pkg/execpool sets AutoBackground for
+// `tool == "bash"`), and a command still running at its own timeout is
+// promoted to a job that reports back later. A preset whose allowlist keeps
+// bash but drops bash_start and agent_spawn is therefore a child that waits,
+// and an earlier gate of "agent_spawn or bash_start" told it nothing.
+//
+// pymodule_start and the agent_* verbs are here for the same reason: each can
+// put work in flight whose settlement arrives as a message. Naming a tool the
+// child does not have is the failure mode this list prevents — the section is
+// emitted when ANY of them survives the allowlist.
+var waitTools = []string{
+	(tools.BashBlueprint{}).Name(),
+	(tools.BashStartBlueprint{}).Name(),
+	(tools.AgentSpawnBlueprint{}).Name(),
+	(tools.AgentViewBlueprint{}).Name(),
+	(tools.AgentSendBlueprint{}).Name(),
+	(tools.PyModuleStartBlueprint{}).Name(),
+	(tools.ScheduleWakeupBlueprint{}).Name(),
+	(tools.TaskListBlueprint{}).Name(),
+}
+
+// canWait reports whether the child has any tool that can leave work running.
+// A child with none — a read/edit-only reviewer, say — has nothing to wait on,
+// and the section would be tokens spent conveying nothing.
+func canWait(registry *tools.Registry) bool {
+	for _, name := range waitTools {
+		if registry.Retains(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // childEnv joins the serving process's environment with one child's
 // forwarded environment (RuntimeOptions.Env): the process env is the base,
 // the forwarded map overlays it (forwarded wins per key), and the result
@@ -848,19 +886,18 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	cfg := Config{
-		Model:                opts.Model,
-		ThinkingBudget:       opts.ThinkingBudget,
-		MaxOutputTokens:      opts.MaxOutputTokens,
-		SystemPromptOverride: opts.SystemPromptOverride,
-		AppendSystemPrompt:   opts.AppendSystemPrompt,
-		ContextWindow:        opts.ContextWindow,
-		Prefill:              opts.Prefill,
-		PrefillTools:         prefillTools,
-		ContextFiles:         contextFiles,
-		SkillsInventory:      skills.SkillsInventory(discovered),
-		Recall:               registry.Retains((tools.RecallBlueprint{}).Name()),
-		Wait: registry.Retains((tools.AgentSpawnBlueprint{}).Name()) ||
-			registry.Retains((tools.BashStartBlueprint{}).Name()),
+		Model:                  opts.Model,
+		ThinkingBudget:         opts.ThinkingBudget,
+		MaxOutputTokens:        opts.MaxOutputTokens,
+		SystemPromptOverride:   opts.SystemPromptOverride,
+		AppendSystemPrompt:     opts.AppendSystemPrompt,
+		ContextWindow:          opts.ContextWindow,
+		Prefill:                opts.Prefill,
+		PrefillTools:           prefillTools,
+		ContextFiles:           contextFiles,
+		SkillsInventory:        skills.SkillsInventory(discovered),
+		Recall:                 registry.Retains((tools.RecallBlueprint{}).Name()),
+		Wait:                   canWait(registry),
 		Cwd:                    opts.Cwd,
 		Workspace:              opts.Workspace,
 		Ref:                    opts.Ref,

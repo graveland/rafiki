@@ -1035,3 +1035,14 @@ func TestMCPFaceTagIgnoresSpoofedCaller(t *testing.T) {
 	ck.Eq(f.owner, rows[0].OwnerUserID, "the tag belongs to the calling child's owner")
 	ck.Eq(tags.ScopeTree, rows[0].Scope, "scope")
 }
+
+// The note must say WHICH channel it is about. A daemon-managed claude child
+// reads these same descriptions, and for its own subagents the log fan-out is
+// not the channel at all (notifyMCPSettled returns for a parented child), so a
+// note that reads as the whole waiting rule teaches polling.
+func TestMCPNotificationNoteScopesItselfToTopLevelAgents(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, want := range []string{"TOP-LEVEL", "worker's own children", "not in a loop"} {
+		c.StrContains(mcpNotificationNote, want, "mcpNotificationNote")
+	}
+}

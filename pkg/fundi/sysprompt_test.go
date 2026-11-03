@@ -155,5 +155,12 @@ func TestWaitSectionOnlyWhenEnabled(t *testing.T) {
 	c := assert.NewAborting(t)
 	c.StrContains(on, "## Waiting", "waiting section missing when Wait is set; got")
 	c.StrContains(on, "end your turn", "waiting section must name the alternative to polling; got")
+	c.StrContains(on, "reports back on its own", "waiting section must say the report comes unprompted; got")
+	c.StrContains(on, "promoted to a background job", "waiting section must name the bash case, which is the commonest one; got")
+	c.StrContains(on, "Do not sleep", "waiting section must forbid sleeping; got")
+	// The section is emitted for a child whose only async tool may be bash, so
+	// naming a tool it might not have would be advice it cannot follow. The
+	// tool-specific half of the rule lives in each tool's own description.
+	c.NotStrContains(on, "agent_list", "the waiting section must name no tools; got")
 	c.NotStrContains(off, "## Waiting", "waiting section present when Wait is unset; got")
 }

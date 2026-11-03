@@ -388,3 +388,19 @@ func assertPair(t *testing.T, argv []string, flag, value string) {
 	}
 	t.Errorf("argv %v: missing %s", argv, flag)
 }
+
+// The waiting rule is the prompt's newest clause, and it exists because the MCP
+// tool descriptions this child reads carry only the NEGATIVE half
+// (mcpNotificationNote: a push may be dropped, so check deliberately). Read
+// alone that teaches polling, which is what a child then does.
+func TestCoordinationPromptStatesTheWaitingRule(t *testing.T) {
+	c := assert.NewCollecting(t)
+	c.StrContains(CoordinationPrompt, coordinationWaiting, "CoordinationPrompt must carry the waiting paragraph")
+	for _, want := range []string{"end your turn", "as a message", "TOP-LEVEL", "not a reason to poll"} {
+		c.StrContains(coordinationWaiting, want, "coordinationWaiting")
+	}
+	// The channel distinction is the point: a parented child's settlement never
+	// takes the log fan-out, so the note's warning must not read as the rule.
+	c.NotStrContains(coordinationWaiting, "never wait for one",
+		"the waiting paragraph must not repeat the log-channel warning as if it were the rule")
+}

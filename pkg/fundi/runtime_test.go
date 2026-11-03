@@ -797,3 +797,43 @@ func TestMcpOAuthRuntimeOptionThreadsTheFactory(t *testing.T) {
 	c.Eq(endpoint, calls[0].endpoint, "factory endpoint")
 	c.Eq("acme", calls[0].headers["X-Mcp-Tenant"], "factory headers")
 }
+
+// waitTestTool is a registry member with nothing behind it: canWait only ever
+// asks for the NAME.
+type waitTestTool string
+
+func (n waitTestTool) Name() string            { return string(n) }
+func (waitTestTool) Description() string       { return "test tool" }
+func (waitTestTool) InputSchema() tools.Schema { return tools.Schema{Type: "object"} }
+
+func (waitTestTool) Execute(context.Context, tools.ToolInput) (tools.ToolResult, error) {
+	return tools.ToolResult{}, nil
+}
+
+// canWait is the waiting section's gate and must cover every tool that can
+// leave work running. bash is the one that matters most: every bash call is
+// auto-background-eligible (pkg/execpool sets AutoBackground for `bash`), so a
+// preset that keeps bash while dropping bash_start and agent_spawn is still a
+// child that ends up waiting on a job — and the previous
+// "agent_spawn or bash_start" gate told exactly that child nothing.
+func TestCanWaitCoversEveryAsyncTool(t *testing.T) {
+	c := assert.NewAborting(t)
+	async := []string{
+		"bash", "bash_start", "agent_spawn", "agent_view", "agent_send",
+		"pymodule_start", "ScheduleWakeup", "task_list",
+	}
+	for _, name := range async {
+		c.True(slices.Contains(waitTools, name),
+			"waitTools must name %q: a child whose allowlist keeps only that tool can still be left waiting", name)
+		reg := tools.NewRegistry()
+		reg.Register(waitTestTool(name))
+		c.True(canWait(reg), "canWait with only %q registered", name)
+	}
+
+	// The section is paid for on every request, so a child with nothing async
+	// in its allowlist must not get it.
+	reg := tools.NewRegistry()
+	reg.Register(waitTestTool("read"))
+	reg.Register(waitTestTool("edit"))
+	c.False(canWait(reg), "a read/edit-only child must not get the waiting section")
+}
