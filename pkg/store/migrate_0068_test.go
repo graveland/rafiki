@@ -768,13 +768,18 @@ func scratchDatabaseName(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 // freshPoolTo opens a pool to a database on the test server. A NEW pool is the
 // point: a connection an existing pool already holds keeps the settings it
 // connected with, so a database-level setting changed after that pool was built
-// reaches only the sessions opened afterwards.
-func freshPoolTo(t *testing.T, dbname string) *pgxpool.Pool {
+// reaches only the sessions opened afterwards. maxConns caps the pool, so a
+// caller can pin the one session the pool will ever hand out; 0 keeps pgx's own
+// default.
+func freshPoolTo(t *testing.T, dbname string, maxConns int32) *pgxpool.Pool {
 	t.Helper()
 	c := assert.NewAborting(t)
 	cfg, err := pgxpool.ParseConfig(os.Getenv("RAFIKI_TEST_DSN"))
 	c.Require().NoError(err, "parse the test dsn")
 	cfg.ConnConfig.Database = dbname
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
+	}
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	c.Require().NoError(err, "connect %s", dbname)
 	t.Cleanup(pool.Close)
@@ -833,7 +838,11 @@ func TestMigrate0068CopiesCompressedRowsWhenColumnarScanIsOff(t *testing.T) {
 		`ALTER DATABASE `+pgx.Identifier{dbName}.Sanitize()+` SET timescaledb.enable_columnarscan = off`)
 	c.Require().NoError(err, "turn the columnar scan off at database level")
 
-	off := freshPoolTo(t, dbName)
+	// One connection, so the session the migration runs on is the one this test
+	// reads afterwards: a session-level set_config would leave the setting on
+	// there, and no fresh pool (which inherits the database setting anyway) and no
+	// catalog row would ever show it.
+	off := freshPoolTo(t, dbName, 1)
 	var setting string
 	c.Require().NoError(off.QueryRow(ctx, `SELECT current_setting('timescaledb.enable_columnarscan')`).Scan(&setting),
 		"read the setting on a session opened after the change")
@@ -849,7 +858,26 @@ func TestMigrate0068CopiesCompressedRowsWhenColumnarScanIsOff(t *testing.T) {
 			ht.table, len(truth[ht.table]))
 	}
 
+	// The guard has to be TRANSACTION-local, and a fresh pool cannot show a leak:
+	// it opens a new session, which inherits the database setting either way. Pin
+	// the session instead. The pool holds one connection, so the pid must be the
+	// same before and after, and a session-level set_config would leave the
+	// setting on there.
+	var beforePID int
+	c.Require().NoError(off.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&beforePID),
+		"read the pid of the session the migration will run on")
 	c.Require().NoError(Migrate(ctx, off), "migrate with the columnar scan off")
+	var afterPID int
+	c.Require().NoError(off.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&afterPID),
+		"re-read the pid of the session the migration ran on")
+	c.Eq(beforePID, afterPID,
+		"the pool handed the migration a different session than the one asserted; the leak check below proves nothing")
+	var leaked string
+	c.Require().NoError(off.QueryRow(ctx, `SELECT current_setting('timescaledb.enable_columnarscan')`).Scan(&leaked),
+		"read the setting on the session the migration ran on")
+	c.Eq("off", leaked,
+		"0068 leaked timescaledb.enable_columnarscan=%s onto the session it ran on; the guard is not transaction-local",
+		leaked)
 
 	for _, ht := range hypertables0068 {
 		c.False(isHypertable(t, ctx, off, ht.table), "%s is still a hypertable after 0068", ht.table)
@@ -862,7 +890,7 @@ func TestMigrate0068CopiesCompressedRowsWhenColumnarScanIsOff(t *testing.T) {
 
 	// The setting is transaction-local: nothing the migration did reaches the
 	// operator's database settings or a session opened afterwards.
-	later := freshPoolTo(t, dbName)
+	later := freshPoolTo(t, dbName, 0)
 	c.Require().NoError(later.QueryRow(ctx, `SELECT current_setting('timescaledb.enable_columnarscan')`).Scan(&setting),
 		"read the setting on a session opened after the migration")
 	c.Eq("off", setting, "0068 changed the columnar scan setting of later sessions")
