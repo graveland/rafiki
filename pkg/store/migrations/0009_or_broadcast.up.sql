@@ -6,22 +6,7 @@
 -- cost, timing, model, and correlation ids). The raw_payload JSONB stores the
 -- full OTLP span for schema evolution without re-migration.
 CREATE SCHEMA IF NOT EXISTS openrouter;
--- A hypertable when timescaledb is installed; a plain table otherwise (an
--- embedded install has no timescaledb).
-DO $$
-DECLARE
-    ts_with text := '';
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
-        ts_with := $w$ WITH (
-    tsdb.hypertable,
-    tsdb.partition_column = 'created_at',
-    tsdb.enable_columnstore = true,
-    tsdb.segmentby = 'session_id',
-    tsdb.orderby = 'created_at DESC'
-)$w$;
-    END IF;
-    EXECUTE $ddl$CREATE TABLE openrouter.broadcast (
+CREATE TABLE openrouter.broadcast (
     id              BIGINT GENERATED ALWAYS AS IDENTITY,
     session_id      TEXT,
     generation_id   TEXT,
@@ -39,6 +24,5 @@ BEGIN
     received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     raw_payload     JSONB NOT NULL,
     PRIMARY KEY (id, created_at)
-)$ddl$ || ts_with;
-END $$;
+);
 CREATE INDEX IF NOT EXISTS broadcast_session_idx ON openrouter.broadcast (session_id, created_at DESC);

@@ -18,14 +18,25 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// The migrator tests need a real TimescaleDB (>= 2.22, PostgreSQL 18 for
-// uuidv7()). Set RAFIKI_TEST_DSN to run them, e.g.:
+// The migrator tests need a real PostgreSQL 18 (for uuidv7()). Set
+// RAFIKI_TEST_DSN to run them, e.g.:
 //
 //	RAFIKI_TEST_DSN="postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable" go test ./pkg/store/...
+//
+// The TestMigrate0068* tests additionally need a server with timescaledb
+// preloaded and installed in template1: they build hypertables to convert.
 //
 // Each subtest runs in its own scratch database created from that DSN.
 
 func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	return testPoolFromTemplate(t, "template1")
+}
+
+// testPoolFromTemplate is testPool with the scratch database's template chosen:
+// template1 carries the extensions this server has installed (timescaledb),
+// template0 carries none of them.
+func testPoolFromTemplate(t *testing.T, template string) *pgxpool.Pool {
 	t.Helper()
 	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -40,8 +51,22 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	t.Cleanup(admin.Close)
 
 	name := fmt.Sprintf("rafiki_mig_%d", time.Now().UnixNano())
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatalf("create scratch db: %v", err)
+	// template1 carries timescaledb, and its job scheduler connects to every
+	// database that has the extension installed — template1 included — so the
+	// template is transiently "being accessed by other users". Retry that.
+	var createErr error
+	for attempt := 0; attempt < 50; attempt++ {
+		if _, createErr = admin.Exec(ctx, "CREATE DATABASE "+name+" WITH TEMPLATE "+template); createErr == nil {
+			break
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(createErr, &pgErr) || pgErr.Code != "55006" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if createErr != nil {
+		t.Fatalf("create scratch db: %v", createErr)
 	}
 	t.Cleanup(func() {
 		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)")
@@ -99,7 +124,7 @@ func TestMigrateFreshDatabase(t *testing.T) {
 	assertBaselineSchema(t, ctx, pool)
 	c.Eq("baseline", baselineName(t, ctx, pool), "baseline row name")
 
-	// The executed schema must actually work: uuidv7 default, hypertable insert.
+	// The executed schema must actually work: uuidv7 default, table insert.
 	var convID string
 	err := pool.QueryRow(ctx, `INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
 		VALUES ('test','server') RETURNING id::text`).Scan(&convID)
@@ -246,13 +271,11 @@ func TestMigrate0019UserAttribution(t *testing.T) {
 		cid).Scan(&author), "select v_turn.author_username")
 	ck.Eq("brent", author, "author_username")
 
-	// The FK is enforced inside the hypertable's chunks, not merely declared:
-	// adding the constraint separately from the column (the only form
-	// columnstore accepts) must still reject an unknown user.
+	// The FK is enforced, not merely declared.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO conversations.conversation_turn (conversation_id, ordinal, author_user_id)
 		 VALUES ($1::uuid, 1, '00000000-0000-0000-0000-000000000001'::uuid)`, cid); err == nil {
-		t.Fatal("a turn referencing an unknown user was accepted; the hypertable FK is not enforced")
+		t.Fatal("a turn referencing an unknown user was accepted; the FK is not enforced")
 	}
 
 	// A tombstoned user still resolves — that is the point of not deleting.
@@ -282,15 +305,6 @@ func TestMigrate0019UserAttribution(t *testing.T) {
 			`SELECT to_regclass('conversations.'||$1) IS NOT NULL`, v).Scan(&ok), "probe %s", v)
 		ck.True(ok, "view conversations.%s was not recreated", v)
 	}
-
-	// conversation_turn is still a hypertable with columnstore enabled: the
-	// two-statement column+constraint form exists to avoid downgrading it.
-	var compressed bool
-	ck.NoError(pool.QueryRow(ctx, `
-		SELECT compression_enabled FROM timescaledb_information.hypertables
-		 WHERE hypertable_schema='conversations' AND hypertable_name='conversation_turn'`,
-	).Scan(&compressed), "probe hypertable")
-	ck.True(compressed, "conversation_turn lost its columnstore hypertable status")
 }
 
 // TestMigrate0037ServedProvider pins 0037: the chain produces a nullable,

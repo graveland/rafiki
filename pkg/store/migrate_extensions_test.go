@@ -9,33 +9,29 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// TestMigrateFullServerSchemaUnchanged pins the AVAILABLE branch of the four
-// migrations that tolerate a missing extension (0001, 0009, 0010 and 0036).
-// The test database has timescaledb, vector and pg_textsearch, so the chain
-// must still produce exactly the schema it produced before those migrations
-// learned to degrade: hypertables, vector embedding columns, bm25 indexes. A
-// DO block that silently takes the "extension missing" path — a typo in the
-// extname, a check against the wrong catalog — shows up here as a plain table,
-// a bytea column or a missing index.
+// TestMigrateFullServerSchemaUnchanged pins the schema the chain produces on a
+// server that has timescaledb, vector and pg_textsearch installed: plain tables
+// for the three turn tables — 0001, 0009 and 0010 no longer branch on the
+// extension, so a database created from the chain never sees a hypertable —
+// real vector embedding columns and bm25 indexes from 0036.
 //
-// The unavailable branch (plain tables, bytea embedding columns, no bm25
-// indexes) is exercised on a real embedded server, which has none of the three.
+// 0036's unavailable branch (bytea embedding columns, no bm25 indexes) is
+// exercised on a real embedded server, which has neither extension.
 func TestMigrateFullServerSchemaUnchanged(t *testing.T) {
 	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := testPool(t)
 	c.Require().NoError(Migrate(ctx, pool), "migrate")
 
-	// 0001, 0009 and 0010: a plain table where a hypertable is expected would
-	// silently lose chunk pruning and the columnstore policy those tables rely
-	// on, and nothing else in the chain would notice.
+	// 0001, 0009 and 0010 create plain tables unconditionally: on a server with
+	// timescaledb installed too, nothing in the chain may leave a hypertable.
 	for _, table := range []string{"conversation_turn", "broadcast", "raw_http_request"} {
 		var isHyper bool
 		c.Require().NoError(pool.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM timescaledb_information.hypertables
 				 WHERE hypertable_name = $1)`, table).Scan(&isHyper), "probe hypertable %s", table)
-		c.True(isHyper, "%s is a plain table on a server with timescaledb installed", table)
+		c.False(isHyper, "%s is a hypertable; the baseline creates plain tables", table)
 	}
 
 	// 0036: the bytea placeholders must become real vector columns, or every

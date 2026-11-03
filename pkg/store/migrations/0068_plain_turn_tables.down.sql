@@ -1,0 +1,3 @@
+-- Not reversible: 0068 turns hypertables into ordinary tables, and an ordinary
+-- table cannot be turned back into one without choosing chunk and columnstore
+-- settings that no longer exist in rafiki.

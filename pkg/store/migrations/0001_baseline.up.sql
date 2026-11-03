@@ -32,22 +32,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS conversation_external_ref_uniq
 -- time-ordered); ordinal is a decorative hint only, NOT a uniqueness key — the
 -- client/proxy path writes 0 every turn. Write-ahead: request + status='pending'
 -- inserted before the call, response + usage filled after.
--- A hypertable when timescaledb is installed; a plain table otherwise (an
--- embedded install has no timescaledb).
-DO $$
-DECLARE
-	ts_with text := '';
-BEGIN
-	IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
-		ts_with := $w$ WITH (
-	tsdb.hypertable,
-	tsdb.partition_column = 'created_at',
-	tsdb.enable_columnstore = true,
-	tsdb.segmentby = 'conversation_id',
-	tsdb.orderby = 'created_at DESC'
-)$w$;
-	END IF;
-	EXECUTE $ddl$CREATE TABLE IF NOT EXISTS conversations.conversation_turn (
+CREATE TABLE IF NOT EXISTS conversations.conversation_turn (
 	id                    UUID NOT NULL DEFAULT uuidv7(),
 	conversation_id       UUID NOT NULL,
 	ordinal               INT NOT NULL,
@@ -64,17 +49,12 @@ BEGIN
 	error                 TEXT,
 	latency_ms            INT,
 	created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-	-- id is uuidv7 (time-ordered); created_at is the partition column, so the
-	-- composite is hypertable-legal and lets CompleteTurn/FailTurn prune to one
-	-- chunk. ordinal is retained only as a decorative ordering hint.
+	-- id is uuidv7 (time-ordered); the (id, created_at) composite is the key
+	-- CompleteTurn/FailTurn update by. ordinal is retained only as a decorative
+	-- ordering hint.
 	PRIMARY KEY (id, created_at)
-)$ddl$ || ts_with;
-END $$;
+);
 CREATE INDEX IF NOT EXISTS conversation_turn_conv_idx ON conversations.conversation_turn (conversation_id, created_at DESC);
--- tsdb.enable_columnstore=true (above) auto-creates a 7-day columnstore policy
--- on TimescaleDB 2.23+ (see 0001_fleet_initial.up.sql), so no explicit
--- add_columnstore_policy call is needed. Retention is intentionally deferred
--- (no drop policy) pending a data decision.
 
 -- Schema-only in this increment: multi-entrypoint attach/detach (design §9).
 CREATE TABLE IF NOT EXISTS conversations.conversation_attachment (
