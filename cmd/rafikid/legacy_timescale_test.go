@@ -22,9 +22,19 @@ const (
 	legacyToolkitExtension   = "timescaledb_toolkit"
 )
 
-// legacyWarnMessage is the notice's text, asserted verbatim: it is what an
-// operator greps the daemon log for.
-const legacyWarnMessage = "rafiki no longer uses TimescaleDB; the extension is still installed in this database and can be removed"
+// The notice's three texts, asserted verbatim: they are what an operator greps
+// the daemon log for, and which one appears is the difference between safe
+// advice and destructive advice.
+const (
+	// legacyWarnMessage is the migrated state: rafiki's tables are ordinary
+	// tables, so the leftover extension really can go.
+	legacyWarnMessage = "rafiki no longer uses TimescaleDB; the extension is still installed in this database and can be removed"
+	// legacyMigrateFirstWarnMessage is the unmigrated state: rafiki's tables are
+	// still hypertables, so removing the extension would destroy them.
+	legacyMigrateFirstWarnMessage = "rafiki's tables are still TimescaleDB hypertables; run rafikid migrate before removing the extension"
+	// legacyUnknownWarnMessage is the probe-failed state: unknown is not safe.
+	legacyUnknownWarnMessage = "cannot tell whether rafiki's tables are still TimescaleDB hypertables; run rafikid migrate before removing the extension"
+)
 
 // TestLegacyTimescaleDropOrdersToolkitFirst pins the statement text and the
 // drop ORDER. timescaledb_toolkit depends on timescaledb, so dropping the other
@@ -110,7 +120,7 @@ func TestLegacyTimescaleWarnsOnce(t *testing.T) {
 		c.Eq(strings.Join(names, ","), records[0].Attrs["extensions"],
 			"the extensions the probe found, comma-joined in drop order")
 		c.Eq("SELECT * FROM timescaledb_information.hypertables", records[0].Attrs["check_first"],
-			"the check that must precede a drop: a hypertable listed there is not rafiki's")
+			"the check that must precede a drop: a hypertable listed there that is not one of rafiki's three is not rafiki's")
 		c.Eq("run as a superuser: "+legacyTimescaleDrop(names)+" and remove timescaledb from shared_preload_libraries",
 			records[0].Attrs["remove"], "the removal instructions")
 	})
@@ -123,6 +133,112 @@ func TestLegacyTimescaleWarnsOnce(t *testing.T) {
 
 		c.Empty(rec.snapshot(), "nothing to say when neither extension is installed")
 	})
+}
+
+// TestLegacyTimescaleWarnsMigrateFirstWhileRafikiTablesAreHypertables pins the
+// UNMIGRATED branch: the extension is installed and rafiki's own three tables
+// are still hypertables, which is the shape of every database that has not run
+// 0068 — including a daemon started ahead of `rafikid migrate`, and --dev,
+// which warns before it migrates. The notice must say to migrate, and must not
+// carry the removal advice: DROP EXTENSION there destroys those tables.
+func TestLegacyTimescaleWarnsMigrateFirstWhileRafikiTablesAreHypertables(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	pool := legacyScratchPool(t)
+	legacyCreateExtension(t, pool, legacyTimescaleExtension)
+	legacyMakeRafikiHypertables(t, pool,
+		"conversations.conversation_turn", "openrouter.broadcast", "conversations.raw_http_request")
+
+	rec := captureLegacyLogs(t)
+
+	warnLegacyTimescale(ctx, pool)
+
+	records := rec.snapshot()
+	c.Require().Len(records, 1, "exactly one record; got %+v", records)
+	c.Eq(slog.LevelWarn, records[0].Level, "the notice must be a WARN")
+	c.Eq(legacyMigrateFirstWarnMessage, records[0].Msg,
+		"an unmigrated database must be told to migrate first")
+	c.Eq(legacyTimescaleExtension, records[0].Attrs["extensions"], "the installed extension")
+	c.Eq("conversations.conversation_turn,conversations.raw_http_request,openrouter.broadcast",
+		records[0].Attrs["hypertables"],
+		"rafiki's tables that are still hypertables, schema-qualified and sorted; all three must be recognised")
+	c.Eq("rafikid migrate", records[0].Attrs["next"], "what to run before removing anything")
+	c.Eq("SELECT * FROM timescaledb_information.hypertables", records[0].Attrs["check_first"],
+		"the query that shows the operator the same tables")
+	c.NotHasKey(records[0].Attrs, "remove",
+		"the removal advice is exactly wrong while rafiki's tables are hypertables")
+}
+
+// TestLegacyTimescaleProbeFailureDoesNotClaimRemoval pins the third branch: the
+// extension is installed (so the hypertable probe runs) but the probe fails, so
+// the state is unknown. Unknown is not safe, so the confident "can be removed"
+// advice must not appear.
+func TestLegacyTimescaleProbeFailureDoesNotClaimRemoval(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	pool := legacyScratchPool(t)
+	legacyCreateExtension(t, pool, legacyTimescaleExtension)
+	legacyDropHypertablesView(t, pool)
+
+	rec := captureLegacyLogs(t)
+
+	warnLegacyTimescale(ctx, pool)
+
+	records := rec.snapshot()
+	c.Require().Len(records, 1, "exactly one record; got %+v", records)
+	c.Eq(slog.LevelWarn, records[0].Level, "the notice must be a WARN")
+	c.Eq(legacyUnknownWarnMessage, records[0].Msg, "a failed probe is an unknown state, not a safe one")
+	c.Eq(legacyTimescaleExtension, records[0].Attrs["extensions"], "the installed extension")
+	c.NotEmpty(records[0].Attrs["error"], "the probe's error must be reported, not swallowed")
+	c.Eq("rafikid migrate", records[0].Attrs["next"], "what to run before removing anything")
+	c.NotHasKey(records[0].Attrs, "remove", "an unproven state must not carry the removal advice")
+}
+
+// legacyMakeRafikiHypertables turns the named rafiki tables into real
+// hypertables in pool's database: the pre-0068 shape. The names are
+// schema-qualified constants chosen by the test, never input, so they are
+// interpolated rather than bound (DDL takes no bind parameters).
+func legacyMakeRafikiHypertables(t *testing.T, pool *pgxpool.Pool, tables ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS conversations; CREATE SCHEMA IF NOT EXISTS openrouter;"); err != nil {
+		t.Fatalf("create the schemas rafiki's tables live in: %v", err)
+	}
+	for _, tbl := range tables {
+		// The shape 0068 converts: an identity key plus the time column, which
+		// is what makes the table eligible for create_hypertable at all.
+		if _, err := pool.Exec(ctx, fmt.Sprintf(
+			"CREATE TABLE %s (id bigint GENERATED ALWAYS AS IDENTITY, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (id, created_at))",
+			tbl)); err != nil {
+			t.Fatalf("create table %s: %v", tbl, err)
+		}
+		if _, err := pool.Exec(ctx, fmt.Sprintf("SELECT create_hypertable('%s','created_at')", tbl)); err != nil {
+			t.Fatalf("make %s a hypertable: %v", tbl, err)
+		}
+	}
+}
+
+// legacyDropHypertablesView removes timescaledb_information.hypertables from
+// pool's database while leaving the extension installed — the one state that
+// makes the hypertable probe fail without also making the extension probe skip
+// it. The view belongs to the extension, so it is detached first.
+func legacyDropHypertablesView(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, "ALTER EXTENSION timescaledb DROP VIEW timescaledb_information.hypertables"); err != nil {
+		t.Fatalf("detach the hypertables view from the extension: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "DROP VIEW timescaledb_information.hypertables"); err != nil {
+		t.Fatalf("drop the hypertables view: %v", err)
+	}
+	// Prove the premise rather than assume it: the extension must still be
+	// installed, or warnLegacyTimescale would skip the probe and the test would
+	// be pinning nothing.
+	var installed bool
+	c.NoError(pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1)`,
+		legacyTimescaleExtension).Scan(&installed), "re-read pg_extension")
+	c.True(installed, "the extension must still be installed for the probe to run at all")
 }
 
 // legacyScratchPool creates a private database on the test server, with no
