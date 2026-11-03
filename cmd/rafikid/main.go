@@ -293,7 +293,11 @@ func newMigrateCmd() *cobra.Command {
 				return err
 			}
 			defer pool.Close()
-			return store.Migrate(ctx, pool)
+			if err := store.Migrate(ctx, pool); err != nil {
+				return err
+			}
+			warnLegacyTimescale(ctx, pool)
+			return nil
 		},
 	}
 
@@ -443,6 +447,7 @@ func runDaemon(opts runDaemonOpts) error {
 		os.Exit(1)
 	}
 	slog.Info("agent database pool opened")
+	warnLegacyTimescale(baseCtx, pool)
 	if opts.Dev {
 		if err := store.Migrate(baseCtx, pool); err != nil {
 			slog.Error("dev mode: migrate failed", "error", err)
