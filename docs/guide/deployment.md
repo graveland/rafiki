@@ -94,11 +94,12 @@ at its exact major, and they are what run. A physical copy of the data directory
 (`--format txz|tgz`) is a different thing, embedded-only, chosen only explicitly,
 and stops that server for the duration.
 
-The restore is `pg_restore --clean --if-exists --no-owner --single-transaction`:
-every object the ARCHIVE contains is dropped and recreated in one transaction, so
-a failure rolls back, and everything the archive does not contain is left alone.
-It destroys what it covers, so `--force` is required; a run without it only
-names the database it would replace.
+The restore is `pg_restore --clean --if-exists --single-transaction`, plus
+`--no-owner` only when the connecting role is not a superuser (see Ownership
+below): every object the ARCHIVE contains is dropped and recreated in one
+transaction, so a failure rolls back, and everything the archive does not contain
+is left alone. It destroys what it covers, so `--force` is required; a run
+without it only names the database it would replace.
 
 **A post-`0068` dump needs no extension hook, given the right target.** Since
 `0068` the archive holds ordinary tables, so `pg_restore --clean` never meets the
@@ -129,10 +130,10 @@ every later session on that database until it does.
 
 ```sh
 #!/bin/sh
-# Restore a pre-0068 dump into the target database. Run as a superuser, with
-# RAFIKI_DB (or DSN) naming that database.
+# Restore a pre-0068 dump into the target database. Run as a superuser: set DSN
+# to that database's superuser connection string, or RAFIKI_DB to it.
 set -u
-DSN=${RAFIKI_DB:?RAFIKI_DB is not set}
+DSN=${DSN:-${RAFIKI_DB:?set DSN or RAFIKI_DB}}
 DUMP=/var/backups/rafiki/rafiki-pre-0068.dump
 
 psql "$DSN" -X -q -v ON_ERROR_STOP=1 -c 'SELECT timescaledb_pre_restore();' || exit 1
@@ -144,7 +145,7 @@ post() {
     psql "$DSN" -X -q -c 'SELECT timescaledb_post_restore();'
 }
 trap post EXIT
-trap 'exit 130' INT TERM
+trap 'exit 130' INT TERM HUP
 
 # The flags `rafikid db restore` would have used. --no-owner is passed only when
 # the connecting role is NOT a superuser, and this bracket needs one, so it is
@@ -156,8 +157,9 @@ exit $rc
 
 `--single-transaction` is what makes a failed restore leave the database as it
 was; `--clean --if-exists` drops what the archive replaces, and the `trap` is
-what keeps the database usable afterwards. Run `rafikid migrate` against the
-restored database next — that is the step that makes its tables ordinary.
+what keeps the database usable afterwards — it covers a dropped ssh session too,
+which is why `HUP` is in it. Run `rafikid migrate` against the restored database
+next — that is the step that makes its tables ordinary.
 
 **Ownership is the connecting role's, decided rather than constant.** `pg_restore
 --no-owner` makes that role the owner of everything it creates, so a superuser
@@ -282,37 +284,59 @@ install's `ts_insert_blocker`, for instance, whose function lives in
 Keep a `\d+` of each of the three as well: it is the cheapest before-and-after
 diff.
 
-**Size the disk for all three at once.** Every table is rewritten inside ONE
-transaction, so nothing is reclaimed until it commits: all three old tables and
-their three new twins coexist for the whole run. Compressed chunks are copied out
-decompressed into ordinary heap and TOAST, so a table can end up larger than it
-is today; the indexes are built after the rows load; and every byte of the copy
-and of each index build is WAL-logged too. Budget the sum of the three tables,
-doubled, plus WAL — and measure it in the rehearsal rather than trusting a number
-from another install:
+**Size the disk for all three at once, from a measurement, not a formula.** Every
+table is rewritten inside ONE transaction, so nothing is reclaimed until it
+commits: all three old tables and their three new twins coexist for the whole run.
+Compressed chunks are copied out decompressed into ordinary heap and TOAST, so the
+new twin of a compressed table is larger than the table it replaces; the
+indexes are rebuilt after the rows load; and every byte of the copy and of each
+index build is WAL-logged too. No arithmetic on the current sizes is a safe bound,
+because the expansion is not bounded by them. Measure instead.
+
+Measure each table's uncompressed footprint — what it takes now, plus what its
+compressed chunks need when they are expanded back into ordinary heap and TOAST.
+`hypertable_compression_stats` reports no rows for a table that has never been
+compressed, so that term is zero there:
 
 ```sql
-SELECT format('%I.%I', hypertable_schema, hypertable_name) AS relation,
-       pg_size_pretty(hypertable_size(format('%I.%I', hypertable_schema, hypertable_name)::regclass)) AS size
-  FROM timescaledb_information.hypertables
- WHERE (hypertable_schema, hypertable_name) IN
+SELECT format('%I.%I', h.hypertable_schema, h.hypertable_name) AS relation,
+       pg_size_pretty(
+         hypertable_size(format('%I.%I', h.hypertable_schema, h.hypertable_name)::regclass)
+         + coalesce((SELECT before_compression_total_bytes
+                       FROM hypertable_compression_stats(format('%I.%I', h.hypertable_schema, h.hypertable_name)::regclass)), 0)
+       ) AS uncompressed
+  FROM timescaledb_information.hypertables h
+ WHERE (h.hypertable_schema, h.hypertable_name) IN
        (('conversations', 'conversation_turn'),
         ('openrouter', 'broadcast'),
         ('conversations', 'raw_http_request'));
 ```
 
+That over-counts a compressed table by its compressed footprint, because the two
+terms overlap — the direction to be wrong in. Add the three up, then add the new
+indexes (built after the rows are loaded) and the WAL those copies and builds
+write.
+
+**Then size the volume from the rehearsal's measured peak, not from that sum.**
+Sample the destination through the run — `pg_database_size(current_database())`
+once a minute, or the volume's own high-water mark — and use that number with
+headroom on top. The sum above is the estimate you check the rehearsal against; a
+figure from another install is not a measurement of yours.
+
 Check `max_wal_size`, archive and replication-slot headroom, and replica lag with
-that number in hand: it is gigabytes inside a single transaction.
+the rehearsal's peak in hand: it is gigabytes inside a single transaction.
 `conversations.raw_http_request` is a debugging aid, so `TRUNCATE
 conversations.raw_http_request` before the backup makes the dump, the rehearsal
 and the conversion all cheap.
 
 **Migrate.** `rafikid migrate --db "$RAFIKI_DB"`. `0068` is one transaction, so a
 failure — a lock timeout, a row count that does not match, a volume that filled —
-rolls the whole of it back and leaves the three tables exactly as they were. That
-rollback is itself a logged copy of that size, so the headroom above has to cover
-it too; filling the volume during the rollback is the one failure that needs the
-backup.
+rolls the whole of it back and leaves the three tables exactly as they were. The
+rollback writes no second copy: it logs an abort record and unlinks the
+relfilenodes the copy created, so it gives that space back. The hazard is the copy
+itself — a data or WAL volume that fills during it PANICs the server, and crash
+recovery then needs the space back before it can finish. That is what the measured
+peak and its headroom are for, and what the backup is for.
 
 **Start the daemon, then take the dump you would actually restore from.**
 
@@ -351,23 +375,42 @@ connected to. Inventory all of them first, as a superuser (both `psql` calls tak
 their connection from `PG*`, so run it on the server's host):
 
 ```sh
-psql -X -At -d postgres -c "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate" |
+psql -X -At -d postgres -c "SELECT datname FROM pg_database WHERE datallowconn" |
 while read -r db; do
   printf '%-24s %s\n' "$db" \
     "$(psql -X -At -d "$db" -c "SELECT coalesce(string_agg(extname, ', '), '-') FROM pg_extension WHERE extname IN ('timescaledb','timescaledb_toolkit')")"
 done
 ```
 
+The filter is `datallowconn` and nothing else, so **`template1` is in that list**:
+it is a database like any other for this purpose, `pg_extension` answers for it,
+and an image-built cluster routinely has `timescaledb` installed there — the
+`timescaledb-ha` image's own initdb does exactly that. Anything installed in
+`template1` is copied into every database created from it afterwards, so leaving
+it out hides the extension from precisely the databases that will inherit it.
+`template0` is excluded because it accepts no connections, and it never carries
+the extension.
+
 Every database has to answer `-` before you touch `shared_preload_libraries`. A
 database that still uses TimescaleDB is worse off without the preload than with
 it: the extension's event triggers are C functions from the library, so DDL in
-that database fails outright. A PostgreSQL cluster dedicated to rafiki makes this
-a one-line answer, which is the other way to close it.
+that database FATALs. A PostgreSQL cluster dedicated to rafiki makes this a
+one-line answer, which is the other way to close it.
 
 **Drop first, then remove the preload entry and restart.** In that order, in every
-database that has it: an installed extension whose library is not preloaded
-breaks every DDL in that database, `DROP EXTENSION` included, so the drop cannot
-wait until after the restart.
+database that has it, and the wrong order has a specific cost:
+
+- **Installed and preloaded** (the normal state): drop `timescaledb_toolkit` and
+  then `timescaledb` in each database that has them, then edit the preload list
+  and restart.
+- **Installed but NOT preloaded** (you removed the preload entry first): in every
+  such database, `DROP EXTENSION timescaledb_toolkit` and every other DDL
+  statement — `rafikid migrate` included — FATALs with `extension "timescaledb"
+  must be preloaded`. `DROP EXTENSION timescaledb` itself still works.
+- **The way back**, without a restart: in each affected database run
+  `DROP EXTENSION timescaledb;` first and drop the toolkit after it. Or put
+  `timescaledb` back into `shared_preload_libraries` and restart, which restores
+  the state the first bullet assumes.
 
 In each such database, as a superuser, look before you drop:
 
@@ -380,7 +423,7 @@ for rafiki's three, because they are ordinary tables. Anything else listed belon
 to something else on this server: it is not rafiki's, and the drop below will
 refuse while it is there.
 
-Then drop the toolkit first:
+Then, while `timescaledb` is still preloaded, drop the toolkit first:
 
 ```sql
 DROP EXTENSION timescaledb_toolkit;

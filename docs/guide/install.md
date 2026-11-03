@@ -145,8 +145,10 @@ the data directory is refused (the archive would contain itself).
 content — a `PGDMP` dump, or a compressed tar of the data directory — and never
 trusts its extension. A restore destroys what it covers, so it does nothing
 without `--force`: it names what it would replace and exits non-zero. A dump is
-restored with `pg_restore --clean --if-exists --no-owner --single-transaction`,
-so a failure rolls back rather than leaving a half-rebuilt database.
+restored with `pg_restore --clean --if-exists --single-transaction`, plus
+`--no-owner` only when the connecting role is not a superuser (Ownership below).
+One transaction means a failure rolls back rather than leaving a half-rebuilt
+database.
 
 **Ownership.** `pg_restore --no-owner` makes the CONNECTING role the owner of
 everything it creates, so whether the restore passes it is decided by that role

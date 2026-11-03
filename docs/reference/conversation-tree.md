@@ -700,9 +700,10 @@ cutover is a restart.
    the extension's catalog, so it restores only into a server with `timescaledb`
    installed at the same version, and only with the extension's hooks around
    `pg_restore`: `SELECT timescaledb_pre_restore();`, then
-   `pg_restore -d <db> --clean --if-exists --single-transaction <dump>`, then
-   `SELECT timescaledb_post_restore();` — as a superuser, and with the post call
-   in a shell `trap` so it runs even when `pg_restore` fails or is interrupted,
+   `pg_restore -d <db> --clean --if-exists --single-transaction <dump>` (no
+   `--no-owner`: this runs as a superuser, which is what keeps the archive's own
+   owners), then `SELECT timescaledb_post_restore();`, with that post call in a
+   shell `trap` so it runs even when `pg_restore` fails or is interrupted,
    or `timescaledb.restoring` stays set for every later session on that database.
    The verb does not run them; the full script is in [Deploying rafiki →
    Backups](../guide/deployment.md#backups). Pass `--db` to every `rafikid`
