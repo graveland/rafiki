@@ -149,3 +149,58 @@ func TestRememberExecutorNoOpsOnEmptyArgs(t *testing.T) {
 	clientstate.RememberExecutor("work", "claude", "")
 	assert.NewAborting(t).Eq("", clientstate.LastExecutorFor("work", "claude"), "no-op cases must not have written anything, got")
 }
+
+func TestRememberAndRecallKind(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	c.Eq("", clientstate.LastKindFor("work"), "want empty before anything is remembered, got")
+	clientstate.RememberKind("work", "claude")
+	c.Eq("claude", clientstate.LastKindFor("work"), "want claude, got")
+	c.Eq("", clientstate.LastKindFor("home"), "the kind must not leak across profiles, got")
+}
+
+// A script child needs a pymodule spec this memory does not carry, so replaying
+// "script" as a default kind would make every later bare create fail on a
+// request the CLI cannot complete.
+func TestScriptKindIsNotRemembered(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	clientstate.RememberKind("work", "script")
+	clientstate.RememberKind("work", "")
+
+	assert.NewAborting(t).Eq("", clientstate.LastKindFor("work"), "want nothing recorded, got")
+}
+
+// The bool is load-bearing: 0 is "unlimited" and a real answer (the operator
+// cleared the field), so it must stay distinguishable from never-remembered.
+func TestLastMaxCostDistinguishesUnlimitedFromUnset(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	_, ok := clientstate.LastMaxCostFor("work", "fundi")
+	c.False(ok, "an unseen kind must report not-remembered")
+
+	clientstate.RememberMaxCost("work", "fundi", 0)
+	v, ok := clientstate.LastMaxCostFor("work", "fundi")
+	c.True(ok, "a remembered 0 must stay remembered")
+	c.Eq(0.0, v, "remembered unlimited")
+
+	clientstate.RememberMaxCost("work", "claude", 2.5)
+	v, _ = clientstate.LastMaxCostFor("work", "claude")
+	c.Eq(2.5, v, "remembered claude budget")
+	v, _ = clientstate.LastMaxCostFor("work", "fundi")
+	c.Eq(0.0, v, "the fundi budget must not have been overwritten")
+}
+
+func TestRememberMaxCostNoOpsOnEmptyArgs(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	clientstate.RememberMaxCost("", "fundi", 1)
+	clientstate.RememberMaxCost("work", "", 1)
+	clientstate.RememberMaxCost("work", "fundi", -1)
+
+	if _, ok := clientstate.LastMaxCostFor("work", "fundi"); ok {
+		t.Error("no-op cases must not have written anything")
+	}
+}

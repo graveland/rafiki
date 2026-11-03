@@ -496,6 +496,20 @@ Passing any of these (or any other shaping flag) spawns directly; `-i` opens
 the interactive form anyway, prefilled — where the executor field, `⌥E`'s
 picker, and the same kind-aware default apply.
 
+### Remembered spawn values
+
+The form reopens on what you last spawned from this profile — the **kind**, the
+model, the executor and the max-cost — so a person who always creates the same
+shape of child presses ⏎ twice. Each one is a fallback, never an override: a
+`--kind`/`--model`/`--executor`/`--max-cost` flag, a preset, or a profile
+default all outrank it (which is why `create -i --max-cost 5` shows 5 rather
+than dropping the flag). The kind is remembered per profile; the other three
+per (profile, kind), because a fundi budget is not a claude budget. A blank
+max-cost is remembered as unlimited, so a cap you clear stays cleared; an empty
+model and a `script` kind are never recorded — "the daemon's default" is not a
+choice worth replaying, and a script child needs a `--pymodule` this memory
+cannot carry.
+
 ### Batch models (`:batch`)
 
 A fundi child spawned on an OpenRouter model id ending `:batch` (e.g.

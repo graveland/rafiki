@@ -91,6 +91,17 @@ type spawnForm struct {
 	kindIx int
 	focus  spawnField
 
+	// kindPinned records that the KIND was DECLARED (a --kind flag, a preset's
+	// kind, or a profile's `kind` field reaching the form as SpawnDefaults.Kind)
+	// rather than defaulted. A declared kind must outrank the remembered one, and
+	// it also decides which kind's remembered model/executor/budget is read.
+	kindPinned bool
+	// submitted is the last request this form sent, kept so a SUCCESSFUL spawn
+	// can record exactly what went on the wire (the resolved kind and budget)
+	// rather than re-deriving it from fields the user may have since edited.
+	submitted    spawnParams
+	hasSubmitted bool
+
 	// preset is the caller's SpawnDefaults.Preset, echoed into every spawn —
 	// not an editable field.
 	preset string
@@ -228,8 +239,9 @@ func (f *spawnForm) acceptSuggestion() bool {
 func (f *spawnForm) kind() string { return spawnKinds[f.kindIx] }
 
 // prefill seeds the form from the caller's defaults, leaving anything empty at
-// the form's own default.
-func (f *spawnForm) prefill(d SpawnDefaults) {
+// the form's own default. cur is the profile's display currency: a declared
+// budget arrives in USD and the field shows what a person would type back in.
+func (f *spawnForm) prefill(d SpawnDefaults, cur *clientstate.Currency) {
 	f.preset = d.Preset
 	if d.Name != "" {
 		f.inputs[fieldName].SetValue(d.Name)
@@ -243,11 +255,23 @@ func (f *spawnForm) prefill(d SpawnDefaults) {
 	if d.Cwd != "" {
 		f.inputs[fieldCwd].SetValue(d.Cwd)
 	}
+	if d.MaxCost != nil {
+		f.inputs[fieldMaxCost].SetValue(costField(*d.MaxCost, cur))
+	}
 	for i, k := range spawnKinds {
 		if k == d.Kind {
 			f.kindIx = i
+			f.kindPinned = true
 		}
 	}
+}
+
+// costField renders a USD amount as the number to show in the max-cost row:
+// converted into the profile's display currency, and formatted so it parses
+// back through strconv.ParseFloat unchanged ('f', -1 is the shortest exact
+// spelling; %v would give scientific notation for small amounts).
+func costField(usd float64, cur *clientstate.Currency) string {
+	return strconv.FormatFloat(costfmt.ToDisplay(usd, cur), 'f', -1, 64)
 }
 
 // params returns what to spawn, or an error message if the form is
@@ -636,6 +660,9 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 			}
 		}
 		f.busy, f.err = true, ""
+		// Keep exactly what went on the wire: applySpawned records the kind and
+		// budget from this, not from fields the user could edit mid-flight.
+		f.submitted, f.hasSubmitted = p, true
 		return c, c.spawnCmd(p)
 	}
 
@@ -651,12 +678,25 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 	return c, cmd
 }
 
-// seedRemembered fills the model and executor rows from what was last spawned
-// for the form's kind, so a freshly opened form shows the same values a kind
-// switch would. It only fills rows still empty: a value the caller declared
-// (a flag, a preset, the environment) is a decision and outranks this
-// inference, so it must run after prefill.
+// seedRemembered fills the kind, model, executor and budget rows from what was
+// last spawned, so a freshly opened form shows the same values a kind switch
+// would. It only fills rows still empty (and the kind only when it was not
+// DECLARED): a value the caller declared -- a flag, a preset, a profile default
+// -- is a decision and outranks this inference, so it must run after prefill.
+//
+// The kind goes first because everything else is keyed by it: reading the
+// remembered model for the form's default kind would prefill a claude child's
+// id onto a fundi spawn.
 func (c *Cockpit) seedRemembered() {
+	if !c.form.kindPinned {
+		if k := clientstate.LastKindFor(c.profileName); k != "" {
+			for i, sk := range spawnKinds {
+				if sk == k {
+					c.form.kindIx = i
+				}
+			}
+		}
+	}
 	kind := c.form.kind()
 	if c.form.inputs[fieldModel].Value() == "" {
 		c.form.inputs[fieldModel].SetValue(clientstate.LastModelFor(c.profileName, kind))
@@ -664,6 +704,21 @@ func (c *Cockpit) seedRemembered() {
 	if c.form.inputs[fieldExecutor].Value() == "" {
 		c.form.inputs[fieldExecutor].SetValue(clientstate.LastExecutorFor(c.profileName, kind))
 	}
+	if c.form.inputs[fieldMaxCost].Value() == "" {
+		c.form.inputs[fieldMaxCost].SetValue(c.rememberedCostField(kind))
+	}
+}
+
+// rememberedCostField renders the budget remembered for a profile and kind as
+// the text the field should hold: BLANK when nothing was remembered or the
+// remembered value is 0 (unlimited), because the field's blank state already
+// means "no cap" and params() refuses a typed "0".
+func (c *Cockpit) rememberedCostField(kind string) string {
+	usd, ok := clientstate.LastMaxCostFor(c.profileName, kind)
+	if !ok || usd <= 0 {
+		return ""
+	}
+	return costField(usd, c.currency)
 }
 
 // kindChanged reacts to the kind row cycling: the two kinds have different
@@ -678,6 +733,9 @@ func (c *Cockpit) kindChanged() tea.Cmd {
 	// that kind's own remembered model instead of leaving a stale id behind.
 	c.form.inputs[fieldModel].SetValue(clientstate.LastModelFor(c.profileName, kind))
 	c.form.inputs[fieldExecutor].SetValue(clientstate.LastExecutorFor(c.profileName, kind))
+	// The budget swaps for the same reason: it is remembered per kind, so a
+	// fundi cap left in place would become a limit nobody set on a claude child.
+	c.form.inputs[fieldMaxCost].SetValue(c.rememberedCostField(kind))
 	c.form.suggestCur = -1
 	c.form.refreshSuggestions(c.models[kind], c.modelView)
 	// Both caches warm here: the typeahead needs the models, and the
@@ -705,11 +763,30 @@ func (c *Cockpit) applySpawned(m spawnedMsg) tea.Cmd {
 	// Remember what actually got spawned, keyed by kind, so the next bare
 	// form opens on the same choices. The executor is remembered only when one
 	// was actually chosen -- an empty field is not a choice worth replaying.
+	//
+	// The KIND is recorded too, which is what makes "always create a claude
+	// child" survive a restart: without it the form reopened on fundi and the
+	// remembered claude model was unreachable (it is keyed by kind). It is read
+	// from the submitted params, not from the fields, so a value edited while
+	// the spawn was in flight cannot be recorded as if it had been sent.
 	if c.form != nil {
-		clientstate.RememberModel(c.profileName, c.form.kind(), strings.TrimSpace(c.form.inputs[fieldModel].Value()))
-		if ref := strings.TrimSpace(c.form.inputs[fieldExecutor].Value()); ref != "" {
-			clientstate.RememberExecutor(c.profileName, c.form.kind(), ref)
+		kind := c.form.kind()
+		if c.form.hasSubmitted {
+			kind = c.form.submitted.kind
 		}
+		clientstate.RememberKind(c.profileName, kind)
+		clientstate.RememberModel(c.profileName, kind, strings.TrimSpace(c.form.inputs[fieldModel].Value()))
+		if ref := strings.TrimSpace(c.form.inputs[fieldExecutor].Value()); ref != "" {
+			clientstate.RememberExecutor(c.profileName, kind, ref)
+		}
+		// A nil maxCost is recorded as 0 -- "unlimited" is a real answer here,
+		// and the field starts prefilled from this, so a cap the operator
+		// cleared must not come back on the next open.
+		var cost float64
+		if c.form.submitted.maxCost != nil {
+			cost = *c.form.submitted.maxCost
+		}
+		clientstate.RememberMaxCost(c.profileName, kind, cost)
 	}
 	c.form = nil
 	// Land on the new agent. Its rail row arrives on the event stream's

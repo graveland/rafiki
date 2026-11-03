@@ -748,3 +748,50 @@ func TestResolveModelChainWithoutPreset(t *testing.T) {
 		})
 	}
 }
+
+// ─── kind precedence, remembered last ────────────────────────────────────────
+
+// The remembered kind is the WEAKEST input: --kind and a profile's `kind` field
+// are declarations, a preset's kind (applied in the daemon) outranks all three,
+// and the memory only beats the fundi default. A remembered `script` is ignored
+// outright — a script child needs a pymodule spec the memory cannot carry, so
+// replaying it would build a request the CLI has to refuse.
+func TestResolveKindPrecedence(t *testing.T) {
+	c := assert.NewAborting(t)
+	for _, tc := range []struct {
+		name                      string
+		flag, profile, remembered string
+		want                      string
+	}{
+		{"flag wins over everything", protocol.KindClaude, "fundi", "fundi", protocol.KindClaude},
+		{"profile beats remembered", "", "claude", "fundi", protocol.KindClaude},
+		{"remembered beats the default", "", "", "claude", protocol.KindClaude},
+		{"nothing declared, nothing remembered", "", "", "", protocol.KindFundi},
+		{"a remembered script is never replayed", "", "", protocol.KindScript, protocol.KindFundi},
+	} {
+		c.Eq(tc.want, resolveKind(tc.flag, tc.profile, tc.remembered), tc.name)
+	}
+}
+
+// ─── the form's defaults carry the declared budget ───────────────────────────
+
+// `create -i --max-cost 5` must show the cap in the form: the defaults carry
+// it, and the form then sends what it shows. Without it the flag was a silent
+// no-op on the interactive path, which is the only path it could reach.
+func TestCreateFormDefaultsCarryTheDeclaredMaxCost(t *testing.T) {
+	c := assert.NewAborting(t)
+	five := 5.0
+
+	d := createFormDefaults(protocol.SpawnRequest{Kind: protocol.KindClaude, MaxCost: &five})
+
+	c.Require().NotNil(d.MaxCost, "the declared budget was dropped from the form's defaults")
+	c.Eq(5.0, *d.MaxCost, "defaults MaxCost")
+	c.Eq(protocol.KindClaude, d.Kind, "defaults Kind")
+}
+
+// Nil is "the caller declared nothing", which is NOT unlimited: the remembered
+// budget still applies underneath it (seedRemembered).
+func TestCreateFormDefaultsLeaveAnUndeclaredBudgetNil(t *testing.T) {
+	assert.NewAborting(t).Nil(createFormDefaults(protocol.SpawnRequest{}).MaxCost,
+		"an undeclared MaxCost must stay nil, not become 0")
+}

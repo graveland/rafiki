@@ -724,3 +724,130 @@ func TestTabAcceptsTheFirstSuggestionOnTheModelRow(t *testing.T) {
 	ck.Eq(want, c.form.inputs[fieldModel].Value(), "model")
 	ck.Eq(fieldModel, c.form.focus, "tab moved focus")
 }
+
+// The KIND is remembered like the model and executor are: somebody who always
+// creates claude children must not reopen on fundi — where the remembered
+// claude model is unreachable, because that memory is keyed by kind.
+func TestSpawnFormOpensOnTheRememberedKind(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const profile = "remembered-kind"
+	clientstate.RememberKind(profile, "claude")
+	clientstate.RememberModel(profile, "claude", "vendor/claude-model")
+	c := profiledCockpit(profile, Options{})
+
+	c.openSpawnForm()
+
+	ck.Eq("claude", c.form.kind(), "kind row")
+	ck.Eq("vendor/claude-model", c.form.inputs[fieldModel].Value(),
+		"the model row must come from the remembered KIND's memory, got")
+}
+
+// A declared kind is a decision; the remembered one is an inference.
+func TestDeclaredKindOutranksTheRememberedKind(t *testing.T) {
+	const profile = "declared-kind-wins"
+	clientstate.RememberKind(profile, "claude")
+
+	c := profiledCockpit(profile, Options{
+		OpenCreate:     true,
+		CreateDefaults: SpawnDefaults{Kind: "fundi"},
+	})
+
+	assert.NewCollecting(t).Eq("fundi", c.form.kind(), "kind row")
+}
+
+// The budget is remembered per kind and prefilled in the profile's display
+// currency: a person types the number they see on screen.
+func TestRememberedMaxCostPrefillsInDisplayCurrency(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const profile = "remembered-cost"
+	clientstate.RememberMaxCost(profile, "fundi", 2)
+	c := profiledCockpit(profile, Options{})
+	c.currency = &clientstate.Currency{Code: "CAD", Rate: 1.38}
+
+	c.openSpawnForm()
+
+	ck.Eq("2.76", c.form.inputs[fieldMaxCost].Value(), "max-cost row (2 USD at 1.38)")
+}
+
+// A remembered 0 is "the operator cleared the cap", not "never set": the field
+// must stay blank rather than come back as a limit they removed.
+func TestClearedMaxCostStaysCleared(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const profile = "cleared-cost"
+	clientstate.RememberMaxCost(profile, "fundi", 0)
+	c := profiledCockpit(profile, Options{})
+
+	c.openSpawnForm()
+
+	ck.Eq("", c.form.inputs[fieldMaxCost].Value(), "max-cost row")
+}
+
+// A declared --max-cost is a decision and outranks the remembered one — it is
+// what `create -i --max-cost 5` puts in the form instead of silently dropping.
+func TestDeclaredMaxCostOutranksTheRememberedOne(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const profile = "declared-cost"
+	clientstate.RememberMaxCost(profile, "fundi", 2)
+	five := 5.0
+	c := profiledCockpit(profile, Options{
+		OpenCreate:     true,
+		CreateDefaults: SpawnDefaults{MaxCost: &five},
+	})
+
+	ck.Eq("5", c.form.inputs[fieldMaxCost].Value(), "max-cost row")
+}
+
+// A kind change swaps the budget with the model and executor: a cap is per
+// kind, so a fundi budget left in place would become a limit nobody set on a
+// claude child.
+func TestKindChangeSwapsTheRememberedBudget(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const profile = "cost-kind-swap"
+	c := profiledCockpit(profile, Options{})
+	c.openSpawnForm()
+	clientstate.RememberMaxCost(profile, "claude", 7)
+	c.form.kindIx = 1
+
+	c.kindChanged()
+
+	ck.Eq("7", c.form.inputs[fieldMaxCost].Value(), "max-cost row")
+}
+
+// A successful spawn records exactly what it SENT — the kind, and the budget
+// (blank included, as 0 = unlimited, so a cleared cap does not come back).
+func TestApplySpawnedRecordsTheKindAndBudget(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := formCockpit(t)
+	c.profileName = "records-on-spawn"
+	c.form.inputs[fieldCwd].SetValue("/tmp")
+	c.form.kindIx = 1
+	c.form.inputs[fieldMaxCost].SetValue("3")
+
+	_, cmd := c.handleKey(keyMsg("enter"))
+	ck.Require().NotNil(cmd, "the form did not spawn")
+	c.applySpawned(spawnedMsg{childID: "c_new"})
+
+	ck.Eq("claude", clientstate.LastKindFor("records-on-spawn"), "remembered kind")
+	usd, ok := clientstate.LastMaxCostFor("records-on-spawn", "claude")
+	ck.True(ok, "the budget was not remembered")
+	ck.Eq(3.0, usd, "remembered budget (USD)")
+}
+
+// A blank budget is recorded as unlimited, which is what makes a deliberate
+// clear stick across the next open.
+func TestApplySpawnedRecordsAClearedBudget(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := formCockpit(t)
+	c.profileName = "records-cleared-cost"
+	kind := c.form.kind()
+	clientstate.RememberMaxCost("records-cleared-cost", kind, 4)
+	c.form.inputs[fieldCwd].SetValue("/tmp")
+
+	_, cmd := c.handleKey(keyMsg("enter"))
+	ck.Require().NotNil(cmd, "the form did not spawn")
+	c.applySpawned(spawnedMsg{childID: "c_new"})
+
+	usd, ok := clientstate.LastMaxCostFor("records-cleared-cost", kind)
+	ck.True(ok, "a cleared budget must still be recorded")
+	ck.Eq(0.0, usd, "a blank field means unlimited")
+}

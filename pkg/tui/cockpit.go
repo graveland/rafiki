@@ -330,6 +330,11 @@ type SpawnDefaults struct {
 	Model    string
 	Executor string
 	Cwd      string
+	// MaxCost is a declared budget (USD), shown in the profile's display
+	// currency. Nil means "the caller declared nothing", which is NOT the same
+	// as unlimited: the remembered budget still applies. A declared one always
+	// wins, like every other declared field here.
+	MaxCost *float64
 	// Preset is sent with every spawn issued from the form and resolved
 	// daemon-side via Controller.Spawn.
 	Preset string
@@ -607,7 +612,7 @@ func NewCockpit(opts Options) *Cockpit {
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()
-		c.form.prefill(opts.CreateDefaults)
+		c.form.prefill(opts.CreateDefaults, c.currency)
 		c.seedRemembered()
 		c.form.refreshSuggestions(nil, c.modelView)
 	}

@@ -164,6 +164,11 @@ func createFormDefaults(req protocol.SpawnRequest) tui.SpawnDefaults {
 		Model:    req.Model,
 		Executor: req.ExecutorRef,
 		Cwd:      req.Cwd,
-		Preset:   req.Preset,
+		// MaxCost travels too: without it `create -i --max-cost 5` opened a
+		// form whose budget row was blank, so the declared cap was silently
+		// dropped by the spawn the form then issued. Declared outranks the
+		// remembered budget, which the form seeds underneath it.
+		MaxCost: req.MaxCost,
+		Preset:  req.Preset,
 	}
 }

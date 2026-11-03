@@ -21,15 +21,24 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // State is one document. Which document depends on the Scope it was loaded
-// with: Currency lives in the global one, ModelView and LastModel in a
-// profile's own. Every section is a POINTER so "never set" stays
+// with: Currency lives in the global one, ModelView and the remembered spawn
+// values in a profile's own. Every section is a POINTER so "never set" stays
 // distinguishable from "set to its zero value".
 type State struct {
 	// ModelView is the cockpit's remembered model filter and ordering.
 	ModelView *ModelView `json:"modelView,omitempty"`
+	// LastKind is the child kind most recently spawned from this profile.
+	//
+	// A remembered choice must never outrank a declared one: resolveKind
+	// (cmd/rafiki/cmd_create.go) checks --kind, then the named preset's kind,
+	// then the profile's own `kind` field, and only then this. `script` is
+	// never stored — a script child needs a pymodule spec the memory cannot
+	// carry, so replaying the kind would build a spawn the CLI must refuse.
+	LastKind string `json:"lastKind,omitempty"`
 	// LastModel is the model most recently spawned, keyed by child KIND.
 	//
 	// A remembered choice must never outrank a declared one: resolveModel
@@ -44,6 +53,13 @@ type State struct {
 	// and replaying one onto the other's kind is a wrong answer as often as
 	// it is a right one.
 	LastExecutor map[string]string `json:"lastExecutor,omitempty"`
+	// LastMaxCost is the per-child budget most recently spawned, in USD, keyed
+	// by child KIND — the same reasoning as LastModel: what you cap a claude
+	// child at says little about a fundi one. Presence is the signal, not the
+	// value: a remembered 0 is "unlimited", which is a real answer (the
+	// operator cleared the field) and must stay distinguishable from "never
+	// remembered" — see LastMaxCostFor's bool.
+	LastMaxCost map[string]float64 `json:"lastMaxCost,omitempty"`
 	// Currency is the client's preferred display currency for cost figures
 	// (TUI, `rafiki list`). Costs are still tracked and billed in USD
 	// everywhere else -- this only converts the last-mile string a person
@@ -209,5 +225,67 @@ func RememberExecutor(profileName, kind, ref string) {
 			s.LastExecutor = map[string]string{}
 		}
 		s.LastExecutor[kind] = ref
+	})
+}
+
+// LastKindFor returns the child kind most recently spawned from a profile.
+//
+// Keyed by PROFILE alone: a daemon's model universe and executor fleet decide
+// what a kind can DO, and both differ per daemon, so "claude" chosen against
+// the work daemon says nothing about the personal one. It is not keyed by
+// kind for the obvious reason — it IS the kind.
+func LastKindFor(profileName string) string {
+	if profileName == "" {
+		return ""
+	}
+	return LoadScoped(Scope{Profile: profileName}).LastKind
+}
+
+// RememberKind records the child kind a spawn actually used.
+//
+// An empty kind is not recorded, and neither is protocol.KindScript: a script
+// child is spawnable only with a pymodule spec, which this memory does not
+// carry, so replaying "script" as a default kind would make every later bare
+// create fail on a request the CLI cannot complete. Every other kind is a
+// self-contained answer.
+func RememberKind(profileName, kind string) {
+	if profileName == "" || kind == "" || kind == protocol.KindScript {
+		return
+	}
+	UpdateScoped(Scope{Profile: profileName}, func(s *State) {
+		s.LastKind = kind
+	})
+}
+
+// LastMaxCostFor returns the budget most recently spawned for a profile and
+// kind, in USD, and whether one was ever recorded.
+//
+// The bool is load-bearing: 0 is a legitimate remembered value (the field was
+// left blank, i.e. unlimited) and collapsing it into "not remembered" would
+// make a cleared cap come back on the next open — the one direction a guardrail
+// must not fail in.
+func LastMaxCostFor(profileName, kind string) (float64, bool) {
+	if profileName == "" || kind == "" {
+		return 0, false
+	}
+	v, ok := LoadScoped(Scope{Profile: profileName}).LastMaxCost[kind]
+	return v, ok
+}
+
+// RememberMaxCost records the budget a spawn actually carried, in USD.
+//
+// Unlike the model and the executor, an EMPTY field IS recorded, as 0: the
+// max-cost field starts prefilled from this value, so blank means the operator
+// deliberately cleared a remembered cap, and forgetting that would resurrect a
+// limit they had just removed.
+func RememberMaxCost(profileName, kind string, usd float64) {
+	if profileName == "" || kind == "" || usd < 0 {
+		return
+	}
+	UpdateScoped(Scope{Profile: profileName}, func(s *State) {
+		if s.LastMaxCost == nil {
+			s.LastMaxCost = map[string]float64{}
+		}
+		s.LastMaxCost[kind] = usd
 	})
 }

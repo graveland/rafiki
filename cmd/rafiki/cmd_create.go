@@ -51,6 +51,7 @@ Kind precedence, strongest first:
   --kind (refused if it conflicts with the preset's kind)
   the named preset's kind (the preset resolves in the daemon)
   the resolved profile's kind
+  the kind last spawned from this profile (remembered per profile)
   fundi (default)
 
 With --preset, the preset resolves IN THE DAEMON: it supplies the kind, model,
@@ -65,6 +66,9 @@ Without a preset, model precedence, strongest first:
   the resolved profile's model
   the model last spawned for this kind (remembered per profile and kind)
   the daemon's default
+
+The form also reopens on the kind, model, executor and max-cost last spawned
+from this profile, each below anything the caller declared.
 
 Labels: --label flags are merged over the resolved profile's labels, with the
 flags winning on a key collision.
@@ -192,24 +196,24 @@ func addSpawnFlags(cmd *cobra.Command) {
 	// fundi-only OpenRouter ids when --kind was never passed on the line.
 	_ = cmd.RegisterFlagCompletionFunc("model", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		flagKind, _ := c.Flags().GetString("kind")
-		profileKind := ""
+		profileKind, profileName := "", ""
 		// Best-effort, matching --preset's completion above: a completion
 		// handler must never exit or print, so a misconfigured profile
-		// degrades to resolveKind("", "") -- which falls back to
+		// degrades to resolveKind("", "", "") -- which falls back to
 		// protocol.KindFundi -- rather than failing the completion.
 		if p, err := resolveProfile(c); err == nil {
-			profileKind = p.Kind
+			profileKind, profileName = p.Kind, p.Name
 		}
-		kind := resolveKind(flagKind, profileKind)
+		kind := resolveKind(flagKind, profileKind, clientstate.LastKindFor(profileName))
 		return completeModel(c, kind, toComplete), cobra.ShellCompDirectiveNoFileComp
 	})
 	_ = cmd.RegisterFlagCompletionFunc("executor", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		flagKind, _ := c.Flags().GetString("kind")
-		profileKind := ""
+		profileKind, profileName := "", ""
 		if p, err := resolveProfile(c); err == nil {
-			profileKind = p.Kind
+			profileKind, profileName = p.Kind, p.Name
 		}
-		kind := resolveKind(flagKind, profileKind)
+		kind := resolveKind(flagKind, profileKind, clientstate.LastKindFor(profileName))
 		return completeExecutor(c, kind, toComplete), cobra.ShellCompDirectiveNoFileComp
 	})
 }
@@ -261,12 +265,25 @@ func resolvePresetName(cmd *cobra.Command) string {
 // resolveKind picks the agent kind. Extracted so the precedence is testable
 // without building a whole cobra command — an inlined copy in a test passes no
 // matter what the real command reads.
-func resolveKind(flagKind, profileKind string) string {
+//
+// The remembered kind is the WEAKEST input on purpose: --kind and a profile's
+// `kind` field are declarations, this is an inference from what happened last
+// time, and a preset's kind (applied later, in the daemon) outranks all three.
+//
+// `script` is never taken from the memory: a script child is spawnable only
+// with a pymodule spec the memory does not carry, so replaying the kind would
+// build a request the CLI has to refuse. RememberKind refuses to store it in
+// the first place; this is the second guard, because a hand-edited state file
+// must not be able to make every bare create fail.
+func resolveKind(flagKind, profileKind, remembered string) string {
 	if flagKind != "" {
 		return flagKind
 	}
 	if profileKind != "" {
 		return profileKind
+	}
+	if remembered != "" && remembered != protocol.KindScript {
+		return remembered
 	}
 	return protocol.KindFundi
 }
@@ -339,7 +356,7 @@ func resolveExecutor(flagExecutor, flagSelector, remembered string, rememberedEl
 func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
 	p := mustProfile(cmd)
 	flagKind, _ := cmd.Flags().GetString("kind")
-	kind := resolveKind(flagKind, p.Kind)
+	kind := resolveKind(flagKind, p.Kind, clientstate.LastKindFor(p.Name))
 
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
@@ -897,6 +914,16 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// Remember what actually got spawned, not what was asked for: a preset or
 	// a declared model may have supplied it, and replaying the resolved choice
 	// is what makes the next bare create land on the same model.
+	//
+	// The kind is remembered for the same reason one level up: it is the key
+	// the other two memories hang off, so a profile that always creates claude
+	// children must not reopen on fundi and make its remembered claude model
+	// unreachable. RememberKind refuses a script kind itself (it needs a
+	// pymodule spec this memory cannot carry). The max-cost is deliberately NOT
+	// recorded here: --max-cost is an explicit, per-invocation guardrail, and a
+	// cap set once in a script must not silently follow the operator into the
+	// form. The form records its own.
+	clientstate.RememberKind(p.Name, req.Kind)
 	clientstate.RememberModel(p.Name, req.Kind, req.Model)
 	if ref := req.ExecutorRef; ref != "" {
 		clientstate.RememberExecutor(p.Name, req.Kind, ref)
