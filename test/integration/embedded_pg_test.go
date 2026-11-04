@@ -263,6 +263,31 @@ func queryInt(t *testing.T, pool *pgxpool.Pool, what, sql string, args ...any) i
 	return n
 }
 
+// requireTimescaleDB skips the calling test on a server that cannot provide
+// timescaledb, and otherwise leaves the extension installed in pool's database.
+//
+// rafiki no longer uses TimescaleDB, so the test database does not carry it —
+// and it could not be used even if the extension were installable, because the
+// library must be preloaded via shared_preload_libraries. The restore tests
+// that call this exist for the other direction: a database and an archive that
+// carry the extension, which only a server that can load it can reproduce.
+// Point RAFIKI_TEST_DSN at such a server to run them.
+//
+// A skip is right here and not a silent hole: an archive without the extension
+// proves nothing about restoring one that has it, so there is nothing to
+// assert, and the message says exactly what would run them.
+//
+// pg_available_extensions is not enough: the extension is listed there and
+// still refuses to load without the preload, so the probe is the CREATE
+// EXTENSION itself — its refusal is the answer, not a failure.
+func requireTimescaleDB(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS timescaledb`); err != nil {
+		t.Skip("timescaledb is not preloaded on this server; this restore test needs it in shared_preload_libraries " +
+			"(point RAFIKI_TEST_DSN at a server that has it)")
+	}
+}
+
 // TestEmbeddedPostgresMigratesAndServes is the design's end-to-end claim, on a
 // real server: RAFIKI_DB=embedded starts a private PostgreSQL that ships vector
 // and pg_textsearch but not timescaledb, the migration chain applies cleanly to
@@ -818,6 +843,10 @@ func TestEmbeddedPostgresBackupRestoreRoundTrip(t *testing.T) {
 // object the archive holds, the extension's catalog included, which is the part
 // a plain-server round trip cannot reach.
 //
+// It skips on a server that cannot load timescaledb: without the extension the
+// restore runs against a database nothing distinguishes from a plain one, and
+// would pass while proving nothing about the server it names.
+//
 // It uses its OWN scratch database, created and dropped here. The shared
 // RAFIKI_TEST_DSN database is not reset between runs (CLAUDE.md), and a restore
 // is precisely the operation that must not touch rows another run left behind.
@@ -841,6 +870,10 @@ func TestDbBackupRestoreRoundTripOnAServerWithTimescaleInstalled(t *testing.T) {
 	c.NoError(err, "connect the scratch database")
 	t.Cleanup(scratch.Close)
 
+	// The extension is what this test exists for, so the database must have it
+	// before it is migrated and dumped. A server that cannot load it skips here.
+	requireTimescaleDB(t, ctx, scratch)
+
 	c.NoError(store.Migrate(ctx, scratch), "migrate the scratch database")
 
 	// The database every later step writes to must be the scratch one. Asserted
@@ -856,8 +889,7 @@ func TestDbBackupRestoreRoundTripOnAServerWithTimescaleInstalled(t *testing.T) {
 	// pass while proving nothing about the server it names.
 	c.Require().Eq(int64(1), queryInt(t, scratch, "is timescaledb installed",
 		`SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'`),
-		"RAFIKI_TEST_DSN's server must have the extension installed (and in template1), or this test "+
-			"proves nothing about the server it names")
+		"the scratch database must have the extension installed, or this test proves nothing about the server it names")
 	// Before the backup, so a restore that silently rebuilt the table as something
 	// else is a difference rather than a coincidence.
 	c.Eq(int64(0), queryInt(t, scratch, "the formerly-hypertable table before the backup",
@@ -1293,6 +1325,10 @@ func scratchDatabase(t *testing.T, admin *pgxpool.Pool, dsn, prefix, template st
 // The target is created from template0 ON PURPOSE: rafiki's test container puts
 // timescaledb in template1, so an ordinary new database would have it installed
 // and this would be the in-place case again.
+//
+// It skips on a server that cannot load timescaledb: the archive carries the
+// extension only because the source has it installed, and a server that cannot
+// create it produces an archive without one, which proves nothing here.
 func TestDbRestoreIntoAFreshDatabaseWithoutTheExtension(t *testing.T) {
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
@@ -1312,6 +1348,10 @@ func TestDbRestoreIntoAFreshDatabaseWithoutTheExtension(t *testing.T) {
 	source, err := pgxpool.New(ctx, sourceDSN)
 	c.NoError(err, "connect the source database")
 	t.Cleanup(source.Close)
+	// The archive carries whatever the source has installed, and the extension is
+	// the subject here: a source without it produces an archive without it. A
+	// server that cannot load the extension skips here, before the backup.
+	requireTimescaleDB(t, ctx, source)
 	c.NoError(store.Migrate(ctx, source), "migrate the source database")
 
 	const (

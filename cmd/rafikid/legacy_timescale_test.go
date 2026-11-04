@@ -64,11 +64,17 @@ func TestLegacyTimescaleDropOrdersToolkitFirst(t *testing.T) {
 // database without it must answer nothing. A probe
 // that always returns a name fails the second half; one that never does fails
 // the first.
+//
+// The "installed" half skips on a server that cannot load timescaledb; the
+// "absent" half needs no extension and runs everywhere.
 func TestLegacyTimescaleExtensionsReportsInstalled(t *testing.T) {
 	c := assert.NewCollecting(t)
 	ctx := context.Background()
 
 	t.Run("installed", func(t *testing.T) {
+		// Skips here, not at the top of the test: the "absent" half below is
+		// real coverage that must keep running on a server without the
+		// extension.
 		pool, haveToolkit := legacyPoolWithTimescale(t)
 		names, err := legacyTimescaleExtensions(ctx, pool)
 		c.Require().NoError(err, "probe the scratch database")
@@ -90,11 +96,17 @@ func TestLegacyTimescaleExtensionsReportsInstalled(t *testing.T) {
 // message and the three operator-facing values, when an extension is installed —
 // and NO record at all when neither is. The single-record half is what keeps
 // the notice a startup line rather than log spam.
+//
+// The "installed" half skips on a server that cannot load timescaledb; the
+// "absent" half needs no extension and runs everywhere.
 func TestLegacyTimescaleWarnsOnce(t *testing.T) {
 	c := assert.NewCollecting(t)
 	ctx := context.Background()
 
 	t.Run("installed", func(t *testing.T) {
+		// Skips here, not at the top of the test: the "absent" half below is
+		// real coverage that must keep running on a server without the
+		// extension.
 		pool, _ := legacyPoolWithTimescale(t)
 		// The probe's own answer is the source of truth for the values
 		// asserted below, so they pin the NOTICE's rendering (comma join,
@@ -135,11 +147,14 @@ func TestLegacyTimescaleWarnsOnce(t *testing.T) {
 // 0068 — including a daemon started ahead of `rafikid migrate`, and --dev,
 // which warns before it migrates. The notice must say to migrate, and must not
 // carry the removal advice: DROP EXTENSION there destroys those tables.
+//
+// The installed state IS the subject, so a server that cannot load the
+// extension skips the whole test.
 func TestLegacyTimescaleWarnsMigrateFirstWhileRafikiTablesAreHypertables(t *testing.T) {
 	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := legacyScratchPool(t)
-	legacyCreateExtension(t, pool, legacyTimescaleExtension)
+	legacyRequireTimescale(t, pool)
 	legacyMakeRafikiHypertables(t, pool,
 		"conversations.conversation_turn", "openrouter.broadcast", "conversations.raw_http_request")
 
@@ -167,11 +182,14 @@ func TestLegacyTimescaleWarnsMigrateFirstWhileRafikiTablesAreHypertables(t *test
 // extension is installed (so the hypertable probe runs) but the probe fails, so
 // the state is unknown. Unknown is not safe, so the confident "can be removed"
 // advice must not appear.
+//
+// The installed state IS the subject, so a server that cannot load the
+// extension skips the whole test.
 func TestLegacyTimescaleProbeFailureDoesNotClaimRemoval(t *testing.T) {
 	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := legacyScratchPool(t)
-	legacyCreateExtension(t, pool, legacyTimescaleExtension)
+	legacyRequireTimescale(t, pool)
 	legacyDropHypertablesView(t, pool)
 
 	rec := captureLegacyLogs(t)
@@ -279,14 +297,40 @@ func legacyScratchPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// legacyRequireTimescale skips the calling test on a server that cannot provide
+// timescaledb, and otherwise leaves the extension installed in pool's database.
+//
+// rafiki no longer uses TimescaleDB, so the test database does not carry it —
+// and it could not be used even if the extension were installable, because the
+// library must be preloaded via shared_preload_libraries. These tests exist for
+// the other direction: a LEGACY database that still has the extension
+// installed, which only a server that can load it can reproduce. Point
+// RAFIKI_TEST_DSN at such a server to run them.
+//
+// A skip is right here and not a silent hole: the notice's installed branches
+// cannot exist on a server without the extension, so there is nothing to
+// assert, and the message says exactly what would run them.
+//
+// pg_available_extensions is not enough: the extension is listed there and
+// still refuses to load without the preload, so the probe is the CREATE
+// EXTENSION itself — its refusal is the answer, not a failure.
+func legacyRequireTimescale(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), "CREATE EXTENSION IF NOT EXISTS "+legacyTimescaleExtension); err != nil {
+		t.Skip("timescaledb is not preloaded on this server; this test needs it in shared_preload_libraries " +
+			"(point RAFIKI_TEST_DSN at a server that has it)")
+	}
+}
+
 // legacyPoolWithTimescale returns a scratch database with timescaledb
 // installed and, when the server provides it, timescaledb_toolkit too. The bool
 // reports whether the toolkit is there, so a caller can assert the exact list
-// without restating the server's extension set.
+// without restating the server's extension set. It skips the calling test on a
+// server that cannot load timescaledb.
 func legacyPoolWithTimescale(t *testing.T) (*pgxpool.Pool, bool) {
 	t.Helper()
 	pool := legacyScratchPool(t)
-	legacyCreateExtension(t, pool, legacyTimescaleExtension)
+	legacyRequireTimescale(t, pool)
 	if !legacyExtensionAvailable(t, pool, legacyToolkitExtension) {
 		return pool, false
 	}
