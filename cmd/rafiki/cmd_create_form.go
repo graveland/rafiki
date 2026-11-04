@@ -22,7 +22,7 @@ import (
 var shapingFlags = []string{
 	"model", "kind", "cwd", "preset", "detached",
 	"executor", "executor-selector", "session", "fork", "fork-from", "from-tag", "append-system-prompt", "thinking",
-	"prefill-files", "pymodule",
+	"prefill-files", "pymodule", "compact",
 }
 
 // wantsCreateForm decides whether `rafiki create` should ask.

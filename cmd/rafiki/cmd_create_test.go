@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,10 +13,12 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/proto"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/modelquery"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/profile"
@@ -910,4 +914,223 @@ func TestConnectSpawnRequestCarriesFork(t *testing.T) {
 	out = connectSpawnRequest(protocol.SpawnRequest{})
 	c.Eq(true, out.ForkFrom == nil, "absent fork must stay nil")
 	c.Eq("", out.FromTag, "absent tag must stay empty")
+}
+
+// ─── forkOverflow: the compact-on-fork detection ──────────────────────────────
+//
+// The helper reads two things from the daemon: the source's last completed
+// turn (the size the fork borrows, off the durable event log) and the
+// destination's context window. Both are allowed to be UNKNOWN, and unknown
+// never refuses — that rule is what the "never refuses" tests below pin,
+// because a refusal built on a guess would block a fork that would have worked.
+
+// forkOverflowStub answers the four reads forkOverflow makes: GetChild for the
+// child's latest durable ordinal (the replay watermark), StreamEvents for the
+// durable log itself, ListModels for the listing's window, and ModelInfo for a
+// model the listing cannot price (a declared model, or an alias).
+type forkOverflowStub struct {
+	rafikiv1connect.UnimplementedControlHandler
+
+	latest *int32
+	events []*rafikiv1.Event
+	models []*rafikiv1.ModelRow
+	info   *rafikiv1.ModelInfoResponse
+
+	gotKind  string
+	gotModel string
+	gotTypes []string
+}
+
+func (s *forkOverflowStub) GetChild(
+	_ context.Context,
+	_ *connect.Request[rafikiv1.GetChildRequest],
+) (*connect.Response[rafikiv1.GetChildResponse], error) {
+	return connect.NewResponse(&rafikiv1.GetChildResponse{
+		Child: &rafikiv1.ChildSummary{ChildId: "c_01SRC", LatestOrdinal: s.latest},
+	}), nil
+}
+
+func (s *forkOverflowStub) StreamEvents(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.StreamEventsRequest],
+	stream *connect.ServerStream[rafikiv1.Event],
+) error {
+	s.gotTypes = req.Msg.GetTypes()
+	for _, ev := range s.events {
+		if err := stream.Send(ev); err != nil {
+			return err
+		}
+	}
+	// The real daemon follows live and never ends the stream on its own; the
+	// caller cancels once it has replayed up to its watermark.
+	<-ctx.Done()
+	return nil
+}
+
+func (s *forkOverflowStub) ListModels(
+	_ context.Context,
+	req *connect.Request[rafikiv1.ListModelsRequest],
+) (*connect.Response[rafikiv1.ListModelsResponse], error) {
+	s.gotKind = req.Msg.GetKind()
+	return connect.NewResponse(&rafikiv1.ListModelsResponse{Models: s.models}), nil
+}
+
+func (s *forkOverflowStub) ModelInfo(
+	_ context.Context,
+	req *connect.Request[rafikiv1.ModelInfoRequest],
+) (*connect.Response[rafikiv1.ModelInfoResponse], error) {
+	s.gotModel = req.Msg.GetModel()
+	if s.info == nil {
+		return connect.NewResponse(&rafikiv1.ModelInfoResponse{Model: req.Msg.GetModel()}), nil
+	}
+	return connect.NewResponse(s.info), nil
+}
+
+// forkOverflowClient serves the stub over a real Connect handler and returns a
+// client for it — the streaming RPC has no usable fake, and this exercises the
+// same transport the CLI uses (epoch header included).
+func forkOverflowClient(t *testing.T, stub *forkOverflowStub) rafikiv1connect.ControlClient {
+	t.Helper()
+	_, handler := rafikiv1connect.NewControlHandler(stub)
+	srv := httptest.NewServer(epochResponseHeader(handler))
+	t.Cleanup(srv.Close)
+	client := &http.Client{Transport: &bearerTransport{base: http.DefaultTransport}}
+	return rafikiv1connect.NewControlClient(client, srv.URL)
+}
+
+// turnEnd builds one durable turn_end event carrying the given usage.
+func turnEnd(ordinal int32, input, cacheRead, cacheWrite int64) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		Ordinal: proto.Int32(ordinal),
+		Payload: &rafikiv1.Event_TurnEnd{TurnEnd: &rafikiv1.TurnEnd{
+			Usage: &rafikiv1.Usage{
+				InputTokens:      proto.Int64(input),
+				CacheReadTokens:  proto.Int64(cacheRead),
+				CacheWriteTokens: proto.Int64(cacheWrite),
+			},
+		}},
+	}
+}
+
+// TestForkOverflowUsesTheLastTurnUsage pins both halves of the measurement: the
+// size is the LAST turn_end's input+cache_read+cache_write (the rail's own sum,
+// i.e. the prompt size the next call carries), and the window comes from the
+// listing row for the destination.
+func TestForkOverflowUsesTheLastTurnUsage(t *testing.T) {
+	c := assert.NewAborting(t)
+	window := int32(1000)
+	latest := int32(5)
+	stub := &forkOverflowStub{
+		latest: &latest,
+		events: []*rafikiv1.Event{
+			{Ordinal: proto.Int32(0), Payload: &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}}},
+			turnEnd(1, 10, 0, 0),
+			{Ordinal: proto.Int32(4), Payload: &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}}},
+			turnEnd(5, 100, 200, 50),
+		},
+		models: []*rafikiv1.ModelRow{{Id: "fakeor/tiny", ContextWindow: &window}},
+	}
+
+	tokens, got, known, err := forkOverflow(context.Background(), connectEndpoint{}, forkOverflowClient(t, stub), "c_01SRC", "fakeor/tiny")
+	c.Require().NoError(err, "forkOverflow")
+	c.Eq(int64(350), tokens, "tokens = the last turn_end's input+cache_read+cache_write")
+	c.Eq(window, got, "window =")
+	c.True(known, "a size and a window are both known")
+	c.Eq(protocol.KindFundi, stub.gotKind, "the listing is asked for fundi's universe")
+	c.Len(stub.gotTypes, 0, "the replay is unfiltered: the watermark can be a non-turn_end event")
+}
+
+// TestForkOverflowUnknownWindowNeverRefuses pins the unknown-window rule: a
+// destination the daemon cannot price (no listing row, and ModelInfo answers
+// known=false) reports known=false, and FitsWindow then never refuses.
+func TestForkOverflowUnknownWindowNeverRefuses(t *testing.T) {
+	c := assert.NewAborting(t)
+	latest := int32(1)
+	stub := &forkOverflowStub{
+		latest: &latest,
+		events: []*rafikiv1.Event{turnEnd(1, 5000, 0, 0)},
+	}
+
+	tokens, window, known, err := forkOverflow(context.Background(), connectEndpoint{}, forkOverflowClient(t, stub), "c_01SRC", "nowhere/unknown")
+	c.Require().NoError(err, "forkOverflow")
+	c.Eq(int64(5000), tokens, "the size is still reported")
+	c.Eq(int32(0), window, "an unpriced model has no window")
+	c.False(known, "an unknown window is not a known answer")
+	c.True(modelquery.FitsWindow(tokens, window), "an unknown window must never overflow")
+	c.Eq("nowhere/unknown", stub.gotModel, "the window falls through to ModelInfo")
+}
+
+// TestForkOverflowUnknownTokensNeverRefuses pins the other half: a source with
+// no completed turn (no turn_end in its durable log) has no borrowable size, so
+// nothing can be over-window — the fork is allowed.
+func TestForkOverflowUnknownTokensNeverRefuses(t *testing.T) {
+	c := assert.NewAborting(t)
+	window := int32(1000)
+	latest := int32(3)
+	stub := &forkOverflowStub{
+		latest: &latest,
+		events: []*rafikiv1.Event{
+			{Ordinal: proto.Int32(3), Payload: &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}}},
+		},
+		models: []*rafikiv1.ModelRow{{Id: "fakeor/tiny", ContextWindow: &window}},
+	}
+
+	tokens, got, known, err := forkOverflow(context.Background(), connectEndpoint{}, forkOverflowClient(t, stub), "c_01SRC", "fakeor/tiny")
+	c.Require().NoError(err, "forkOverflow")
+	c.Eq(int64(0), tokens, "no turn_end means no size")
+	c.Eq(window, got, "the window is still known")
+	c.False(known, "one unknown side makes the comparison unknown")
+	c.True(modelquery.FitsWindow(tokens, got), "unknown never overflows")
+
+	// A child that has logged NOTHING has no latest ordinal at all, and the
+	// helper must not stream for it: an unset watermark is not 0.
+	empty := &forkOverflowStub{models: []*rafikiv1.ModelRow{{Id: "fakeor/tiny", ContextWindow: &window}}}
+	tokens, _, known, err = forkOverflow(context.Background(), connectEndpoint{}, forkOverflowClient(t, empty), "c_01SRC", "fakeor/tiny")
+	c.Require().NoError(err, "forkOverflow")
+	c.Eq(int64(0), tokens, "an empty log has no size")
+	c.False(known, "known =")
+	c.Len(empty.gotTypes, 0, "an unset watermark must not open a stream")
+}
+
+// TestForkOverflowMatchesAProviderQualifiedID pins the two spellings the CLI
+// accepts: the row whose id IS the model, and — for a bare id — the row whose
+// id ends in "/"+model. A declared model has no window in the listing, so the
+// answer falls through to ModelInfo, which is where the daemon resolves the
+// provider registry.
+func TestForkOverflowMatchesAProviderQualifiedID(t *testing.T) {
+	c := assert.NewAborting(t)
+	qualified, other := int32(1000), int32(200000)
+	latest := int32(1)
+	stub := &forkOverflowStub{
+		latest: &latest,
+		events: []*rafikiv1.Event{turnEnd(1, 5000, 0, 0)},
+		models: []*rafikiv1.ModelRow{
+			{Id: "fakeor/mini", ContextWindow: &qualified},
+			{Id: "other/mini", ContextWindow: &other},
+		},
+	}
+	client := forkOverflowClient(t, stub)
+
+	// The exact id wins over any suffix match.
+	_, window, known, err := forkOverflow(context.Background(), connectEndpoint{}, client, "c_01SRC", "fakeor/mini")
+	c.Require().NoError(err, "forkOverflow")
+	c.Eq(qualified, window, "the exact id's row")
+	c.True(known, "known =")
+
+	// A bare id matches the row whose final segment it is (the listing is
+	// sorted by id, so the first such row is deterministic).
+	_, window, _, err = forkOverflow(context.Background(), connectEndpoint{}, client, "c_01SRC", "mini")
+	c.Require().NoError(err, "forkOverflow")
+	c.Eq(qualified, window, "a bare id matches the first /mini row")
+
+	// A declared model carries no window in the listing at all; ModelInfo is
+	// where the daemon resolves the provider registry, so the answer still
+	// arrives.
+	stub.models = []*rafikiv1.ModelRow{{Id: "fakeor/tiny"}}
+	declared := int32(1000)
+	stub.info = &rafikiv1.ModelInfoResponse{Model: "fakeor/tiny", Known: true, ContextWindow: declared}
+	_, window, known, err = forkOverflow(context.Background(), connectEndpoint{}, client, "c_01SRC", "fakeor/tiny")
+	c.Require().NoError(err, "forkOverflow")
+	c.Eq(declared, window, "a declared model's window comes from ModelInfo")
+	c.True(known, "known =")
 }

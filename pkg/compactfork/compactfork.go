@@ -14,8 +14,9 @@
 //   - I, the intermediate: a fork of S on S's own model, told to /compact. It is
 //     an ordinary child, VISIBLE in the rail and in `rafiki list` for the
 //     duration of the summary call, deliberately: an operator watching spend can
-//     see what is being called. It is CLOSED once the fork exists, never
-//     deleted — the fork edge from N names a node in I's conversation.
+//     see what is being called. It is STOPPED and then CLOSED once the fork
+//     exists, never deleted — the fork edge from N names a node in I's
+//     conversation, and the daemon only closes an exited child.
 //   - N, the fork: a child on the destination model whose borrowed history is
 //     I's compacted result.
 //
@@ -48,6 +49,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
 
 // DefaultInstructions is what the intermediate child's /compact is given when
@@ -97,8 +100,8 @@ type Options struct {
 //
 // Ordering: I is spawned from the SOURCE; /compact is sent to I; Run waits for a
 // CompactionBoundary event; N is spawned from I with an EMPTY cursor (I's last
-// completed turn, i.e. the end of the compacted result); I is closed. Nothing
-// here touches the source.
+// completed turn, i.e. the end of the compacted result); I is stopped and
+// closed. Nothing here touches the source.
 //
 // Failures before the compaction can start — reading the watermark, sending
 // /compact — leave I with nothing to finish, so Run closes it and names it in
@@ -264,11 +267,25 @@ func fetchHistory(ctx context.Context, c rafikiv1connect.ControlClient, childID 
 	return resp.Msg.GetEvents(), nil
 }
 
-// closeIntermediate closes the helper child and nothing else: N's fork edge
-// names a node in its conversation, so a descendant-scoped close would be both
-// impossible (N is not its descendant) and wrong.
+// closeIntermediate stops and closes the helper child and nothing else: N's
+// fork edge names a node in its conversation, so a descendant-scoped close
+// would be both impossible (N is not its descendant) and wrong.
+//
+// The STOP comes first because a live child cannot be closed at all: Close
+// finalizes an EXITED child and refuses anything else with ErrNotExited ("child
+// is still running"), so a close-only sequence leaves the helper live forever
+// and fails the whole composition at its last step. This is the same sequence
+// `rafiki close` runs, and an already-exited child is not an error — the point
+// is that it is gone.
 func closeIntermediate(ctx context.Context, c rafikiv1connect.ControlClient, childID string) error {
-	_, err := c.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{
+	_, err := c.Kill(ctx, connect.NewRequest(&rafikiv1.KillRequest{
+		ChildId: childID,
+		Scope:   rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY,
+	}))
+	if err != nil && rpcreason.Reason(err) != protocol.ErrChildExited {
+		return fmt.Errorf("stop: %w", err)
+	}
+	_, err = c.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{
 		ChildId: childID,
 		Scope:   rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY,
 	}))

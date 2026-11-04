@@ -13,8 +13,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/compactfork"
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/modelquery"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/prefill"
 	"go.graveland.dev/rafiki/pkg/presets"
@@ -145,6 +148,10 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("fork", "", "Fork from an existing session.jsonl by path")
 	cmd.Flags().String("fork-from", "", "Start from a point in another child's conversation history: <child> or <child>@m:<ordinal>; an empty cursor means its last completed turn (kind is forced to fundi)")
 	cmd.Flags().String("from-tag", "", "Start from the node a tag names (see `rafiki tag add`); kind is forced to fundi")
+	cmd.Flags().Bool("compact", false,
+		"when the borrowed history exceeds --model's context window, compact it on the source's model\n"+
+			"first (spawns a temporary helper child); without it an over-window fork is refused. A window\n"+
+			"the daemon cannot resolve — including a source with no completed turn — never refuses")
 	cmd.Flags().Bool("no-extensions", false, "Disable extension discovery")
 	cmd.Flags().StringSlice("extension", nil, "Load an extension (repeatable)")
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
@@ -893,6 +900,89 @@ func promptForExecutorSetup(ctx context.Context, cmd *cobra.Command, profileName
 	return createResolveLaunchExecutor(ctx, cmd, profileName, kind)
 }
 
+// forkOverflow reports the source's borrowed size against the destination's
+// window. known is false when either side is unknown — no completed turn yet,
+// or a model the daemon cannot price — and unknown never refuses: a fork whose
+// size or window nobody can state is spawned as asked.
+//
+// tokens is the LAST turn_end's usage, summed the way the cockpit rail sums it
+// (input + cache read + cache write). That is the prompt size the fork's next
+// call carries, not a turn total: an agentic turn makes one call per tool round
+// and every call re-reads the cached prefix, so a summed cache_read would read
+// many times larger than the real context.
+//
+// It is read from the DURABLE EVENT LOG, not from GetHistory: turn_end is an
+// event, not a conversation row, so the transcript GetHistory serves never
+// carries one. The replay is bounded by the child's own latest ordinal
+// (ChildSummary.latest_ordinal), which is what the watermark parameter of the
+// shared durable replay means — fetchScriptLog is that replay, and its name is
+// historical (it is the only bounded StreamEvents read in the CLI).
+//
+// window comes from the daemon, in two steps, because neither step alone
+// answers it. The listing carries a window only for a model the OpenRouter
+// catalog knows (and for an alias whose target is in the same listing), so a
+// providers.toml DECLARED model — the offline test daemon's only kind — has no
+// window there; ModelInfo resolves the same string through the provider
+// registry first and is what the child will actually run against. A bare id
+// (no slash) matches a listing row whose id ends in "/"+model, which is how the
+// CLI accepts both spellings; ModelInfo resolves a bare id through the default
+// provider.
+func forkOverflow(ctx context.Context, ep connectEndpoint, ctrl rafikiv1connect.ControlClient, sourceChildID, model string) (tokens int64, window int32, known bool, err error) {
+	get, err := ctrl.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: sourceChildID}))
+	if err != nil {
+		return 0, 0, false, diagnoseConnectError(err, ep.describe)
+	}
+	// An UNSET latest ordinal means the child has logged nothing yet, so there
+	// is no completed turn to measure — the same "unknown" a missing turn_end
+	// reports. A SET 0 is a real log (ordinals start at 0).
+	if watermark, ok := latestOrdinal(get.Msg.GetChild()); ok {
+		events, err := fetchScriptLog(ctx, ep, ctrl, sourceChildID, watermark)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		for _, ev := range events {
+			if u := ev.GetTurnEnd().GetUsage(); u != nil {
+				tokens = u.GetInputTokens() + u.GetCacheReadTokens() + u.GetCacheWriteTokens()
+			}
+		}
+	}
+	if model != "" {
+		rows, lerr := ctrl.ListModels(ctx, connect.NewRequest(&rafikiv1.ListModelsRequest{Kind: protocol.KindFundi}))
+		if lerr != nil {
+			return 0, 0, false, diagnoseConnectError(lerr, ep.describe)
+		}
+		if row := matchModelRow(rows.Msg.GetModels(), model); row != nil {
+			window = row.GetContextWindow()
+		}
+		if window <= 0 {
+			info, ierr := ctrl.ModelInfo(ctx, connect.NewRequest(&rafikiv1.ModelInfoRequest{Model: model}))
+			if ierr != nil {
+				return 0, 0, false, diagnoseConnectError(ierr, ep.describe)
+			}
+			if info.Msg.GetKnown() {
+				window = info.Msg.GetContextWindow()
+			}
+		}
+	}
+	return tokens, window, tokens > 0 && window > 0, nil
+}
+
+// matchModelRow finds model's row in a listing: the row whose id IS model, else
+// the first row whose id ends in "/"+model. The listing is sorted by id, so the
+// suffix match is deterministic.
+func matchModelRow(rows []*rafikiv1.ModelRow, model string) *rafikiv1.ModelRow {
+	var suffix *rafikiv1.ModelRow
+	for _, r := range rows {
+		if r.GetId() == model {
+			return r
+		}
+		if suffix == nil && strings.HasSuffix(r.GetId(), "/"+model) {
+			suffix = r
+		}
+	}
+	return suffix
+}
+
 func runCreate(cmd *cobra.Command, args []string) error {
 	// Resolve the mode before doing anything: -j and -J together is a
 	// user-input error and must not spawn a child first.
@@ -967,6 +1057,52 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		resolveSpawnModel(&req, p, p.Name)
 	}
 
+	// The fork gate. It runs HERE, after the model resolution above, because
+	// the destination window is the resolved model's: a preset or a profile may
+	// have supplied it, and checking --model's raw flag would measure the wrong
+	// one. Detection never mutates the source; only `models switch` closes it.
+	compactFlag, _ := cmd.Flags().GetBool("compact")
+	compacting := false
+	var forkWindow int32
+	var sourceModel string
+	if compactFlag && (req.ForkFrom == nil || req.ForkFrom.ChildID == "") {
+		// A flag that silently did nothing would let an operator believe a
+		// compaction happened when the whole history was borrowed. A tag fork
+		// is excluded too: its source is resolved daemon-side, so the client
+		// has nothing to measure before the spawn.
+		return errors.New("--compact applies to --fork-from: it compacts the history that fork borrows, and a from-tag fork is resolved daemon-side")
+	}
+	if req.ForkFrom != nil && req.ForkFrom.ChildID != "" {
+		tokens, window, known, err := forkOverflow(cmdCtx(cmd), ep, ctrl, req.ForkFrom.ChildID, req.Model)
+		if err != nil {
+			return err
+		}
+		if known && !modelquery.FitsWindow(tokens, window) {
+			// The source's model is read only on this path: it is what the
+			// compaction runs on, and what the refusal names. The common fork
+			// pays for neither.
+			src, err := ctrl.GetChild(cmdCtx(cmd), connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: req.ForkFrom.ChildID}))
+			if err != nil {
+				return diagnoseConnectError(err, ep.describe)
+			}
+			sourceModel = src.Msg.GetChild().GetModel()
+			if !compactFlag {
+				return fmt.Errorf("borrowed history is ~%d tokens but %s's window is %d; pass --compact to compact it on %s first, or pick a larger model",
+					tokens, req.Model, window, sourceModel)
+			}
+			fmt.Fprintf(os.Stderr, "compacting ~%d tokens on %s (one summary call)\n", tokens, sourceModel)
+			compacting, forkWindow = true, window
+		} else if compactFlag {
+			// The flag is a permission, not an instruction: a fork that fits is
+			// spawned as asked, and the operator is told why nothing happened.
+			if known {
+				fmt.Fprintf(os.Stderr, "borrowed history is ~%d tokens, within %s's %d-token window; not compacting\n", tokens, req.Model, window)
+			} else {
+				fmt.Fprintln(os.Stderr, "borrowed history size or the destination's window is unknown; not compacting")
+			}
+		}
+	}
+
 	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
 	detached, _ := cmd.Flags().GetBool("detached")
 	flagExecutor, _ := cmd.Flags().GetString("executor")
@@ -1022,9 +1158,22 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resp, err := ctrl.Spawn(cmdCtx(cmd), connect.NewRequest(connectSpawnRequest(req)))
-	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+	var childID string
+	if compacting {
+		childID, err = compactfork.Run(cmdCtx(cmd), ctrl, connectSpawnRequest(req), compactfork.Options{
+			SourceModel: sourceModel,
+			DestWindow:  forkWindow,
+			Progress:    func(s string) { fmt.Fprintln(os.Stderr, s) },
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		resp, err := ctrl.Spawn(cmdCtx(cmd), connect.NewRequest(connectSpawnRequest(req)))
+		if err != nil {
+			return diagnoseConnectError(err, ep.describe)
+		}
+		childID = resp.Msg.GetChildId()
 	}
 
 	// The child set changed, so whatever a TAB answered a moment ago is stale.
@@ -1047,14 +1196,13 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if ref := req.ExecutorRef; ref != "" {
 		clientstate.RememberExecutor(p.Name, req.Kind, ref)
 	}
-	childID := resp.Msg.GetChildId()
 	if err := setActive(p.Name, childID); err != nil {
 		// Best effort — log to stderr but don't fail.
 		fmt.Fprintln(os.Stderr, "warning: could not update active marker:", err)
 	}
 
 	if detached {
-		return renderCreateSummary(os.Stdout, resp.Msg, mode)
+		return renderCreateSummary(os.Stdout, &rafikiv1.SpawnResponse{ChildId: childID}, mode)
 	}
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")

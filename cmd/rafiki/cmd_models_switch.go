@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -11,8 +12,10 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/compactfork"
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/modelquery"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -58,6 +61,14 @@ completed turn. The routing spec is replayed as-is: it was written for the
 old model's provider lines, and may misroute or be refused on the new one —
 the step names itself if the replay fails.
 
+A switch onto a model whose context window cannot hold the borrowed history is
+REFUSED with both numbers rather than spawned to fail on its first call. Pass
+--compact to fit it: the source is forked onto its own model as a temporary
+helper child, that child is compacted, and the continuation forks from the
+compacted result — so the new conversation starts from a summary of the old
+one instead of its whole transcript. The helper is closed, never deleted, and
+the source is still closed exactly once, by this command.
+
 If a step after the spawn fails, the command says which: both conversations
 exist, and the printed rafiki close/rename/route line finishes by hand.
 Re-running the whole switch would spawn a SECOND fork.
@@ -75,6 +86,10 @@ Re-running the whole switch would spawn a SECOND fork.
 			cur.Code)
 	}
 	cmd.Flags().Float64("max-cost", -1, maxCostHelp)
+	cmd.Flags().Bool("compact", false,
+		"when the borrowed history exceeds <model>'s context window, compact the source on its own model\n"+
+			"first (spawns a temporary helper child); without it an over-window switch is refused. A window\n"+
+			"the daemon cannot resolve — including a source with no completed turn — never refuses")
 	cmd.Flags().Bool("descendants", false, "Also close the source's subagents (default: leave them running)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout when the source must be stopped first (default 2.5s)")
 	return cmd
@@ -124,6 +139,31 @@ func runModelsSwitch(cmd *cobra.Command, args []string) error {
 	// sandbox block instead.
 	if src.GetLabels()["rafiki/sandbox"] == "1" {
 		return fmt.Errorf("%s runs in a sandbox and a switch cannot carry the sandbox; fork it by hand with an explicit --sandbox block instead", childID)
+	}
+
+	// Over-window detection, before anything is spawned: the continuation
+	// borrows the source's whole history, and a model whose window cannot hold
+	// it would take the fork and then fail on its first call. known is false
+	// when the source has no completed turn or the daemon cannot price the
+	// destination, and unknown never refuses.
+	compactFlag, _ := cmd.Flags().GetBool("compact")
+	tokens, window, known, err := forkOverflow(ctx, ep, ctrl, childID, model)
+	if err != nil {
+		return err
+	}
+	compacting := known && !modelquery.FitsWindow(tokens, window)
+	if compacting && !compactFlag {
+		return fmt.Errorf("borrowed history is ~%d tokens but %s's window is %d; pass --compact to compact it on %s first, or pick a larger model",
+			tokens, model, window, src.GetModel())
+	}
+	if compacting {
+		fmt.Fprintf(os.Stderr, "compacting ~%d tokens on %s (one summary call)\n", tokens, src.GetModel())
+	} else if compactFlag {
+		if known {
+			fmt.Fprintf(os.Stderr, "borrowed history is ~%d tokens, within %s's %d-token window; not compacting\n", tokens, model, window)
+		} else {
+			fmt.Fprintln(os.Stderr, "borrowed history size or the destination's window is unknown; not compacting")
+		}
 	}
 
 	// The source's parent, so a SUBAGENT's switch stays under the same
@@ -187,11 +227,23 @@ func runModelsSwitch(cmd *cobra.Command, args []string) error {
 		req.Preset = pname
 	}
 
-	spawned, err := ctrl.Spawn(ctx, connect.NewRequest(req))
-	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+	var newID string
+	if compacting {
+		newID, err = compactfork.Run(ctx, ctrl, req, compactfork.Options{
+			SourceModel: src.GetModel(),
+			DestWindow:  window,
+			Progress:    func(s string) { fmt.Fprintln(os.Stderr, s) },
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		spawned, err := ctrl.Spawn(ctx, connect.NewRequest(req))
+		if err != nil {
+			return diagnoseConnectError(err, ep.describe)
+		}
+		newID = spawned.Msg.GetChildId()
 	}
-	newID := spawned.Msg.GetChildId()
 	fmt.Printf("spawned %s on %s (fork of %s)\n", newID, model, childID)
 
 	// Everything past here leaves BOTH conversations in place on failure;

@@ -5,6 +5,7 @@ package compactfork
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
 
 const (
@@ -28,7 +31,7 @@ const (
 	defaultIntermediateName = sourceID + "-compact"
 )
 
-// fakeControl implements the four RPCs the fork layer uses and nothing else: the
+// fakeControl implements the five RPCs the fork layer uses and nothing else: the
 // embedded interface is nil, so a call to any other verb panics. That is the
 // loud answer — the layer is supposed to be incapable of touching the source.
 type fakeControl struct {
@@ -41,13 +44,18 @@ type fakeControl struct {
 	// historyErr, when non-nil, is consulted per GetHistory call (1-based); a
 	// non-nil result fails that call.
 	historyErr func(call int) error
-	// sendErr and closeErr, when non-nil, fail every Send / Close.
+	// sendErr, closeErr and killErr, when non-nil, fail every Send / Close /
+	// Kill. killErr stands in for the daemon's "child already exited" refusal
+	// (protocol.ErrChildExited) as well as for a real failure, so a test can
+	// pick which one by building the error.
 	sendErr  error
 	closeErr error
+	killErr  error
 
 	calls  []string
 	spawns []*rafikiv1.SpawnRequest
 	sends  []*rafikiv1.SendRequest
+	kills  []*rafikiv1.KillRequest
 	closes []*rafikiv1.CloseRequest
 	// historyCalls counts GetHistory calls, including the watermark read.
 	historyCalls int
@@ -85,6 +93,15 @@ func (f *fakeControl) GetHistory(_ context.Context, req *connect.Request[rafikiv
 		events = f.history(f.historyCalls)
 	}
 	return connect.NewResponse(&rafikiv1.GetHistoryResponse{Events: events}), nil
+}
+
+func (f *fakeControl) Kill(_ context.Context, req *connect.Request[rafikiv1.KillRequest]) (*connect.Response[rafikiv1.KillResponse], error) {
+	f.kills = append(f.kills, req.Msg)
+	f.calls = append(f.calls, "kill:"+req.Msg.GetChildId())
+	if f.killErr != nil {
+		return nil, f.killErr
+	}
+	return connect.NewResponse(&rafikiv1.KillResponse{}), nil
 }
 
 func (f *fakeControl) Close(_ context.Context, req *connect.Request[rafikiv1.CloseRequest]) (*connect.Response[rafikiv1.CloseResponse], error) {
@@ -217,17 +234,21 @@ func TestRunSpawnsCompactsThenForksTheIntermediate(t *testing.T) {
 	// one the source already carried.
 	c.Eq("gethistory:"+intermediateID, calls[1], "then the watermark read")
 	c.Eq("send:"+intermediateID, calls[2], "then /compact")
-	c.Eq("spawn:dest", calls[len(calls)-2], "the fork is spawned after the boundary")
+	c.Eq("spawn:dest", calls[len(calls)-3], "the fork is spawned after the boundary")
+	c.Eq("kill:"+intermediateID, calls[len(calls)-2], "the intermediate is STOPPED before it is closed")
 	c.Eq("close:"+intermediateID, calls[len(calls)-1], "the intermediate is closed last")
-	for _, call := range calls[3 : len(calls)-2] {
+	for _, call := range calls[3 : len(calls)-3] {
 		c.Eq("gethistory:"+intermediateID, call, "the wait polls the intermediate's history")
 	}
 
 	// The source is never MUTATED. The one request that names it is the
 	// intermediate's fork_from, which is a read edge: that is how I borrows S's
-	// history. Kill is absent from the fake entirely, so a kill would panic.
+	// history.
 	for _, s := range f.sends {
 		c.NotEq(sourceID, s.GetChildId(), "no send may target the source")
+	}
+	for _, k := range f.kills {
+		c.NotEq(sourceID, k.GetChildId(), "no kill may target the source")
 	}
 	for _, cl := range f.closes {
 		c.NotEq(sourceID, cl.GetChildId(), "no close may target the source")
@@ -270,6 +291,7 @@ func TestRunWaitsForANewBoundary(t *testing.T) {
 		"gethistory:" + intermediateID,
 		"gethistory:" + intermediateID,
 		"spawn:dest",
+		"kill:" + intermediateID,
 		"close:" + intermediateID,
 	}, f.calls, "the stale boundary is skipped, the new one proceeds")
 }
@@ -364,6 +386,87 @@ func TestRunClosesTheIntermediateOnAPostCompactRefusal(t *testing.T) {
 	c.Len(f.closes, 1, "the intermediate is closed even though the fork was refused")
 	c.Eq(rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY, f.closes[0].GetScope(), "only the intermediate is closed")
 	c.Eq("close:"+intermediateID, f.calls[len(f.calls)-1], "the close is the last thing Run does")
+}
+
+// TestRunStopsTheIntermediateBeforeClosingIt pins the sequence a LIVE child
+// requires: the daemon closes only an EXITED child (Close answers ErrNotExited,
+// "child is still running"), so a close-only last step fails every real run at
+// the very end — the unit test's fake used to allow it, which is exactly why it
+// went unnoticed.
+func TestRunStopsTheIntermediateBeforeClosingIt(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeControl{
+		spawnIDs: []string{intermediateID, forkID},
+		history: func(call int) []*rafikiv1.Event {
+			events := []*rafikiv1.Event{userTextEvent(0, "the prompt")}
+			if call > 1 {
+				events = append(events, boundaryEvent(2))
+			}
+			return events
+		},
+	}
+
+	fork, err := Run(context.Background(), f, baseRequest(), fastOptions())
+	c.NoError(err, "run")
+	c.Eq(forkID, fork, "the fork's id")
+
+	c.Require().Len(f.kills, 1, "the intermediate is stopped")
+	c.Eq(intermediateID, f.kills[0].GetChildId(), "the stop targets the intermediate")
+	c.Eq(rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY, f.kills[0].GetScope(),
+		"the stop ends the intermediate alone — the fork is not its descendant")
+	c.Require().Len(f.closes, 1, "and then closed")
+
+	killAt := slices.Index(f.calls, "kill:"+intermediateID)
+	closeAt := slices.Index(f.calls, "close:"+intermediateID)
+	c.True(killAt >= 0 && closeAt > killAt, "the stop must precede the close: %v", f.calls)
+}
+
+// TestRunToleratesAnAlreadyExitedIntermediate pins the other half of the stop:
+// "already exited" is the state Run wants, not a failure.
+func TestRunToleratesAnAlreadyExitedIntermediate(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeControl{
+		spawnIDs: []string{intermediateID, forkID},
+		killErr: rpcreason.Attach(
+			connect.NewError(connect.CodeFailedPrecondition, errors.New("child "+intermediateID+" already exited")),
+			protocol.ErrChildExited),
+		history: func(call int) []*rafikiv1.Event {
+			events := []*rafikiv1.Event{userTextEvent(0, "the prompt")}
+			if call > 1 {
+				events = append(events, boundaryEvent(2))
+			}
+			return events
+		},
+	}
+
+	fork, err := Run(context.Background(), f, baseRequest(), fastOptions())
+	c.NoError(err, "an already-exited intermediate is not a failure")
+	c.Eq(forkID, fork, "the fork's id")
+	c.Len(f.closes, 1, "it is still closed")
+}
+
+// TestRunNamesTheIntermediateWhenTheStopFails pins the failure: the stop is not
+// swallowed, the child is named, and the error says the fork already exists —
+// a close left undone must be finishable by hand.
+func TestRunNamesTheIntermediateWhenTheStopFails(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeControl{
+		spawnIDs: []string{intermediateID, forkID},
+		killErr:  connect.NewError(connect.CodeInternal, errors.New("boom")),
+		history: func(call int) []*rafikiv1.Event {
+			events := []*rafikiv1.Event{userTextEvent(0, "the prompt")}
+			if call > 1 {
+				events = append(events, boundaryEvent(2))
+			}
+			return events
+		},
+	}
+
+	_, err := Run(context.Background(), f, baseRequest(), fastOptions())
+	c.Require().Error(err, "a failed stop is a failure")
+	c.ErrorContains(err, intermediateID, "the error names the intermediate")
+	c.ErrorContains(err, "the fork "+forkID+" exists", "the error says the fork is already there")
+	c.Len(f.closes, 0, "a failed stop must not be followed by a close")
 }
 
 // TestRunRefusesWithoutASourceModel pins that an impossible composition spawns
@@ -466,7 +569,7 @@ func TestRunFakeControlPanicsOnAnUnusedVerb(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := &fakeControl{}
 	c.Panics(func() {
-		_, _ = f.Kill(context.Background(), connect.NewRequest(&rafikiv1.KillRequest{ChildId: sourceID}))
+		_, _ = f.Rename(context.Background(), connect.NewRequest(&rafikiv1.RenameRequest{ChildId: sourceID}))
 	}, "an unimplemented verb must panic")
 }
 

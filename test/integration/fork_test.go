@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,11 @@ type forkSeat struct {
 
 	mu     sync.Mutex
 	bodies [][]byte
+	// inputTokens is the prompt size an ordinary reply reports; 0 means the
+	// fixture default of 10. It is the number the compact-on-fork detection
+	// reads off the source's last turn_end, so a test that needs an
+	// OVER-WINDOW source raises it rather than growing the transcript.
+	inputTokens int64
 }
 
 func newForkSeat(t *testing.T) *forkSeat {
@@ -58,6 +64,24 @@ func newForkSeat(t *testing.T) *forkSeat {
 	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.srv.Close)
 	return s
+}
+
+// reportUsage sets the input_tokens an ordinary reply reports — the prompt size
+// the compact-on-fork detection measures.
+func (s *forkSeat) reportUsage(n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inputTokens = n
+}
+
+// usage is the input_tokens an ordinary reply reports.
+func (s *forkSeat) usage() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inputTokens == 0 {
+		return 10
+	}
+	return s.inputTokens
 }
 
 // script makes the seat answer any request carrying marker with a tool_use
@@ -81,18 +105,44 @@ func (s *forkSeat) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.bodies = append(s.bodies, body)
-	marker, tool, input := s.marker, s.tool, s.input
+	marker, tool, input, usage := s.marker, s.tool, s.input, s.inputTokens
 	s.mu.Unlock()
+	if usage == 0 {
+		usage = 10
+	}
 
 	text := string(body)
 	switch {
+	case strings.Contains(text, compactionPromptFirstLine):
+		// A compaction summary call. It is NON-streaming (llm.compact clears
+		// the stream handler), so the reply must be a plain JSON Message, and
+		// it must carry a <summary> block or the compaction writes nothing and
+		// no boundary ever appears.
+		s.replySummary(w)
 	case strings.Contains(text, `"tool_result"`):
-		s.replyText(w, "noted")
+		s.replyText(w, "noted", usage)
 	case marker != "" && strings.Contains(text, marker):
 		s.replyToolUse(w, tool, input)
 	default:
-		s.replyText(w, "done")
+		s.replyText(w, "done", usage)
 	}
+}
+
+// replySummary answers a compaction summary call with a complete non-streaming
+// Messages response carrying a <summary> block.
+func (s *forkSeat) replySummary(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	body, _ := json.Marshal(map[string]any{
+		"id":          "msg_fork_compact",
+		"type":        "message",
+		"role":        "assistant",
+		"model":       "mini",
+		"content":     []map[string]any{{"type": "text", "text": "<analysis>handoff</analysis><summary>handoff summary</summary>"}},
+		"stop_reason": "end_turn",
+		"usage":       map[string]any{"input_tokens": 5, "output_tokens": 5},
+	})
+	_, _ = w.Write(body)
 }
 
 func (s *forkSeat) requests() [][]byte {
@@ -130,10 +180,10 @@ func (s *forkSeat) writeEvents(w http.ResponseWriter, events []string) {
 	}
 }
 
-func (s *forkSeat) replyText(w http.ResponseWriter, text string) {
+func (s *forkSeat) replyText(w http.ResponseWriter, text string, inputTokens int64) {
 	delta, _ := json.Marshal(text)
 	s.writeEvents(w, []string{
-		"event: message_start\n" + `data: {"type":"message_start","message":{"id":"msg_fork","type":"message","role":"assistant","model":"mini","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}` + "\n\n",
+		"event: message_start\n" + fmt.Sprintf(`data: {"type":"message_start","message":{"id":"msg_fork","type":"message","role":"assistant","model":"mini","content":[],"usage":{"input_tokens":%d,"output_tokens":1}}}`, inputTokens) + "\n\n",
 		"event: content_block_start\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n",
 		"event: content_block_delta\n" + fmt.Sprintf(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`, delta) + "\n\n",
 		"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n",
@@ -156,10 +206,47 @@ func (s *forkSeat) replyToolUse(w http.ResponseWriter, tool string, input map[st
 	})
 }
 
+// The compact-on-fork destination: a DECLARED model with a genuinely small
+// window, so a source of a few thousand tokens is over-window without a real
+// catalog. Declaring it in providers.toml is what lets the daemon price it —
+// Controller.declContextWindow reads the provider registry before the
+// OpenRouter catalog, and ModelInfo is how the CLI asks (the listing carries a
+// window only for models the catalog knows).
+const (
+	tinyForkModel    = "fakeor/tiny"
+	tinyForkWindow   = 1000
+	sourceForkTokens = 5000
+)
+
+// writeForkProviders writes this file's providers fixture: the recording seat,
+// plus the tiny declared destination above. fakeor/mini — the model the sources
+// run on — is deliberately NOT declared, so the source's own window stays
+// unknown and only the destination's is measurable.
+func writeForkProviders(t *testing.T, baseURL string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "providers.toml")
+	body := fmt.Sprintf(`default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.fakeor]
+kind = "anthropic-openrouter"
+base_url = %q
+
+[providers.fakeor.models.tiny]
+id = "tiny"
+context_window = %d
+`, baseURL, tinyForkWindow)
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte(body), 0o600), "write fork providers fixture")
+	return path
+}
+
 // forkDaemon boots a DB-backed daemon whose only provider is the given seat.
 func forkDaemon(t *testing.T, seat *forkSeat) *daemon {
 	t.Helper()
-	providers := writeRecordingProviders(t, seat.srv.URL)
+	providers := writeForkProviders(t, seat.srv.URL)
 	d := bootDaemonDB(t, nextDaemonID(), append(noRealProviderEnv(),
 		"RAFIKI_EXECUTORS_ENABLED=0",
 		"RAFIKI_PROVIDERS="+providers,
@@ -677,4 +764,279 @@ func TestCLIModelsSwitchAsTokenUserKeepsTheParent(t *testing.T) {
 		"the switched child must name its source")
 
 	killChildren(t, client, newID, coord)
+}
+
+// ─── compact on fork ─────────────────────────────────────────────────────────
+//
+// The compact-on-fork layer, driven through the real CLI: an over-window fork
+// is compacted on the source's own model through a TEMPORARY helper child, and
+// the continuation borrows the compacted result. What these tests pin is the
+// part the CLI owns — that the flag exists, that the refusal names both
+// numbers, and that only `models switch` closes the source.
+
+// waitAssistantTurns polls a child's durable history until it holds at least n
+// assistant messages — the proof n turns COMPLETED. A fork starts from a
+// completed turn and a compaction needs several working rows, so both need the
+// turns actually finished, not merely requested.
+func waitAssistantTurns(t *testing.T, client rafikiv1connect.ControlClient, childID string, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last []*rafikiv1.Event
+	for time.Now().Before(deadline) {
+		last = getHistoryEvents(t, client, childID)
+		got := 0
+		for _, ev := range last {
+			if ev.GetAssistantMessage() != nil {
+				got++
+			}
+		}
+		if got >= n {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("child %s never stored %d assistant turn(s); history:\n%v", childID, n, last)
+}
+
+// forkSourceWithTurns spawns a named fundi source on the fake model and drives
+// turns completed turns through it. A compaction needs minCompactableRows (4)
+// working rows, so a source with a single turn would have nothing to summarise.
+func forkSourceWithTurns(t *testing.T, client rafikiv1connect.ControlClient, seat *forkSeat, name string, turns int) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	src, err := forkSpawn(t, client, "", &rafikiv1.SpawnRequest{
+		Cwd:   "/tmp",
+		Kind:  protocol.KindFundi,
+		Model: "fakeor/mini",
+		Name:  name,
+	})
+	c.Require().NoError(err, "spawn the compact source")
+	for i := 1; i <= turns; i++ {
+		sendPrompt(t, client, src, fmt.Sprintf("alpha-%d-%s", i, uniqueSuffix()))
+		seat.waitForRequests(t, i, 60*time.Second)
+		waitAssistantTurns(t, client, src, i, 60*time.Second)
+	}
+	return src
+}
+
+// hasCompactionBoundary reports whether a history carries a compaction
+// boundary — the durable marker of a compaction the daemon actually wrote.
+func hasCompactionBoundary(events []*rafikiv1.Event) bool {
+	for _, ev := range events {
+		if ev.GetCompactionBoundary() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// childIDFromCreateOutput reads the child id off `rafiki create -d`'s text
+// record ("childId: c_..."), so a test asserts on the child ITS invocation
+// made rather than scanning every row the shared database holds.
+func childIDFromCreateOutput(t *testing.T, out []byte) string {
+	t.Helper()
+	for _, line := range strings.Split(string(out), "\n") {
+		if id, ok := strings.CutPrefix(strings.TrimSpace(line), "childId: "); ok {
+			return strings.TrimSpace(id)
+		}
+	}
+	t.Fatalf("create printed no childId; output: %s", out)
+	return ""
+}
+
+// childIDSet returns the live children's ids, sorted, for a before/after
+// comparison that does not depend on row counts.
+func childIDSet(t *testing.T, client rafikiv1connect.ControlClient) []string {
+	t.Helper()
+	var ids []string
+	for _, ch := range listChildren(t, client) {
+		ids = append(ids, ch.GetChildId())
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// watchForkedChildren records every live child's rafiki/forked-from label until
+// the returned stop function is called, then hands back what it saw.
+//
+// It exists because the compact fork's INTERMEDIATE is live only while its
+// summary call runs: compactfork closes it once the fork exists, before the
+// switch returns, so a post-hoc read cannot see it at all. A 20ms poll cannot
+// miss it — the layer waits for the compaction boundary on a 500ms ticker, so
+// the intermediate is live for at least that long.
+func watchForkedChildren(client rafikiv1connect.ControlClient) (stop func() map[string]string) {
+	var (
+		mu   sync.Mutex
+		seen = map[string]string{}
+	)
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-quit:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			resp, err := client.ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
+			cancel()
+			if err != nil {
+				continue
+			}
+			mu.Lock()
+			for _, ch := range resp.Msg.GetChildren() {
+				if from := ch.GetLabels()["rafiki/forked-from"]; from != "" {
+					seen[ch.GetChildId()] = from
+				}
+			}
+			mu.Unlock()
+		}
+	}()
+	return func() map[string]string {
+		close(quit)
+		<-done
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]string, len(seen))
+		for k, v := range seen {
+			out[k] = v
+		}
+		return out
+	}
+}
+
+// TestCLICompactForkLeavesTheSourceRunning is the design's central claim on the
+// create path: an over-window fork is compacted on the source's model through a
+// temporary helper child, the fork's borrowed history is the COMPACTED result,
+// and the source is neither mutated nor closed.
+func TestCLICompactForkLeavesTheSourceRunning(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	seat := newForkSeat(t)
+	// The source's turns report more prompt tokens than the destination's
+	// window can hold, which is what makes the fork over-window.
+	seat.reportUsage(sourceForkTokens)
+	d := forkDaemon(t, seat)
+	client := d.connectClient()
+
+	name := "compact-fork-" + uniqueSuffix()
+	src := forkSourceWithTurns(t, client, seat, name, 3)
+
+	out, err := cliCmd(t, d, "create", "-d", "--no-local-executor",
+		"--fork-from", name, "--model", tinyForkModel, "--compact").CombinedOutput()
+	c.NoError(err, "create --compact failed: %v\noutput: %s", err, out)
+	forked := childIDFromCreateOutput(t, out)
+
+	// The source is untouched: still live, still listed.
+	listed := false
+	for _, ch := range listChildren(t, client) {
+		if ch.GetChildId() == src {
+			listed = true
+		}
+	}
+	c.True(listed, "the source must still be live after a compact fork; output: %s", out)
+
+	// The borrowed history is the compacted one: a boundary is what the
+	// compaction wrote, and a fork of the raw transcript would have none.
+	c.True(hasCompactionBoundary(getHistoryEvents(t, client, forked)),
+		"the fork's history carries no compaction boundary")
+
+	// And it runs on the requested destination.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	get, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: forked}))
+	c.Require().NoError(err, "get the compact fork")
+	c.StrContains(get.Msg.GetChild().GetModel(), tinyForkModel, "the fork is not on the requested model")
+
+	killChildren(t, client, forked, src)
+}
+
+// TestCLICompactSwitchClosesTheSource pins the layering: the compact layer
+// never closes the source, and `models switch` does — once, after the fork
+// exists. The provenance chain is S → I → N, so the switched child names the
+// INTERMEDIATE in rafiki/forked-from, not the source.
+func TestCLICompactSwitchClosesTheSource(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	seat := newForkSeat(t)
+	seat.reportUsage(sourceForkTokens)
+	d := forkDaemon(t, seat)
+	client := d.connectClient()
+
+	name := "compact-switch-" + uniqueSuffix()
+	src := forkSourceWithTurns(t, client, seat, name, 3)
+
+	// The intermediate has to be read while it is live (see
+	// watchForkedChildren): the switch closes it before it returns.
+	stopWatch := watchForkedChildren(client)
+	out, err := cliCmd(t, d, "models", "switch", name, tinyForkModel, "--compact").CombinedOutput()
+	watched := stopWatch()
+	c.NoError(err, "models switch --compact failed: %v\noutput: %s", err, out)
+
+	// N: the survivor answering to the source's name.
+	newID := ""
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && newID == "" {
+		for _, ch := range listChildren(t, client) {
+			if ch.GetName() == name && ch.GetChildId() != src {
+				newID = ch.GetChildId()
+			}
+		}
+		if newID == "" {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	c.Require().NotEq("", newID, "no child inherited the source's name %q; output: %s", name, out)
+
+	// The source is gone from the live list (closed, not merely stopped).
+	for _, ch := range listChildren(t, client) {
+		c.NotEq(src, ch.GetChildId(), "the source child is still listed after the switch")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	get, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: newID}))
+	c.Require().NoError(err, "get the switched child")
+
+	intermediate := get.Msg.GetChild().GetLabels()["rafiki/forked-from"]
+	c.Require().NotEq("", intermediate, "the switched child names no fork source")
+	c.NotEq(src, intermediate, "the switch forked the source directly: nothing was compacted")
+	c.Eq(src, watched[intermediate],
+		"the intermediate %q must itself be a fork of the source %q (seen while live: %v)", intermediate, src, watched)
+
+	c.True(hasCompactionBoundary(getHistoryEvents(t, client, newID)),
+		"the switched history carries no compaction boundary")
+
+	killChildren(t, client, newID)
+}
+
+// TestCLICompactRefusalNamesBothNumbers pins the refusal: an over-window fork
+// without --compact is refused with BOTH numbers, and nothing is spawned — the
+// flag is explicit, so no path compacts on its own.
+func TestCLICompactRefusalNamesBothNumbers(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	seat := newForkSeat(t)
+	seat.reportUsage(sourceForkTokens)
+	d := forkDaemon(t, seat)
+	client := d.connectClient()
+
+	name := "compact-refuse-" + uniqueSuffix()
+	src := forkSourceWithTurns(t, client, seat, name, 3)
+	before := childIDSet(t, client)
+
+	out, err := cliCmd(t, d, "create", "-d", "--no-local-executor",
+		"--fork-from", name, "--model", tinyForkModel).CombinedOutput()
+	c.Require().Error(err, "an over-window fork without --compact must be refused; output: %s", out)
+	c.StrContains(string(out), fmt.Sprintf("~%d tokens", sourceForkTokens),
+		"the refusal must name the borrowed size; output: %s", out)
+	c.StrContains(string(out), fmt.Sprintf("window is %d", tinyForkWindow),
+		"the refusal must name the window; output: %s", out)
+	c.StrContains(string(out), tinyForkModel, "the refusal must name the destination; output: %s", out)
+	c.StrContains(string(out), "--compact", "the refusal must say what to pass; output: %s", out)
+
+	c.EqDiff(before, childIDSet(t, client), "the refusal must not spawn a child")
+	killChildren(t, client, src)
 }
