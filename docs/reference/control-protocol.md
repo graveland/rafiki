@@ -1796,9 +1796,14 @@ The rules, in order:
 - only `kind=fundi` can be forked to;
 - the default cursor is the last node on the working path that is a completed
   turn — an assistant message with NO `tool_use` block at all, so a message
-  whose tool call was already answered is skipped too (`isCompletedTurn`,
-  `cmd/rafikid/fork.go`); an explicit `cursor` must name such a completed turn
-  (`CodeInvalidArgument` otherwise), and a `.n` suffix is parsed and ignored;
+  whose tool call was already answered is skipped too — or a
+  `compaction_summary` boundary node (`isCompletedTurn`, `cmd/rafikid/fork.go`);
+  an explicit `cursor` must name such a completed turn (`CodeInvalidArgument`
+  otherwise), and a `.n` suffix is parsed and ignored. The boundary is accepted
+  because the predicate exists to skip a DANGLING `tool_use`, and a summary root
+  is a user-role node that stands in for everything before it and has no block
+  that can dangle; without it a compacted conversation whose verbatim tail is
+  empty would have NO forkable point at all;
 - lineage scope = the source, its subtree and its ancestors; tree scope =
   everything under the scope root's top-level ancestor; owner scope = every
   agent of the owner;
@@ -1838,8 +1843,29 @@ you`, and — for a move whose expectation is stale — `tag %q points at %s, no
 `CodeFailedPrecondition`: `agent %s has no conversation to fork from yet`. A
 cursor is refused `CodeInvalidArgument`, as `malformed cursor %q (want
 m:<ordinal>)` or as `cursor %s is not a completed turn (an assistant message
-with no pending tool call)`. What the fork records is the concrete node, so
-moving a tag never reaches a fork already created (the preset rule, §"Presets").
+with no pending tool call, or a compaction boundary)`. What the fork records is
+the concrete node, so moving a tag never reaches a fork already created (the
+preset rule, §"Presets").
+
+**Compacting an oversized fork.** A fork whose borrowed history does not fit the
+destination model's window can be compacted on the way through, and it needs NO
+new wire surface: the client composes four existing RPCs (`pkg/compactfork`,
+behind `rafiki create --compact` and `rafiki models switch --compact`). It
+`Spawn`s a helper child I forked from the source on the SOURCE's own model — the
+only model that can ingest the history — with `skip_derived_index`; `Send`s it
+`/compact <handoff instructions>`; polls `GetHistory` for a `CompactionBoundary`
+past a watermark read BEFORE the send, because an already-compacted source
+carries one that would otherwise satisfy the wait instantly; `Spawn`s the real
+fork N from I with an empty cursor, which resolves to I's last completed turn —
+the boundary itself when the tail is empty; then `Close`s I with `TARGET_ONLY`.
+I is closed, never deleted: N's fork edge names a node in its conversation, and
+that conversation is the audit record of the summary. Nothing mutates the
+source — it is named as the first fork edge and read for its model, and only a
+`models switch` tail closes it. The post-compaction size check compares the
+destination window against the size the boundary records (see the
+`CompactionBoundary` paragraph above) and falls back to a text estimate only for
+a boundary that carries none; still over the window is an ERROR naming both
+numbers, never a fall-through to the reactive overflow net.
 
 **`Tag`** creates or moves one tag. `name` (1–64 bytes of `[a-z0-9._-]`,
 starting with a letter or digit), `scope`, `child_id`, `cursor` and an optional
@@ -1877,7 +1903,10 @@ the tag, and who wrote this row), `note`, and `created_at`/`superseded_at`/
 **Provenance.** The daemon stamps the fork's source child id as the
 `rafiki/forked-from` label at spawn (both entry points: for `fork_from` it is
 the child the caller named, for `from_tag` the child whose conversation the
-winning tag's node belongs to — `SourceChildID`, which a MOVED tag keeps). Daemon-written at spawn only, like `rafiki/routing` — a resume
+winning tag's node belongs to — `SourceChildID`, which a MOVED tag keeps). A
+COMPACTED fork is the one case where the label names neither: the real fork is
+spawned from the helper I, so N carries `I` and I carries the source — the
+chain is three links deep (§"Compacting an oversized fork" above). Daemon-written at spawn only, like `rafiki/routing` — a resume
 keeps the label the original spawn set — and it is what `rafiki get` and
 `rafiki list` render in their FORKED FROM column. The label names the CHILD;
 the conversation's immutable fork edge remains the authority on the node.
@@ -1885,7 +1914,8 @@ the conversation's immutable fork edge remains the authority on the node.
 **Client surfaces.** The CLI exposes all of this without new wire shapes:
 `rafiki create --fork-from <child|child@m:N>` / `--from-tag <name>` (kind
 forced to fundi; both refuse to combine with each other or with the claude
-session-file flags `--session`/`--fork`), `rafiki tag list|add|move|rm` over
+session-file flags `--session`/`--fork`; `--compact` compacts an over-window
+borrow first), `rafiki tag list|add|move|rm` over
 `ListTags`/`Tag`/`Untag` (`move` reads the tag's current node first and sends
 it as `expect_node_id`, hiding the CAS behind one command), and the cockpit's
 rail keys `f` (fork: the spawn form pointed at the selected child) and `t`

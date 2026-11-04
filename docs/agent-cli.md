@@ -620,7 +620,7 @@ volume is estimated and capped at **60% of the model's context window**
 nothing is persisted and the child ends with an error naming the estimate,
 the cap, and the five largest reads.
 
-### Forking another conversation (`--fork-from`, `--from-tag`)
+### Forking another conversation (`--fork-from`, `--from-tag`, `--compact`)
 
 `rafiki create --fork-from <child|child@m:N>` starts a new fundi child from a
 point in another child's conversation history — the new conversation **borrows**
@@ -652,13 +652,50 @@ conversation into a fundi child works — the borrowed tool calls are renamed or
 rendered as text for the new model — which is the cross-provider path
 `rafiki models switch` automates.
 
+**`--compact`.** A fork whose borrowed history does not fit the destination
+model's window is refused unless `--compact` is passed. With the flag the fork
+is not made from the source directly: rafiki spawns a temporary helper child
+forked from the source on the SOURCE's own model — the only model that can
+ingest the history — sends it `/compact` with handoff-oriented instructions
+(task state, decisions, paths and open threads rather than narrative), waits for
+the compaction boundary, forks the real child from the helper with an empty
+cursor (the end of the compacted result), and closes the helper. **The source is
+never touched**: it is named as the fork edge and read for its model, and
+nothing in this path mutates it. Only `rafiki models switch` closes a source,
+and only after the new child exists. The helper is deliberately visible while it
+works (`rafiki list` and the rail, named `<source>-compact`, with
+`skip_derived_index`) so an operator watching spend can see the call being paid
+for.
+
+It costs **one full-context summary call on the source's model**, the same order
+as a manual `/compact`, and the CLI prints the estimate before spending it. It
+is always explicit — nothing auto-compacts — so an over-window fork without the
+flag names both numbers and the flag:
+
+```
+borrowed history is ~120000 tokens but openrouter/qwen/qwen3-8b's window is 32768; pass --compact to compact it on openrouter/z-ai/glm-5.3 first, or pick a larger model
+```
+
+The check is the source's last completed turn's usage
+(`input + cache_read + cache_write`) against the destination's catalog window,
+and **unknown never refuses**: no completed turn yet, or a model the catalog
+does not price, skips it. A model ALIAS is unknown by construction — it resolves
+daemon-side at spawn — so an alias destination is never checked (and therefore
+never refused). The measurement is of a `--fork-from` source; a `--from-tag`
+fork resolves its source daemon-side at spawn, so it is not measured and spawns
+normally. The flag is a permission, not an instruction: a history that
+already fits forks normally, and the command says so once on stderr. If the
+compacted result STILL exceeds the window, the fork fails with `compacted
+history still exceeds <window> tokens (estimated <n>): pick a larger model` — an
+error, never a silent fall-through to the reactive overflow net.
+
 ### Switching a conversation's model (`rafiki models switch`)
 
 A child's model resolves once at spawn and no RPC changes it in place, so a
 switch composes the fork path in one command:
 
 ```
-rafiki models switch <child> <model> [--max-cost N] [--descendants] [--kill-timeout 2.5s]
+rafiki models switch <child> <model> [--max-cost N] [--descendants] [--kill-timeout 2.5s] [--compact]
 ```
 
 1. spawns a fundi child forked from `<child>`'s last completed turn, on
@@ -680,6 +717,16 @@ rafiki models switch <child> <model> [--max-cost N] [--descendants] [--kill-time
    (`rafiki route set`) so operator pins survive. That spec was written for
    the old model's provider lines and may misroute or be refused on the new
    one; a failed replay names itself and does not undo the switch.
+
+`--compact` passes through to that fork. An over-window switch is refused
+exactly as an over-window `create --fork-from` is; with the flag, step 1 forks
+from a compacted helper on the source's model rather than from the source
+itself. **Only this verb closes the source** — `create --fork-from` leaves it
+running — and the close is step 2, after the new child exists. The provenance
+chain is therefore three links deep: the new child's `rafiki/forked-from` is the
+helper, and the helper's is the source (`rafiki/forked-from` names the child;
+the conversation's fork edge holds the node). The helper is closed, never
+deleted: its conversation is the audit record of the summary.
 
 From the rail it reads as "the conversation changed models"; in the database
 the old conversation remains queryable at its old model, one fork edge behind,
