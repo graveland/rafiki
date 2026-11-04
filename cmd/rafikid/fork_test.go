@@ -313,7 +313,7 @@ func TestForkCursorMustBeACompletedTurn(t *testing.T) {
 		forkRequest(self, &protocol.ForkFrom{ChildID: self, Cursor: fmt.Sprintf("m:%d", pending.Ordinal)}, ""),
 		users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrInvalidArgs,
-		fmt.Sprintf("cursor m:%d is not a completed turn (an assistant message with no pending tool call)", pending.Ordinal))
+		fmt.Sprintf("cursor m:%d is not a completed turn (an assistant message with no pending tool call, or a compaction boundary)", pending.Ordinal))
 
 	// The ordinal form is accepted with or without a message subscript, and
 	// names the same node either way.

@@ -262,7 +262,7 @@ func malformedCursorErr(cursor string) error {
 func notCompletedErr(cursor string) error {
 	return &connectapi.ControllerError{
 		Code:    protocol.ErrInvalidArgs,
-		Message: fmt.Sprintf("cursor %s is not a completed turn (an assistant message with no pending tool call)", cursor),
+		Message: fmt.Sprintf("cursor %s is not a completed turn (an assistant message with no pending tool call, or a compaction boundary)", cursor),
 	}
 }
 
