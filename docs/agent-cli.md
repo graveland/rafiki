@@ -680,9 +680,12 @@ borrowed history is ~120000 tokens but openrouter/qwen/qwen3-8b's window is 3276
 The check is the source's last completed turn's usage
 (`input + cache_read + cache_write`) against the destination's catalog window,
 and **unknown never refuses**: no completed turn yet, or a model the catalog
-does not price, skips it. A model ALIAS is unknown by construction — it resolves
-daemon-side at spawn — so an alias destination is never checked (and therefore
-never refused). The measurement is of a `--fork-from` source, so `--compact` is
+does not price, skips it. A model ALIAS resolves daemon-side at spawn, so the
+alias NAME itself matches no catalog row and is not checked; note the one way a
+bare name can still match — the lookup falls back to a row whose id ENDS in
+`/<name>`, so a destination that happens to be the suffix of a listed model is
+measured against THAT row's window, not the alias's target. The measurement is
+of a `--fork-from` source, so `--compact` is
 refused in the two cases where it could not measure anything and would otherwise
 be silently inert: with `--from-tag` (a tag fork names no source child id — the
 daemon resolves the tag at spawn — so neither the source's model nor the

@@ -1849,7 +1849,7 @@ preset rule, §"Presets").
 
 **Compacting an oversized fork.** A fork whose borrowed history does not fit the
 destination model's window can be compacted on the way through, and it needs NO
-new wire surface: the client composes four existing RPCs (`pkg/compactfork`,
+new wire surface: the client composes five existing RPCs (`pkg/compactfork`,
 behind `rafiki create --compact` and `rafiki models switch --compact`). It
 `Spawn`s a helper child I forked from the source on the SOURCE's own model — the
 only model that can ingest the history — with `skip_derived_index`; `Send`s it
