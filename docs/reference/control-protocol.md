@@ -1857,7 +1857,9 @@ only model that can ingest the history — with `skip_derived_index`; `Send`s it
 past a watermark read BEFORE the send, because an already-compacted source
 carries one that would otherwise satisfy the wait instantly; `Spawn`s the real
 fork N from I with an empty cursor, which resolves to I's last completed turn —
-the boundary itself when the tail is empty; then `Close`s I with `TARGET_ONLY`.
+the boundary itself when the tail is empty; then `Kill`s and `Close`s I with
+`TARGET_ONLY` — the stop comes first because `Close` finalizes an EXITED child
+and refuses a live one (`ErrNotExited`).
 I is closed, never deleted: N's fork edge names a node in its conversation, and
 that conversation is the audit record of the summary. Nothing mutates the
 source — it is named as the first fork edge and read for its model, and only a

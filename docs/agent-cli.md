@@ -659,7 +659,8 @@ forked from the source on the SOURCE's own model — the only model that can
 ingest the history — sends it `/compact` with handoff-oriented instructions
 (task state, decisions, paths and open threads rather than narrative), waits for
 the compaction boundary, forks the real child from the helper with an empty
-cursor (the end of the compacted result), and closes the helper. **The source is
+cursor (the end of the compacted result), and stops and closes the helper (a live
+child cannot be closed — `Close` finalizes an exited one). **The source is
 never touched**: it is named as the fork edge and read for its model, and
 nothing in this path mutates it. Only `rafiki models switch` closes a source,
 and only after the new child exists. The helper is deliberately visible while it
@@ -681,10 +682,14 @@ The check is the source's last completed turn's usage
 and **unknown never refuses**: no completed turn yet, or a model the catalog
 does not price, skips it. A model ALIAS is unknown by construction — it resolves
 daemon-side at spawn — so an alias destination is never checked (and therefore
-never refused). The measurement is of a `--fork-from` source; a `--from-tag`
-fork resolves its source daemon-side at spawn, so it is not measured and spawns
-normally. The flag is a permission, not an instruction: a history that
-already fits forks normally, and the command says so once on stderr. If the
+never refused). The measurement is of a `--fork-from` source, so `--compact` is
+refused in the two cases where it could not measure anything and would otherwise
+be silently inert: with `--from-tag` (a tag fork names no source child id — the
+daemon resolves the tag at spawn — so neither the source's model nor the
+borrowed history can be read; fork from the child id instead) and on a spawn
+that borrows nothing (`--compact` without `--fork-from`). The flag is a
+permission, not an instruction: a history that already fits forks normally, and
+the command says so once on stderr. If the
 compacted result STILL exceeds the window, the fork fails with `compacted
 history still exceeds <window> tokens (estimated <n>): pick a larger model` — an
 error, never a silent fall-through to the reactive overflow net.
