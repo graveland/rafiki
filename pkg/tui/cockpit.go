@@ -228,8 +228,8 @@ type seedRetryMsg struct {
 type sendFailedMsg struct {
 	err     error
 	childID string
-	// mode is what the user asked for, before sendModeFor adapted it to the
-	// child's state at send time.
+	// mode is the mode actually sent — the key's mode, or PROMPT when a slash
+	// command overrode a steer — so a retry is the same request.
 	mode   rafikiv1.SendMode
 	text   string
 	images []stagedAttachment
@@ -1700,6 +1700,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if mode := c.modeForKey(msg); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
 		text := strings.TrimSpace(c.expandPastes(c.ta.Value()))
+		mode = c.slashOverride(mode, text)
 		if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
 			// An attachment alone is a message: a screenshot with nothing to
 			// say still has something to say.
@@ -1915,34 +1916,21 @@ func (c *Cockpit) scrollFocused(msg tea.KeyPressMsg) tea.Cmd {
 	return cmd
 }
 
-// sendModeFor upgrades a PROMPT to a STEER when the target is mid-turn.
-//
-// ModePrompt is debounced and busy-GATED, so a prompt typed at a working agent
-// waits in agent_inbox until the turn settles -- which is the ⏳ that never
-// clears. A steer is delivered at the next opportunity instead.
-//
-// Over-applying steer is safe: Engine.HandleSteerID buffers for mid-turn
-// injection when a turn is running and otherwise treats the text as a plain
-// prompt, so the client's status view being a few milliseconds stale can only
-// be wrong in the harmless direction.
-//
-// Only the cockpit's ⏎ is rewritten. SEND_MODE_PROMPT stays intact on the wire
-// for callers that genuinely want queueing -- a coordinator's agent_send,
-// where the debounce and the per-(child, source) coalescing are the point.
-func sendModeFor(mode rafikiv1.SendMode, status string) rafikiv1.SendMode {
-	// "running" is deliberately NOT rewritten even though Working("running")
-	// is true: it is a script child's whole-run status, and a script has no
-	// turn to steer INTO. A STEER send at a script would be delivered on its
-	// Receive stream (connect_script.go's textMessage forwards the mode) as
-	// out-of-band input to a plain process, not injected into any turn --
-	// queue it as a prompt instead.
-	if mode == rafikiv1.SendMode_SEND_MODE_PROMPT && status != "running" && rail.Working(status) {
-		return rafikiv1.SendMode_SEND_MODE_STEER
-	}
-	return mode
-}
-
 // modeForKey maps an input-pane keystroke to a send mode.
+//
+// The KEY picks the mode; nothing infers one from agent state. ⏎ is a STEER,
+// which the daemon resolves into "inject into the running turn" or "run as the
+// next turn" (fundi.HandleSteerWithAttachments), so it means send-or-steer
+// without the client having to know which. ^Q is a PROMPT, which is queueing and
+// nothing else.
+//
+// It used to be the other way round with a sendModeFor() in between: ⏎ sent a
+// PROMPT and a status check upgraded it to a STEER when the rail reported the
+// child mid-turn. That left a window — a rail a few events behind, or a status
+// rail.Working does not count (a script's "running", batch_wait, blocked_ui) —
+// where ⏎ silently queued instead of steering, which is precisely the case a
+// user presses ⏎ to avoid. The daemon already knows whether a turn is running;
+// asking it, by sending the steer, is one less thing to be wrong.
 //
 // It reads the BINDINGS rather than switching on key strings. It used to carry
 // its own copy of them, which is the drift footerHints was already rewritten to
@@ -1951,13 +1939,36 @@ func sendModeFor(mode rafikiv1.SendMode, status string) rafikiv1.SendMode {
 func (c *Cockpit) modeForKey(msg tea.KeyPressMsg) rafikiv1.SendMode {
 	switch {
 	case key.Matches(msg, c.keys.Send):
-		return rafikiv1.SendMode_SEND_MODE_PROMPT
-	case key.Matches(msg, c.keys.Steer):
 		return rafikiv1.SendMode_SEND_MODE_STEER
+	case key.Matches(msg, c.keys.Queue):
+		return rafikiv1.SendMode_SEND_MODE_PROMPT
 	case key.Matches(msg, c.keys.Abort):
 		return rafikiv1.SendMode_SEND_MODE_ABORT
 	}
 	return rafikiv1.SendMode_SEND_MODE_UNSPECIFIED
+}
+
+// slashOverride keeps a slash command out of the steer path.
+//
+// A command line is a command to the DAEMON, not a message to the agent, and
+// the daemon only classifies one in PROMPT mode (handleSlashCommand,
+// cmd/rafikid/slash_commands.go, which returns early for any other mode) — so
+// "STEER is never a command" is a rule about text aimed at the model mid-turn,
+// and it is what stops relayed or daemon-pushed text from running lifecycle
+// verbs. Sending ⏎'s steer for "/exit" would therefore deliver the literal
+// string to the model instead of killing the child.
+//
+// So the command goes as a prompt whichever key was pressed, and the two keys
+// still differ for every line that is not a registered command. ABORT is left
+// alone: esc with "/exit" in the box is still "stop the turn".
+func (c *Cockpit) slashOverride(mode rafikiv1.SendMode, text string) rafikiv1.SendMode {
+	if mode != rafikiv1.SendMode_SEND_MODE_STEER {
+		return mode
+	}
+	if _, _, ok := slashcmd.Parse(text); ok {
+		return rafikiv1.SendMode_SEND_MODE_PROMPT
+	}
+	return mode
 }
 
 // send submits to the focused child.
@@ -1978,10 +1989,6 @@ func (c *Cockpit) sendWith(mode rafikiv1.SendMode, text string, images []stagedA
 func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, images []stagedAttachment) tea.Cmd {
 	if child == "" {
 		return nil
-	}
-	asked := mode
-	if n, ok := c.rail.Get(child); ok {
-		mode = sendModeFor(mode, n.Status)
 	}
 	req := &rafikiv1.SendRequest{ChildId: child, Mode: mode}
 	if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
@@ -2005,7 +2012,9 @@ func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, imag
 			})
 		}
 		// A slash command is consumed by the daemon: /clear and /exit produce no
-		// user_message to acknowledge the echo, so a pending line would never clear.
+		// user_message to acknowledge the echo, so a pending line would never
+		// clear. slashOverride sends one as a PROMPT whatever key was pressed,
+		// so the mode clause only guards a caller that bypassed it.
 		if _, _, slash := slashcmd.Parse(text); !slash || mode != rafikiv1.SendMode_SEND_MODE_PROMPT {
 			shown := text
 			if shown == "" {
@@ -2018,7 +2027,7 @@ func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, imag
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if _, err := c.client.Send(ctx, connect.NewRequest(req)); err != nil {
-			return sendFailedMsg{err: err, childID: child, mode: asked, text: text, images: images}
+			return sendFailedMsg{err: err, childID: child, mode: mode, text: text, images: images}
 		}
 		return nil
 	}
@@ -2810,7 +2819,7 @@ func (c *Cockpit) footerHints() string {
 	case focusRail:
 		bs = []key.Binding{k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Rename, k.Escape}
 	default:
-		bs = []key.Binding{k.Send, k.Newline, k.ClearInput, k.ClearAll, k.Steer, k.Abort}
+		bs = []key.Binding{k.Send, k.Queue, k.Newline, k.ClearInput, k.ClearAll, k.Abort}
 	}
 	parts := make([]string, 0, len(bs)+3)
 	for _, b := range bs {
@@ -2879,12 +2888,12 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.Quit, "Quit; press twice within two seconds to confirm. Your agents keep running."},
 	)
 	right := group("input",
-		entry{k.Send, "Send your message. If the agent is mid-turn, it steers into the running turn instead of queueing for the next one."},
+		entry{k.Send, "Send your message. Mid-turn, it joins the running turn instead of waiting for it to end — the daemon decides which, so there is nothing for the rail to get wrong."},
 		entry{k.Newline, "Insert a line break (^J works in any terminal; ⇧⏎ needs one with Kitty keyboard support)."},
 		entry{k.ClipboardPaste, "Paste from the system clipboard, including images. Pasting a file path attaches the image."},
 		entry{k.ClearInput, "Clear the line the cursor is on. On an empty line, remove the line above, so repeating it unrolls the input."},
 		entry{k.ClearAll, "Clear the whole input, pasted blocks and attachments included."},
-		entry{k.Steer, "Steer: inject your message into the turn already running, instead of waiting for it to end (^S also works)."},
+		entry{k.Queue, "Queue: run this as the next turn, once the current one ends, instead of joining it. Against an idle agent it is the same as ⏎. A claude child queues either way; ⌃⏎ works where the terminal reports it."},
 		entry{k.Abort, "Stop the turn in progress. The agent stays alive (^X also works)."},
 	)
 	right = append(right, group("agents  (the rail: ⇥ to enter)",

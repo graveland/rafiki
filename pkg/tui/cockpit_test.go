@@ -457,9 +457,15 @@ func TestSendModesAreDistinctKeys(t *testing.T) {
 		name string
 		want rafikiv1.SendMode
 	}{
-		{tea.KeyPressMsg{Code: tea.KeyEnter}, "enter", rafikiv1.SendMode_SEND_MODE_PROMPT},
-		{tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt}, "alt+enter", rafikiv1.SendMode_SEND_MODE_STEER},
-		{tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}, "ctrl+s", rafikiv1.SendMode_SEND_MODE_STEER},
+		// ⏎ is a STEER and nothing else: the daemon turns it into "join the
+		// running turn" or "run as the next turn" by itself, so the cockpit
+		// never has to guess from a status that may be a few events stale.
+		{tea.KeyPressMsg{Code: tea.KeyEnter}, "enter", rafikiv1.SendMode_SEND_MODE_STEER},
+		{tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl}, "ctrl+q", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		// The return-key spelling of queue. Only a Kitty-protocol terminal
+		// reports it; elsewhere it arrives as CR (⏎) or LF (^J), which is why
+		// ^Q is the advertised one.
+		{tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}, "ctrl+enter", rafikiv1.SendMode_SEND_MODE_PROMPT},
 		{tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl}, "ctrl+x", rafikiv1.SendMode_SEND_MODE_ABORT},
 		// esc aborts: it is what muscle memory reaches for to stop a turn.
 		{tea.KeyPressMsg{Code: tea.KeyEscape}, "esc", rafikiv1.SendMode_SEND_MODE_ABORT},
@@ -468,10 +474,46 @@ func TestSendModesAreDistinctKeys(t *testing.T) {
 		got := c.modeForKey(tc.key)
 		ck.Eq(tc.want, got, "modeForKey(%q) = %v, want", tc.name, got)
 	}
-	// Inferring the mode from agent state removes a real choice: C1a-2 made a
-	// prompt to a busy agent durably QUEUE, so queueing a follow-up and
-	// interrupting the running turn are both things a user wants.
-	ck.Require().NotEq(c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt}), c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter}), "prompt and steer must not collapse onto one key")
+	// Sending and queueing are separate keys, and the difference is a decision
+	// only the user can make: "join this turn" versus "run it when you are
+	// done". Neither is inferred from agent state.
+	ck.Require().NotEq(c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter}),
+		c.modeForKey(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl}), "sending and queueing must not collapse onto one key")
+
+	// The ADVERTISED queue key is ^Q, and the footer, the ^G page and
+	// `attach --help` all render Help().Key. ⌃⏎ is bound, but it is dead on
+	// every terminal without the Kitty keyboard protocol or modifyOtherKeys,
+	// so advertising it would promise a key most terminals never deliver.
+	ck.Eq("^Q", c.keys.Queue.Help().Key, "the advertised queue key must be one every terminal delivers")
+}
+
+// A slash command is a command to the daemon, not a message to the agent, and
+// the daemon only classifies one in PROMPT mode — so it must not ride ⏎'s
+// steer. If it did, "/exit" would be delivered to the model as literal text
+// instead of killing the child, and /clear would not mark the conversation.
+func TestSlashCommandGoesAsAPromptFromEitherKey(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	for _, tc := range []struct {
+		key  tea.KeyPressMsg
+		name string
+		text string
+		want rafikiv1.SendMode
+	}{
+		{tea.KeyPressMsg{Code: tea.KeyEnter}, "enter /exit", "/exit", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		{tea.KeyPressMsg{Code: tea.KeyEnter}, "enter /compact", "/compact be brief", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		{tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl}, "ctrl+q /clear", "/clear", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		// An unregistered /foo is ordinary text, so it keeps the key's mode.
+		{tea.KeyPressMsg{Code: tea.KeyEnter}, "enter /foo", "/foo", rafikiv1.SendMode_SEND_MODE_STEER},
+		// Prose that merely mentions a command is not a command either.
+		{tea.KeyPressMsg{Code: tea.KeyEnter}, "enter prose", "run /exit later", rafikiv1.SendMode_SEND_MODE_STEER},
+	} {
+		got := c.slashOverride(c.modeForKey(tc.key), tc.text)
+		ck.Eq(tc.want, got, "%s: got %v, want", tc.name, got)
+	}
+	// esc still stops the turn, whatever is in the box.
+	ck.Eq(rafikiv1.SendMode_SEND_MODE_ABORT,
+		c.slashOverride(rafikiv1.SendMode_SEND_MODE_ABORT, "/exit"), "esc with /exit in the box stopped being an abort")
 }
 
 // child_spawned is the only event that introduces a rail row, and a child
@@ -1415,7 +1457,7 @@ func TestHelpToggleRendersBindings(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	help := ansi.Strip(c.View().Content)
 	ck.Require().NotEq(before, help, "^G changed nothing on screen")
-	for _, want := range []string{"Steer", "Stop the turn", "Move focus"} {
+	for _, want := range []string{"Queue", "Stop the turn", "Move focus"} {
 		ck.StrContains(help, want, "help overlay is missing")
 	}
 
@@ -1451,7 +1493,7 @@ func TestHelpPageNamesEveryInputAndRailKey(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	help := ansi.Strip(c.View().Content)
 	k := c.keys
-	for _, b := range []key.Binding{k.Send, k.Steer, k.Newline, k.ClipboardPaste, k.ClearInput, k.ClearAll, k.Abort,
+	for _, b := range []key.Binding{k.Send, k.Queue, k.Newline, k.ClipboardPaste, k.ClearInput, k.ClearAll, k.Abort,
 		k.SelectUp, k.FoldLeft, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.EditBudget, k.Rename, k.Escape,
 		k.ToggleRail, k.ToggleInjected, k.ToggleImages, k.ExpandArgs, k.Redraw, k.Quit} {
 		ck.StrContains(help, b.Help().Key, "the help page is missing a key")
@@ -2741,44 +2783,18 @@ func TestExpandArgsTogglesAndInvalidates(t *testing.T) {
 	ck.True(sig.expandArgs, "paneSig has no expandArgs field")
 }
 
-// A prompt sent to a busy agent used to sit in the inbox until the turn
-// settled, because ModePrompt is busy-gated. Typing at a working agent should
-// reach it at the next opportunity.
-func TestEnterSteersABusyAgent(t *testing.T) {
-	for _, tc := range []struct {
-		status string
-		want   rafikiv1.SendMode
-	}{
-		{"streaming", rafikiv1.SendMode_SEND_MODE_STEER},
-		{"tool_running", rafikiv1.SendMode_SEND_MODE_STEER},
-		{"compacting", rafikiv1.SendMode_SEND_MODE_STEER},
-		{"running", rafikiv1.SendMode_SEND_MODE_PROMPT},
-		{"idle", rafikiv1.SendMode_SEND_MODE_PROMPT},
-		{"spawning", rafikiv1.SendMode_SEND_MODE_PROMPT},
-		{"blocked_ui", rafikiv1.SendMode_SEND_MODE_PROMPT},
-		{"exited", rafikiv1.SendMode_SEND_MODE_PROMPT},
-		{"", rafikiv1.SendMode_SEND_MODE_PROMPT},
-	} {
-		got := sendModeFor(rafikiv1.SendMode_SEND_MODE_PROMPT, tc.status)
-		assert.NewCollecting(t).Eq(tc.want, got, "status %q: got %v, want", tc.status, got)
+// A send must not depend on the rail's cached status: ⏎ is a steer on the
+// wire, and the daemon decides between joining the running turn and starting
+// the next one. This is the regression guard for the client-side inference that
+// used to upgrade a prompt only when the status happened to look busy.
+func TestEnterIsASteerWhateverTheRailSays(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	for _, status := range []string{"idle", "streaming", "tool_running", "compacting", "running", "batch_wait", "blocked_ui", "spawning", "exited", ""} {
+		c := newTestCockpit("c_1")
+		c.rail.Seed([]*rafikiv1.ChildSummary{{ChildId: "c_1", Name: "one", Status: status, Labels: map[string]string{}}})
+		ck.Eq(rafikiv1.SendMode_SEND_MODE_STEER, c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter}),
+			"status %q: ⏎ stopped being a steer", status)
 	}
-}
-
-// An explicit steer stays a steer, and abort is never rewritten.
-func TestExplicitModesAreNotRewritten(t *testing.T) {
-	c := assert.NewCollecting(t)
-	c.Eq(rafikiv1.SendMode_SEND_MODE_STEER, sendModeFor(rafikiv1.SendMode_SEND_MODE_STEER, "idle"), "an explicit steer at an idle agent became")
-	c.Eq(rafikiv1.SendMode_SEND_MODE_ABORT, sendModeFor(rafikiv1.SendMode_SEND_MODE_ABORT, "streaming"), "abort was rewritten to")
-}
-
-// A running SCRIPT has no turn to steer into: a STEER send would ride its
-// Receive stream (connect_script.go's textMessage forwards the mode) as
-// out-of-band input to a plain process. Working("running") is true, so this
-// exclusion must be sendModeFor's own deliberate decision.
-func TestRunningScriptIsNeverSteered(t *testing.T) {
-	assert.NewCollecting(t).Eq(rafikiv1.SendMode_SEND_MODE_PROMPT,
-		sendModeFor(rafikiv1.SendMode_SEND_MODE_PROMPT, "running"),
-		"a prompt at a running script was rewritten to STEER, which would reach the script's Receive stream instead of queueing")
 }
 
 // ^L must force a real repaint, not a cached one. The pane skips rebuilding

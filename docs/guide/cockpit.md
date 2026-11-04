@@ -85,21 +85,34 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 
 | Key | Does |
 |---|---|
-| `⏎` | Send a prompt. Against an agent that is mid-turn it steers into the running turn instead of waiting for it to end |
+| `⏎` | Send. Against an agent that is mid-turn the message joins the running turn; otherwise it starts one |
+| `^Q` | Queue — run this as the next turn once the current one ends, instead of joining it (`⌃⏎` where the terminal reports it) |
 | `⇧⏎` / `^J` | Insert a newline (`⇧⏎` needs a Kitty-keyboard-protocol terminal — Ghostty, Kitty, WezTerm, recent iTerm2/Alacritty; `^J` works everywhere) |
 | paste | Over six lines or 800 characters folds to `[pasted #1: 40 lines]`; paste again to insert in full |
 | `^U` | Kill the cursor's line; on an empty line, remove the line above, so repeating it unrolls the input |
 | `⌥K` | Clear the whole input, folded pastes included |
-| `⌥⏎` / `^S` | Steer — inject into the turn already running. Against an idle agent the text simply starts a turn |
 | `PgUp`/`PgDn`, `home`/`end` | Scroll the transcript without leaving the input box |
 | `↑` / `↓` | Move the cursor; with nowhere to move, scroll the transcript |
 
-`⏎` does not queue behind a running turn: the cockpit upgrades it to a steer
-(`sendModeFor`), because a queued prompt waits for the turn to end — and so does
-the ghost line standing in for it until then. Over-applying steer is safe: an
-agent that is between turns treats a steer as a prompt. `⌥⏎` is the explicit
-spelling of the same thing — against a busy agent both keys steer, and against
-an idle one both start a turn.
+The key picks the mode; nothing is inferred from agent state. `⏎` sends a
+`STEER`, and the daemon resolves it — inject into the turn that is running, or
+run it as the next turn when none is (`fundi.HandleSteerWithAttachments`). That
+is what makes `⏎` mean "send, or steer if busy" with no window in which a stale
+status can turn it into a queued message instead. `^Q` sends a `PROMPT`, which
+is queueing and nothing else.
+
+The distinction is real for a **fundi** child mid-turn, and only there. A
+`claude` child's prompt and steer both encode to the same stdin user message
+(`ClaudeProvider.EncodeOutbound`), so the mode makes no difference on that path
+— a claude turn cannot be steered with text, and both keys queue. A **script**
+child sees the `mode` on the message it pulls from its receive stream, and can
+treat the two differently if it wants to.
+
+A line that begins with a registered `/command` is not a message at all: it goes
+as a `PROMPT` whichever key was pressed (`slashOverride`), because the daemon
+only classifies a command in `PROMPT` mode. Otherwise `⏎` on `/exit` would
+deliver the literal text to the model rather than killing the child. `esc` is
+unaffected — it still stops the turn.
 
 **Rail pane**
 

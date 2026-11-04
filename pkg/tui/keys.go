@@ -58,7 +58,7 @@ type keyMap struct {
 
 	// Input pane.
 	Send           key.Binding
-	Steer          key.Binding
+	Queue          key.Binding
 	Newline        key.Binding
 	ClipboardPaste key.Binding
 
@@ -133,8 +133,29 @@ func defaultKeyMap() keyMap {
 		// and the other two panes match their own Escape before this).
 		Abort: key.NewBinding(key.WithKeys("esc", "ctrl+x"), key.WithHelp("esc", "abort turn")),
 
-		Send:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send · steers if busy")),
-		Steer: key.NewBinding(key.WithKeys("alt+enter", "ctrl+s"), key.WithHelp("⌥⏎", "steer")),
+		// ⏎ is a STEER, always: the daemon injects it into a turn that is
+		// running and enqueues it as the next turn when none is
+		// (fundi.HandleSteerWithAttachments), which is exactly "send, or steer
+		// if busy". It used to send a PROMPT that sendModeFor upgraded from
+		// the rail's cached status — a client-side guess with a window where a
+		// stale "idle" parked the message until the turn ended. There is no
+		// separate steer key for the same reason: the mode is chosen by the
+		// key now, not inferred from state.
+		Send: key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send · steers if busy")),
+		// ^Q queues instead: the message becomes the NEXT turn rather than
+		// joining this one. Against an idle agent it is the same as ⏎, and
+		// against a claude child it is the same too — a claude prompt and a
+		// claude steer encode to one stdin user message
+		// (ClaudeProvider.EncodeOutbound), so the distinction only exists for
+		// a fundi child mid-turn.
+		//
+		// ⌃⏎ is the return-key spelling, and it is an ALIAS for the same
+		// reason ⇧⏎ is only half a binding: a terminal must speak the Kitty
+		// keyboard protocol (or xterm's modifyOtherKeys) before ⌃⏎ is
+		// reportable at all, and where it is not, ⌃⏎ arrives as a bare CR
+		// (SENDS) or an LF (which decodes as ^J, i.e. NEWLINE). Both are the
+		// wrong outcome for a queue key, so ^Q is the one advertised.
+		Queue: key.NewBinding(key.WithKeys("ctrl+q", "ctrl+enter"), key.WithHelp("^Q", "queue")),
 		// The textarea's own InsertNewline is bound to enter and ctrl+m --
 		// the SAME BYTE, and Send takes it -- so a send-on-⏎ input has no
 		// newline key at all unless one is given to it explicitly.

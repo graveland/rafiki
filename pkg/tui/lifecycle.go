@@ -96,8 +96,9 @@ type endAsk struct {
 type resumeAsk struct {
 	childID string
 	name    string
-	// mode is what the user asked for, before it was adapted to the child's
-	// state; the re-send adapts it again against the resumed child.
+	// mode is the mode actually sent (the key's, or PROMPT when a slash
+	// command overrode a steer), so the re-send is the same request against
+	// the resumed child.
 	mode   rafikiv1.SendMode
 	text   string
 	images []stagedAttachment

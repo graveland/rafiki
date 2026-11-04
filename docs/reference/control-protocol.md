@@ -1942,6 +1942,18 @@ child, and `message_id` names that row: a prompt, a steer or an abort is
 persisted before it is delivered, and retired only once the agent confirms it
 entered a turn.
 
+**`PROMPT` and `STEER` mean different things per child kind — and on a `claude`
+child, nothing.** A `STEER` is what lets a client say "send" without knowing
+whether a turn is running: the daemon resolves it. For a fundi child a `PROMPT`
+is queued as the next turn, while a `STEER` is injected into the turn that is
+running, or enqueued as the next turn when none is
+(`fundi.HandleSteerWithAttachments`). A `claude` child's `PROMPT` and `STEER`
+both encode to the same stdin user message (`ClaudeProvider.EncodeOutbound`), so
+the mode makes no difference on that path — a claude turn cannot be steered with
+text, and stopping one is an abort (a signal, below). A `script` child pulls
+both from its `Receive` stream with the mode on the message, and decides for
+itself what to do with it.
+
 The one exception is an **abort aimed at a `claude` child**. `claude -p` has
 no in-band abort frame — the only way to stop it is to signal the process and
 resume the session — so that abort is a signal plus a lifecycle operation
