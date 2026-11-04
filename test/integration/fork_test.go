@@ -14,6 +14,7 @@ package integration_test
 // the source's rows are in the new child's transcript AND on the wire.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -595,4 +597,84 @@ func listTags(t *testing.T, client rafikiv1connect.ControlClient) []*rafikiv1.Ta
 		t.Fatalf("list tags: %v", err)
 	}
 	return resp.Msg.GetRows()
+}
+
+// TestCLIModelsSwitchAsTokenUserKeepsTheParent pins finding 3's admission
+// through a REAL user credential: the ordinary switch test runs over the
+// local-trust socket (nil identity), which every policy passes, so it cannot
+// answer "may a user credential name a parent it owns on Spawn". Here the
+// whole tree — coordinator, source, and the switch itself — is created and
+// driven by a minted user's bearer token, and the switched child must come
+// out still parented under that user's coordinator.
+func TestCLIModelsSwitchAsTokenUserKeepsTheParent(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	seat := newForkSeat(t)
+	d := forkDaemon(t, seat)
+	client := d.connectClient()
+
+	// Mint the user through the CLI: `rafiki user create` dials token-less,
+	// the UDS admits it anonymously, and the token lands in profile "it"'s
+	// token file, which every later cliCmdIn call presents.
+	configDir := t.TempDir()
+	userCmd := cliCmdIn(t, d, configDir, "--output", "json", "user", "create", operatorName())
+	var userStderr bytes.Buffer
+	userCmd.Stderr = &userStderr
+	userOut, err := userCmd.Output()
+	c.NoError(err, "user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
+	tokenPath := filepath.Join(configDir, "rafiki", "profiles", "it", "token")
+	tokenRaw, err := os.ReadFile(tokenPath)
+	c.Require().NoError(err, "read the minted token")
+	token := strings.TrimSpace(string(tokenRaw))
+	c.NotEq("", token, "the minted token is empty")
+
+	// The tree is the USER's: both spawns present its bearer token.
+	coord, err := forkSpawn(t, client, token, &rafikiv1.SpawnRequest{
+		Cwd:   "/tmp",
+		Kind:  protocol.KindFundi,
+		Model: "fakeor/mini",
+		Name:  "ucoord-" + uniqueSuffix(),
+	})
+	c.Require().NoError(err, "spawn the user's coordinator")
+	name := "uswitchme-" + uniqueSuffix()
+	a, err := forkSpawn(t, client, token, &rafikiv1.SpawnRequest{
+		Cwd:           "/tmp",
+		Kind:          protocol.KindFundi,
+		Model:         "fakeor/mini",
+		Name:          name,
+		ParentChildId: coord,
+	})
+	c.Require().NoError(err, "spawn the user's source child")
+	aPrompt := "user-alpha-" + uniqueSuffix()
+	sendPrompt(t, client, a, aPrompt)
+	seat.waitForRequests(t, 1, 60*time.Second)
+	waitAssistantTurn(t, client, a, "done", 30*time.Second)
+
+	out, err := cliCmdIn(t, d, configDir, "models", "switch", name, "fakeor/mini").CombinedOutput()
+	c.NoError(err, "models switch as the owning user failed: %v\noutput: %s", err, out)
+
+	newID := ""
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && newID == "" {
+		for _, ch := range listChildren(t, client) {
+			if ch.GetName() == name && ch.GetChildId() != a {
+				newID = ch.GetChildId()
+			}
+		}
+		if newID == "" {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	c.NotEq("", newID, "no switched child inherited the name; output: %s", out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	get, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: newID}))
+	c.Require().NoError(err, "get the switched child")
+	c.Eq(coord, get.Msg.GetChild().GetLabels()["rafiki/parent"],
+		"the user's switched child must stay under the user's coordinator")
+	c.Eq(a, get.Msg.GetChild().GetLabels()["rafiki/forked-from"],
+		"the switched child must name its source")
+
+	killChildren(t, client, newID, coord)
 }

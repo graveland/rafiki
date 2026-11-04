@@ -233,6 +233,12 @@ func (c *Cockpit) switchSpawnCmd(p spawnParams) tea.Cmd {
 			return spawnedMsg{err: err, switchSource: p.switchSource}
 		}
 		src := get.Msg.GetChild()
+		// A sandboxed source must not switch: the sandbox block cannot be
+		// carried (ChildSummary does not expose it), so the continuation would
+		// land unconfined on the default executor.
+		if src.GetLabels()["rafiki/sandbox"] == "1" {
+			return spawnedMsg{err: fmt.Errorf("%s runs in a sandbox and a switch cannot carry the sandbox; fork it by hand instead", p.switchSource), switchSource: p.switchSource}
+		}
 
 		req := c.buildSpawnRequest(p)
 		// A switch is "same conversation, new model": the source's cwd and
@@ -251,6 +257,11 @@ func (c *Cockpit) switchSpawnCmd(p spawnParams) tea.Cmd {
 		}
 		if req.MaxCost == nil && src.MaxCost != nil {
 			req.MaxCost = src.MaxCost
+		}
+		// The source's preset re-resolves: its allowlists and prompt are part
+		// of "the same conversation"; its model loses to the switch's model.
+		if pname := src.GetLabels()["rafiki/preset"]; pname != "" {
+			req.Preset = pname
 		}
 		labels := map[string]string{}
 		for k, v := range src.GetLabels() {

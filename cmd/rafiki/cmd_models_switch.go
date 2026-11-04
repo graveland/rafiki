@@ -117,6 +117,14 @@ func runModelsSwitch(cmd *cobra.Command, args []string) error {
 	if src.GetKind() == protocol.KindScript {
 		return fmt.Errorf("%s is a script child: it has no conversation history to fork", childID)
 	}
+	// A sandboxed source must not switch: the composition cannot carry the
+	// sandbox block (ChildSummary does not expose it), so the switch would
+	// land the continuation UNCONFINED on the default executor — a
+	// confinement widening nobody asked for. Fork by hand with an explicit
+	// sandbox block instead.
+	if src.GetLabels()["rafiki/sandbox"] == "1" {
+		return fmt.Errorf("%s runs in a sandbox and a switch cannot carry the sandbox; fork it by hand with an explicit --sandbox block instead", childID)
+	}
 
 	// The source's parent, so a SUBAGENT's switch stays under the same
 	// coordinator: dropping it would move the switch out of the coordinator's
@@ -156,13 +164,27 @@ func runModelsSwitch(cmd *cobra.Command, args []string) error {
 		if v < 0 {
 			return fmt.Errorf("--max-cost must be a non-negative amount (got %v); leave it off to carry the source's cap", v)
 		}
+		// On the wire an explicit 0 means "spend nothing" (SpawnRequest.max_cost's
+		// own comment), which on a switch reads as an instant halt. If you meant
+		// to LIFT the cap, that is not expressible here: blank carries the
+		// source's cap, and the new child's cap is editable afterwards.
 		if v == 0 {
-			return fmt.Errorf("--max-cost 0 would read as unlimited; leave it off to carry the source's cap")
+			return fmt.Errorf("--max-cost 0 means \"spend nothing\" — a switched conversation that can never spend; leave it off to carry the source's cap")
 		}
 		usd := costfmt.ToUSD(v, clientstate.LoadScoped(clientstate.Scope{}).Currency)
 		req.MaxCost = &usd
 	} else if src.MaxCost != nil {
 		req.MaxCost = src.MaxCost
+	}
+
+	// The source's preset re-resolves on the switch spawn: its tool, skill and
+	// MCP allowlists and its prompt are part of "the same conversation", and
+	// the preset's own model is overridden by the switch's explicit model
+	// (preset resolves first, explicit fields win). A preset DELETED since the
+	// source spawned refuses the switch — a safe failure, both conversations
+	// remain. Plain --fork-from does NOT carry the preset: pass -p yourself.
+	if pname := src.GetLabels()["rafiki/preset"]; pname != "" {
+		req.Preset = pname
 	}
 
 	spawned, err := ctrl.Spawn(ctx, connect.NewRequest(req))

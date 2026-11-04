@@ -34,6 +34,8 @@ type switchClient struct {
 	// killErr, when set, is returned by the first Kill call.
 	killErr error
 	killed  int
+	// sandboxed marks the fake source as sandboxed.
+	sandboxed bool
 }
 
 func (f *switchClient) record(ev string) {
@@ -48,8 +50,15 @@ func (f *switchClient) GetChild(_ context.Context, req *connect.Request[rafikiv1
 		ChildId: req.Msg.GetChildId(),
 		Name:    "scout",
 		Cwd:     "/work/scout",
-		Labels:  map[string]string{"rafiki/parent": "c_coord", "team": "x"},
+		Labels: map[string]string{
+			"rafiki/parent": "c_coord",
+			"rafiki/preset": "review:fixer",
+			"team":          "x",
+		},
 		Routing: "sort=price",
+	}
+	if f.sandboxed {
+		src.Labels["rafiki/sandbox"] = "1"
 	}
 	cost := 3.5
 	src.MaxCost = &cost
@@ -144,6 +153,8 @@ func TestSwitchCompositionCarriesSourceAndStopsBeforeClose(t *testing.T) {
 	req := client.spawned[0]
 	ck.Eq("/work/scout", req.GetCwd(), "the source's cwd wins over the form's")
 	ck.Eq("c_coord", req.GetParentChildId(), "a subagent's switch stays under its coordinator")
+	ck.Eq("review:fixer", req.GetPreset(),
+		"the source's preset re-resolves: its allowlists and prompt are part of the seat")
 	ck.Require().NotNil(req.GetMaxCost(), "the source's cap")
 	ck.Eq(3.5, req.GetMaxCost(), "the source's cap carries over when the form left it blank")
 	ck.Require().NotNil(req.GetForkFrom(), "fork")
@@ -189,4 +200,26 @@ func TestSwitchCompositionStopFailureAbortsBeforeClose(t *testing.T) {
 	ck.Require().NoError(sw2.err, "ErrChildExited on the stop must not fail the switch")
 	ck.EqDiff([]string{"getchild:c_src", "spawn", "kill:c_src", "close:c_src", "rename:scout", "routing:sort=price"},
 		client2.events, "the switch proceeds past an already-exited source")
+}
+
+// A sandboxed source refuses the switch outright: the sandbox block cannot be
+// carried (ChildSummary does not expose it), so continuing would land the new
+// child UNCONFINED on the default executor — a widening, not a neutral loss.
+func TestSwitchCompositionRefusesASandboxedSource(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_x")
+	client := newSwitchClient()
+	c.client = client
+
+	// The sandbox refusal happens on the source read, before any spawn.
+	client.sandboxed = true
+	p := spawnParams{
+		kind: protocol.KindFundi, model: "openrouter/z-ai/glm-5.3-flash",
+		switchSource: "c_src", forkFrom: &protocol.ForkFrom{ChildID: "c_src"},
+	}
+	sm, ok := c.switchSpawnCmd(p)().(spawnedMsg)
+	ck.Require().True(ok, "switchSpawnCmd = %T", c.switchSpawnCmd(p))
+	ck.Require().NotEq(nil, sm.err, "the sandboxed source must refuse")
+	ck.StrContains(sm.err.Error(), "sandbox", "the refusal names the sandbox")
+	ck.EqDiff([]string{"getchild:c_src"}, client.events, "nothing spawns after the refusal")
 }

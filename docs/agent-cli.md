@@ -632,7 +632,9 @@ to — refusing an explicitly typed other `--kind` rather than overriding it.
 An empty cursor means the source's last completed turn; `child@m:42` pins an
 ordinal as `agent_view` prints it (a `.n` message suffix is accepted and
 ignored). The claude session-file flags `--session`/`--fork` are a different
-mechanism and refuse the combination.
+mechanism and refuse the combination. A fork does NOT carry the source's
+preset: the new child spawns with the default tool seat unless you pass
+`-p <preset>` yourself.
 
 ```bash
 rafiki create --fork-from scout                     # continue scout's history as a new agent
@@ -663,10 +665,14 @@ rafiki models switch <child> <model> [--max-cost N] [--descendants] [--kill-time
    `<model>` (any model the daemon offers — this is how a claude conversation
    moves to an OpenRouter model, or a fundi one to another provider),
    carrying the source's cwd, parent (a subagent's switch stays under the
-   same coordinator), user labels and spend cap (`--max-cost` overrides; the
-   cap is PER CONVERSATION — the new child starts with the source's full cap,
-   the source's spend is not deducted; `--max-cost` can raise or lower it but
-   cannot REMOVE it, since a blank row carries the source's cap);
+   same coordinator), user labels, PRESET (re-resolved: its tool, skill and
+   MCP allowlists and its prompt are part of the seat, and its own model
+   loses to the switch's model — a preset deleted since the source spawned
+   refuses the switch), and spend cap (`--max-cost` overrides; the cap is
+   PER CONVERSATION — the new child starts with the source's full cap, the
+   source's spend is not deducted; `--max-cost` can raise or lower it but
+   cannot REMOVE it, since a blank row carries the source's cap, and 0 means
+   "spend nothing" on the wire, so it is refused);
 2. stops the source and closes it (`--descendants` also closes its subagents;
    the default leaves them running);
 3. renames the new child into the source's name — that order is forced by the
@@ -679,10 +685,20 @@ From the rail it reads as "the conversation changed models"; in the database
 the old conversation remains queryable at its old model, one fork edge behind,
 with the survivor naming it in `rafiki/forked-from`. A source that is
 mid-turn when the switch lands loses that in-flight turn and any tool side
-effects it caused — the fork starts from the last completed turn. A step
-failing after the spawn says which: both conversations exist, and the printed
-`rafiki close`/`rafiki rename`/`rafiki route set` line finishes the switch by
-hand (re-running the whole switch would spawn a SECOND fork).
+effects it caused — the fork starts from the last completed turn.
+
+What the switch does NOT carry, because `GetChild` does not expose it: the
+source's executor binding or sandbox block (a SANDBOXED source refuses the
+switch outright rather than continue unconfined — fork it by hand with an
+explicit `--sandbox` block; a machine-pinned source lands on the default
+executor resolution, and the daemon refuses a cwd the new executor cannot
+see), and the fan-out grants (`max-depth`/`max-children` reset to their
+defaults — a switched coordinator's subtree shrinks, it does not widen). A
+top-level child's `--skip-derived-index` opt-out is lost and its history is
+indexed again; a SUBAGENT's re-inherits from the copied parent at spawn. A
+step failing after the spawn says which: both conversations exist, and the
+printed `rafiki close`/`rafiki rename`/`rafiki route set` line finishes the
+switch by hand (re-running the whole switch would spawn a SECOND fork).
 
 ## `rafiki tag`
 

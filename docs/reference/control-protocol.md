@@ -1900,9 +1900,15 @@ name (that order is forced by the live-sibling name rule, §"Child names are
 unique among live siblings"), then replay the source's routing spec
 (`SetRouting`) so operator pins survive — a spec written for the old model
 may misroute on the new one, and a failed replay names itself without
-undoing the switch. The old conversation stays queryable at its old model,
-one fork edge behind; a mid-turn source loses the in-flight turn, since the
-fork starts from the last completed turn.
+undoing the switch. The source's preset re-resolves on the fork (allowlists
+and prompt are part of the seat; the preset's model loses to the switch's
+explicit model), and a SANDBOXED source refuses the switch — the sandbox
+block is not exposed on `ChildSummary`, so continuing would land the child
+unconfined. Not carried: the executor binding, `max_depth`/`max_children`
+(reset to defaults) and a top-level `skip_derived_index` (a subagent
+re-inherits through the copied parent). The old conversation stays queryable
+at its old model, one fork edge behind; a mid-turn source loses the
+in-flight turn, since the fork starts from the last completed turn.
 
 ### Recall and memories (`Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `RecallBackfill`, `RecallStatus`)
 
