@@ -125,9 +125,10 @@ func TestStopReasonNormalizes(t *testing.T) {
 func ptr[T any](v T) *T { return &v }
 
 // A kind='compaction_summary' node maps to a CompactionBoundary event, not to
-// the ordinary UserMessage branch its role would otherwise land in. Only
-// pre_tokens is ever set here — a reattach-synthesized boundary cannot know
-// the post size — which is what makes the renderer pick the one-sided format.
+// the ordinary UserMessage branch its role would otherwise land in. A boundary
+// with no recorded output size leaves post_tokens unset — a conversation
+// compacted before that size was stored — which is what makes the renderer pick
+// the one-sided format.
 func TestEventsFromNodesMapsCompactionSummaryNode(t *testing.T) {
 	c := assert.NewAborting(t)
 	boundary := node(1, msg.User, "summary")
@@ -164,6 +165,27 @@ func TestEventsFromNodesCompactionSummaryWithoutTokens(t *testing.T) {
 	if cb.PreTokens != nil || cb.PostTokens != nil {
 		t.Fatalf("pre_tokens=%v post_tokens=%v, want both unset", cb.PreTokens, cb.PostTokens)
 	}
+}
+
+// A summary node that records the working set it left behind carries it as
+// post_tokens: that number is what a continuation from the boundary will
+// borrow, and it is the only durable source for it (nothing text-bearing
+// follows a /compact boundary).
+func TestEventsFromNodesCompactionSummaryCarriesPostTokens(t *testing.T) {
+	c := assert.NewAborting(t)
+	boundary := node(3, msg.User, "summary")
+	boundary.Kind = conv.KindCompactionSummary
+	boundary.InputTokens = ptr(int64(182000))
+	boundary.OutputTokens = ptr(int64(12000))
+
+	ev := eventconv.EventsFromNodes("c_test", []*conv.Node{boundary})[0]
+
+	cb := ev.GetCompactionBoundary()
+	c.NotNil(cb, "event is %T, want Event_CompactionBoundary", ev.Payload)
+	c.Require().NotNil(cb.PostTokens, "post_tokens")
+	c.Eq(int32(12000), cb.GetPostTokens(), "post_tokens")
+	c.Require().NotNil(cb.PreTokens, "pre_tokens")
+	c.Eq(int32(182000), cb.GetPreTokens(), "pre_tokens")
 }
 
 // kind='compaction_tail' nodes are copies of nodes that already sit before the

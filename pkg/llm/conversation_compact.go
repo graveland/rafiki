@@ -14,6 +14,7 @@ import (
 	convpkg "go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
 	"go.graveland.dev/rafiki/pkg/msg"
+	msganthropic "go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -111,14 +112,35 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	replaced := int(msg.Val(resp.Usage.Input) + msg.Val(resp.Usage.CacheRead) + msg.Val(resp.Usage.CacheWrite))
 	start := cutTail(history, p.tailBudget())
 	tail := history[start:]
+
+	// The summary row records BOTH sizes: what it replaced (input_tokens) and
+	// the working set it leaves behind (output_tokens). The second one is what a
+	// fork continuing from this boundary needs — it is what the fork will
+	// borrow — and the row is the only place a later history read can find it.
+	//
+	// The size is computed ONCE, here, before the append, from the bytes the
+	// append will store (they are passed explicitly so the estimate is of the
+	// stored content, not a re-encoding of it). The same value feeds the live
+	// CompactionEnd event below, so a durable reader and a live observer cannot
+	// disagree about it.
+	summaryMsg := summaryMessage(summary)
+	content, err := msganthropic.EncodeContent(summaryMsg)
+	if err != nil {
+		return false, err
+	}
+	content = convpkg.StorableJSON(content)
+	postTokens := int64(estimateTokens(&convpkg.Node{Msg: summaryMsg, Content: content}) + estimateHistoryTokens(tail))
+
 	// The summary and the boundary rows are built natively: they are content
 	// this package writes, not a provider message it received.
 	replacedTokens := int64(replaced)
 	nodes := make([]convpkg.NewNode, 0, len(tail)+1)
 	nodes = append(nodes, convpkg.NewNode{
-		Msg:         summaryMessage(summary),
-		InputTokens: &replacedTokens,
-		Origin:      convpkg.OriginFundi,
+		Msg:          summaryMsg,
+		Content:      content,
+		InputTokens:  &replacedTokens,
+		OutputTokens: &postTokens,
+		Origin:       convpkg.OriginFundi,
 	})
 	for _, t := range tail {
 		// The stored bytes are carried verbatim: a tail copy is the same row,
@@ -132,12 +154,11 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 			Origin:     t.Origin,
 		})
 	}
-	res, err := conv.handle().Append(ctx, convpkg.Append{
+	if _, err := conv.handle().Append(ctx, convpkg.Append{
 		Root:            convtree.RootKindCompaction,
 		DerivedFromHead: true,
 		Nodes:           nodes,
-	})
-	if err != nil {
+	}); err != nil {
 		return false, err
 	}
 
@@ -152,7 +173,7 @@ func (conv *Conversation) compact(ctx context.Context, span trace.Span, history 
 	// earlier failure must not block the next legitimate compaction.
 	conv.compactSuppressBelow = 0
 	pre = replaced
-	post = estimateTokens(res.Nodes[0]) + estimateHistoryTokens(tail)
+	post = int(postTokens)
 	succeeded = true
 	return true, nil
 }

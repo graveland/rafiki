@@ -848,6 +848,53 @@ func TestCompactionStartEndEventsBalanced(t *testing.T) {
 	ck.False(failed[1].Succeeded, "a failed compaction's End event must report Succeeded=false")
 }
 
+// TestCompactionSummaryRowCarriesThePostSize pins the durable half of the
+// compaction boundary: the summary row stores, as output_tokens, the size of the
+// working set the compaction leaves behind — the same number the live
+// CompactionEnd event reports. A fork continuing from the boundary reads that row
+// (served as post_tokens) instead of guessing, so the two must never become two
+// estimators.
+func TestCompactionSummaryRowCarriesThePostSize(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	sender := &scriptedSender{scripts: []func(*msg.Request) (*msg.Response, error){
+		respondUsage(10, 5, 0, 0, "<summary>s</summary>"),
+		respondUsage(10, 5, 0, 0, "real"),
+	}}
+	c := memClient(t, sender)
+	ctx := context.Background()
+	conv, err := c.Conversation(ctx, NewConversation("", "test"),
+		WithCompaction(CompactionPolicy{ContextWindowFn: func() int { return 1_000_000 }}))
+	ck.Require().NoError(err)
+	seedRows(t, conv,
+		textRow(0, msg.User, "a"),
+		textRow(1, msg.Assistant, "b"),
+		textRow(2, msg.User, "c"),
+		textRow(3, msg.Assistant, "d"))
+	conv.usedTokens = 999_000
+	var events []CompactionEvent
+	conv.OnCompaction(func(ev CompactionEvent) { events = append(events, ev) })
+	if _, err := conv.Continue(ctx); err != nil {
+		t.Fatalf("continue: %v", err)
+	}
+
+	ck.Require().Len(events, 2, "events")
+	end := events[1]
+	ck.True(end.Succeeded, "the compaction succeeded")
+	ck.Greater(0, end.PostTokens, "the End event reports a post size")
+
+	var row *convpkg.Node
+	for _, n := range allRows(t, conv) {
+		if n.Kind == convpkg.KindCompactionSummary {
+			row = n
+		}
+	}
+	ck.Require().NotNil(row, "a summary row was written")
+	ck.Require().NotNil(row.OutputTokens, "the summary row stores the post size")
+	ck.Eq(int64(end.PostTokens), *row.OutputTokens, "the stored post size is the number the live event reported")
+	ck.Require().NotNil(row.InputTokens, "the summary row stores the pre size")
+	ck.Eq(int64(end.PreTokens), *row.InputTokens, "input_tokens stays the replaced size")
+}
+
 // TestCompactionFailedSummaryNotRetriedEveryIteration pins the cooldown: a
 // summary that keeps failing must NOT be re-attempted on every tool iteration.
 // After the first failure proactive compaction is suppressed until the working

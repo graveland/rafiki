@@ -4,6 +4,7 @@ package compactfork
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,12 @@ type fakeControl struct {
 	spawnIDs []string
 	// history answers the nth (1-based) GetHistory call.
 	history func(call int) []*rafikiv1.Event
+	// historyErr, when non-nil, is consulted per GetHistory call (1-based); a
+	// non-nil result fails that call.
+	historyErr func(call int) error
+	// sendErr and closeErr, when non-nil, fail every Send / Close.
+	sendErr  error
+	closeErr error
 
 	calls  []string
 	spawns []*rafikiv1.SpawnRequest
@@ -59,12 +66,20 @@ func (f *fakeControl) Spawn(_ context.Context, req *connect.Request[rafikiv1.Spa
 func (f *fakeControl) Send(_ context.Context, req *connect.Request[rafikiv1.SendRequest]) (*connect.Response[rafikiv1.SendResponse], error) {
 	f.sends = append(f.sends, req.Msg)
 	f.calls = append(f.calls, "send:"+req.Msg.GetChildId())
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
 	return connect.NewResponse(&rafikiv1.SendResponse{}), nil
 }
 
 func (f *fakeControl) GetHistory(_ context.Context, req *connect.Request[rafikiv1.GetHistoryRequest]) (*connect.Response[rafikiv1.GetHistoryResponse], error) {
 	f.historyCalls++
 	f.calls = append(f.calls, "gethistory:"+req.Msg.GetChildId())
+	if f.historyErr != nil {
+		if err := f.historyErr(f.historyCalls); err != nil {
+			return nil, err
+		}
+	}
 	var events []*rafikiv1.Event
 	if f.history != nil {
 		events = f.history(f.historyCalls)
@@ -75,6 +90,9 @@ func (f *fakeControl) GetHistory(_ context.Context, req *connect.Request[rafikiv
 func (f *fakeControl) Close(_ context.Context, req *connect.Request[rafikiv1.CloseRequest]) (*connect.Response[rafikiv1.CloseResponse], error) {
 	f.closes = append(f.closes, req.Msg)
 	f.calls = append(f.calls, "close:"+req.Msg.GetChildId())
+	if f.closeErr != nil {
+		return nil, f.closeErr
+	}
 	return connect.NewResponse(&rafikiv1.CloseResponse{}), nil
 }
 
@@ -100,6 +118,17 @@ func boundaryEvent(n int32) *rafikiv1.Event {
 	return &rafikiv1.Event{Ordinal: ordinal(n), Payload: &rafikiv1.Event_CompactionBoundary{
 		CompactionBoundary: &rafikiv1.CompactionBoundary{Trigger: "manual"},
 	}}
+}
+
+// boundaryWithPost is the boundary a current daemon serves: the compaction
+// records the size of the working set it leaves behind on its summary row, and
+// the history read serves it as post_tokens. Nothing text-bearing follows it —
+// /compact produces no assistant turn — so this is the entire shape the fit
+// check has to work from.
+func boundaryWithPost(n int32, post int32) *rafikiv1.Event {
+	ev := boundaryEvent(n)
+	ev.GetCompactionBoundary().PostTokens = &post
+	return ev
 }
 
 // baseRequest is what a caller hands Run: a fork of the source onto the
@@ -245,10 +274,44 @@ func TestRunWaitsForANewBoundary(t *testing.T) {
 	}, f.calls, "the stale boundary is skipped, the new one proceeds")
 }
 
-// TestRunRefusesWhenTheCompactedHistoryStillDoesNotFit pins post-compaction
-// overflow as an error: no fork is spawned, the intermediate is closed, and the
-// message names both the window and the estimate.
-func TestRunRefusesWhenTheCompactedHistoryStillDoesNotFit(t *testing.T) {
+// TestRunRefusesOnTheStoredPostSize is the fit check as it runs against a real
+// daemon: the boundary carries the post size the compaction recorded, and
+// NOTHING text-bearing follows it (a /compact emits no assistant turn), so a
+// check that summed text would see zero and wave this fork through. The stored
+// number is what refuses it.
+func TestRunRefusesOnTheStoredPostSize(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeControl{
+		spawnIDs: []string{intermediateID, forkID},
+		history: func(call int) []*rafikiv1.Event {
+			events := []*rafikiv1.Event{userTextEvent(0, "hi")}
+			if call > 1 {
+				events = append(events, boundaryWithPost(1, 5000))
+			}
+			return events
+		},
+	}
+	opt := fastOptions()
+	opt.DestWindow = 1000
+
+	_, err := Run(context.Background(), f, baseRequest(), opt)
+	c.Error(err, "a working set past the destination window is an error")
+	c.ErrorContains(err, "still exceeds 1000 tokens", "the window is named")
+	c.ErrorContains(err, "estimated 5000", "the recorded post size is named")
+	c.ErrorContains(err, "pick a larger model", "the remedy is named")
+
+	c.Len(f.spawns, 1, "no fork is spawned")
+	c.Require().Len(f.closes, 1, "the intermediate is closed")
+	c.Eq(intermediateID, f.closes[0].GetChildId(), "the intermediate is what is closed")
+}
+
+// TestRunFallsBackToTheTextEstimateWithoutAPostSize pins the fallback for a
+// boundary that records no post size — a conversation compacted before one was
+// stored. Such a conversation can carry turns after its boundary (it went on
+// being used), and those rows are what a fork from it would borrow, so the text
+// estimate still has to refuse an overflow. The primary path is the stored size
+// above; this is the conservative net beneath it.
+func TestRunFallsBackToTheTextEstimateWithoutAPostSize(t *testing.T) {
 	c := assert.NewAborting(t)
 	// 4000 characters is 1000 tokens plus the block overhead: 1032.
 	big := strings.Repeat("x", 4000)
@@ -276,9 +339,9 @@ func TestRunRefusesWhenTheCompactedHistoryStillDoesNotFit(t *testing.T) {
 	c.Eq(intermediateID, f.closes[0].GetChildId(), "the intermediate is what is closed")
 }
 
-// TestRunClosesTheIntermediateOnAPostCompactRefusal pins the same refusal when
-// the overflow rides a USER message rather than an assistant one, so the close
-// is proven independent of which payload carried the text.
+// TestRunClosesTheIntermediateOnAPostCompactRefusal pins the close on the same
+// refusal when the overflow rides a USER message rather than an assistant one,
+// so the close is proven independent of which payload carried the text.
 func TestRunClosesTheIntermediateOnAPostCompactRefusal(t *testing.T) {
 	c := assert.NewAborting(t)
 	big := strings.Repeat("y", 8000)
@@ -323,8 +386,9 @@ func TestRunRefusesWithoutASourceModel(t *testing.T) {
 }
 
 // TestRunLeavesTheIntermediateOnATimeout pins that a wait that never sees a
-// boundary reports the failure and closes nothing: the caller decides what to do
-// with an intermediate that is still running.
+// boundary reports the failure and closes nothing: the summary call may still be
+// running, so the caller decides what to do with the intermediate — which is why
+// the error names it.
 func TestRunLeavesTheIntermediateOnATimeout(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := &fakeControl{spawnIDs: []string{intermediateID, forkID}}
@@ -333,9 +397,66 @@ func TestRunLeavesTheIntermediateOnATimeout(t *testing.T) {
 
 	_, err := Run(context.Background(), f, baseRequest(), opt)
 	c.ErrorContains(err, "wait for compaction", "the failure names the step")
+	c.ErrorContains(err, intermediateID, "the failure names the intermediate")
 	c.ErrorIs(err, context.DeadlineExceeded, "the timeout is unwrappable")
 	c.Len(f.spawns, 1, "no fork is spawned")
 	c.Len(f.closes, 0, "the intermediate is left for the caller")
+}
+
+// TestRunClosesTheIntermediateWhenTheSendFails pins the other half of the
+// abandoned-intermediate rule: a failure BEFORE the compaction starts leaves I
+// with nothing to finish, so Run closes it — and names it, so a close that also
+// failed is actionable. The original cause stays reachable.
+func TestRunClosesTheIntermediateWhenTheSendFails(t *testing.T) {
+	sendErr := errors.New("send refused")
+
+	t.Run("closed", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := &fakeControl{spawnIDs: []string{intermediateID, forkID}, sendErr: sendErr}
+
+		_, err := Run(context.Background(), f, baseRequest(), fastOptions())
+		c.ErrorContains(err, intermediateID, "the error names the intermediate")
+		c.ErrorContains(err, "send /compact", "the error names the step")
+		c.ErrorIs(err, sendErr, "the cause stays reachable")
+		c.Len(f.spawns, 1, "no fork is spawned")
+		c.Require().Len(f.closes, 1, "the abandoned intermediate is closed")
+		c.Eq(intermediateID, f.closes[0].GetChildId(), "the intermediate is what is closed")
+		c.Eq(rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY, f.closes[0].GetScope(), "only the intermediate")
+	})
+
+	t.Run("close failure does not mask the cause", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := &fakeControl{
+			spawnIDs: []string{intermediateID, forkID},
+			sendErr:  sendErr,
+			closeErr: errors.New("close refused"),
+		}
+
+		_, err := Run(context.Background(), f, baseRequest(), fastOptions())
+		c.ErrorIs(err, sendErr, "the original cause stays reachable")
+		c.ErrorContains(err, "close refused", "the close failure is reported too")
+		c.ErrorContains(err, intermediateID, "the error names the intermediate")
+	})
+}
+
+// TestRunClosesTheIntermediateWhenTheWatermarkReadFails pins the same rule for
+// the other pre-compaction failure: nothing was sent, so nothing can be in
+// flight.
+func TestRunClosesTheIntermediateWhenTheWatermarkReadFails(t *testing.T) {
+	c := assert.NewAborting(t)
+	readErr := errors.New("history unavailable")
+	f := &fakeControl{
+		spawnIDs:   []string{intermediateID, forkID},
+		historyErr: func(call int) error { return readErr },
+	}
+
+	_, err := Run(context.Background(), f, baseRequest(), fastOptions())
+	c.ErrorContains(err, intermediateID, "the error names the intermediate")
+	c.ErrorIs(err, readErr, "the cause stays reachable")
+	c.Len(f.sends, 0, "no /compact is sent")
+	c.Len(f.spawns, 1, "no fork is spawned")
+	c.Require().Len(f.closes, 1, "the abandoned intermediate is closed")
+	c.Eq(intermediateID, f.closes[0].GetChildId(), "the intermediate is what is closed")
 }
 
 // TestRunFakeControlPanicsOnAnUnusedVerb pins the fake's loud answer: the

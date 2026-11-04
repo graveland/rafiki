@@ -19,14 +19,18 @@
 //   - N, the fork: a child on the destination model whose borrowed history is
 //     I's compacted result.
 //
-// The post-compaction size check is an ESTIMATE, not a tokenizer. Every
-// text-bearing block at or after the compaction boundary is charged
-// len(text)/4 + 32 tokens — text, thinking, and tool-use input JSON, with a tool
-// result's nested blocks summed and the result block itself charged the fixed
-// overhead. Image blocks are not text and are charged nothing. The estimate
-// exists to refuse a fork that plainly cannot fit before it is spawned; a caller
-// that supplies no destination window (Options.DestWindow 0) skips the check
-// entirely.
+// The post-compaction size check reads the size the compaction itself recorded.
+// The summary row carries, as its output size, the same token count the live
+// CompactionEvent reports for the new working set (the summary plus the verbatim
+// tail), and a history read serves it as CompactionBoundary.post_tokens — so the
+// check compares a recorded number, not a guess. A boundary with no post size (a
+// conversation compacted before one was stored) falls back to a text ESTIMATE:
+// every text-bearing block at or after the boundary is charged len(text)/4 + 32
+// tokens — text, thinking, and tool-use input JSON, with a tool result's nested
+// blocks summed and the result block itself charged the fixed overhead. Image
+// blocks are not text and are charged nothing. Either way the check exists to
+// refuse a fork that plainly cannot fit before it is spawned; a caller that
+// supplies no destination window (Options.DestWindow 0) skips it entirely.
 //
 // This package owns the whole fork layer and knows nothing about the model-change
 // tail. It speaks only the Connect control plane, so it links no database
@@ -96,8 +100,10 @@ type Options struct {
 // completed turn, i.e. the end of the compacted result); I is closed. Nothing
 // here touches the source.
 //
-// A wait failure leaves I alone — the caller decides whether to close it, which
-// is why the error names it.
+// Failures before the compaction can start — reading the watermark, sending
+// /compact — leave I with nothing to finish, so Run closes it and names it in
+// the error. A wait failure is the one exception: the summary call may still be
+// running, so I is left live, and the error names it so the caller can decide.
 func Run(ctx context.Context, c rafikiv1connect.ControlClient, req *rafikiv1.SpawnRequest, opt Options) (string, error) {
 	source := req.GetForkFrom().GetChildId()
 	if source == "" || opt.SourceModel == "" {
@@ -146,7 +152,7 @@ func Run(ctx context.Context, c rafikiv1connect.ControlClient, req *rafikiv1.Spa
 	// the wait instantly with a stale event.
 	watermark, err := historyWatermark(ctx, c, intermediate)
 	if err != nil {
-		return "", fmt.Errorf("read the intermediate history: %w", err)
+		return "", abandon(ctx, c, intermediate, fmt.Errorf("read the history of intermediate %s: %w", intermediate, err))
 	}
 
 	instructions := opt.Instructions
@@ -161,24 +167,24 @@ func Run(ctx context.Context, c rafikiv1connect.ControlClient, req *rafikiv1.Spa
 		}},
 	}))
 	if err != nil {
-		return "", fmt.Errorf("send /compact: %w", err)
+		return "", abandon(ctx, c, intermediate, fmt.Errorf("send /compact to intermediate %s: %w", intermediate, err))
 	}
 	progress("waiting for the compaction boundary")
 
 	boundary, events, err := waitForBoundary(ctx, c, intermediate, watermark, poll, timeout)
 	if err != nil {
-		return "", fmt.Errorf("wait for compaction: %w", err)
+		// Deliberately NOT closed: the summary call may still be running, and
+		// closing I under it would abandon a write in flight. The id is in the
+		// error so the caller can act once it settles.
+		return "", fmt.Errorf("wait for compaction on intermediate %s: %w", intermediate, err)
 	}
 
 	// Post-compaction overflow is an ERROR, never a silent fall-through to the
 	// reactive overflow net: the caller picks a larger model instead.
 	if opt.DestWindow > 0 {
-		if estimate := estimateFrom(events, boundary.GetOrdinal()); estimate > int(opt.DestWindow) {
+		if estimate := postCompactionSize(boundary, events); estimate > int(opt.DestWindow) {
 			sizeErr := fmt.Errorf("compacted history still exceeds %d tokens (estimated %d): pick a larger model", opt.DestWindow, estimate)
-			if cerr := closeIntermediate(ctx, c, intermediate); cerr != nil {
-				return "", fmt.Errorf("%w (and closing the intermediate %s failed: %v)", sizeErr, intermediate, cerr)
-			}
-			return "", sizeErr
+			return "", abandon(ctx, c, intermediate, sizeErr)
 		}
 	}
 
@@ -267,6 +273,28 @@ func closeIntermediate(ctx context.Context, c rafikiv1connect.ControlClient, chi
 		Scope:   rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY,
 	}))
 	return err
+}
+
+// abandon closes an intermediate that has nothing left to finish, and folds a
+// close failure into the cause without hiding it (the cause stays reachable
+// through %w). Use it only for failures that leave no work in flight: a
+// compaction still running must not be closed out from under its summary call.
+func abandon(ctx context.Context, c rafikiv1connect.ControlClient, childID string, cause error) error {
+	if cerr := closeIntermediate(ctx, c, childID); cerr != nil {
+		return fmt.Errorf("%w (and closing the intermediate %s failed: %v)", cause, childID, cerr)
+	}
+	return cause
+}
+
+// postCompactionSize is the size of the working set N will borrow. It prefers
+// the post size the compaction recorded on its boundary — the same number the
+// live CompactionEvent reported — and only estimates from text when the boundary
+// carries none, which is a conversation compacted before that size was stored.
+func postCompactionSize(boundary *rafikiv1.Event, events []*rafikiv1.Event) int {
+	if cb := boundary.GetCompactionBoundary(); cb != nil && cb.PostTokens != nil {
+		return int(cb.GetPostTokens())
+	}
+	return estimateFrom(events, boundary.GetOrdinal())
 }
 
 // estimateFrom sums the size estimate over the events at or after ordinal from.

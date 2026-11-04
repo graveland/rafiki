@@ -41,6 +41,16 @@ func EventsFromNodes(childID string, nodes []*conv.Node) []*rafikiv1.Event {
 				pre := int32(*n.InputTokens)
 				cb.PreTokens = &pre
 			}
+			// output_tokens on a summary row is the size of the working set the
+			// compaction left behind — the same number the live CompactionEnd
+			// event reports — and it is what a continuation from this boundary
+			// will borrow. It is absent on a conversation compacted before it was
+			// stored, and post_tokens is optional so absent stays distinguishable
+			// from a zero.
+			if n.OutputTokens != nil {
+				post := int32(*n.OutputTokens)
+				cb.PostTokens = &post
+			}
 			ev.Payload = &rafikiv1.Event_CompactionBoundary{CompactionBoundary: cb}
 			out = append(out, ev)
 			continue

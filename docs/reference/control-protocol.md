@@ -2277,20 +2277,25 @@ with a `stderr│ ` failure-colour prefix, joining adjacent same-stream
 split-piece events so an oversized line stays whole on screen
 (`pkg/tui/session.applyScriptOutput`).
 
-`CompactionBoundary.pre_tokens`/`post_tokens` are both `optional`, and
-deliberately asymmetric across the two ways this event reaches a client.
-The LIVE event (emitted when Claude Code's own `system/compact_boundary`
-frame arrives) carries both. A REATTACH-synthesized instance of this event
-— built from a stored `conversation_message` row tagged
-`kind='compaction_summary'`, not from the live stream — carries only
-`pre_tokens` (an approximation: the previous turn's `input_tokens`, the
-size of the context the boundary replaced), because the stored row has no
-post-compaction count. That approximation appears only when a prior turn's
-`input_tokens` is nonzero: with no prior turn, or one with 0, the stored
-`input_tokens` is NULL and the reattach event carries NEITHER token — the
-bare one-sided format. A client renders the two-sided and one-sided cases
-differently for exactly this reason — see `pkg/tui/session`'s
-`formatCompactionBoundary`.
+`CompactionBoundary.pre_tokens`/`post_tokens` are both `optional`, and which
+of them a boundary carries depends on who wrote it. The LIVE event (emitted
+when Claude Code's own `system/compact_boundary` frame arrives, and by the
+fundi emitter when its own compaction ends) carries both. A
+REATTACH-synthesized instance of this event — built from a stored
+`conversation_message` row tagged `kind='compaction_summary'`, not from the
+live stream — carries `pre_tokens` (an approximation: the previous turn's
+`input_tokens`, the size of the context the boundary replaced) and, for a
+fundi compaction, `post_tokens` too: that compaction records the size of the
+working set it leaves behind on the row's `output_tokens`, from the same
+computation the live event reports, so a client continuing from the boundary
+reads a recorded number rather than guessing. A claude-code boundary row (the
+provider's own summary message) records no post size, and neither does one
+compacted before the field was stored, so those carry `pre_tokens` alone. The
+`pre_tokens` approximation appears only when a prior turn's `input_tokens` is
+nonzero: with no prior turn, or one with 0, the stored `input_tokens` is NULL
+and the reattach event carries NEITHER token — the bare one-sided format. A
+client renders the two-sided and one-sided cases differently for exactly this
+reason — see `pkg/tui/session`'s `formatCompactionBoundary`.
 
 `AgentStatus.state` is one of the ten `protocol.Status` values: `spawning`, `idle`,
 `streaming`, `running`, `tool_running`, `compacting`, `batch_wait`, `blocked_ui`, `shutting_down`,
