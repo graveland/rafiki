@@ -75,6 +75,12 @@ type spawnParams struct {
 	// preset is not a form field: it arrives via SpawnDefaults and rides every
 	// spawn this form issues, resolved daemon-side via Controller.Spawn.
 	preset string
+	// forkFrom, when set, starts the new child from a point in another child's
+	// history (borrowed conversation, immutable fork edge). switchSource names
+	// the child a model SWITCH replaces: spawn this fork, then close that one
+	// and take its name. Empty on an ordinary spawn.
+	forkFrom     *protocol.ForkFrom
+	switchSource string
 }
 
 // spawnForm is the modal shown by `n` on the agents pane.
@@ -96,6 +102,16 @@ type spawnForm struct {
 	// rather than defaulted. A declared kind must outrank the remembered one, and
 	// it also decides which kind's remembered model/executor/budget is read.
 	kindPinned bool
+	// forkFrom, when set, is what this form spawns: a conversation fork of
+	// that child. It locks the kind row (only fundi can be forked to), titles
+	// the form, and rides params() onto the wire.
+	forkFrom *protocol.ForkFrom
+	// switchSource, when set alongside forkFrom, makes the submit a model
+	// SWITCH: after the spawn lands, the source closes and the new child
+	// takes its name. Reported in the title so the heavier operation is named
+	// before it runs.
+	switchSource string
+
 	// submitted is the last request this form sent, kept so a SUCCESSFUL spawn
 	// can record exactly what went on the wire (the resolved kind and budget)
 	// rather than re-deriving it from fields the user may have since edited.
@@ -202,6 +218,22 @@ func newSpawnForm() *spawnForm {
 	return f
 }
 
+// setForkFrom points the form at another child's history: kind locks to fundi
+// (only fundi can be forked to; the daemon refuses the rest), the name field
+// clears (the source's name is taken until a SWITCH closes it), and the title
+// names the operation. Model seeding is the caller's job — a fork usually
+// wants the source's model, a switch a different one.
+func (f *spawnForm) setForkFrom(childID string) {
+	for i, k := range spawnKinds {
+		if k == protocol.KindFundi {
+			f.kindIx = i
+			f.kindPinned = true
+		}
+	}
+	f.forkFrom = &protocol.ForkFrom{ChildID: childID}
+	f.inputs[fieldName].SetValue("")
+}
+
 // refreshSuggestions recomputes the typeahead from the catalog and whatever is
 // typed in the model row.
 //
@@ -282,12 +314,20 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 		return spawnParams{}, "cwd is required"
 	}
 	p := spawnParams{
-		name:     strings.TrimSpace(f.inputs[fieldName].Value()),
-		kind:     f.kind(),
-		model:    strings.TrimSpace(f.inputs[fieldModel].Value()),
-		executor: strings.TrimSpace(f.inputs[fieldExecutor].Value()),
-		cwd:      cwd,
-		preset:   f.preset,
+		name:         strings.TrimSpace(f.inputs[fieldName].Value()),
+		kind:         f.kind(),
+		model:        strings.TrimSpace(f.inputs[fieldModel].Value()),
+		executor:     strings.TrimSpace(f.inputs[fieldExecutor].Value()),
+		cwd:          cwd,
+		preset:       f.preset,
+		forkFrom:     f.forkFrom,
+		switchSource: f.switchSource,
+	}
+	// A switch exists to CHANGE the model: an empty row would "switch" to the
+	// daemon's default, which is not a decision anyone made. The fork-only
+	// form may still leave it blank.
+	if p.switchSource != "" && p.model == "" {
+		return spawnParams{}, "model is required for a switch — pick the model to switch to"
 	}
 	if raw := strings.TrimSpace(f.inputs[fieldMaxCost].Value()); raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)
@@ -313,6 +353,11 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 func (f *spawnForm) moveFocus(delta int) {
 	f.inputs[f.focus].Blur()
 	next := (int(f.focus) + delta + int(spawnFieldCount)) % int(spawnFieldCount)
+	// A fork's kind row is LOCKED — only fundi can be forked to — so tabbing
+	// steps over it rather than parking on a row that cannot change.
+	if f.forkFrom != nil && spawnField(next) == fieldKind {
+		next = (next + delta + int(spawnFieldCount)) % int(spawnFieldCount)
+	}
 	f.focus = spawnField(next)
 	if f.focus != fieldKind {
 		f.inputs[f.focus].Focus()
@@ -340,7 +385,15 @@ func (f *spawnForm) update(msg tea.KeyPressMsg) tea.Cmd {
 func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *clientstate.Currency) string {
 	f.viewSummary = v.summary()
 	var b strings.Builder
-	b.WriteString(styleRailFocused.Render("new agent"))
+	switch {
+	case f.switchSource != "":
+		b.WriteString(styleRailFocused.Render("switch model of " + f.switchSource +
+			" · carries its cwd, parent and budget"))
+	case f.forkFrom != nil:
+		b.WriteString(styleRailFocused.Render("fork of " + f.forkFrom.ChildID))
+	default:
+		b.WriteString(styleRailFocused.Render("new agent"))
+	}
 	b.WriteString("\n\n")
 
 	// bubbles renders a placeholder of exactly ONE character when Width is
@@ -371,7 +424,13 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 		b.WriteString(padTo(styleMeta.Render(label), fieldLabelWidth))
 
 		if i == fieldKind {
-			b.WriteString(f.kindView())
+			if f.forkFrom != nil {
+				// Locked: the fork decides the kind, so the row renders state
+				// rather than offering a choice it will not honour.
+				b.WriteString(styleMeta.Render("(fundi — fork)"))
+			} else {
+				b.WriteString(f.kindView())
+			}
 		} else {
 			b.WriteString(f.inputs[i].View())
 		}
@@ -663,6 +722,11 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 		// Keep exactly what went on the wire: applySpawned records the kind and
 		// budget from this, not from fields the user could edit mid-flight.
 		f.submitted, f.hasSubmitted = p, true
+		if p.switchSource != "" {
+			// A model SWITCH: spawn the fork, then the follow-up closes the
+			// source and renames this child into its place.
+			return c, c.switchSpawnCmd(p)
+		}
 		return c, c.spawnCmd(p)
 	}
 
@@ -793,6 +857,35 @@ func (c *Cockpit) applySpawned(m spawnedMsg) tea.Cmd {
 	// child_spawned, but hopping now means the pane is already open when the
 	// first token lands rather than after the user goes looking for it.
 	cmd := c.hop(m.childID)
+	if m.switchSource != "" {
+		// The fork was the switch's FIRST half: land on it, and run the
+		// second — close the source, rename this child into its name, replay
+		// its routing. The source's history is borrowed, so nothing is lost
+		// by the close; a failure midway is reported by applySwitched with
+		// both ids, and finishing by hand is safe.
+		c.setNotice(fmt.Sprintf("created %s; closing %s…", m.childID, m.switchSource))
+		return tea.Batch(cmd, c.leaveRail(),
+			c.switchFinishCmd(m.switchSource, m.childID, m.sourceName, m.sourceRouting))
+	}
 	c.setNotice("created " + m.childID)
 	return tea.Batch(cmd, c.leaveRail())
+}
+
+// applySwitched reports a model switch's second step. The fork already landed
+// and the cockpit is already looking at it, so every failure here leaves the
+// user on the NEW conversation with both ids in the notice — the state to
+// recover from by hand (close + rename) rather than one to untangle blind.
+func (c *Cockpit) applySwitched(m switchedMsg) {
+	if m.err != nil {
+		c.setNotice(fmt.Sprintf("switch incomplete: %v — both %s and %s exist", m.err, m.source, m.newID))
+		return
+	}
+	if m.name != "" {
+		// The rename's own rail update rides the event stream; setting the
+		// name here too keeps the row right when the event is slow.
+		c.rail.SetName(m.newID, m.name)
+		c.setNotice(fmt.Sprintf("switched %s to %s (fork of %s)", m.name, m.newID, m.source))
+		return
+	}
+	c.setNotice(fmt.Sprintf("switched to %s (fork of %s)", m.newID, m.source))
 }

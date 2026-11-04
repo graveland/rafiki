@@ -146,6 +146,7 @@ func newRootCmd() *cobra.Command {
 		newTailCmd(),
 		newLogsCmd(),
 		newLabelCmd(),
+		newTagCmd(),
 		newModelsCmd(),
 		newPresetCmd(),
 		newProvidersCmd(),

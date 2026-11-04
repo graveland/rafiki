@@ -93,7 +93,7 @@ a provider or starting a new local model, instead of waiting out the cache.`,
 		[]string{"ctx", "in", "out", "cache", "max out", "age", "intel", "code", "agentic"},
 		cobra.ShellCompDirectiveNoFileComp,
 	))
-	cmd.AddCommand(newModelsRouteCmd(), newModelsAliasCmd())
+	cmd.AddCommand(newModelsRouteCmd(), newModelsAliasCmd(), newModelsSwitchCmd())
 	return cmd
 }
 

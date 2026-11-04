@@ -21,7 +21,7 @@ import (
 // here either -- it is a positional, and len(args) covers it.
 var shapingFlags = []string{
 	"model", "kind", "cwd", "preset", "detached",
-	"executor", "executor-selector", "session", "fork", "append-system-prompt", "thinking",
+	"executor", "executor-selector", "session", "fork", "fork-from", "from-tag", "append-system-prompt", "thinking",
 	"prefill-files", "pymodule",
 }
 

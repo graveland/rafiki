@@ -473,6 +473,7 @@ type Cockpit struct {
 	form       *spawnForm
 	budgetForm *budgetForm
 	renameForm *renameForm
+	tagForm    *tagForm
 	// picker is the full model browser opened from the form's model row, nil
 	// when none. It stacks ON TOP of the form -- esc returns to the form
 	// rather than dismissing both, because the other fields are still half
@@ -800,6 +801,64 @@ func (c *Cockpit) openSpawnForm() tea.Cmd {
 	c.seedRemembered()
 	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 	return tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
+}
+
+// forkSelected opens the create form pointed at the selected child's history:
+// the spawn it produces borrows that history up to the source's last
+// completed turn, and BOTH conversations keep running. The model row seeds
+// from the source's own model — the common fork is "this conversation, a
+// second copy", and a fork that wants a DIFFERENT model edits one field (or
+// takes `M`, which seeds empty and closes the source when it lands).
+func (c *Cockpit) forkSelected() tea.Cmd {
+	id := c.selected
+	if id == "" {
+		return nil
+	}
+	c.form = newSpawnForm()
+	c.form.setForkFrom(id)
+	if n, ok := c.rail.Get(id); ok {
+		c.form.inputs[fieldModel].SetValue(n.Model)
+	}
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+	return tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
+}
+
+// switchModelSelected opens the create form as a model SWITCH of the selected
+// child: same borrowed history, but on submit the fork spawns, the source
+// closes, and the new child takes the source's name — so from the rail it
+// looks like the conversation changed models, while the old conversation
+// stays in the lineage at its old model. The model row starts EMPTY (the
+// whole point is to change it, and a switch refuses a blank one); the budget
+// row seeds from the source's cap, since a switch carries it unless edited —
+// the rail row is where that cap already lives.
+func (c *Cockpit) switchModelSelected() tea.Cmd {
+	id := c.selected
+	if id == "" {
+		return nil
+	}
+	c.form = newSpawnForm()
+	c.form.setForkFrom(id)
+	c.form.switchSource = id
+	if n, ok := c.rail.Get(id); ok && n.MaxCost > 0 {
+		c.form.inputs[fieldMaxCost].SetValue(costField(n.MaxCost, c.currency))
+	}
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+	return tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
+}
+
+// tagSelected opens the tag modal on the selected child, naming its last
+// completed turn.
+func (c *Cockpit) tagSelected() tea.Cmd {
+	id := c.selected
+	if id == "" {
+		return nil
+	}
+	name := id
+	if n, ok := c.rail.Get(id); ok && n.Name != "" {
+		name = n.Name
+	}
+	c.tagForm = newTagForm(id, name)
+	return textinput.Blink
 }
 
 // landRailFirst decides where a bare `rafiki attach` should start, once the
@@ -1151,6 +1210,14 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.applyRenamed(msg)
 		return c, nil
 
+	case switchedMsg:
+		c.applySwitched(msg)
+		return c, nil
+
+	case taggedMsg:
+		c.applyTagged(msg)
+		return c, nil
+
 	case tickMsg:
 		if c.notice != "" && time.Now().After(c.noticeUntil) {
 			c.notice = ""
@@ -1440,6 +1507,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if c.renameForm != nil {
 		return c.handleRenameFormKey(msg)
 	}
+	if c.tagForm != nil {
+		return c.handleTagFormKey(msg)
+	}
 
 	// A pending "include subagents?" question owns the next key outright.
 	if c.endAsk != nil {
@@ -1618,6 +1688,12 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return c, tea.Batch(commit, c.leaveRail())
 		case key.Matches(msg, k.NewAgent):
 			return c, c.openSpawnForm()
+		case key.Matches(msg, k.Fork):
+			return c, c.forkSelected()
+		case key.Matches(msg, k.Tag):
+			return c, c.tagSelected()
+		case key.Matches(msg, k.SwitchModel):
+			return c, c.switchModelSelected()
 		case key.Matches(msg, k.EndAgent):
 			return c, c.endSelected()
 		case key.Matches(msg, k.Resume):
@@ -2538,7 +2614,8 @@ func (c *Cockpit) bodyHeight() int {
 // wins over both, and no peek can outlive the last row: a zero-row rail is an
 // empty column costing the transcript width for nothing.
 func (c *Cockpit) railCols() int {
-	if c.form != nil || c.picker != nil || c.execPicker != nil || c.budgetForm != nil || c.renameForm != nil || c.railHidden ||
+	if c.form != nil || c.picker != nil || c.execPicker != nil || c.budgetForm != nil || c.renameForm != nil ||
+		c.tagForm != nil || c.railHidden ||
 		c.rail.Len() == 0 || (c.rail.Len() < 2 && !c.railPeek) {
 		return 0
 	}
@@ -2914,6 +2991,9 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.Resume, "Resume an exited agent."},
 		entry{k.EditBudget, "Set the agent's cost budget."},
 		entry{k.Rename, "Rename the agent."},
+		entry{k.Fork, "Fork the agent: a new conversation borrowing its history; both keep running."},
+		entry{k.Tag, "Tag the agent's last completed turn, making the point forkable by name."},
+		entry{k.SwitchModel, "Switch the agent's model: spawns a fork on the model you pick, closes the old conversation, keeps the name."},
 		entry{k.Escape, "Leave the rail without opening anything."},
 	)...)
 	right = append(right, group("reading",
@@ -3017,6 +3097,8 @@ func (c *Cockpit) View() tea.View {
 		conv = c.budgetForm.view(convWidth, bodyHeight, c.currency)
 	case c.renameForm != nil:
 		conv = c.renameForm.view(convWidth)
+	case c.tagForm != nil:
+		conv = c.tagForm.view(convWidth)
 	case c.showHelp:
 		conv = c.helpView(convWidth, bodyHeight)
 	case f == "" && c.rail.Len() == 0:
@@ -3063,7 +3145,7 @@ func (c *Cockpit) View() tea.View {
 		conv = styleMeta.Render("loading…")
 	}
 	switch f := c.viewing(); {
-	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && c.renameForm == nil && !c.showHelp && c.sessions[f] != nil:
+	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && c.renameForm == nil && c.tagForm == nil && !c.showHelp && c.sessions[f] != nil:
 		if n, ok := c.rail.Get(f); ok && rail.Working(n.Status) {
 			conv += "\n" + styleWorking.Render(rail.SpinnerFrame(c.frame)+" "+workingLabel(n.Status))
 		}

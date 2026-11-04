@@ -14,6 +14,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -850,4 +851,73 @@ func TestApplySpawnedRecordsAClearedBudget(t *testing.T) {
 	usd, ok := clientstate.LastMaxCostFor("records-cleared-cost", kind)
 	ck.True(ok, "a cleared budget must still be recorded")
 	ck.Eq(0.0, usd, "a blank field means unlimited")
+}
+
+// A fork (`f` on a rail row) opens the form pointed at that child's history:
+// kind locks to fundi, the kind row becomes unvisitable, and the model row
+// seeds from the source's own model — "this conversation, a second copy".
+func TestSpawnFormForkLocksKindAndSeedsTheSourceModel(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := profiledCockpit("fork-form", Options{})
+	sum := summaryFor("c_src", "source", 0)
+	sum.Kind = protocol.KindFundi
+	sum.Model = "fakeor/mini"
+	c.rail.Seed([]*rafikiv1.ChildSummary{sum})
+	c.selected = "c_src"
+
+	c.forkSelected()
+
+	ck.Require().NotNil(c.form, "the form must be open")
+	ck.Eq("c_src", c.form.forkFrom.ChildID, "fork source")
+	ck.Eq(protocol.KindFundi, c.form.kind(), "a fork's kind is fundi")
+	ck.Eq("fakeor/mini", c.form.inputs[fieldModel].Value(), "model row seeds from the source")
+	ck.Eq("", c.form.inputs[fieldName].Value(), "the fork's name is not the source's (a switch will want it)")
+
+	// Tabbing steps OVER the locked kind row in both directions: name →
+	// executor, and back.
+	ck.Eq(fieldName, c.form.focus, "the form starts on the name row")
+	c.form.moveFocus(+1)
+	ck.Eq(fieldExecutor, c.form.focus, "tab skips the locked kind row")
+	c.form.moveFocus(-1)
+	ck.Eq(fieldName, c.form.focus, "and back")
+
+	// The lock rides params onto the wire shape the spawn consumes.
+	p, problem := c.form.params(c.currency)
+	ck.Eq("", problem, "params")
+	ck.Require().NotNil(p.forkFrom, "params.forkFrom")
+	ck.Eq("c_src", p.forkFrom.ChildID, "params.forkFrom.ChildID")
+	ck.Eq("", p.switchSource, "a plain fork closes nothing")
+}
+
+// A switch (`M`) is the fork form with the heavier post-spawn: the source
+// closes and the new child takes its name. The model row starts EMPTY — the
+// whole point is to change it — and the title names the operation before it
+// runs.
+func TestSpawnFormSwitchSeedsEmptyAndMarksTheSource(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := profiledCockpit("switch-form", Options{})
+	sum := summaryFor("c_src", "source", 0)
+	sum.Kind = protocol.KindFundi
+	sum.Model = "fakeor/mini"
+	c.rail.Seed([]*rafikiv1.ChildSummary{sum})
+	c.selected = "c_src"
+
+	c.switchModelSelected()
+
+	ck.Require().NotNil(c.form, "the form must be open")
+	ck.Eq("c_src", c.form.forkFrom.ChildID, "the fork source is also the switch source")
+	ck.Eq("c_src", c.form.switchSource, "switch source")
+	ck.Eq("", c.form.inputs[fieldModel].Value(), "the model row starts empty: switching means changing it")
+	ck.StrContains(c.form.view(80, 24, c.modelView, nil, c.currency), "switch model of c_src",
+		"the title names the heavier operation")
+
+	// An empty model row is refused: a switch exists to CHANGE the model, and
+	// "the daemon's default" is not a decision anyone made.
+	_, problem := c.form.params(c.currency)
+	ck.StrContains(problem, "model is required", "a blank switch model must be refused")
+
+	c.form.inputs[fieldModel].SetValue("openrouter/z-ai/glm-5.3-flash")
+	p, problem := c.form.params(c.currency)
+	ck.Eq("", problem, "params with a model set")
+	ck.Eq("c_src", p.switchSource, "params.switchSource")
 }

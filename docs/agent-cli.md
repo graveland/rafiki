@@ -620,6 +620,96 @@ volume is estimated and capped at **60% of the model's context window**
 nothing is persisted and the child ends with an error naming the estimate,
 the cap, and the five largest reads.
 
+### Forking another conversation (`--fork-from`, `--from-tag`)
+
+`rafiki create --fork-from <child|child@m:N>` starts a new fundi child from a
+point in another child's conversation history — the new conversation **borrows**
+that history through an immutable fork edge (`docs/reference/control-protocol.md`
+§"Forks and tags"), so nothing is copied and nothing can drift. `--from-tag
+<name>` names the point through a tag instead (`rafiki tag add`); the two are
+mutually exclusive, and both force the kind to fundi — only fundi can be forked
+to — refusing an explicitly typed other `--kind` rather than overriding it.
+An empty cursor means the source's last completed turn; `child@m:42` pins an
+ordinal as `agent_view` prints it (a `.n` message suffix is accepted and
+ignored). The claude session-file flags `--session`/`--fork` are a different
+mechanism and refuse the combination.
+
+```bash
+rafiki create --fork-from scout                     # continue scout's history as a new agent
+rafiki create --fork-from scout@m:42 -m openrouter/z-ai/glm-5.3
+rafiki create --fork-from scout --from-tag release-candidate   # error: pick one
+rafiki tag add scout release-candidate              # then: --from-tag release-candidate
+```
+
+A fork keeps BOTH conversations: the source continues untouched, and the new
+child's first turn replays the borrowed rows to its provider. The fork names
+its source: the daemon stamps `rafiki/forked-from` at spawn, and `rafiki get`
+/ `rafiki list` show it in the FORKED FROM column (the conversation's fork
+edge holds the precise node). Forking a claude
+conversation into a fundi child works — the borrowed tool calls are renamed or
+rendered as text for the new model — which is the cross-provider path
+`rafiki models switch` automates.
+
+### Switching a conversation's model (`rafiki models switch`)
+
+A child's model resolves once at spawn and no RPC changes it in place, so a
+switch composes the fork path in one command:
+
+```
+rafiki models switch <child> <model> [--max-cost N] [--descendants] [--kill-timeout 2.5s]
+```
+
+1. spawns a fundi child forked from `<child>`'s last completed turn, on
+   `<model>` (any model the daemon offers — this is how a claude conversation
+   moves to an OpenRouter model, or a fundi one to another provider),
+   carrying the source's cwd, parent (a subagent's switch stays under the
+   same coordinator), user labels and spend cap (`--max-cost` overrides; the
+   cap is PER CONVERSATION — the new child starts with the source's full cap,
+   the source's spend is not deducted; `--max-cost` can raise or lower it but
+   cannot REMOVE it, since a blank row carries the source's cap);
+2. stops the source and closes it (`--descendants` also closes its subagents;
+   the default leaves them running);
+3. renames the new child into the source's name — that order is forced by the
+   live-sibling name rule — and replays the source's routing spec
+   (`rafiki route set`) so operator pins survive. That spec was written for
+   the old model's provider lines and may misroute or be refused on the new
+   one; a failed replay names itself and does not undo the switch.
+
+From the rail it reads as "the conversation changed models"; in the database
+the old conversation remains queryable at its old model, one fork edge behind,
+with the survivor naming it in `rafiki/forked-from`. A source that is
+mid-turn when the switch lands loses that in-flight turn and any tool side
+effects it caused — the fork starts from the last completed turn. A step
+failing after the spawn says which: both conversations exist, and the printed
+`rafiki close`/`rafiki rename`/`rafiki route set` line finishes the switch by
+hand (re-running the whole switch would spawn a SECOND fork).
+
+## `rafiki tag`
+
+Tags are named handles to a node in a child's history; creating or moving one
+is the grant that makes the point forkable (`--from-tag`). They are not
+labels (`rafiki label` describes a child; a tag pins a node and survives it).
+
+```
+rafiki tag list [--prefix p] [--history <name-or-id>] [--limit N]
+rafiki tag add <child> <name> [--at m:N] [--scope lineage|tree|owner] [--note text] [--replace]
+rafiki tag move <name> <child> [--at m:N]
+rafiki tag rm <name-or-id>
+```
+
+- `add` tags the child's last completed turn unless `--at` names one; scope
+  defaults to lineage (the tagging child's ancestors and descendants may fork
+  from it); `--replace` tombstones the live holder of the name first (user
+  credentials only).
+- `move` reads the tag's current node first and sends it as the CAS
+  expectation, so two concurrent moves cannot interleave silently — a loser
+  answers `failed_precondition`; every move appends a version and the history
+  survives (`list --history <name>`).
+- `rm` tombstones by name (your nearest visible one) or tag id; forks already
+  made are unaffected.
+- `-j`/`-J` emit the protojson `TagRow`s, matching every other Connect-backed
+  verb.
+
 ## `rafikid fundi` flags
 
 `rafikid fundi` runs a single agent child on stdio. Its flags configure the

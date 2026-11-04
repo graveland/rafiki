@@ -148,7 +148,7 @@ func TestForkFromSelfAllowed(t *testing.T) {
 	self := uniqueForkName("self")
 	_, nodes := f.forkableChild(t, self, "", self, f.owner, 1)
 
-	node, err := f.ctrl.resolveFork(context.Background(),
+	node, _, err := f.ctrl.resolveFork(context.Background(),
 		forkRequest(self, &protocol.ForkFrom{ChildID: self}, ""), users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "a child may fork itself")
 	ck.Eq(nodes[0].ID, node, "the default cursor is the last completed turn")
@@ -162,7 +162,7 @@ func TestForkFromDescendantAllowed(t *testing.T) {
 	_, nodes := f.forkableChild(t, desc, self, self, f.owner, 1)
 	f.child(t, self, "", self, f.owner, "")
 
-	node, err := f.ctrl.resolveFork(context.Background(),
+	node, _, err := f.ctrl.resolveFork(context.Background(),
 		forkRequest(self, &protocol.ForkFrom{ChildID: desc}, ""), users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "an ancestor may fork its descendant")
 	ck.Eq(nodes[0].ID, node, "node")
@@ -178,7 +178,7 @@ func TestForkFromClosedDescendantAllowed(t *testing.T) {
 	f.child(t, self, "", self, f.owner, "")
 	ck.Require().NoError(f.store.Delete(ctx, desc), "close the descendant")
 
-	node, err := f.ctrl.resolveFork(ctx, forkRequest(self, &protocol.ForkFrom{ChildID: desc}, ""),
+	node, _, err := f.ctrl.resolveFork(ctx, forkRequest(self, &protocol.ForkFrom{ChildID: desc}, ""),
 		users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "a closed descendant's history outlives it")
 	ck.Eq(nodes[0].ID, node, "node")
@@ -193,7 +193,7 @@ func TestForkFromSiblingRefused(t *testing.T) {
 	f.forkableChild(t, sib, parent, parent, f.owner, 1)
 	f.child(t, parent, "", parent, f.owner, "")
 
-	_, err := f.ctrl.resolveFork(context.Background(),
+	_, _, err := f.ctrl.resolveFork(context.Background(),
 		forkRequest(self, &protocol.ForkFrom{ChildID: sib}, ""), users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrPermissionDenied,
 		fmt.Sprintf("agent %s is not visible to you", sib))
@@ -206,7 +206,7 @@ func TestForkFromParentRefused(t *testing.T) {
 	f.forkableChild(t, parent, "", parent, f.owner, 1)
 	f.forkableChild(t, self, parent, parent, f.owner, 1)
 
-	_, err := f.ctrl.resolveFork(context.Background(),
+	_, _, err := f.ctrl.resolveFork(context.Background(),
 		forkRequest(self, &protocol.ForkFrom{ChildID: parent}, ""), users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrPermissionDenied,
 		fmt.Sprintf("agent %s is not visible to you", parent))
@@ -224,9 +224,9 @@ func TestForkFromForeignOwnerRefusedLikeUnknown(t *testing.T) {
 	f.forkableChild(t, foreign, "", foreign, other.ID, 1)
 	unknown := uniqueForkName("unknown")
 
-	_, foreignErr := f.ctrl.resolveFork(ctx, forkRequest("", &protocol.ForkFrom{ChildID: foreign}, ""),
+	_, _, foreignErr := f.ctrl.resolveFork(ctx, forkRequest("", &protocol.ForkFrom{ChildID: foreign}, ""),
 		users.Identity{UserID: f.owner})
-	_, unknownErr := f.ctrl.resolveFork(ctx, forkRequest("", &protocol.ForkFrom{ChildID: unknown}, ""),
+	_, _, unknownErr := f.ctrl.resolveFork(ctx, forkRequest("", &protocol.ForkFrom{ChildID: unknown}, ""),
 		users.Identity{UserID: f.owner})
 
 	ck.Require().Error(foreignErr, "a foreign child must be refused")
@@ -248,7 +248,7 @@ func TestForkToClaudeRefused(t *testing.T) {
 	req := forkRequest("", &protocol.ForkFrom{ChildID: "whatever"}, "")
 	req.Kind = protocol.KindClaude
 
-	_, err := f.ctrl.resolveFork(context.Background(), req, users.Identity{UserID: f.owner})
+	_, _, err := f.ctrl.resolveFork(context.Background(), req, users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrInvalidArgs,
 		"a fork runs as kind=fundi; claude and script children cannot be forked to")
 }
@@ -256,7 +256,7 @@ func TestForkToClaudeRefused(t *testing.T) {
 func TestForkFromAndFromTagExclusive(t *testing.T) {
 	f := newForkFixture(t)
 
-	_, err := f.ctrl.resolveFork(context.Background(),
+	_, _, err := f.ctrl.resolveFork(context.Background(),
 		forkRequest("", &protocol.ForkFrom{ChildID: "whatever"}, "some-tag"),
 		users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrInvalidArgs,
@@ -270,7 +270,7 @@ func TestForkDefaultCursorSkipsPendingToolCall(t *testing.T) {
 	convID, nodes := f.forkableChild(t, self, "", self, f.owner, 1)
 	f.pendingToolCall(t, convID)
 
-	node, err := f.ctrl.resolveFork(context.Background(),
+	node, _, err := f.ctrl.resolveFork(context.Background(),
 		forkRequest(self, &protocol.ForkFrom{ChildID: self}, ""), users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "the default cursor skips the dangling tool call")
 	ck.Eq(nodes[0].ID, node, "the last COMPLETED turn, not the head")
@@ -284,7 +284,7 @@ func TestForkCursorMustBeACompletedTurn(t *testing.T) {
 	convID, nodes := f.forkableChild(t, self, "", self, f.owner, 1)
 	pending := f.pendingToolCall(t, convID)
 
-	_, err := f.ctrl.resolveFork(ctx,
+	_, _, err := f.ctrl.resolveFork(ctx,
 		forkRequest(self, &protocol.ForkFrom{ChildID: self, Cursor: fmt.Sprintf("m:%d", pending.Ordinal)}, ""),
 		users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrInvalidArgs,
@@ -293,14 +293,14 @@ func TestForkCursorMustBeACompletedTurn(t *testing.T) {
 	// The ordinal form is accepted with or without a message subscript, and
 	// names the same node either way.
 	for _, cursor := range []string{fmt.Sprintf("m:%d", nodes[0].Ordinal), fmt.Sprintf("m:%d.0", nodes[0].Ordinal)} {
-		node, err := f.ctrl.resolveFork(ctx,
+		node, _, err := f.ctrl.resolveFork(ctx,
 			forkRequest(self, &protocol.ForkFrom{ChildID: self, Cursor: cursor}, ""),
 			users.Identity{UserID: f.owner})
 		ck.Require().NoError(err, "cursor %q", cursor)
 		ck.Eq(nodes[0].ID, node, "cursor %q names the reply", cursor)
 	}
 
-	_, err = f.ctrl.resolveFork(ctx,
+	_, _, err = f.ctrl.resolveFork(ctx,
 		forkRequest(self, &protocol.ForkFrom{ChildID: self, Cursor: "turn-3"}, ""),
 		users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrInvalidArgs,
@@ -326,7 +326,7 @@ func TestForkFromClaudeSourceResolvesRootThread(t *testing.T) {
 		Labels:    map[string]string{childstore.LabelRoot: src},
 	}), "upsert the claude child")
 
-	got, err := f.ctrl.resolveFork(ctx, forkRequest("", &protocol.ForkFrom{ChildID: src}, ""),
+	got, _, err := f.ctrl.resolveFork(ctx, forkRequest("", &protocol.ForkFrom{ChildID: src}, ""),
 		users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "a claude child's root thread is forkable")
 	ck.Eq(node.ID, got, "the root thread's completed turn")
@@ -558,4 +558,65 @@ func TestRefusedForkLeavesNoChildRowOrName(t *testing.T) {
 	res, err := f.ctrl.Spawn(ctx, req, users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "a later spawn with the same name")
 	ck.Eq(name, mustSnapshot(t, f.ctrl, res.ChildID).Name, "the retry took the name")
+}
+
+// TestSpawnForkStampsForkedFromLabel pins the provenance label through a real
+// Controller.Spawn: a forked child's durable row carries rafiki/forked-from =
+// the source child id — the arm `rafiki get` and the list table read, while
+// the conversation's immutable edge holds the node. Both entry points are
+// pinned, fork_from and from_tag, because they learn the source differently.
+func TestSpawnForkStampsForkedFromLabel(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	owner := users.Identity{UserID: f.owner}
+	ctx := context.Background()
+
+	src := spawnAliasChild(t, f.ctrl, owner, protocol.SpawnRequest{
+		Name:  uniqueForkName("src"),
+		Model: "openrouter/~deepseek/deepseek-flash-latest",
+	})
+	srcConv, ok, err := f.store.ForkSource(ctx, src.ChildID)
+	ck.Require().NoError(err, "read the source child row")
+	ck.Require().True(ok, "the spawned child row exists")
+	ck.NotEq("", srcConv.ConversationID, "a spawned fundi child has a conversation")
+	appendNode(t, f.pool, srcConv.ConversationID, anthropic.NewUserMessage(anthropic.NewTextBlock("prompt")), nil)
+	appendNode(t, f.pool, srcConv.ConversationID, anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply")), nil)
+
+	forked := spawnAliasChild(t, f.ctrl, owner, protocol.SpawnRequest{
+		Name:     uniqueForkName("forked"),
+		Model:    "openrouter/~deepseek/deepseek-flash-latest",
+		ForkFrom: &protocol.ForkFrom{ChildID: src.ChildID},
+	})
+	snap := mustSnapshot(t, f.ctrl, forked.ChildID)
+	ck.Eq(src.ChildID, snap.Labels["rafiki/forked-from"], "rafiki/forked-from names the source child")
+
+	// The from_tag path learns the source from the winning tag, not from the
+	// request: the label must still name it.
+	tagName := uniqueForkName("labeltag")
+	created := f.createTag(t, tagCaller(owner.UserID, src.ChildID), connectapi.TagInput{
+		Name: tagName, Scope: tags.ScopeOwner, ChildID: src.ChildID,
+	})
+
+	tagged := spawnAliasChild(t, f.ctrl, owner, protocol.SpawnRequest{
+		Name:    uniqueForkName("bytag"),
+		Model:   "openrouter/~deepseek/deepseek-flash-latest",
+		FromTag: tagName,
+	})
+	snap = mustSnapshot(t, f.ctrl, tagged.ChildID)
+	ck.Eq(created.NodeID != "", true, "the tag names a node")
+	ck.Eq(src.ChildID, snap.Labels["rafiki/forked-from"], "a from_tag fork labels the tag's child too")
+
+	// The label is spawn-only metadata: a resume copies the stored row's
+	// labels and re-stamps only cwd/pid/kind, so the provenance survives.
+	killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer killCancel()
+	_, err = f.ctrl.Kill(killCtx, forked.ChildID, 2*time.Second, 500*time.Millisecond)
+	ck.Require().NoError(err, "stop the forked child")
+	waitForExited(t, f.ctrl.st, forked.ChildID, 5*time.Second)
+	rtCtx, rtCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer rtCancel()
+	_, err = f.ctrl.Resume(rtCtx, forked.ChildID, "")
+	ck.Require().NoError(err, "resume the forked child")
+	ck.Eq(src.ChildID, mustSnapshot(t, f.ctrl, forked.ChildID).Labels["rafiki/forked-from"],
+		"resume must keep the original spawn's rafiki/forked-from")
 }

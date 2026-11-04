@@ -77,16 +77,19 @@ type keyMap struct {
 	ScrollBottom key.Binding
 
 	// Rail pane.
-	SelectUp   key.Binding
-	SelectDown key.Binding
-	FoldLeft   key.Binding
-	FoldRight  key.Binding
-	Commit     key.Binding
-	NewAgent   key.Binding
-	EndAgent   key.Binding
-	Resume     key.Binding
-	EditBudget key.Binding
-	Rename     key.Binding
+	SelectUp    key.Binding
+	SelectDown  key.Binding
+	FoldLeft    key.Binding
+	FoldRight   key.Binding
+	Commit      key.Binding
+	NewAgent    key.Binding
+	EndAgent    key.Binding
+	Resume      key.Binding
+	EditBudget  key.Binding
+	Rename      key.Binding
+	Fork        key.Binding
+	Tag         key.Binding
+	SwitchModel key.Binding
 
 	// Any pane: return to input.
 	Escape key.Binding
@@ -234,6 +237,17 @@ func defaultKeyMap() keyMap {
 
 		// Capital R: lowercase r is Resume.
 		Rename: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rename")),
+		// Fork opens the create form pointed at the selected child's history:
+		// the new conversation borrows everything up to the fork point, and
+		// both conversations keep running.
+		Fork: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "fork")),
+		// Tag pins a named, forkable handle to the child's last completed
+		// turn (`rafiki create --from-tag` resolves it later).
+		Tag: key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tag")),
+		// Capital M, like capital R: the switch CLOSES the old conversation
+		// once the fork lands, so it carries the heavier capitals. Lowercase
+		// letters are the read-only rail actions.
+		SwitchModel: key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "switch model")),
 
 		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back to input")),
 	}

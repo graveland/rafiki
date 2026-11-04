@@ -419,3 +419,180 @@ func killChildren(t *testing.T, client rafikiv1connect.ControlClient, ids ...str
 		_, _ = client.Kill(ctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: id}))
 	}
 }
+
+// TestCLIModelsSwitchForksClosesAndRenames runs `rafiki models switch` end to
+// end against a real daemon: the switched conversation is a NEW child on the
+// new model whose history is the source's, the source is closed, and the new
+// child answers to the source's name — the clone-path model switch, with the
+// routing pin replayed so an operator's steering survives.
+func TestCLIModelsSwitchForksClosesAndRenames(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	seat := newForkSeat(t)
+	d := forkDaemon(t, seat)
+	client := d.connectClient()
+
+	name := "switchme-" + uniqueSuffix()
+	// A coordinator above the source, so the test pins the part the CLI and
+	// TUI compositions must carry: a SUBAGENT's switch stays under its
+	// coordinator (rafiki/parent copied, rename judged against the same
+	// sibling set).
+	coord, err := forkSpawn(t, client, "", &rafikiv1.SpawnRequest{
+		Cwd:   "/tmp",
+		Kind:  protocol.KindFundi,
+		Model: "fakeor/mini",
+		Name:  "coord-" + uniqueSuffix(),
+	})
+	c.Require().NoError(err, "spawn the coordinator")
+	a, err := forkSpawn(t, client, "", &rafikiv1.SpawnRequest{
+		Cwd:           "/tmp",
+		Kind:          protocol.KindFundi,
+		Model:         "fakeor/mini",
+		Name:          name,
+		ParentChildId: coord,
+	})
+	c.Require().NoError(err, "spawn the source child under the coordinator")
+
+	aPrompt := "alpha-" + uniqueSuffix()
+	sendPrompt(t, client, a, aPrompt)
+	seat.waitForRequests(t, 1, 60*time.Second)
+	waitAssistantTurn(t, client, a, "done", 30*time.Second)
+
+	// An operator pin set BEFORE the switch; the new child must inherit it.
+	rtCtx, rtCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer rtCancel()
+	if _, err := client.SetRouting(rtCtx, connect.NewRequest(&rafikiv1.SetRoutingRequest{
+		ChildId: a,
+		Delta:   "sort=price",
+	})); err != nil {
+		t.Fatalf("set routing on the source: %v", err)
+	}
+
+	out, err := cliCmd(t, d, "models", "switch", name, "fakeor/mini").CombinedOutput()
+	c.NoError(err, "models switch failed: %v\noutput: %s", err, out)
+
+	// The renamed survivor: a child answering to the source's name that is
+	// NOT the source. The rename rides the switch's own RPCs, so a short poll
+	// absorbs the close-before-rename ordering.
+	newID := ""
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, ch := range listChildren(t, client) {
+			if ch.GetName() == name && ch.GetChildId() != a {
+				newID = ch.GetChildId()
+			}
+		}
+		if newID != "" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	c.NotEq("", newID, "no child inherited the source's name %q; output: %s", name, out)
+
+	// The survivor carries the borrowed history, the new model and the pin.
+	got := userTexts(getHistoryEvents(t, client, newID))
+	c.EqDiff([]string{aPrompt}, got, "the switched child's history is not the source's")
+
+	rtCtx2, rtCancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer rtCancel2()
+	get, err := client.GetChild(rtCtx2, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: newID}))
+	c.Require().NoError(err, "get the switched child")
+	c.StrContains(get.Msg.GetChild().GetModel(), "fakeor/mini", "the switched child is not on the requested model")
+	c.StrContains(get.Msg.GetChild().GetRouting(), "sort=price", "the source's routing pin did not survive the switch")
+	// Provenance: the daemon stamps rafiki/forked-from at spawn, which is
+	// what `rafiki get`/`list` render in the FORKED FROM column.
+	c.Eq(a, get.Msg.GetChild().GetLabels()["rafiki/forked-from"],
+		"the switched child must name its source in rafiki/forked-from")
+	// And the switch keeps the subagent under its coordinator: dropping the
+	// parent would move it out of the coordinator's lineage and rename it
+	// against the wrong sibling set.
+	c.Eq(coord, get.Msg.GetChild().GetLabels()["rafiki/parent"],
+		"the switched child must stay under the source's coordinator")
+
+	// The source is gone from the live list (closed, not merely stopped).
+	for _, ch := range listChildren(t, client) {
+		c.NotEq(a, ch.GetChildId(), "the source child is still listed after the switch")
+	}
+
+	killChildren(t, client, newID)
+}
+
+// TestCLITagVerbsAndForkFromCreate drives the CLIENT surfaces the fork work
+// added: `rafiki tag add/list/rm`, and `rafiki create --fork-from` producing a
+// child whose durable history is the source's. The daemon's fork machinery is
+// pinned by TestForkEndToEndBorrowsHistory; this pins the CLI wiring in front
+// of it, execing the real binary like every CLI test here.
+func TestCLITagVerbsAndForkFromCreate(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	seat := newForkSeat(t)
+	d := forkDaemon(t, seat)
+	client := d.connectClient()
+
+	name := "cli-fork-src-" + uniqueSuffix()
+	a, err := forkSpawn(t, client, "", &rafikiv1.SpawnRequest{
+		Cwd:   "/tmp",
+		Kind:  protocol.KindFundi,
+		Model: "fakeor/mini",
+		Name:  name,
+	})
+	c.Require().NoError(err, "spawn the source child")
+	aPrompt := "alpha-" + uniqueSuffix()
+	sendPrompt(t, client, a, aPrompt)
+	seat.waitForRequests(t, 1, 60*time.Second)
+	waitAssistantTurn(t, client, a, "done", 30*time.Second)
+
+	// add → list shows it; the name resolves for fork time.
+	out, err := cliCmd(t, d, "tag", "add", name, "checkpoint-"+uniqueSuffix()).CombinedOutput()
+	c.NoError(err, "tag add failed: %v\noutput: %s", err, out)
+
+	tagName := ""
+	for _, row := range listTags(t, client) {
+		if strings.HasPrefix(row.GetName(), "checkpoint-") {
+			tagName = row.GetName()
+		}
+	}
+	c.Require().NotEq("", tagName, "the created tag is listed")
+
+	// --fork-from through the real create: the new child borrows the source's
+	// history, which is the proof the flag reached the wire request.
+	// --no-local-executor: this daemon runs with its executor pool disabled
+	// (forkDaemon), so the create pre-flight must not try to join this
+	// machine as a workspace — the direct-RPC spawns above prove the
+	// daemon's own fallback hosts the child.
+	out, err = cliCmd(t, d, "create", "-d", "--no-local-executor", "--fork-from", name, "--model", "fakeor/mini").CombinedOutput()
+	c.NoError(err, "create --fork-from failed: %v\noutput: %s", err, out)
+
+	// The create output IS the record ("childId: c_..."), so the assertion
+	// targets the child this invocation made rather than scanning every row
+	// the shared test database holds — other tests run in parallel, and their
+	// children are none of this one's business.
+	newID := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		if id, ok := strings.CutPrefix(strings.TrimSpace(line), "childId: "); ok {
+			newID = strings.TrimSpace(id)
+		}
+	}
+	c.Require().NotEq("", newID, "create printed no childId; output: %s", out)
+
+	// rm tombstones by name; the name no longer resolves anywhere.
+	out, err = cliCmd(t, d, "tag", "rm", tagName).CombinedOutput()
+	c.NoError(err, "tag rm failed: %v\noutput: %s", err, out)
+	for _, row := range listTags(t, client) {
+		c.NotEq(tagName, row.GetName(), "the tag survives its rm")
+	}
+
+	killChildren(t, client, a, newID)
+}
+
+// listTags returns the live tags visible to the socket's local trust.
+func listTags(t *testing.T, client rafikiv1connect.ControlClient) []*rafikiv1.TagRow {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := client.ListTags(ctx, connect.NewRequest(&rafikiv1.ListTagsRequest{}))
+	if err != nil {
+		t.Fatalf("list tags: %v", err)
+	}
+	return resp.Msg.GetRows()
+}

@@ -336,18 +336,24 @@ func (c *Controller) visibleTag(ctx context.Context, pos tags.Position, t tags.T
 // calling child for a child credential and the fundi spawner sets it to
 // itself; a USER that names a parent therefore forks with that parent's
 // authority, which is deliberate — naming a parent is asking to act as one.
-func (c *Controller) resolveFork(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (string, error) {
+//
+// The second return is the SOURCE child id, the provenance the spawn stamps
+// as the rafiki/forked-from label: for fork_from it is the child the caller
+// named, for from_tag the child whose conversation the winning tag's node
+// belongs to (SourceChildID — a MOVED tag keeps the node's child, not the
+// mover's).
+func (c *Controller) resolveFork(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (nodeID, sourceChild string, err error) {
 	if req.ForkFrom == nil && req.FromTag == "" {
-		return "", nil
+		return "", "", nil
 	}
 	if req.ForkFrom != nil && req.FromTag != "" {
-		return "", &connectapi.ControllerError{
+		return "", "", &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "fork_from and from_tag are mutually exclusive",
 		}
 	}
 	if req.Kind != protocol.KindFundi {
-		return "", &connectapi.ControllerError{
+		return "", "", &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "a fork runs as kind=fundi; claude and script children cannot be forked to",
 		}
@@ -356,50 +362,56 @@ func (c *Controller) resolveFork(ctx context.Context, req protocol.SpawnRequest,
 	if req.ForkFrom != nil {
 		src, err := c.forkSource(ctx, req.ForkFrom.ChildID)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if !c.mayRead(ctx, owner, callerChildID, src) {
-			return "", notVisibleErr(req.ForkFrom.ChildID)
+			return "", "", notVisibleErr(req.ForkFrom.ChildID)
 		}
 		if src.ConversationID == "" {
-			return "", noConversationErr(src.ChildID)
+			return "", "", noConversationErr(src.ChildID)
 		}
-		return c.forkNode(ctx, src.ConversationID, req.ForkFrom.Cursor)
+		node, err := c.forkNode(ctx, src.ConversationID, req.ForkFrom.Cursor)
+		return node, src.ChildID, err
 	}
-	return c.resolveTagFork(ctx, owner, callerChildID, req.FromTag)
+	tag, err := c.resolveTagFork(ctx, owner, callerChildID, req.FromTag)
+	if err != nil {
+		return "", "", err
+	}
+	return tag.NodeID, tag.SourceChildID, nil
 }
 
 // resolveTagFork picks the nearest tag named name that the caller may fork
 // from: lineage before tree before owner, and nearest root first within
 // lineage. A name that resolves to nothing — foreign, out of scope or
-// unknown — answers the ONE permission-denied text.
-func (c *Controller) resolveTagFork(ctx context.Context, owner users.Identity, callerChildID, name string) (string, error) {
+// unknown — answers the ONE permission-denied text. The winning tag is
+// returned whole: its node is the fork point and its child the provenance.
+func (c *Controller) resolveTagFork(ctx context.Context, owner users.Identity, callerChildID, name string) (tags.Tag, error) {
 	if c.tagStore == nil {
-		return "", tagUnavailableErr()
+		return tags.Tag{}, tagUnavailableErr()
 	}
 	pos, err := c.position(ctx, callerChildID)
 	if err != nil {
-		return "", err
+		return tags.Tag{}, err
 	}
 	candidates, err := c.tagStore.ByName(ctx, owner.UserID, name)
 	if err != nil {
-		return "", err
+		return tags.Tag{}, err
 	}
 	inScope := make([]tags.Tag, 0, len(candidates))
 	for _, t := range candidates {
 		ok, err := c.visibleTag(ctx, pos, t)
 		if err != nil {
-			return "", err
+			return tags.Tag{}, err
 		}
 		if ok {
 			inScope = append(inScope, t)
 		}
 	}
 	if len(inScope) == 0 {
-		return "", &connectapi.ControllerError{
+		return tags.Tag{}, &connectapi.ControllerError{
 			Code:    protocol.ErrPermissionDenied,
 			Message: fmt.Sprintf("tag %q is not visible to you", name),
 		}
 	}
-	return tags.Rank(inScope, pos)[0].NodeID, nil
+	return tags.Rank(inScope, pos)[0], nil
 }

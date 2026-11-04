@@ -102,7 +102,7 @@ func renderList(w io.Writer, children []*rafikiv1.ChildSummary, mode outputMode,
 	}
 
 	tb := table.New(w, table.Options{Color: useColor})
-	tb.Header(dimHeader(useColor, "ID", "NAME", "KIND", "STATUS", "PROVIDER", "MODEL", "COST", "TOTAL", "CWD", "STARTED", "LABELS")...)
+	tb.Header(dimHeader(useColor, "ID", "NAME", "KIND", "STATUS", "PROVIDER", "MODEL", "COST", "TOTAL", "CWD", "STARTED", "FORKED FROM", "LABELS")...)
 
 	treeRows := sortChildrenAsTree(children)
 	if flat {
@@ -139,6 +139,10 @@ func renderList(w io.Writer, children []*rafikiv1.ChildSummary, mode outputMode,
 			costfmt.Format(total, cur),
 			defaultDash(shortenCwd(ch.GetCwd())),
 			started,
+			// Fork provenance rides the daemon's own rafiki/forked-from
+			// label (stamped at spawn, invisible to formatLabels); the
+			// conversation's fork edge holds the precise node.
+			defaultDash(ch.GetLabels()["rafiki/forked-from"]),
 			formatLabels(ch.GetLabels(), 40, false),
 		)
 	}

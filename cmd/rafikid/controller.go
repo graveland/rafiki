@@ -2240,7 +2240,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// refusal starts no process. The node rides the child's session from this
 	// point on, which is what makes moving a tag unreachable from an existing
 	// fork and a resume a plain reopen of the conversation the fork created.
-	forkFromNodeID, err := c.resolveFork(ctx, req, owner)
+	forkFromNodeID, forkSourceChild, err := c.resolveFork(ctx, req, owner)
 	if err != nil {
 		return protocol.SpawnResponseData{}, err
 	}
@@ -2581,6 +2581,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	}
 	if req.ResumedFromSession != "" {
 		initLabels["rafiki/resumed-from-session"] = req.ResumedFromSession
+	}
+	// Where this conversation came from: the fork's source child, daemon-written
+	// at spawn only (like rafiki/routing; resume keeps the label the original
+	// spawn set). The node itself lives on the conversation's immutable fork
+	// edge; the label is the human-readable arm — what `rafiki get` shows and
+	// what an audit joins on.
+	if forkSourceChild != "" {
+		initLabels["rafiki/forked-from"] = forkSourceChild
 	}
 	if parentLabel != "" {
 		initLabels[childstore.LabelParent] = parentLabel

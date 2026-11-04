@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
@@ -42,6 +44,14 @@ const statusShuttingDown = "shutting_down"
 type spawnedMsg struct {
 	childID string
 	err     error
+	// switchSource, when set, marks this spawn as a model SWITCH's first step:
+	// the follow-up closes that child and renames childID into its name.
+	switchSource string
+	// sourceName/sourceRouting carry what the switch follow-up needs, read
+	// from the source BEFORE it closes (the rename target, and the routing
+	// spec to replay onto the new child).
+	sourceName    string
+	sourceRouting string
 }
 
 type killedMsg struct {
@@ -173,6 +183,12 @@ func (c *Cockpit) buildSpawnRequest(p spawnParams) *rafikiv1.SpawnRequest {
 		MaxCost: p.maxCost,
 		Preset:  p.preset,
 	}
+	if p.forkFrom != nil {
+		req.ForkFrom = &rafikiv1.SpawnRequest_ForkFrom{
+			ChildId: p.forkFrom.ChildID,
+			Cursor:  p.forkFrom.Cursor,
+		}
+	}
 	switch {
 	case p.executor != "":
 		req.ExecutorRef = p.executor
@@ -198,6 +214,127 @@ func (c *Cockpit) spawnCmd(p spawnParams) tea.Cmd {
 		}
 		return spawnedMsg{childID: resp.Msg.GetChildId()}
 	}
+}
+
+// switchSpawnCmd is a model switch's FIRST step: read the source child (its
+// name, labels and routing spec — everything the follow-up needs that must be
+// read BEFORE the source closes), then spawn the fork the form described with
+// the source's user labels carried over.
+//
+// One goroutine, two RPCs, one message: the form's busy state spans both, and
+// applySpawned takes the switch follow-up from here.
+func (c *Cockpit) switchSpawnCmd(p spawnParams) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
+		defer cancel()
+
+		get, err := c.client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: p.switchSource}))
+		if err != nil {
+			return spawnedMsg{err: err, switchSource: p.switchSource}
+		}
+		src := get.Msg.GetChild()
+
+		req := c.buildSpawnRequest(p)
+		// A switch is "same conversation, new model": the source's cwd and
+		// parent win over the form's, and a blank max-cost row carries the
+		// source's cap rather than reading as unlimited (matching the CLI's
+		// --max-cost-unset behaviour). A parented source STAYS parented —
+		// dropping the parent would move the switch out of the coordinator's
+		// lineage and rename it against the wrong sibling set.
+		if srcCwd := src.GetCwd(); srcCwd != "" {
+			req.Cwd = srcCwd
+		}
+		// ParentLabel honours the pre-rename fundi/parent spelling, the
+		// same fallback Rename and the lineage reads use.
+		if parent, ok := childstore.ParentLabel(src.GetLabels()); ok {
+			req.ParentChildId = parent
+		}
+		if req.MaxCost == nil && src.MaxCost != nil {
+			req.MaxCost = src.MaxCost
+		}
+		labels := map[string]string{}
+		for k, v := range src.GetLabels() {
+			// Only USER labels carry over: rafiki/ and fundi/ are daemon
+			// namespaces, and "owner" is reserved outright (it feeds executor
+			// admission selectors) — spawning with any of them is refused.
+			if strings.HasPrefix(k, "rafiki/") || strings.HasPrefix(k, "fundi/") || k == "owner" {
+				continue
+			}
+			labels[k] = v
+		}
+		req.Labels = labels
+
+		resp, err := c.client.Spawn(ctx, connect.NewRequest(req))
+		if err != nil {
+			return spawnedMsg{err: err, switchSource: p.switchSource}
+		}
+		return spawnedMsg{
+			childID:       resp.Msg.GetChildId(),
+			switchSource:  p.switchSource,
+			sourceName:    src.GetName(),
+			sourceRouting: src.GetRouting(),
+		}
+	}
+}
+
+// switchFinishCmd is a model switch's SECOND step, run only after the fork
+// spawned: stop the source (Close refuses a live child), close it, rename the
+// new child into the source's name, and replay the source's routing spec so
+// an operator's provider pins survive the switch. The order is forced by the
+// live-sibling name rule: the name is held until the close lands, so rename
+// comes last. The source's subagents are left running — switching one child
+// must not close a tree (a deliberate --descendants choice exists on the CLI
+// verb only).
+//
+// A failure stops the chain and names the step; both conversations exist.
+// Nothing here is re-runnable by repeating the SWITCH — that would spawn a
+// second fork — but each remaining step is a single RPC the notice names.
+func (c *Cockpit) switchFinishCmd(source, newID, name, routing string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
+		defer cancel()
+
+		// Close refuses a child that is not exited, so the source is stopped
+		// first; "already exited" is the ordinary case for a switched child
+		// and is tolerated, exactly as the cockpit's own end-agent path does.
+		if _, err := c.client.Kill(ctx, connect.NewRequest(&rafikiv1.KillRequest{
+			ChildId: source,
+			Scope:   rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY,
+		})); err != nil && rpcreason.Reason(err) != protocol.ErrChildExited {
+			return switchedMsg{source: source, newID: newID, err: fmt.Errorf("stop %s: %w", source, err)}
+		}
+		if _, err := c.client.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{
+			ChildId: source,
+			Scope:   rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY,
+		})); err != nil {
+			return switchedMsg{source: source, newID: newID, err: fmt.Errorf("close %s: %w", source, err)}
+		}
+		if name != "" {
+			if _, err := c.client.Rename(ctx, connect.NewRequest(&rafikiv1.RenameRequest{
+				ChildId: newID,
+				Name:    name,
+			})); err != nil {
+				return switchedMsg{source: source, newID: newID, err: fmt.Errorf("rename %s: %w", newID, err)}
+			}
+		}
+		if routing != "" {
+			if _, err := c.client.SetRouting(ctx, connect.NewRequest(&rafikiv1.SetRoutingRequest{
+				ChildId: newID,
+				Delta:   routing,
+			})); err != nil {
+				return switchedMsg{source: source, newID: newID, name: name, err: fmt.Errorf("routing %s: %w", newID, err)}
+			}
+		}
+		return switchedMsg{source: source, newID: newID, name: name}
+	}
+}
+
+// switchedMsg reports a model switch's second step.
+type switchedMsg struct {
+	source string
+	newID  string
+	name   string
+	err    error
 }
 
 // killCmd ends a child. force asks the daemon to escalate immediately instead

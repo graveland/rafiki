@@ -76,7 +76,7 @@ func TestTagNonCreatorInScopeCanForkButNotMove(t *testing.T) {
 	// parent: its child is in scope but is neither the creator nor an ancestor
 	// of it.
 	created := f.createTag(t, tagCaller(f.owner, l.parent), connectapi.TagInput{Name: name, ChildID: l.parent})
-	node, err := f.ctrl.resolveFork(ctx, forkRequest(l.child, nil, name), users.Identity{UserID: f.owner})
+	node, _, err := f.ctrl.resolveFork(ctx, forkRequest(l.child, nil, name), users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "an in-scope non-creator may fork from the tag")
 	ck.Eq(created.NodeID, node, "the tag's node")
 
@@ -153,7 +153,7 @@ func TestTagShadowingLineageBeatsTreeBeatsOwner(t *testing.T) {
 		{treeTag.TagID, nodes[1].ID, "tree is next"},
 		{ownerTag.TagID, nodes[2].ID, "owner is last"},
 	} {
-		got, err := f.ctrl.resolveFork(ctx, forkRequest(l.child, nil, name), users.Identity{UserID: f.owner})
+		got, _, err := f.ctrl.resolveFork(ctx, forkRequest(l.child, nil, name), users.Identity{UserID: f.owner})
 		ck.Require().NoError(err, want.label)
 		ck.Eq(want.nodeID, got, want.label)
 		ck.Require().NoError(f.manager().Untag(ctx, caller, want.drop), "untag %s", want.label)
@@ -170,7 +170,7 @@ func TestTagTreeScopeVisibleToCousin(t *testing.T) {
 	created := f.createTag(t, tagCaller(f.owner, l.child), connectapi.TagInput{
 		Name: name, ChildID: l.child, Scope: tags.ScopeTree,
 	})
-	node, err := f.ctrl.resolveFork(ctx, forkRequest(l.sibling, nil, name), users.Identity{UserID: f.owner})
+	node, _, err := f.ctrl.resolveFork(ctx, forkRequest(l.sibling, nil, name), users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "a cousin in the same tree is in scope")
 	ck.Eq(created.NodeID, node, "the tree tag's node")
 }
@@ -181,7 +181,7 @@ func TestTagLineageScopeNotVisibleToSibling(t *testing.T) {
 	name := uniqueForkName("lineage")
 	f.createTag(t, tagCaller(f.owner, l.child), connectapi.TagInput{Name: name, ChildID: l.child})
 
-	_, err := f.ctrl.resolveFork(context.Background(), forkRequest(l.sibling, nil, name),
+	_, _, err := f.ctrl.resolveFork(context.Background(), forkRequest(l.sibling, nil, name),
 		users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrPermissionDenied,
 		fmt.Sprintf("tag %q is not visible to you", name))
@@ -197,14 +197,14 @@ func TestTagUserWithoutParentSeesOwnerScopeOnly(t *testing.T) {
 	user := tagCaller(f.owner, "")
 
 	f.createTag(t, user, connectapi.TagInput{Name: name, ChildID: self, Cursor: cursorAt(nodes[0])})
-	_, err := f.ctrl.resolveFork(ctx, forkRequest("", nil, name), users.Identity{UserID: f.owner})
+	_, _, err := f.ctrl.resolveFork(ctx, forkRequest("", nil, name), users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrPermissionDenied,
 		fmt.Sprintf("tag %q is not visible to you", name))
 
 	ownerTag := f.createTag(t, user, connectapi.TagInput{
 		Name: name, ChildID: self, Scope: tags.ScopeOwner, Cursor: cursorAt(nodes[1]),
 	})
-	node, err := f.ctrl.resolveFork(ctx, forkRequest("", nil, name), users.Identity{UserID: f.owner})
+	node, _, err := f.ctrl.resolveFork(ctx, forkRequest("", nil, name), users.Identity{UserID: f.owner})
 	ck.Require().NoError(err, "a user with no parent resolves the owner-scope tag")
 	ck.Eq(ownerTag.NodeID, node, "the owner-scope tag's node")
 }
@@ -235,8 +235,8 @@ func TestTagCrossOwnerResolutionIsIdenticalPermissionDenied(t *testing.T) {
 	ck.Require().NoError(err, "create the other owner")
 	unknown := uniqueForkName("nobody")
 
-	_, foreignErr := f.ctrl.resolveFork(ctx, forkRequest("", nil, name), users.Identity{UserID: other.ID})
-	_, unknownErr := f.ctrl.resolveFork(ctx, forkRequest("", nil, unknown), users.Identity{UserID: other.ID})
+	_, _, foreignErr := f.ctrl.resolveFork(ctx, forkRequest("", nil, name), users.Identity{UserID: other.ID})
+	_, _, unknownErr := f.ctrl.resolveFork(ctx, forkRequest("", nil, unknown), users.Identity{UserID: other.ID})
 	// The two texts differ only in the name the caller itself supplied, so it
 	// learns nothing about which tags exist: one template answers both.
 	requireExactControllerError(t, foreignErr, protocol.ErrPermissionDenied,

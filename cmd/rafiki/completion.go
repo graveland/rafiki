@@ -34,6 +34,12 @@ type completionSkill struct {
 	Name      string `json:"name"`
 }
 
+// completionTag is the slice of a TagRow completion uses.
+type completionTag struct {
+	TagID string `json:"tagId"`
+	Name  string `json:"name"`
+}
+
 // skillCacheTTL and userCacheTTL mirror childCacheTTL. Both mutate rarely,
 // but nothing drops their entries on a mutation — `rafiki skills rm` and
 // `rafiki user rm` change daemon state no completion verb observes — so a
@@ -45,6 +51,7 @@ type completionSkill struct {
 const (
 	skillCacheTTL = childCacheTTL
 	userCacheTTL  = childCacheTTL
+	tagCacheTTL   = childCacheTTL
 )
 
 // completionEndpointKey names the endpoint a cached answer came from, so two
@@ -244,4 +251,55 @@ func completionUserNames(cmd *cobra.Command) []string {
 	}
 	cacheWrite("users", completionEndpointKey(cmd), out)
 	return out
+}
+
+// completionTags returns the caller's visible live tags, cached like the
+// child and skill lists. Nothing drops the entry on a mutation except this
+// repo's own tag verbs (see dropTagCompletionCache), so the TTL bounds only
+// another actor's change.
+//
+// Every failure yields no candidates: a completion handler must never exit,
+// never block past completionDeadline, and never print.
+func completionTags(cmd *cobra.Command) []completionTag {
+	var out []completionTag
+	if cacheRead("tags", completionEndpointKey(cmd), tagCacheTTL, &out) {
+		return out
+	}
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return nil // remote with no token: a 401 is the only possible outcome
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), completionDeadline)
+	defer cancel()
+
+	resp, err := ep.control().ListTags(ctx,
+		connect.NewRequest(&rafikiv1.ListTagsRequest{}))
+	if err != nil {
+		return nil
+	}
+	out = make([]completionTag, 0, len(resp.Msg.GetRows()))
+	for _, t := range resp.Msg.GetRows() {
+		out = append(out, completionTag{TagID: t.GetTagId(), Name: t.GetName()})
+	}
+	cacheWrite("tags", completionEndpointKey(cmd), out)
+	return out
+}
+
+// dropTagCompletionCache invalidates the tag cache. Called by every verb that
+// changes the tag set — tag add, tag move, tag rm.
+func dropTagCompletionCache(cmd *cobra.Command) {
+	cacheDrop("tags", completionEndpointKey(cmd))
+}
+
+// completeTagNames offers visible tag names, for --from-tag and `rafiki tag`
+// positionals. Name collisions across scopes resolve nearest-first at fork
+// time, so offering the bare name is what a caller wants.
+func completeTagNames(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	var out []string
+	for _, t := range completionTags(cmd) {
+		if strings.HasPrefix(t.Name, toComplete) {
+			out = append(out, t.Name)
+		}
+	}
+	return out, cobra.ShellCompDirectiveNoFileComp
 }

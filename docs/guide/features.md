@@ -85,6 +85,16 @@
   the Connect API directly can all observe or steer the same conversation at
   once — the event log fans out to every subscriber, and any number of them
   can replay a child's history from an ordinal.
+- **Forks, tags, and switching a conversation's model.** A new agent can start
+  from a point in another agent's history — `rafiki create --fork-from
+  <child[@m:N]>` or `--from-tag <name>`, cockpit `f`/`t` on the rail —
+  borrowing it through an immutable edge instead of copying it. Because a
+  child's model resolves once at spawn, changing a conversation's model is a
+  fork too: `rafiki models switch <child> <model>` (cockpit `M`) spawns the
+  fork on the new model — cross-provider included, claude conversation to an
+  OpenRouter id — then closes the source and renames the fork into its name,
+  so the rail reads "same conversation, new model" while the old one stays
+  queryable one fork edge behind.
 - **Conversation review** — an LLM-driven pass over your own captured history
   that detects skill gaps and triages findings, on demand
   (`rafiki conversations review`) or automatically on close (`rafiki close

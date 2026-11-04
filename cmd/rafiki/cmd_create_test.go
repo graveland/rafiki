@@ -795,3 +795,119 @@ func TestCreateFormDefaultsLeaveAnUndeclaredBudgetNil(t *testing.T) {
 	assert.NewAborting(t).Nil(createFormDefaults(protocol.SpawnRequest{}).MaxCost,
 		"an undeclared MaxCost must stay nil, not become 0")
 }
+
+func TestParseForkFromFlag(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	// Bare child: empty cursor = last completed turn.
+	ff, err := parseForkFromFlag("c_01ABC")
+	c.Require().NoError(err)
+	c.EqDiff(protocol.ForkFrom{ChildID: "c_01ABC"}, *ff, "bare child")
+
+	// Cursor spellings the daemon's parseForkCursor accepts: an ordinal and
+	// the message-within-row form, which a fork ignores the tail of.
+	ff, err = parseForkFromFlag("c_01ABC@m:42")
+	c.Require().NoError(err)
+	c.EqDiff(protocol.ForkFrom{ChildID: "c_01ABC", Cursor: "m:42"}, *ff, "ordinal cursor")
+
+	ff, err = parseForkFromFlag("c_01ABC@m:42.3")
+	c.Require().NoError(err)
+	c.EqDiff(protocol.ForkFrom{ChildID: "c_01ABC", Cursor: "m:42.3"}, *ff, "sub-message cursor")
+
+	// Empty is no fork at all, not an error — the flag is optional.
+	ff, err = parseForkFromFlag("")
+	c.Require().NoError(err)
+	c.Eq(true, ff == nil, "empty flag must parse to nil")
+
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"@m:3", "child"},                 // no child id
+		{"c_01ABC@", "cursor"},            // @ with nothing after
+		{"c_01ABC@12", "m:<ordinal>"},     // missing the m: prefix
+		{"c_01ABC@m:", "m:<ordinal>"},     // prefix with no ordinal
+		{"c_01ABC@m:x", "m:<ordinal>"},    // not a number
+		{"c_01ABC@m:1.2x", "m:<ordinal>"}, // sub-message not a number
+		{"c_01ABC@m:x.2", "m:<ordinal>"},  // ordinal not a number
+	} {
+		_, err := parseForkFromFlag(tc.in)
+		c.NotEq(nil, err, "parseForkFromFlag(%q) must refuse", tc.in)
+		c.StrContains(err.Error(), tc.want, "refusal for %q names the shape", tc.in)
+	}
+}
+
+// A --fork-from spawn is a statement of intent on the wire: ForkFrom rides
+// the request and the kind is forced to fundi when it merely RESOLVED to
+// something else (a profile's or remembered kind), while an explicitly typed
+// non-fundi --kind is refused rather than silently overridden.
+func TestBuildSpawnRequest_ForkFromForcesFundi(t *testing.T) {
+	c := assert.NewCollecting(t)
+	isolateProfiles(t)
+
+	cmd := newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("fork-from", "c_01ABC@m:7"))
+
+	req, err := buildSpawnRequest(cmd, nil)
+	c.Require().NoError(err)
+	c.Require().NotNil(req.ForkFrom, "ForkFrom must ride the request")
+	c.EqDiff(protocol.ForkFrom{ChildID: "c_01ABC", Cursor: "m:7"}, *req.ForkFrom, "ForkFrom")
+	c.Eq(protocol.KindFundi, req.Kind, "a fork's kind is fundi whatever resolved")
+
+	// Explicit kind conflict: refused, naming the flag.
+	cmd = newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("fork-from", "c_01ABC"))
+	c.Require().NoError(cmd.Flags().Set("kind", "claude"))
+	_, err = buildSpawnRequest(cmd, nil)
+	c.NotEq(nil, err, "an explicit --kind claude with --fork-from must be refused")
+	c.StrContains(err.Error(), "--kind", "the refusal names the conflicting flag")
+
+	// fork_session (--fork, the claude session.jsonl path) and a conversation
+	// fork are different mechanisms: combining them is a user error.
+	cmd = newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("fork-from", "c_01ABC"))
+	c.Require().NoError(cmd.Flags().Set("fork", "/tmp/s.jsonl"))
+	_, err = buildSpawnRequest(cmd, nil)
+	c.NotEq(nil, err, "--fork-from with --fork must be refused")
+
+	// Same for --from-tag, and the two fork spellers are mutually exclusive.
+	cmd = newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("fork-from", "c_01ABC"))
+	c.Require().NoError(cmd.Flags().Set("from-tag", "release"))
+	_, err = buildSpawnRequest(cmd, nil)
+	c.NotEq(nil, err, "--fork-from with --from-tag must be refused")
+
+	// A tag alone rides FromTag and forces the kind the same way.
+	cmd = newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("from-tag", "release"))
+	req, err = buildSpawnRequest(cmd, nil)
+	c.Require().NoError(err)
+	c.Eq("release", req.FromTag, "FromTag")
+	c.Eq(protocol.KindFundi, req.Kind, "a from-tag spawn is fundi too")
+}
+
+// The wire mapping: the client-assembled ForkFrom reaches the Connect request
+// field for field, and FromTag rides bare. This is the mirror of the daemon's
+// forkFromFromProto.
+func TestConnectSpawnRequestCarriesFork(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	out := connectSpawnRequest(protocol.SpawnRequest{
+		ForkFrom: &protocol.ForkFrom{ChildID: "c_01ABC", Cursor: "m:9"},
+		FromTag:  "release",
+	})
+	c.Require().NotNil(out.ForkFrom, "ForkFrom")
+	c.Eq("c_01ABC", out.ForkFrom.ChildId, "ForkFrom.ChildId")
+	c.Eq("m:9", out.ForkFrom.Cursor, "ForkFrom.Cursor")
+	c.Eq("release", out.FromTag, "FromTag")
+
+	// No fork: the pointer stays nil, which is what the daemon reads as none.
+	out = connectSpawnRequest(protocol.SpawnRequest{})
+	c.Eq(true, out.ForkFrom == nil, "absent fork must stay nil")
+	c.Eq("", out.FromTag, "absent tag must stay empty")
+}

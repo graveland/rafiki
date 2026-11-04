@@ -1874,6 +1874,36 @@ never deleted. Its fields are `tag_id`, `name`, `scope`, `scope_root`,
 the tag, and who wrote this row), `note`, and `created_at`/`superseded_at`/
 `deleted_at` (`Timestamp`s; both of the last unset on the live row).
 
+**Provenance.** The daemon stamps the fork's source child id as the
+`rafiki/forked-from` label at spawn (both entry points: for `fork_from` it is
+the child the caller named, for `from_tag` the child whose conversation the
+winning tag's node belongs to — `SourceChildID`, which a MOVED tag keeps). Daemon-written at spawn only, like `rafiki/routing` — a resume
+keeps the label the original spawn set — and it is what `rafiki get` and
+`rafiki list` render in their FORKED FROM column. The label names the CHILD;
+the conversation's immutable fork edge remains the authority on the node.
+
+**Client surfaces.** The CLI exposes all of this without new wire shapes:
+`rafiki create --fork-from <child|child@m:N>` / `--from-tag <name>` (kind
+forced to fundi; both refuse to combine with each other or with the claude
+session-file flags `--session`/`--fork`), `rafiki tag list|add|move|rm` over
+`ListTags`/`Tag`/`Untag` (`move` reads the tag's current node first and sends
+it as `expect_node_id`, hiding the CAS behind one command), and the cockpit's
+rail keys `f` (fork: the spawn form pointed at the selected child) and `t`
+(tag its last completed turn). **Changing the model a conversation runs on is
+a fork, not a field** — a child's model resolves once at spawn and no RPC
+changes it in place — so `rafiki models switch <child> <model>` and the
+cockpit's `M` compose the fork path: spawn a fundi fork of the source on the
+new model (carrying its cwd, parent, user labels and spend cap — the cap is
+per conversation, so the source's spend is not deducted), stop and close the
+source (Close refuses a live child), rename the new child into the source's
+name (that order is forced by the live-sibling name rule, §"Child names are
+unique among live siblings"), then replay the source's routing spec
+(`SetRouting`) so operator pins survive — a spec written for the old model
+may misroute on the new one, and a failed replay names itself without
+undoing the switch. The old conversation stays queryable at its old model,
+one fork edge behind; a mid-turn source loses the in-flight turn, since the
+fork starts from the last completed turn.
+
 ### Recall and memories (`Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `RecallBackfill`, `RecallStatus`)
 
 The eight recall verbs serve the recall index: `conversations.memory` (the

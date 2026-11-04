@@ -143,6 +143,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
 	cmd.Flags().String("session", "", "Resume an existing session.jsonl by path")
 	cmd.Flags().String("fork", "", "Fork from an existing session.jsonl by path")
+	cmd.Flags().String("fork-from", "", "Start from a point in another child's conversation history: <child> or <child>@m:<ordinal>; an empty cursor means its last completed turn (kind is forced to fundi)")
+	cmd.Flags().String("from-tag", "", "Start from the node a tag names (see `rafiki tag add`); kind is forced to fundi")
 	cmd.Flags().Bool("no-extensions", false, "Disable extension discovery")
 	cmd.Flags().StringSlice("extension", nil, "Load an extension (repeatable)")
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
@@ -184,6 +186,15 @@ func addSpawnFlags(cmd *cobra.Command) {
 	_ = cmd.RegisterFlagCompletionFunc("fork", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
 	})
+	_ = cmd.RegisterFlagCompletionFunc("fork-from", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		// Past the child id there is nothing to offer for cursors: they are
+		// ordinals read off a transcript, not names.
+		if strings.Contains(toComplete, "@") {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("from-tag", completeTagNames)
 	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
 	// Scoped to --kind: a claude child cannot resolve an OpenRouter slash id, and
 	// the fundi child cannot resolve one of claude's provider-local ids. Offering
@@ -205,6 +216,16 @@ func addSpawnFlags(cmd *cobra.Command) {
 			profileKind, profileName = p.Kind, p.Name
 		}
 		kind := resolveKind(flagKind, profileKind, clientstate.LastKindFor(profileName))
+		// A fork is the one statement that overrides a resolved kind (buildSpawnRequest
+		// forces fundi), so the candidates follow it — a remembered claude
+		// kind must not offer Anthropic-only ids for `create --fork-from`.
+		if kind != protocol.KindFundi {
+			if f, _ := c.Flags().GetString("fork-from"); f != "" {
+				kind = protocol.KindFundi
+			} else if t, _ := c.Flags().GetString("from-tag"); t != "" {
+				kind = protocol.KindFundi
+			}
+		}
 		return completeModel(c, kind, toComplete), cobra.ShellCompDirectiveNoFileComp
 	})
 	_ = cmd.RegisterFlagCompletionFunc("executor", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -400,6 +421,30 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	noSession, _ := cmd.Flags().GetBool("no-session")
 	resume, _ := cmd.Flags().GetString("session")
 	fork, _ := cmd.Flags().GetString("fork")
+	forkFromFlag, _ := cmd.Flags().GetString("fork-from")
+	fromTagFlag, _ := cmd.Flags().GetString("from-tag")
+	forkFrom, err := parseForkFromFlag(forkFromFlag)
+	if err != nil {
+		return protocol.SpawnRequest{}, err
+	}
+	if forkFrom != nil && fromTagFlag != "" {
+		return protocol.SpawnRequest{}, errors.New("--fork-from and --from-tag are mutually exclusive")
+	}
+	if (forkFrom != nil || fromTagFlag != "") && (resume != "" || fork != "") {
+		return protocol.SpawnRequest{}, errors.New("--fork-from/--from-tag cannot combine with --session/--fork: a conversation fork starts fresh, a claude session file resumes elsewhere")
+	}
+	// A conversation fork runs on the native runtime: only kind=fundi can be
+	// forked TO (the daemon refuses the rest). An explicitly typed --kind is a
+	// decision, so it is refused rather than silently overridden; a kind that
+	// merely RESOLVED to something else (profile or remembered) yields to the
+	// fork the caller declared, the same precedence --kind itself has over
+	// the remembered kind.
+	if (forkFrom != nil || fromTagFlag != "") && kind != protocol.KindFundi {
+		if flagKind != "" {
+			return protocol.SpawnRequest{}, fmt.Errorf("--fork-from/--from-tag fork into a kind=fundi child; drop --kind %s", flagKind)
+		}
+		kind = protocol.KindFundi
+	}
 	noExt, _ := cmd.Flags().GetBool("no-extensions")
 	exts, _ := cmd.Flags().GetStringSlice("extension")
 	verbose, _ := cmd.Flags().GetBool("verbose")
@@ -477,6 +522,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		RecordRequests:     recordRequests,
 		PassthroughAuth:    passthroughAuth,
 		SkipDerivedIndex:   skipDerivedIndex,
+		ForkFrom:           forkFrom,
+		FromTag:            fromTagFlag,
 		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;
 		// caller-forwarded vars win on duplicate keys.  This is what users
 		// usually want — SSH_AUTH_SOCK, *_API_KEY, GOOGLE_APPLICATION_CREDENTIALS,
@@ -583,6 +630,13 @@ func connectSpawnRequest(req protocol.SpawnRequest) *rafikiv1.SpawnRequest {
 		kids := int32(*req.MaxChildren)
 		out.MaxChildren = &kids
 	}
+	if req.ForkFrom != nil {
+		out.ForkFrom = &rafikiv1.SpawnRequest_ForkFrom{
+			ChildId: req.ForkFrom.ChildID,
+			Cursor:  req.ForkFrom.Cursor,
+		}
+	}
+	out.FromTag = req.FromTag
 	if req.Script != nil {
 		out.Script = &rafikiv1.SpawnRequest_ScriptSpec{
 			Repo:    req.Script.Repo,
@@ -599,6 +653,56 @@ func connectSpawnRequest(req protocol.SpawnRequest) *rafikiv1.SpawnRequest {
 		})
 	}
 	return out
+}
+
+// parseForkFromFlag parses --fork-from's "<child>" or "<child>@m:<ordinal>"
+// into a protocol.ForkFrom. The cursor shape matches what agent_view prints
+// and what the daemon's parseForkCursor accepts (m:<ordinal>, or
+// m:<ordinal>.<sub> where the sub names a message inside the row and is
+// ignored): validated here so a typo fails before any dial, but the ordinal
+// itself is the daemon's to judge — only it knows which nodes are completed
+// turns.
+func parseForkFromFlag(v string) (*protocol.ForkFrom, error) {
+	if v == "" {
+		return nil, nil
+	}
+	child, cursor, hasCursor := strings.Cut(v, "@")
+	child = strings.TrimSpace(child)
+	if child == "" {
+		return nil, fmt.Errorf("--fork-from must be <child> or <child>@m:<ordinal> (got %q)", v)
+	}
+	if !hasCursor {
+		return &protocol.ForkFrom{ChildID: child}, nil
+	}
+	cursor = strings.TrimSpace(cursor)
+	rest, ok := strings.CutPrefix(cursor, "m:")
+	if !ok || rest == "" {
+		return nil, fmt.Errorf("--fork-from cursor must look like m:<ordinal> (got %q)", cursor)
+	}
+	if i := strings.IndexByte(rest, '.'); i >= 0 {
+		if !allDigits(rest[i+1:]) {
+			return nil, fmt.Errorf("--fork-from cursor must look like m:<ordinal> (got %q)", cursor)
+		}
+		rest = rest[:i]
+	}
+	if !allDigits(rest) {
+		return nil, fmt.Errorf("--fork-from cursor must look like m:<ordinal> (got %q)", cursor)
+	}
+	return &protocol.ForkFrom{ChildID: child, Cursor: cursor}, nil
+}
+
+// allDigits reports whether s is non-empty and entirely ASCII digits, the
+// same shape the daemon's cursor parser demands.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // resolvePymoduleFlag parses --pymodule <repo>:<script> into a ScriptSpec.
@@ -817,6 +921,21 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	req.Prefill = prefillEntries
 
 	p := mustProfile(cmd)
+
+	// --fork-from accepts a child NAME for symmetry with every other
+	// child-target flag, but the daemon's fork authority is keyed by CHILD ID
+	// (forkSource reads the child store) — a name that reaches it answers the
+	// one "not visible" refusal. Resolve it here, where the endpoint already
+	// exists; the id form passes through untouched (resolveTargetConnect
+	// answers an id it cannot find rather than a second lookup, and a failed
+	// resolution refuses the spawn before anything is built).
+	if req.ForkFrom != nil && req.ForkFrom.ChildID != "" {
+		childID, err := resolveTargetConnect(cmdCtx(cmd), ctrl, p.Name, req.ForkFrom.ChildID, ep.describe)
+		if err != nil {
+			return fmt.Errorf("--fork-from: %w", err)
+		}
+		req.ForkFrom.ChildID = childID
+	}
 
 	// Resolve the named preset, if any, against the daemon: the daemon applies
 	// the preset's model, tools, prompt and budgets itself, so the request only

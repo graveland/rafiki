@@ -616,3 +616,19 @@ func TestFormatChildStatusMarksUnreachableDaraja(t *testing.T) {
 	gone := &rafikiv1.ChildSummary{Status: "exited", ExitCode: &code, Labels: map[string]string{darajaStateLabel: "unreachable"}}
 	ck.Eq("exited (0)", formatChildStatus(gone, false), "an exited child carries no unreachable note")
 }
+
+// The list/get table surfaces fork provenance: the daemon stamps
+// rafiki/forked-from at spawn, the FORKED FROM column reads it, and children
+// that are not forks render a dash there.
+func TestRenderList_ForkedFromColumn(t *testing.T) {
+	c := assert.NewAborting(t)
+	var buf bytes.Buffer
+	children := []*rafikiv1.ChildSummary{
+		{ChildId: "c_src", Name: "original", Labels: map[string]string{}},
+		{ChildId: "c_fork", Name: "second copy", Labels: map[string]string{"rafiki/forked-from": "c_src"}},
+	}
+	c.NoError(renderList(&buf, children, outputTable, false, false))
+	out := buf.String()
+	c.StrContains(out, "FORKED FROM", "header missing:\n%s", out)
+	c.StrContains(out, "c_src", "the fork's source id is missing:\n%s", out)
+}
