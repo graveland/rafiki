@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -56,6 +57,13 @@ type forkSeat struct {
 	// reads off the source's last turn_end, so a test that needs an
 	// OVER-WINDOW source raises it rather than growing the transcript.
 	inputTokens int64
+	// summary is the <summary> body a compaction call answers with; empty means
+	// the fixture default. The compaction RECORDS the size of what it leaves
+	// behind (this summary plus the verbatim tail), and that recorded number is
+	// what the post-compaction fit check compares against the destination
+	// window — so a test that needs the compacted result to be too big raises
+	// this rather than growing the transcript.
+	summary string
 }
 
 func newForkSeat(t *testing.T) *forkSeat {
@@ -72,6 +80,16 @@ func (s *forkSeat) reportUsage(n int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.inputTokens = n
+}
+
+// replySummaryWith sets the summary body a compaction call answers with. Its
+// LENGTH is the size the compaction records for the working set it leaves
+// behind, so a long summary is how a test makes the compacted result overflow a
+// small destination window.
+func (s *forkSeat) replySummaryWith(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.summary = text
 }
 
 // script makes the seat answer any request carrying marker with a tool_use
@@ -95,7 +113,7 @@ func (s *forkSeat) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.bodies = append(s.bodies, body)
-	marker, tool, input, usage := s.marker, s.tool, s.input, s.inputTokens
+	marker, tool, input, usage, summary := s.marker, s.tool, s.input, s.inputTokens, s.summary
 	s.mu.Unlock()
 	if usage == 0 {
 		usage = 10
@@ -108,7 +126,7 @@ func (s *forkSeat) handle(w http.ResponseWriter, r *http.Request) {
 		// the stream handler), so the reply must be a plain JSON Message, and
 		// it must carry a <summary> block or the compaction writes nothing and
 		// no boundary ever appears.
-		s.replySummary(w)
+		s.replySummary(w, summary)
 	case strings.Contains(text, `"tool_result"`):
 		s.replyText(w, "noted", usage)
 	case marker != "" && strings.Contains(text, marker):
@@ -119,8 +137,12 @@ func (s *forkSeat) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // replySummary answers a compaction summary call with a complete non-streaming
-// Messages response carrying a <summary> block.
-func (s *forkSeat) replySummary(w http.ResponseWriter) {
+// Messages response carrying a <summary> block. text is the summary body; empty
+// takes the fixture default.
+func (s *forkSeat) replySummary(w http.ResponseWriter, text string) {
+	if text == "" {
+		text = "handoff summary"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	body, _ := json.Marshal(map[string]any{
@@ -128,7 +150,7 @@ func (s *forkSeat) replySummary(w http.ResponseWriter) {
 		"type":        "message",
 		"role":        "assistant",
 		"model":       "mini",
-		"content":     []map[string]any{{"type": "text", "text": "<analysis>handoff</analysis><summary>handoff summary</summary>"}},
+		"content":     []map[string]any{{"type": "text", "text": "<analysis>handoff</analysis><summary>" + text + "</summary>"}},
 		"stop_reason": "end_turn",
 		"usage":       map[string]any{"input_tokens": 5, "output_tokens": 5},
 	})
@@ -207,6 +229,16 @@ const (
 	tinyForkWindow   = 1000
 	sourceForkTokens = 5000
 )
+
+// compactedStillTooBig is a summary body long enough that the compacted working
+// set — this summary plus the verbatim tail the compaction keeps beside it — is
+// still past tinyForkWindow. The compaction RECORDS that size on its summary
+// row, and the history read serves it as post_tokens, so this is the number the
+// post-compaction fit check refuses on. 8000 characters is ~2000 tokens: a
+// check that measured nothing would wave the fork through, and a check that fell
+// back to the text estimate of the rows AFTER the boundary would find none (a
+// /compact writes no assistant turn) and wave it through too.
+var compactedStillTooBig = strings.Repeat("handoff ", 1000)
 
 // writeForkProviders writes this file's providers fixture: the recording seat,
 // plus the tiny declared destination above. fakeor/mini — the model the sources
@@ -1028,5 +1060,126 @@ func TestCLICompactRefusalNamesBothNumbers(t *testing.T) {
 	c.StrContains(string(out), "--compact", "the refusal must say what to pass; output: %s", out)
 
 	c.EqDiff(before, childIDSet(t, client), "the refusal must not spawn a child")
+	killChildren(t, client, src)
+}
+
+// compactedSizeFromRefusal pulls the "(estimated N)" number out of the
+// post-compaction refusal. Asserting on it — rather than only on the sentence's
+// presence — is what makes the test prove the check fired on a REAL size: a
+// check that summed nothing, or fell back to a text estimate of the rows after
+// the boundary, would either not refuse at all or refuse while naming a number
+// that is not over the window.
+func compactedSizeFromRefusal(t *testing.T, out string) int {
+	t.Helper()
+	const marker = "(estimated "
+	i := strings.Index(out, marker)
+	if i < 0 {
+		t.Fatalf("the post-compaction refusal names no estimated size; output: %s", out)
+	}
+	rest := out[i+len(marker):]
+	j := strings.Index(rest, ")")
+	if j < 0 {
+		t.Fatalf("the estimated size is unterminated; output: %s", out)
+	}
+	n, err := strconv.Atoi(rest[:j])
+	if err != nil {
+		t.Fatalf("the estimated size %q is not a number: %v; output: %s", rest[:j], err, out)
+	}
+	return n
+}
+
+// assertPostCompactRefusal pins the refusal a compact fork gets when the
+// compaction's OWN recorded result is still too big for the destination: it
+// names the window and a size that is genuinely over it, and says what to do.
+func assertPostCompactRefusal(t *testing.T, out []byte) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	text := string(out)
+	c.StrContains(text, fmt.Sprintf("compacted history still exceeds %d tokens", tinyForkWindow),
+		"the refusal must name the destination window; output: %s", out)
+	// Greater(bound, value) asserts value > bound.
+	c.Greater(tinyForkWindow, compactedSizeFromRefusal(t, text),
+		"the size the refusal names must be over the window; output: %s", out)
+	c.StrContains(text, "pick a larger model", "the refusal must name the remedy; output: %s", out)
+}
+
+// sourceStillLive fails when a child is no longer in the live list.
+func sourceStillLive(t *testing.T, client rafikiv1connect.ControlClient, childID, why string) {
+	t.Helper()
+	for _, ch := range listChildren(t, client) {
+		if ch.GetChildId() == childID {
+			return
+		}
+	}
+	t.Fatalf("%s: child %s is gone from the live list", why, childID)
+}
+
+// TestCLICompactRefusesWhenTheCompactedHistoryStillDoesNotFit is the
+// post-compaction check end to end: the composition really runs (an
+// intermediate is spawned and compacted), and the fork is then REFUSED because
+// the size the compaction RECORDED is still past the destination window.
+//
+// This is the one arm the unit tests cannot prove: they hand the fit check a
+// boundary event they built themselves, so a check that read nothing — or that
+// fell back to a text estimate of the rows after the boundary, of which a
+// /compact writes none — would pass them. Here the number comes from a real
+// daemon's summary row, through a real history read, to the real CLI.
+func TestCLICompactRefusesWhenTheCompactedHistoryStillDoesNotFit(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	seat := newForkSeat(t)
+	// Both halves of the trigger: the SOURCE's turn is over the destination's
+	// window (so --compact is entered at all), and the SUMMARY the compaction
+	// answers with is long enough that the recorded working set is still over it.
+	seat.reportUsage(sourceForkTokens)
+	seat.replySummaryWith(compactedStillTooBig)
+	d := forkDaemon(t, seat)
+	client := d.connectClient()
+
+	name := "compact-still-big-" + uniqueSuffix()
+	src := forkSourceWithTurns(t, client, seat, name, 3)
+	before := childIDSet(t, client)
+
+	out, err := cliCmd(t, d, "create", "-d", "--no-local-executor",
+		"--fork-from", name, "--model", tinyForkModel, "--compact").CombinedOutput()
+	c.Require().Error(err, "a compacted history that still does not fit must be refused; output: %s", out)
+	assertPostCompactRefusal(t, out)
+
+	// N was never spawned, and the intermediate the compaction needed was closed
+	// rather than left behind: the live set is exactly what it was.
+	c.EqDiff(before, childIDSet(t, client), "the refusal must leave no child behind; output: %s", out)
+
+	// The source is untouched: the compact layer never closes it.
+	sourceStillLive(t, client, src, "the source must still be live after a refused compact fork")
+
+	killChildren(t, client, src)
+}
+
+// TestCLICompactSwitchRefusalLeavesTheSourceOpen drives the same wiring through
+// `models switch`, the other place the destination window is handed to the
+// composition. A refused switch must spawn nothing AND close nothing: the close
+// of the source is the switch's own last step, after a fork exists, so a
+// refusal that closed it would lose the conversation outright.
+func TestCLICompactSwitchRefusalLeavesTheSourceOpen(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	seat := newForkSeat(t)
+	seat.reportUsage(sourceForkTokens)
+	seat.replySummaryWith(compactedStillTooBig)
+	d := forkDaemon(t, seat)
+	client := d.connectClient()
+
+	name := "compact-switch-big-" + uniqueSuffix()
+	src := forkSourceWithTurns(t, client, seat, name, 3)
+	before := childIDSet(t, client)
+
+	out, err := cliCmd(t, d, "models", "switch", name, tinyForkModel, "--compact").CombinedOutput()
+	c.Require().Error(err, "a switch whose compacted history still does not fit must be refused; output: %s", out)
+	assertPostCompactRefusal(t, out)
+
+	c.EqDiff(before, childIDSet(t, client),
+		"a refused switch must spawn nothing and close nothing; output: %s", out)
+	sourceStillLive(t, client, src, "a refused switch must leave the source open")
+
 	killChildren(t, client, src)
 }
