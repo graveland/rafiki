@@ -1758,8 +1758,11 @@ func (x *ChildClosed) GetLabels() map[string]string {
 // the fundi emitter and synthesized on reattach from the stored
 // `compaction_summary` row). pre_tokens/post_tokens are optional, not bare
 // int32, because a reattach-synthesized instance of this event (built from a
-// stored marker row, not the live stream) can only ever supply pre_tokens -- a
-// bare zero would be indistinguishable from "compaction dropped everything."
+// stored marker row, not the live stream) may supply neither, or only
+// pre_tokens -- a bare zero would be indistinguishable from "compaction dropped
+// everything." A fundi compaction records the size of the working set it leaves
+// behind on the stored row, so its reattach instance carries both; a
+// claude-code boundary row records no post size and carries pre_tokens alone.
 type CompactionBoundary struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Trigger       string                 `protobuf:"bytes,1,opt,name=trigger,proto3" json:"trigger,omitempty"`
