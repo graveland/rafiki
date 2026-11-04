@@ -459,7 +459,14 @@ type ContentBlock struct {
 	//	*ContentBlock_ToolUse
 	//	*ContentBlock_Image
 	//	*ContentBlock_ToolResult
-	Block         isContentBlock_Block `protobuf_oneof:"block"`
+	Block isContentBlock_Block `protobuf_oneof:"block"`
+	// injected_kind says WHY this block is injected text rather than something
+	// the user typed: "job", "daemon-restart", "subagent", "heartbeat",
+	// "notification", "claude-reminder", ... It is pkg/inject's vocabulary, and
+	// it is what lets a client decorate a restart differently from a job exit.
+	// Empty on every block of content and on an injected block whose wrapper
+	// named no kind, so an old daemon and a new client agree.
+	InjectedKind  string `protobuf:"bytes,7,opt,name=injected_kind,json=injectedKind,proto3" json:"injected_kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -553,6 +560,13 @@ func (x *ContentBlock) GetToolResult() *ToolResultBlock {
 	return nil
 }
 
+func (x *ContentBlock) GetInjectedKind() string {
+	if x != nil {
+		return x.InjectedKind
+	}
+	return ""
+}
+
 type isContentBlock_Block interface {
 	isContentBlock_Block()
 }
@@ -590,10 +604,11 @@ func (*ContentBlock_ToolResult) isContentBlock_Block() {}
 // UserMessage is a durable-tier event: a persisted user-role message.
 //
 // injected holds the text blocks the child's harness inserted into this
-// message (Claude Code's <system-reminder> context), split out of content with
-// the wrapper removed. Every block in both lists keeps its index within the
-// stored message, so the original interleaving is recoverable. An old client
-// ignores injected and shows the user's own text.
+// message (Claude Code's <system-reminder> context, or an envelope rafiki's own
+// daemon wrote), split out of content with the wrapper removed. Every block in
+// both lists keeps its index within the stored message, so the original
+// interleaving is recoverable. An old client ignores injected and shows the
+// user's own text.
 type UserMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Content       []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
@@ -2445,7 +2460,7 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\x0fToolResultBlock\x12\x1e\n" +
 	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x121\n" +
 	"\acontent\x18\x02 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\x12\x19\n" +
-	"\bis_error\x18\x03 \x01(\bR\aisError\"\xb5\x02\n" +
+	"\bis_error\x18\x03 \x01(\bR\aisError\"\xda\x02\n" +
 	"\fContentBlock\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x05R\x05index\x12*\n" +
 	"\x04text\x18\x02 \x01(\v2\x14.rafiki.v1.TextBlockH\x00R\x04text\x126\n" +
@@ -2453,7 +2468,8 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\btool_use\x18\x04 \x01(\v2\x17.rafiki.v1.ToolUseBlockH\x00R\atoolUse\x12-\n" +
 	"\x05image\x18\x05 \x01(\v2\x15.rafiki.v1.ImageBlockH\x00R\x05image\x12=\n" +
 	"\vtool_result\x18\x06 \x01(\v2\x1a.rafiki.v1.ToolResultBlockH\x00R\n" +
-	"toolResultB\a\n" +
+	"toolResult\x12#\n" +
+	"\rinjected_kind\x18\a \x01(\tR\finjectedKindB\a\n" +
 	"\x05block\"u\n" +
 	"\vUserMessage\x121\n" +
 	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\x123\n" +

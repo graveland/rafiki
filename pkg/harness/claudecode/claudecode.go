@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/msg"
 )
 
@@ -61,6 +62,7 @@ func (Harness) Mark(m msg.Message) msg.Message {
 		}
 		if _, ok := body(t.Text); ok {
 			t.Injected = true
+			t.InjectedKind = string(inject.KindClaudeReminder)
 			blocks[i] = t
 		}
 	}

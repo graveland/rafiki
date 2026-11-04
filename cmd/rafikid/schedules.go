@@ -24,12 +24,13 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/schedules"
 )
 
 // scheduleEventSource is the event-buffer source a fired schedule rides.
-const scheduleEventSource = "schedule"
+const scheduleEventSource = string(inject.KindSchedule)
 
 // scheduleKey is the scheduler key for schedule id. armSchedule and
 // cancelTimer both key off it, so a re-arm replaces the pending fire.

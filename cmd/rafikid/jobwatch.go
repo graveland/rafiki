@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -14,7 +15,7 @@ import (
 // One source per concern keeps a coordinator's injected frame readable: the
 // buffer coalesces per (child, source), so job exits land in their own batch
 // rather than interleaved with subagent settles or budget warnings.
-const jobEventSource = "jobs"
+const jobEventSource = string(inject.KindJob)
 
 // jobAckTimeout bounds one AckJobExits call. An ack is idempotent on the
 // executor and an unacked exit is replayed on the next subscribe, so a lost

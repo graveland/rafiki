@@ -32,6 +32,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/inbox"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -258,7 +259,7 @@ func (c *Controller) spawnRecoveryResume(pr pendingResume) {
 			// The nudge rides the durable inbox: a child that dies again
 			// before reading it replays it on its next resume.
 			if claudeWasWorkingAtDeath(pr.rec) {
-				if err := c.sendClaudeNudge(id, claudeRestartResumeText); err != nil {
+				if err := c.sendClaudeNudge(id, inject.KindDaemonRestart, claudeRestartResumeText); err != nil {
 					slog.Warn("auto-resume continuation prompt failed; it stays queued",
 						"childId", id, "error", err)
 				}
@@ -362,8 +363,20 @@ func (c *Controller) takeResumablePending() (pendingResume, bool) {
 // resumes: the rate limit's (deliverRateLimitResume) and a daemon restart's
 // (spawnRecoveryResume). A failed delivery leaves the row pending; the next
 // resume replays it.
-func (c *Controller) sendClaudeNudge(childID, text string) error {
-	frame, err := buildInjectionFrame(inbox.Batch{Mode: inbox.ModePrompt, Frags: []string{text}}, "")
+//
+// The nudge carries a KIND, which is the whole difference between a message a
+// human typed and one the daemon did: without it the text arrives as a bare
+// user prompt, and the model has no way to know its "user" was a restart. The
+// kind rides the batch's Source, which is what makes buildInjectionFrame wrap
+// it. Controller.Send persists the WRAPPED text as the inbox row and leaves the
+// row's Source empty, so a replay delivers the envelope it already carries
+// instead of wrapping it a second time.
+func (c *Controller) sendClaudeNudge(childID string, kind inject.Kind, text string) error {
+	frame, err := buildInjectionFrame(inbox.Batch{
+		Mode:   inbox.ModePrompt,
+		Source: string(kind),
+		Frags:  []string{text},
+	}, "")
 	if err != nil {
 		return err
 	}

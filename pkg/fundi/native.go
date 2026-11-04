@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -151,9 +152,10 @@ func (e *Emitter) publishError(err error) {
 
 // publishUserRow publishes a persisted user row — a prompt, a drained steer,
 // or one tool's result — as a durable UserMessage whose ts is the row's
-// created_at. The content is rendered through eventconv.BlocksFromMsg, the same
-// bridge the history read uses, so the live copy and a replayed one agree on
-// every block the proto vocabulary can name.
+// created_at. The content is rendered through eventconv.UserMessageFrom, the
+// same bridge the history read uses, so the live copy and a replayed one agree
+// on every block the proto vocabulary can name — including which blocks the
+// daemon injected rather than the user, and what kind each one is.
 //
 // A tool_result rides a UserMessage because that is the shape history has:
 // Anthropic puts tool_result in the user turn. ToolExecutionEnd carries a
@@ -163,9 +165,8 @@ func (e *Emitter) publishUserRow(content []msg.Block, row store.Appended) {
 	if e.native == nil {
 		return
 	}
-	e.publishNativeAt(&rafikiv1.UserMessage{
-		Content: eventconv.BlocksFromMsg(msg.Message{Role: msg.User, Content: content}),
-	}, row.CreatedAt)
+	e.publishNativeAt(eventconv.UserMessageFrom(conv.OriginFundi,
+		msg.Message{Role: msg.User, Content: content}), row.CreatedAt)
 }
 
 // publishNative publishes payload stamped with the emit time. Message events

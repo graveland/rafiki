@@ -525,6 +525,14 @@ func TestDBChildState_AutoResumesClaudeChildren(t *testing.T) {
 	nudged := stdinOf(workingID)
 	ck.StrContains(nudged, "daemon restarted while your previous turn was in flight",
 		"the working child's stdin carries the continuation prompt; got:\n%s", nudged)
+	// And it is FRAMED: the child can tell the daemon wrote it rather than its
+	// user, and which kind of daemon message it is. The dump is a JSON line, so
+	// the envelope's angle brackets and quotes arrive escaped — match the bytes
+	// that are actually there rather than the pre-encoding spelling.
+	ck.StrContains(nudged, `rafiki-event source=\"daemon-restart\"`,
+		"the continuation prompt is not wrapped in rafiki's envelope; got:\n%s", nudged)
+	ck.StrContains(nudged, `/rafiki-event`,
+		"the continuation prompt's envelope is not closed; got:\n%s", nudged)
 	ck.Empty(strings.TrimSpace(stdinOf(idleID)),
 		"the idle child's relaunch must send no prompt")
 }

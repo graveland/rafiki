@@ -79,6 +79,11 @@ type Block struct {
 	Final      bool // true when the turn has ended
 	// Stream marks a KindScriptOutput block's stream ("stdout"/"stderr").
 	Stream string
+	// InjectedKind says WHAT was injected on a KindInjected block (pkg/inject's
+	// vocabulary: "jobs", "daemon-restart", "subagents", ...), so the renderer
+	// can decorate one kind differently from another. Empty when the wire
+	// named none — an older daemon, or a Claude Code reminder.
+	InjectedKind string
 }
 
 // Fingerprint returns a cheap content hash for cache-invalidation.
@@ -109,6 +114,7 @@ func (b Block) Fingerprint() string {
 	}
 	writeImages(&sb, b.Images)
 	sb.WriteString(b.StopReason)
+	sb.WriteString(b.InjectedKind)
 	if b.Stream != "" {
 		sb.WriteString(b.Stream)
 	}
@@ -384,10 +390,11 @@ func (s *Session) applyScriptOutput(so *rafikiv1.ScriptOutput) {
 // because it stops at the first block that can still change.
 func (s *Session) applySystemMessage(sm *rafikiv1.SystemMessage) {
 	s.Blocks = append(s.Blocks, Block{
-		Kind:  KindInjected,
-		At:    time.Now(),
-		Text:  TextFromContent(sm.GetContent()),
-		Final: true,
+		Kind:         KindInjected,
+		At:           time.Now(),
+		Text:         TextFromContent(sm.GetContent()),
+		InjectedKind: firstInjectedKind(sm.GetContent()),
+		Final:        true,
 	})
 	s.recomputeFinalized()
 }
@@ -451,10 +458,11 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 	var added []Block
 	for _, cb := range um.GetInjected() {
 		added = append(added, Block{
-			Kind:  KindInjected,
-			At:    time.Now(),
-			Text:  TextFromContent([]*rafikiv1.ContentBlock{cb}),
-			Final: true,
+			Kind:         KindInjected,
+			At:           time.Now(),
+			Text:         TextFromContent([]*rafikiv1.ContentBlock{cb}),
+			InjectedKind: cb.GetInjectedKind(),
+			Final:        true,
 		})
 	}
 
@@ -715,6 +723,18 @@ func TextFromContent(content []*rafikiv1.ContentBlock) string {
 		}
 	}
 	return sb.String()
+}
+
+// firstInjectedKind returns the first kind named by content's blocks, or "".
+// A system-role message carries its blocks in one list rather than a separate
+// injected one, so the kind is a property of the block, not of the message.
+func firstInjectedKind(content []*rafikiv1.ContentBlock) string {
+	for _, cb := range content {
+		if k := cb.GetInjectedKind(); k != "" {
+			return k
+		}
+	}
+	return ""
 }
 
 // imagesFrom returns content's top-level image blocks, in order. It does not

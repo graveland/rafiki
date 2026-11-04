@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import { control } from '../client'
-  import { usd } from '../format'
+  import { injectedLabel, usd } from '../format'
   import { navigate, route } from '../router'
   import { Conversation, type TranscriptBlock } from '../transcript.svelte'
   import { SendQueue, type SendModeName } from '../sendQueue.svelte'
@@ -97,7 +97,10 @@
   <div class="flex-1 space-y-2 overflow-auto p-2">
     {#each conversation.blocks as block, index (`${index}-${block.kind}`)}
       {#if block.kind === 'system'}
-        <div class="text-sm italic opacity-70">{block.text}</div>
+        <div class="text-sm italic opacity-70">
+          {#if block.injectedKind}<span class="badge badge-xs mr-1">{injectedLabel(block.injectedKind)}</span>{/if}
+          {block.text}
+        </div>
       {:else}
         <MessageBlock {block} />
       {/if}

@@ -506,13 +506,20 @@ func getHistoryEvents(t *testing.T, client rafikiv1connect.ControlClient, childI
 }
 
 // eventText returns the text of a message event's text blocks.
+//
+// A user message's text may live in either list: daemon-injected text (a job
+// exit, a settled subagent, a notification) is split into injected, and a
+// message the daemon drove has empty content. Reading only content would make
+// those messages look empty to every test that goes through here.
 func eventText(ev *rafikiv1.Event) string {
 	var sb strings.Builder
 	switch p := ev.GetPayload().(type) {
 	case *rafikiv1.Event_UserMessage:
-		for _, b := range p.UserMessage.GetContent() {
-			if tb := b.GetText(); tb != nil {
-				sb.WriteString(tb.GetText())
+		for _, list := range [][]*rafikiv1.ContentBlock{p.UserMessage.GetInjected(), p.UserMessage.GetContent()} {
+			for _, b := range list {
+				if tb := b.GetText(); tb != nil {
+					sb.WriteString(tb.GetText())
+				}
 			}
 		}
 	case *rafikiv1.Event_AssistantMessage:

@@ -253,8 +253,38 @@ func TestInjectedSplitForClaudeCodeNode(t *testing.T) {
 	c.Eq("reminder two", injected[1].GetText().GetText(), "second reminder body, wrapper removed")
 }
 
-// A fundi node has no harness that marks anything, so its content is not split
-// even when it contains reminder-shaped text.
+// A fundi node is split too — of rafiki's own envelope, which is the one
+// wrapper the daemon wrote rather than the harness. Its kind travels with the
+// block, which is what lets a client decorate a job exit differently from a
+// restart.
+func TestInjectedSplitForFundiNodeCarriesTheKind(t *testing.T) {
+	c := assert.NewAborting(t)
+	const (
+		envelope = `<rafiki-event source="daemon-restart">` + "\n" +
+			"the daemon restarted" + "\n" + "</rafiki-event>"
+		userText = "the user's own words"
+	)
+
+	n := textNode(0, conv.OriginFundi, envelope, userText)
+
+	evs := eventconv.EventsFromNodes("c_test", []*conv.Node{n})
+	c.Len(evs, 1, "got %d events, want 1", len(evs))
+	um := evs[0].GetUserMessage()
+	c.NotNil(um, "event 0 is %T, want Event_UserMessage", evs[0].Payload)
+
+	content := um.GetContent()
+	c.Len(content, 1, "content blocks")
+	c.Eq(userText, content[0].GetText().GetText(), "the user's text is content")
+	c.Eq("", content[0].GetInjectedKind(), "user content names no kind")
+
+	injected := um.GetInjected()
+	c.Len(injected, 1, "injected blocks")
+	c.Eq("the daemon restarted", injected[0].GetText().GetText(), "the body, wrapper removed")
+	c.Eq("daemon-restart", injected[0].GetInjectedKind(), "the kind rides the block")
+}
+
+// A fundi node does not know Claude Code's reminder: only rafiki's own envelope
+// is recognised there.
 func TestInjectedNotSplitForFundiNode(t *testing.T) {
 	c := assert.NewAborting(t)
 	const (

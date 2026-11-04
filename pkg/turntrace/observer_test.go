@@ -118,6 +118,16 @@ func evUserText(t *timestamppb.Timestamp, texts ...string) *rafikiv1.Event {
 	}}
 }
 
+// evInjectedText is a daemon-driven prompt as the wire delivers it after the
+// injected/content split: the text is in injected, content is empty.
+func evInjectedText(t *timestamppb.Timestamp, kind, text string) *rafikiv1.Event {
+	cb := contentText(0, text)
+	cb.InjectedKind = kind
+	return &rafikiv1.Event{Ts: t, Payload: &rafikiv1.Event_UserMessage{
+		UserMessage: &rafikiv1.UserMessage{Injected: []*rafikiv1.ContentBlock{cb}},
+	}}
+}
+
 func evToolResult(t *timestamppb.Timestamp, id, text string, isError bool) *rafikiv1.Event {
 	return &rafikiv1.Event{Ts: t, Payload: &rafikiv1.Event_UserMessage{
 		UserMessage: &rafikiv1.UserMessage{Content: []*rafikiv1.ContentBlock{
@@ -619,4 +629,26 @@ func TestContentGateIsPerOwner(t *testing.T) {
 	_, ok := bob["rafiki.user_message"]
 	c.Eq(false, ok, "bob's content is denied")
 	c.Eq(int64(6), bob["rafiki.user_message.bytes"].AsInt64(), "bob still gets the byte count")
+}
+
+// A daemon-driven turn's prompt is injected text, so the observer must read
+// both lists. Reading content alone recorded no prompt at all for exactly the
+// turns that are otherwise hardest to account for — and before the injected
+// split the same text rode content, so it is a regression, not a design choice.
+func TestInjectedOnlyUserMessageRecordsThePrompt(t *testing.T) {
+	c := assert.NewAborting(t)
+	o, rec := newObserver(t, policyAll(), metaFor, nil)
+
+	const nudge = "The daemon restarted; continue where you stopped."
+	o.Observe("c1", evInjectedText(tsAt(0), "daemon-restart", nudge))
+	o.Observe("c1", evTurnStart(tsAt(1), ""))
+	o.Observe("c1", evAssistantText(tsAt(2), "ok"))
+	o.Observe("c1", evTurnEnd(tsAt(3), rafikiv1.StopReason_STOP_REASON_END_TURN, nil))
+
+	turn := findOne(t, rec.Ended(), "invoke_agent c1")
+	attrs := attrsOf(turn)
+	c.Eq(int64(len(nudge)), attrs["rafiki.user_message.bytes"].AsInt64(),
+		"an injected-only prompt recorded no bytes")
+	c.Eq(nudge, attrs["rafiki.user_message"].AsString(),
+		"an injected-only prompt was not recorded")
 }

@@ -71,6 +71,14 @@ pub struct ToolResultBlock {
 pub struct ContentBlock {
     #[prost(int32, tag = "1")]
     pub index: i32,
+    /// injected_kind says WHY this block is injected text rather than something
+    /// the user typed: "job", "daemon-restart", "subagent", "heartbeat",
+    /// "notification", "claude-reminder", ... It is pkg/inject's vocabulary, and
+    /// it is what lets a client decorate a restart differently from a job exit.
+    /// Empty on every block of content and on an injected block whose wrapper
+    /// named no kind, so an old daemon and a new client agree.
+    #[prost(string, tag = "7")]
+    pub injected_kind: ::prost::alloc::string::String,
     #[prost(oneof = "content_block::Block", tags = "2, 3, 4, 5, 6")]
     pub block: ::core::option::Option<content_block::Block>,
 }
@@ -93,10 +101,11 @@ pub mod content_block {
 /// UserMessage is a durable-tier event: a persisted user-role message.
 ///
 /// injected holds the text blocks the child's harness inserted into this
-/// message (Claude Code's <system-reminder> context), split out of content with
-/// the wrapper removed. Every block in both lists keeps its index within the
-/// stored message, so the original interleaving is recoverable. An old client
-/// ignores injected and shows the user's own text.
+/// message (Claude Code's <system-reminder> context, or an envelope rafiki's own
+/// daemon wrote), split out of content with the wrapper removed. Every block in
+/// both lists keeps its index within the stored message, so the original
+/// interleaving is recoverable. An old client ignores injected and shows the
+/// user's own text.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UserMessage {
     #[prost(message, repeated, tag = "1")]

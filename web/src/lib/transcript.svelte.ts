@@ -38,6 +38,13 @@ export interface TranscriptBlock {
   text: string
   thinking: string
   toolCalls: ToolCallView[]
+  /**
+   * Why a 'system' block is injected rather than user text — the wire's
+   * ContentBlock.injectedKind ("jobs", "daemon-restart", "notify:github", ...).
+   * Undefined on blocks that are not injected, and on an injected block whose
+   * wrapper named no kind.
+   */
+  injectedKind?: string
   costUsd?: number
   /** An ephemeral delta block, replaced by the next durable assistant_message. */
   inFlight: boolean
@@ -364,6 +371,7 @@ export class Conversation {
               text: injectedProjected.text,
               thinking: injectedProjected.thinking,
               toolCalls: injectedProjected.toolCalls,
+              injectedKind: item.injectedKind || undefined,
               inFlight: false,
             },
           ]
@@ -427,6 +435,12 @@ export class Conversation {
             text: projected.text,
             thinking: projected.thinking,
             toolCalls: projected.toolCalls,
+            // A system row names its kind on its block, exactly as an injected
+            // user block does (the TUI's firstInjectedKind takes the same
+            // first-non-empty). Nothing emits one today — eventconv never marks
+            // the system path — but reading it here keeps the two clients from
+            // diverging the day a producer does.
+            injectedKind: content.find((b) => b.injectedKind)?.injectedKind || undefined,
             inFlight: false,
           },
         ]

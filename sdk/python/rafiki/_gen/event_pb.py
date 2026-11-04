@@ -193,11 +193,14 @@ class ContentBlock:
     tool_use: Optional[ToolUseBlock] = None
     image: Optional[ImageBlock] = None
     tool_result: Optional[ToolResultBlock] = None
+    injected_kind: str = ""
 
     def to_dict(self) -> dict:
         out = {}
         if self.index != 0:
             out["index"] = self.index
+        if self.injected_kind != "":
+            out["injectedKind"] = self.injected_kind
         _set_block = [x for x in (self.text, self.thinking, self.tool_use, self.image, self.tool_result) if x is not None]
         if len(_set_block) > 1:
             raise ValueError("ContentBlock: at most one arm of oneof 'block' may be set")
@@ -233,6 +236,9 @@ class ContentBlock:
         _v = _d.get("toolResult")
         if _v is not None:
             obj.tool_result = ToolResultBlock.from_dict(_v)
+        _v = _d.get("injectedKind")
+        if _v is not None:
+            obj.injected_kind = _v
         return obj
 
 @dataclasses.dataclass

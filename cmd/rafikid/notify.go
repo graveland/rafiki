@@ -12,6 +12,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/inbox"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/notify"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -117,7 +118,7 @@ var _ connectapi.Notifier = (*Controller)(nil)
 // notifySourcePrefix is the eventbuf source every notification is queued under:
 // "notify:" + the caller's source, so one webhook source's burst coalesces as
 // its own group.
-const notifySourcePrefix = "notify:"
+const notifySourcePrefix = inject.NotificationPrefix
 
 // notifyAccepter is the event buffer's durable accepter. For every other
 // fragment it is the inbox queue unchanged; a NOTIFICATION is written straight

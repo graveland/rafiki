@@ -13,6 +13,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -314,6 +315,6 @@ func (c *Controller) failChild(childID, reason string) {
 // sendSteer injects a steer message into the child's event stream.
 func (c *Controller) sendSteer(childID, message string) {
 	if c.evbuf != nil {
-		c.evbuf.PushSteer(childID, "executor", message)
+		c.evbuf.PushSteer(childID, string(inject.KindExecutor), message)
 	}
 }

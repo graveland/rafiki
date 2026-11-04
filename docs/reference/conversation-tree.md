@@ -236,21 +236,42 @@ replay matches keeps the origin already stored. Migration 0064 backfilled
 `claude-code` for every conversation with `driven_by = 'client'`, and a
 compaction tail copy keeps its source's origin.
 
-Origin decides how a stored node is read, and `pkg/harness` — which only
-dispatches by origin — plus the per-harness package under it are the only code
-that recognises a harness's injected text: `harness.For(origin)` returns that
-harness, and only that package knows its wrapper (today
-`pkg/harness/claudecode`: exactly `<system-reminder>\n` + body +
-`\n</system-reminder>`, optionally followed by one `\n`, with the body free of
-either tag). `Mark` marks such a block `msg.Text.Injected` — an annotation, never
-stored — and `Unwrap` returns its body for display, wrapper removed. Reading a
-node for a request, `pkg/llm` replays a node whose origin names another harness
-through that harness's `ForeignReplay`, which drops the blocks that are false
-under another harness (Claude Code's model-identity reminder) before the merge;
-fundi's own nodes and unclassified nodes go as stored. The remaining marked
-blocks are encoded as they stand under Anthropic and prefixed with
-`msg.InjectedTextNote` under the OpenAI dialects, and no block is ever moved or
-role-promoted.
+Origin decides how a stored node is read. `pkg/harness` dispatches by origin
+(`harness.For(origin)`), and each harness composes two kinds of recogniser:
+
+- **Its own wrapper**, known only to that harness's package — today
+  `pkg/harness/claudecode`: exactly `<system-reminder>\n` + body +
+  `\n</system-reminder>`, optionally followed by one `\n`, with the body free of
+  either tag.
+- **rafiki's own envelope** (`pkg/inject`:
+  `<rafiki-event source="KIND">\n` + body + `\n</rafiki-event>`), recognised for
+  EVERY origin by `pkg/harness/rafiki`, because rafiki's daemon wrote it
+  whatever captured the node. It is what carries a restart nudge, a job exit, a
+  settled subagent, a schedule fire, a notification — and the kind it names is
+  what lets a client draw one differently from another. `Classify` is anchored
+  at both ends, so a body that quotes a closing tag cannot truncate a frame; a
+  source outside the charset is folded by `inject.Coerce` rather than refused,
+  because a frame that cannot be rendered cannot be delivered.
+
+A harness with no package of its own (`fundi`, unclassified) recognises the
+envelope and nothing else — it must not be assumed to recognise Claude Code's
+reminder, and a fundi node carrying the envelope **is** marked, not sent as
+stored.
+
+`Mark` marks such a block `msg.Text.Injected` + `msg.Text.InjectedKind` —
+annotations, never stored in the conversation — and `Unwrap` returns its body
+for display, wrapper removed. Reading a node for a request, `pkg/llm` replays a
+node whose origin names another harness through that harness's `ForeignReplay`,
+which drops the blocks that are false under another harness (Claude Code's
+model-identity reminder) before the merge; the envelope is true under every
+harness and is never dropped. The remaining marked blocks are encoded as they
+stand under Anthropic and prefixed with `msg.InjectedTextNote` under the OpenAI
+dialects, and no block is ever moved or role-promoted.
+
+A consumer that reads a user message's text must read BOTH lists: after the
+split, daemon-injected text lives in `UserMessage.injected` and `content` is
+empty, so a reader that looks only at `content` goes silently blind. The one
+split is `eventconv.UserMessageFrom`.
 
 ## claude: the request names its parent
 

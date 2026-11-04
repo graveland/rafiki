@@ -223,15 +223,20 @@ func eventUserTexts(ev *rafikiv1.Event) []string {
 	if um == nil {
 		return nil
 	}
+	// Both lists: a job-exit fragment is injected text (the daemon wrote it,
+	// not the user), and it is still this message's text. Reading only content
+	// would make every daemon-pushed fragment invisible to these matchers.
 	var out []string
-	for _, b := range um.GetContent() {
-		if tb := b.GetText(); tb != nil && tb.GetText() != "" {
-			out = append(out, tb.GetText())
-		}
-		if tr := b.GetToolResult(); tr != nil {
-			for _, cb := range tr.GetContent() {
-				if tb := cb.GetText(); tb != nil && tb.GetText() != "" {
-					out = append(out, tb.GetText())
+	for _, list := range [][]*rafikiv1.ContentBlock{um.GetInjected(), um.GetContent()} {
+		for _, b := range list {
+			if tb := b.GetText(); tb != nil && tb.GetText() != "" {
+				out = append(out, tb.GetText())
+			}
+			if tr := b.GetToolResult(); tr != nil {
+				for _, cb := range tr.GetContent() {
+					if tb := cb.GetText(); tb != nil && tb.GetText() != "" {
+						out = append(out, tb.GetText())
+					}
 				}
 			}
 		}

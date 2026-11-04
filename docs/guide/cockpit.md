@@ -140,14 +140,31 @@ argument (`⚒ bash go test ./...`) and truncate output from the *end* (where
 the error usually is). No mouse support, deliberately — capturing it would
 take away your terminal's own select-and-copy.
 
-A `↳` gutter marks the messages the agent's own harness injected — a
-heartbeat nudge, an environment update, a file-changed notice. They are
-stored history, so they are replayed with everything else, but they are not
-conversation and the transcript hides them until you press `^T`. Hiding is a
-view decision: the messages stay in the transcript already fetched, so the
-toggle costs no refetch, and scrolling and the position readout are
-unaffected either way. A transcript whose ONLY blocks are injected says
-`N injected hidden — ^T` instead of claiming the conversation is empty.
+A gutter marks the messages nothing human typed: the agent's own harness's
+reminders (a heartbeat nudge, an environment update, a file-changed notice) and
+the messages rafiki's daemon injects. They are stored history, so they are
+replayed with everything else, but they are not conversation and the transcript
+hides them until you press `^T`. Each kind carries its own glyph and names
+itself on the first row, so a restart is not a job exit:
+
+| Gutter | Kind |
+|---|---|
+| `⟳` | the daemon restarted under a working agent (in the warning colour) |
+| `⏸` | an upstream rate limit paused a turn (warning colour) |
+| `⊘` | a budget breach or a raised budget (warning colour) |
+| `⚑` | a subagent settled |
+| `♥` | a periodic "still working" check-in |
+| `▣` | a background job exited |
+| `◷` | a schedule fired |
+| `▶` | a script child reported |
+| `✉` | a third-party notification |
+| `⌁` | an executor-side condition |
+| `↳` | anything else — a harness reminder, a context update, a kind this build does not know |
+
+Hiding is a view decision: the messages stay in the transcript already
+fetched, so the toggle costs no refetch, and scrolling and the position
+readout are unaffected either way. A transcript whose ONLY blocks are injected
+says `N injected hidden — ^T` instead of claiming the conversation is empty.
 
 ## Activity and attention
 

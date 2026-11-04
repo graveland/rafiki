@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/inject"
 )
 
 // heartbeatEventSource is the event-buffer source name for periodic
@@ -16,7 +18,7 @@ import (
 // independently of settle and budget-breach fragments — a coordinator should
 // never lose a "your worker just finished" notice underneath a routine
 // check-in that happened to land in the same debounce window.
-const heartbeatEventSource = "subagents-heartbeat"
+const heartbeatEventSource = string(inject.KindHeartbeat)
 
 // defaultHeartbeatInterval is how long a child works continuously before its
 // parent gets a check-in. Overridable with RAFIKI_HEARTBEAT_INTERVAL.

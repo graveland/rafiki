@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { ctxLabel, relTime, tokens, usd } from './format'
+import { ctxLabel, injectedLabel, relTime, tokens, usd } from './format'
 
 it('usd renders unknown and unpriced as dash', () => {
   expect(usd(undefined)).toBe('-')
@@ -72,4 +72,12 @@ it('ctxLabel renders thousands as K', () => {
 
 it('ctxLabel renders millions as M', () => {
   expect(ctxLabel(1_000_000)).toBe('1M ctx')
+})
+
+it('injectedLabel names the kind the same way the TUI does', () => {
+  expect(injectedLabel('jobs')).toBe('job')
+  expect(injectedLabel('daemon-restart')).toBe('daemon restart')
+  expect(injectedLabel('notify:github')).toBe('notification')
+  // A kind this build does not know keeps its own name rather than vanishing.
+  expect(injectedLabel('future-kind')).toBe('future-kind')
 })

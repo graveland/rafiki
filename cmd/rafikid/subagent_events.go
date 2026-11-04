@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
 )
@@ -16,7 +17,7 @@ import (
 // news. One source per concern keeps a coordinator's injected frame readable:
 // the buffer coalesces per (child, source), so budget warnings and executor
 // losses land in their own batches rather than being interleaved with these.
-const subagentEventSource = "subagents"
+const subagentEventSource = string(inject.KindSubagent)
 
 // isWorkingStatus reports whether a status means a turn was actually in
 // flight.

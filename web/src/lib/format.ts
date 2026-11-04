@@ -56,3 +56,31 @@ export function ctxLabel(n?: number): string {
   }
   return `${n} ctx`
 }
+
+/**
+ * injectedLabel names an injected message's kind for display. It mirrors
+ * pkg/inject's Label so both clients say the same words: every notification
+ * source is one "notification", and an unrecognised kind is returned verbatim
+ * so a daemon newer than the UI still produces a readable line.
+ */
+export function injectedLabel(kind: string): string {
+  if (kind.startsWith('notify:')) {
+    return 'notification'
+  }
+  switch (kind) {
+    case 'subagents':
+      return 'subagent'
+    case 'subagents-heartbeat':
+      return 'heartbeat'
+    case 'jobs':
+      return 'job'
+    case 'daemon-restart':
+      return 'daemon restart'
+    case 'rate-limit':
+      return 'rate limit'
+    case 'claude-reminder':
+      return 'harness reminder'
+    default:
+      return kind
+  }
+}

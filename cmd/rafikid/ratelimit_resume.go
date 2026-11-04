@@ -9,6 +9,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -425,7 +426,7 @@ func (c *Controller) deliverRateLimitResume(childID string, attempt int) {
 	// The delivery half is shared with the restart auto-resume
 	// (pending_resume.go): a failed delivery leaves the row pending, and the
 	// next resume replays it.
-	if err := c.sendClaudeNudge(childID, rateLimitResumeText); err != nil {
+	if err := c.sendClaudeNudge(childID, inject.KindRateLimit, rateLimitResumeText); err != nil {
 		slog.Warn("auto-resume prompt delivery failed", "childId", childID, "error", err)
 		return
 	}

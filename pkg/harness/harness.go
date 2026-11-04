@@ -1,12 +1,15 @@
 // Package harness holds what rafiki knows about the harnesses that write
 // conversation content (pkg/conv Origin). A harness's own package is the only
 // code that recognises its injected text; everything else consults
-// msg.Text.Injected.
+// msg.Text.Injected. The one envelope every origin shares is rafiki's own
+// (pkg/inject), because its daemon wrote it whatever captured the node.
 package harness
 
 import (
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/harness/claudecode"
+	"go.graveland.dev/rafiki/pkg/harness/rafiki"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/msg"
 )
 
@@ -35,34 +38,53 @@ type Replayer interface {
 }
 
 // For returns origin's harness. An origin with no harness package —
-// unclassified, fundi — gets one that marks and drops nothing.
+// unclassified, fundi — gets one that recognises rafiki's own envelope and
+// drops nothing.
 func For(origin conv.Origin) Harness {
 	switch origin {
 	case conv.OriginClaudeCode:
 		return claude{}
 	default:
-		return none{}
+		return plain{}
 	}
 }
 
-// claude is claudecode's harness plus the replayer method claudecode cannot
-// declare itself: the method returns this package's Replayer interface, and
-// claudecode must not import pkg/harness (this package imports it).
+// claude is claudecode's harness composed with rafiki's own: the replayer
+// method claudecode cannot declare itself (it returns this package's Replayer
+// interface, and claudecode must not import pkg/harness), and the envelope
+// rafiki's daemon writes, which is true whatever captured the node.
 type claude struct{ claudecode.Harness }
+
+func (claude) Mark(m msg.Message) msg.Message {
+	return rafiki.Harness{}.Mark(claudecode.Harness{}.Mark(m))
+}
+
+func (claude) ForeignReplay(m msg.Message) msg.Message {
+	return rafiki.Harness{}.Mark(claudecode.Harness{}.ForeignReplay(m))
+}
+
+func (claude) Unwrap(t msg.Text) string {
+	if _, body, ok := inject.Classify(t.Text); ok {
+		return body
+	}
+	return claudecode.Harness{}.Unwrap(t)
+}
 
 func (claude) Replayer(has func(name string) bool) Replayer { return claudecode.NewReplayer(has) }
 
-// none is the harness for an origin that has no harness package of its own: it
-// marks nothing, drops nothing and unwraps nothing.
-type none struct{}
+// plain is the harness for an origin with no harness package of its own
+// (fundi, unclassified): it knows only rafiki's own envelope — which its daemon
+// wrote, and which no other harness can claim — and marks nothing else, drops
+// nothing and unwraps nothing.
+type plain struct{}
 
-func (none) Mark(m msg.Message) msg.Message { return m }
+func (plain) Mark(m msg.Message) msg.Message { return rafiki.Harness{}.Mark(m) }
 
-func (none) ForeignReplay(m msg.Message) msg.Message { return m }
+func (plain) ForeignReplay(m msg.Message) msg.Message { return rafiki.Harness{}.Mark(m) }
 
-func (none) Replayer(func(name string) bool) Replayer { return noneReplayer{} }
+func (plain) Replayer(func(name string) bool) Replayer { return noneReplayer{} }
 
-func (none) Unwrap(t msg.Text) string { return t.Text }
+func (plain) Unwrap(t msg.Text) string { return rafiki.Harness{}.Unwrap(t) }
 
 // noneReplayer rewrites nothing: an origin with no harness package of its own
 // has nothing to replay under another one.

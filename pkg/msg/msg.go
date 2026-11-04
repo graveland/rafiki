@@ -84,7 +84,12 @@ type Text struct {
 	// unmarked one in its own dialect. It is never stored; a harness package
 	// (pkg/harness) sets it when a message is read for display or replay.
 	Injected bool
-	Ext      Ext
+	// InjectedKind says WHAT was injected (pkg/inject's vocabulary: "job",
+	// "daemon-restart", "subagent", ...), so a client can decorate one kind
+	// differently from another. It is meaningful only when Injected is true,
+	// and it is empty for an injected block whose wrapper names no kind.
+	InjectedKind string
+	Ext          Ext
 }
 
 // InjectedTextNote prefixes an Injected block in dialects with no harness

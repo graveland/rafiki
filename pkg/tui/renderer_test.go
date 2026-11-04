@@ -843,3 +843,69 @@ func TestAssistantProseHasBlankLinesAboveAndBelow(t *testing.T) {
 	c.Eq("", ansi.Strip(lines[one+1]), "no blank line below the prose")
 	c.Eq(one+2, two, "the next block must follow the single blank line")
 }
+
+// ── injected messages are decorated by kind ─────────────────────────────────
+
+// Every injected message used to render identically — one grey ↳ — which made a
+// daemon restart, a settled subagent and a third-party notification
+// indistinguishable in a transcript full of them. Each kind now carries its own
+// glyph and names itself on the first row, so the reader can tell what the
+// agent was told without opening it.
+func TestInjectedMessagesAreDecoratedByKind(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	for _, tc := range []struct {
+		kind  string
+		glyph string
+		label string
+	}{
+		{"daemon-restart", "⟳", "daemon restart"},
+		{"jobs", "▣", "job"},
+		{"subagents", "⚑", "subagent"},
+		{"budget", "⊘", "budget"},
+		{"notify:github", "✉", "notification"},
+		{"claude-reminder", "↳", "harness reminder"},
+		{"", "↳", ""},
+		{"future-kind", "↳", "future-kind"},
+	} {
+		got := ansi.Strip(renderBlockFor(t, session.Block{
+			Kind:         session.KindInjected,
+			Text:         "the body",
+			InjectedKind: tc.kind,
+		}))
+		ck.StrContains(got, tc.glyph, "kind %q: missing glyph", tc.kind)
+		if tc.label != "" {
+			ck.StrContains(got, tc.label+" · ", "kind %q: missing label", tc.kind)
+		} else {
+			ck.NotStrContains(got, " · ", "kind %q: an unlabelled kind drew a separator", tc.kind)
+		}
+		ck.StrContains(got, "the body", "kind %q: the body is missing", tc.kind)
+	}
+}
+
+// The kinds a reader must act on are drawn in the warning colour rather than
+// the routine grey, so they are findable in a wall of injected footnotes. The
+// assertion is a comparison: what makes the warning colour meaningful is that
+// it differs from the routine one.
+func TestUrgentInjectedKindsAreDrawnInTheirOwnColour(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	routine := renderBlockFor(t, session.Block{
+		Kind: session.KindInjected, Text: "x", InjectedKind: "jobs",
+	})
+	for _, kind := range []string{"daemon-restart", "rate-limit", "budget"} {
+		raw := renderBlockFor(t, session.Block{
+			Kind: session.KindInjected, Text: "x", InjectedKind: kind,
+		})
+		ck.NotEq(routine, raw, "kind %q is drawn exactly like routine traffic", kind)
+		ck.NotEq(ansi.Strip(raw), raw, "kind %q rendered with no styling at all", kind)
+	}
+}
+
+// renderBlockFor renders one block through the package's own renderer at a
+// fixed width, the way the transcript pane does.
+func renderBlockFor(t *testing.T, b session.Block) string {
+	t.Helper()
+	r := newRenderer()
+	r.width = 80
+	return r.renderBlock(b)
+}

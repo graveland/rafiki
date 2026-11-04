@@ -65,6 +65,15 @@ func TestBuildInjectionFrameShapes(t *testing.T) {
 			want: `{"type":"prompt","id":"F1","message":"\u003crafiki-event source=\"subagents\"\u003e\na settled\nb settled\n\u003c/rafiki-event\u003e"}`,
 		},
 		{
+			name: "a daemon nudge is wrapped and typed like any other injection",
+			batch: inbox.Batch{
+				ChildID: "c_1", Mode: inbox.ModePrompt,
+				Source: "daemon-restart", Frags: []string{"continue where you stopped"},
+			},
+			id:   "F1",
+			want: `{"type":"prompt","id":"F1","message":"\u003crafiki-event source=\"daemon-restart\"\u003e\ncontinue where you stopped\n\u003c/rafiki-event\u003e"}`,
+		},
+		{
 			name:  "no frame id: nothing to ack, so no id is written",
 			batch: inbox.Batch{ChildID: "c_1", Mode: inbox.ModeSteer, Frags: []string{"LOST"}},
 			id:    "",
@@ -1093,4 +1102,30 @@ func TestChildFrameLimitIsPerRuntime(t *testing.T) {
 	ck.Eq(0, c.childFrameLimit("c_claude"), "claude child limit (no reader of its own to protect)")
 	ck.Eq(0, c.childFrameLimit("c_script"), "script child limit (never written to)")
 	ck.Eq(0, c.childFrameLimit("c_unknown"), "unknown child limit")
+}
+
+// A source the envelope's charset refuses must never fail the frame. A render
+// error here would be a poison message: deliverInbox returns it, Queue.deliver
+// stops at the first error and leaves the batch pending, so it retries forever
+// and blocks every later message to that child. A renamed kind is strictly
+// better than a permanently stalled inbox.
+func TestBuildInjectionFrameCoercesAnUnrepresentableSource(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	got, err := buildInjectionFrame(inbox.Batch{
+		ChildID: "c_1", Mode: inbox.ModePrompt,
+		Source: `Bad Source"><x`, Frags: []string{"news"},
+	}, "F1")
+	c.Require().NoError(err, "an unrepresentable source failed the frame")
+
+	var frame struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	c.Require().NoError(json.Unmarshal(got, &frame), "frame is JSON")
+	// The message is still wrapped — as a kind we could represent — so the
+	// child can still tell it was not the user who said it.
+	c.StrContains(frame.Message, "<rafiki-event source=", "the frame lost its envelope: %s", frame.Message)
+	c.StrContains(frame.Message, "news", "the frame lost its body: %s", frame.Message)
+	c.StrContains(frame.Message, "</rafiki-event>", "the envelope is not closed: %s", frame.Message)
 }

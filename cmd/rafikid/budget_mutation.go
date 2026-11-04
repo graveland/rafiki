@@ -7,6 +7,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -165,6 +166,6 @@ func (c *Controller) notifyBudgetRaised(childID string, newCap float64) {
 		if m.Status == protocol.StatusExited {
 			continue
 		}
-		c.evbuf.PushSteer(m.ChildID, subagentEventSource, msg)
+		c.evbuf.PushSteer(m.ChildID, string(inject.KindBudget), msg)
 	}
 }

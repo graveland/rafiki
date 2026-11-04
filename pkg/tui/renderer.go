@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi/kitty"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
@@ -493,9 +494,21 @@ func (r *renderer) renderBlock(b session.Block) string {
 		// means an error or a compaction boundary, and this must not be
 		// mistaken for one. Wrapped so a long environment update stays inside
 		// the pane; hidden outright unless the reader asked for it.
+		//
+		// The gutter says WHICH kind of message this is, because they are not
+		// interchangeable: a daemon restart and a settled subagent both arrive
+		// from the same "not you" direction but mean very different things, and
+		// one grey ↳ for both made the transcript a wall of identical
+		// footnotes. The first line names the kind; every row carries the glyph.
+		d := decorationFor(b.InjectedKind)
 		var sb strings.Builder
-		for _, line := range strings.Split(strings.TrimRight(sanitizeControlChars(b.Text), "\n"), "\n") {
-			r.writeWrapped(&sb, styleMeta.Render("↳ "), styleThink.Render(line))
+		lines := strings.Split(strings.TrimRight(sanitizeControlChars(b.Text), "\n"), "\n")
+		for i, line := range lines {
+			gutter := d.glyph + " "
+			if i == 0 && d.label != "" {
+				gutter = d.glyph + " " + d.label + " · "
+			}
+			r.writeWrapped(&sb, d.style.Render(gutter), styleThink.Render(line))
 		}
 		return sb.String()
 	case session.KindScriptOutput:
@@ -701,6 +714,60 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	}
 
 	return sb.String()
+}
+
+// injectedDecoration is how one kind of injected message is drawn: a glyph that
+// appears on every row, a label that names the kind on the first, and the style
+// both are rendered in.
+type injectedDecoration struct {
+	glyph string
+	label string
+	style lipgloss.Style
+}
+
+// decorationFor returns the decoration for one injected message's kind.
+//
+// The kinds are pkg/inject's, and the split that matters is urgency, not
+// authorship: a budget breach, a rate-limit pause and a daemon restart all
+// change what the agent can do next, so they are drawn in the warning colour
+// rather than the grey the routine traffic uses. An unknown kind — a daemon
+// newer than this build — still gets the plain gutter and its own name, so it
+// is never mistaken for user text and never disappears.
+func decorationFor(kind string) injectedDecoration {
+	switch inject.Family(inject.Kind(kind)) {
+	case inject.KindJob:
+		return injectedDecoration{"▣", "job", styleMeta}
+	case inject.KindSubagent:
+		return injectedDecoration{"⚑", "subagent", styleMeta}
+	case inject.KindHeartbeat:
+		return injectedDecoration{"♥", "heartbeat", styleMeta}
+	case inject.KindSchedule:
+		return injectedDecoration{"◷", "schedule", styleMeta}
+	case inject.KindExecutor:
+		return injectedDecoration{"⌁", "executor", styleMeta}
+	case inject.KindScript:
+		return injectedDecoration{"▶", "script", styleMeta}
+	case inject.KindNotification:
+		return injectedDecoration{"✉", "notification", styleMeta}
+	case inject.KindDaemonRestart:
+		return injectedDecoration{"⟳", "daemon restart", styleWarn}
+	case inject.KindRateLimit:
+		return injectedDecoration{"⏸", "rate limit", styleWarn}
+	case inject.KindBudget:
+		return injectedDecoration{"⊘", "budget", styleWarn}
+	case inject.KindContext:
+		return injectedDecoration{"↳", "context", styleMeta}
+	case inject.KindClaudeReminder:
+		return injectedDecoration{"↳", "harness reminder", styleMeta}
+	}
+	// An empty kind is an injected block whose wrapper named none (a claude
+	// <system-reminder> from an older daemon, or a system-role row): no label,
+	// rather than a dangling separator. A kind this build does not know keeps
+	// its own name, so it is never mistaken for user text.
+	if kind == "" {
+		return injectedDecoration{"↳", "", styleMeta}
+	}
+	return injectedDecoration{"↳", inject.Label(inject.Kind(kind)), styleMeta}
 }
 
 // hidesBlock reports whether b is left out of the transcript in the given

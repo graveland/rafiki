@@ -81,15 +81,23 @@ message ContentBlock {
     ImageBlock image = 5;
     ToolResultBlock tool_result = 6;
   }
+  // injected_kind says WHY this block is injected text rather than something
+  // the user typed: "job", "daemon-restart", "subagent", "heartbeat",
+  // "notification", "claude-reminder", ... It is pkg/inject's vocabulary, and
+  // it is what lets a client decorate a restart differently from a job exit.
+  // Empty on every block of content and on an injected block whose wrapper
+  // named no kind, so an old daemon and a new client agree.
+  string injected_kind = 7;
 }
 
 // UserMessage is a durable-tier event: a persisted user-role message.
 //
 // injected holds the text blocks the child's harness inserted into this
-// message (Claude Code's <system-reminder> context), split out of content with
-// the wrapper removed. Every block in both lists keeps its index within the
-// stored message, so the original interleaving is recoverable. An old client
-// ignores injected and shows the user's own text.
+// message (Claude Code's <system-reminder> context, or an envelope rafiki's own
+// daemon wrote), split out of content with the wrapper removed. Every block in
+// both lists keeps its index within the stored message, so the original
+// interleaving is recoverable. An old client ignores injected and shows the
+// user's own text.
 message UserMessage {
   repeated ContentBlock content = 1;
   repeated ContentBlock injected = 2;

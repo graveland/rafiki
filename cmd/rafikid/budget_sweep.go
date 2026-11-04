@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
 )
@@ -121,7 +122,7 @@ func (c *Controller) applyBudgetBreach(ctx context.Context, root childstore.Snap
 		}
 		c.blockTasksFor(ctx, m)
 		if c.evbuf != nil {
-			c.evbuf.PushSteer(m.ChildID, subagentEventSource, msg)
+			c.evbuf.PushSteer(m.ChildID, string(inject.KindBudget), msg)
 		}
 	}
 }

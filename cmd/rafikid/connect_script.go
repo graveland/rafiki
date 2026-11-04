@@ -17,6 +17,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -37,7 +38,7 @@ import (
 // readable, the same rule as subagentEventSource: the buffer coalesces per
 // (child, source), so a script's reports land in their own batches rather than
 // being interleaved with subagent settles or budget warnings.
-const scriptEventSource = "script"
+const scriptEventSource = string(inject.KindScript)
 
 // scriptReceiveInterval is how often an open Receive stream polls its child's
 // inbox and status. The inbox has no push channel for a stream consumer, so

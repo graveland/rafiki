@@ -260,13 +260,32 @@ func (o *Observer) observeTurnStart(childID string, start *rafikiv1.TurnStart, t
 	}
 }
 
-func (o *Observer) observeUserMessage(childID string, msg *rafikiv1.UserMessage, t time.Time) {
+// userMessageText is every text block of a user-role message, injected ones
+// included.
+//
+// It must read BOTH lists. A message the daemon drove — a restart nudge, a
+// rate-limit resume, a schedule fire, a job exit, a settled subagent, a
+// notification — is an injected-only UserMessage, so reading content alone
+// records no prompt at all for exactly the turns an operator most wants to
+// account for. The policy gate is not here: applyUserText decides what may
+// leave the daemon.
+func userMessageText(msg *rafikiv1.UserMessage) string {
 	var text string
+	for _, b := range msg.GetInjected() {
+		if tb := b.GetText(); tb != nil {
+			text += tb.GetText()
+		}
+	}
 	for _, b := range msg.GetContent() {
 		if tb := b.GetText(); tb != nil {
 			text += tb.GetText()
 		}
 	}
+	return text
+}
+
+func (o *Observer) observeUserMessage(childID string, msg *rafikiv1.UserMessage, t time.Time) {
+	text := userMessageText(msg)
 
 	o.mu.Lock()
 	defer o.mu.Unlock()

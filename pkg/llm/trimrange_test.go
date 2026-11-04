@@ -190,7 +190,7 @@ func TestForRequestDropsModelReminderFromClaudeCodeNodes(t *testing.T) {
 	c.Require().Len(msgs, 1, "one user message")
 	c.Eq(msg.User, msgs[0].Role, "role")
 	c.EqDeep([]msg.Block{
-		msg.Text{Text: dateReminderBlock, Injected: true},
+		msg.Text{Text: dateReminderBlock, Injected: true, InjectedKind: "claude-reminder"},
 		msg.Text{Text: "hello"},
 	}, msgs[0].Content, "the model reminder is dropped, the rest kept in order")
 }

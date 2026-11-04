@@ -19,6 +19,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/inboxdb"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
 )
@@ -151,6 +152,19 @@ func inboundFromFrame(childID string, frame json.RawMessage) (inbox.Inbound, boo
 //
 // An abort carries no id because nothing acks it — there is no turn for it to
 // enter, only one to cancel.
+//
+// A batch with a Source is a message the DAEMON is injecting, not one a human
+// typed, so it is wrapped in pkg/inject's envelope: the agent can tell it was
+// not the user, and the kind rides in the opening element for the cockpit to
+// decorate. A direct message (Source empty) is never wrapped — that text IS the
+// user's own.
+//
+// The source is COERCED, never refused. A render failure here would be a
+// poison message: deliverInbox returns the error, Queue.deliver stops at the
+// first one and leaves the batch pending, so it retries forever and blocks
+// every later message to that child. A renamed kind is strictly better than a
+// permanently stalled inbox, and every writer today passes a constant that
+// needs no coercion at all.
 func buildInjectionFrame(b inbox.Batch, frameID string) (json.RawMessage, error) {
 	if b.Mode == inbox.ModeAbort {
 		return json.RawMessage(`{"type":"abort"}`), nil
@@ -161,7 +175,17 @@ func buildInjectionFrame(b inbox.Batch, frameID string) (json.RawMessage, error)
 	}
 	body := strings.Join(b.Frags, "\n")
 	if b.Source != "" {
-		body = "<rafiki-event source=\"" + b.Source + "\">\n" + body + "\n</rafiki-event>"
+		// Coerce cannot fail: it folds an unrepresentable source into the
+		// charset, so there is no error arm to take here.
+		wrapped, err := inject.Render(inject.Coerce(b.Source), body)
+		if err != nil {
+			// Unreachable, and deliberately not fatal: deliver the text
+			// unwrapped rather than wedge this child's queue forever.
+			slog.Warn("inbox: could not wrap an injected frame; delivering it unwrapped",
+				"childId", b.ChildID, "source", b.Source, "error", err)
+		} else {
+			body = wrapped
+		}
 	}
 	// Attachments ride the frame beside the text. Omitted when empty so every
 	// existing frame is byte-identical to what it was, which keeps a fundi

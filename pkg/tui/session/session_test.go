@@ -871,3 +871,33 @@ func TestInjectedOnlyMessageAppendsNoUserBlock(t *testing.T) {
 		c.NotEq(session.KindUser, b.Kind, "an injected-only message appended a KindUser block")
 	}
 }
+
+// The wire carries WHAT was injected, and the session keeps it: a client that
+// decorates every injected message the same way cannot tell a daemon restart
+// from a settled subagent, which is the whole reason the kind is on the wire.
+func TestInjectedKindRidesTheBlock(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_test")
+
+	ev := injectedUserMessage("c_test", []string{"a job exited"}, nil)
+	ev.GetUserMessage().Injected[0].InjectedKind = "jobs"
+	s.Apply(ev)
+
+	c.Require().Len(s.Blocks, 1, "blocks")
+	c.Eq(session.KindInjected, s.Blocks[0].Kind, "kind")
+	c.Eq("jobs", s.Blocks[0].InjectedKind, "the injected kind is kept")
+}
+
+// A system-role row names its kind on the block; the session takes the first
+// one it is given, because the message is one block per injected thing.
+func TestSystemMessageKindRidesTheBlock(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_test")
+
+	ev := systemMessage("c_test", "the daemon restarted")
+	ev.GetSystemMessage().Content[0].InjectedKind = "daemon-restart"
+	s.Apply(ev)
+
+	c.Require().Len(s.Blocks, 1, "blocks")
+	c.Eq("daemon-restart", s.Blocks[0].InjectedKind, "the injected kind is kept")
+}
