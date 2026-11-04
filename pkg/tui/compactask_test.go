@@ -220,6 +220,7 @@ func TestCompactAskYesRunsTheComposition(t *testing.T) {
 	compactForm(t, c)
 
 	_, cmd := c.handleKey(keyMsg("enter"))
+	ck.Nil(cmd, "asking must not spawn anything")
 	ck.Require().NotNil(c.compactAsk, "no question was raised")
 	_, cmd = c.handleKey(keyMsg("y"))
 	ck.Require().True(cmd != nil, "the affirmative runs the composition")
@@ -257,6 +258,7 @@ func TestCompactAskNoSpawnsNothing(t *testing.T) {
 	compactForm(t, c)
 
 	_, cmd := c.handleKey(keyMsg("enter"))
+	ck.Nil(cmd, "asking must not spawn anything")
 	ck.Require().NotNil(c.compactAsk, "no question was raised")
 	before := c.form.inputs[fieldModel].Value()
 
@@ -306,6 +308,7 @@ func TestCompactAskSwitchReusesTheSwitchTail(t *testing.T) {
 	c.form.switchSource = "c_1"
 
 	_, cmd := c.handleKey(keyMsg("enter"))
+	ck.Nil(cmd, "asking must not spawn anything")
 	ck.Require().NotNil(c.compactAsk, "no question was raised")
 	ck.True(c.compactAsk.switchMode, "a switch is named as one")
 	_, cmd = c.handleKey(keyMsg("y"))

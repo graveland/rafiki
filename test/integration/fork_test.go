@@ -74,16 +74,6 @@ func (s *forkSeat) reportUsage(n int64) {
 	s.inputTokens = n
 }
 
-// usage is the input_tokens an ordinary reply reports.
-func (s *forkSeat) usage() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.inputTokens == 0 {
-		return 10
-	}
-	return s.inputTokens
-}
-
 // script makes the seat answer any request carrying marker with a tool_use
 // call. It is guarded by the same lock handle reads under: a test re-scripts
 // the seat mid-run, while requests may be in flight.
