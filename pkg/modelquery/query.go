@@ -368,3 +368,15 @@ func HasParam(r *rafikiv1.ModelRow, want string) bool {
 	}
 	return false
 }
+
+// FitsWindow reports whether tokens fit in window. A window of 0 is UNKNOWN --
+// no catalog entry, or a model the catalog has never priced -- and never
+// reports an overflow: unknown is not "cannot", the same rule Vision and Tools
+// apply. A negative window is treated as unknown too, so a caller cannot
+// manufacture an overflow from a bad row.
+func FitsWindow(tokens int64, window int32) bool {
+	if window <= 0 {
+		return true
+	}
+	return tokens <= int64(window)
+}

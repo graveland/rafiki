@@ -190,3 +190,24 @@ func TestEveryFieldHasAName(t *testing.T) {
 		}
 	}
 }
+
+// TestFitsWindow pins the shared over-window predicate: the one both the CLI
+// and the cockpit read, so an unknown window can never refuse a fork.
+func TestFitsWindow(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name   string
+		tokens int64
+		window int32
+		want   bool
+	}{
+		{"under the window", 100, 200, true},
+		{"exactly the window", 200, 200, true},
+		{"one token over", 201, 200, false},
+		{"unknown window never overflows", 1 << 40, 0, true},
+		{"negative window is unknown", 1, -5, true},
+		{"no int32 overflow in the compare", 1 << 40, 200, false},
+	} {
+		c.Eq(tc.want, modelquery.FitsWindow(tc.tokens, tc.window), tc.name)
+	}
+}
