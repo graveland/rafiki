@@ -17,6 +17,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tags"
@@ -106,6 +108,29 @@ func (f *forkFixture) pendingToolCall(t *testing.T, convID string) store.Appende
 	t.Helper()
 	return appendNode(t, f.pool, convID, anthropic.NewAssistantMessage(
 		anthropic.NewToolUseBlock("toolu_pending", map[string]any{"command": "ls"}, "bash")), nil)
+}
+
+// appendBoundary appends one compaction boundary under convID and returns its
+// committed row. A boundary is appended as a ROOT of that kind, exactly as a
+// real compaction writes it: Append takes a root's Kind from Append.Root and
+// drops a NewNode.Kind that lands as a root, so the root form is the one that
+// actually records a compaction summary (pkg/conv/append.go). DerivedFromHead
+// names the row the summary stands in for, which is empty on a fresh
+// conversation and is then simply no derived-from.
+func appendBoundary(t *testing.T, pool *pgxpool.Pool, convID string, kind string) store.Appended {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	res, err := convStoreFor(t, pool).Open(convID, conv.AsOwner()).Append(context.Background(), conv.Append{
+		Root:            kind,
+		DerivedFromHead: true,
+		Nodes: []conv.NewNode{{
+			Msg:  msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "summary"}}},
+			Kind: kind,
+		}},
+	})
+	ck.NoError(err, "append boundary")
+	n := res.Nodes[len(res.Nodes)-1]
+	return store.Appended{ID: n.ID, CreatedAt: n.CreatedAt, Ordinal: n.Ordinal, Depth: n.Depth}
 }
 
 // forkableChild seeds a child whose conversation holds `turns` completed turns.
@@ -305,6 +330,61 @@ func TestForkCursorMustBeACompletedTurn(t *testing.T) {
 		users.Identity{UserID: f.owner})
 	requireExactControllerError(t, err, protocol.ErrInvalidArgs,
 		`malformed cursor "turn-3" (want m:<ordinal>)`)
+}
+
+// TestForkFromCompactionBoundaryAllowed pins the relaxation a compacted
+// conversation needs: a compaction summary root is a legal fork point, so a
+// conversation whose only node is a boundary still has a node to fork from.
+// Without it the empty cursor answers "no completed turn to fork from", because
+// the summary is a user-role node and isCompletedTurn required an assistant one.
+func TestForkFromCompactionBoundaryAllowed(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	self := uniqueForkName("compacted")
+	convID := f.conversation(t)
+	boundary := appendBoundary(t, f.pool, convID, conv.KindCompactionSummary)
+	f.child(t, self, "", self, f.owner, convID)
+
+	node, _, err := f.ctrl.resolveFork(context.Background(),
+		forkRequest(self, &protocol.ForkFrom{ChildID: self}, ""), users.Identity{UserID: f.owner})
+	ck.Require().NoError(err, "a compaction boundary is a completed turn")
+	ck.Eq(boundary.ID, node, "the default cursor is the boundary")
+}
+
+// TestForkFromCompactionTailPrefersTheAssistantTurn pins the clause's width: a
+// verbatim tail after the boundary still wins the empty cursor, so the summary
+// never outranks a real completed turn.
+func TestForkFromCompactionTailPrefersTheAssistantTurn(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	self := uniqueForkName("tail")
+	convID := f.conversation(t)
+	boundary := appendBoundary(t, f.pool, convID, conv.KindCompactionSummary)
+	reply := appendNode(t, f.pool, convID,
+		anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply")), nil)
+	f.child(t, self, "", self, f.owner, convID)
+
+	node, _, err := f.ctrl.resolveFork(context.Background(),
+		forkRequest(self, &protocol.ForkFrom{ChildID: self}, ""), users.Identity{UserID: f.owner})
+	ck.Require().NoError(err, "the verbatim tail is forkable")
+	ck.Eq(reply.ID, node, "the last completed turn, not the boundary")
+	ck.NotEq(boundary.ID, node, "the boundary must not outrank the tail")
+}
+
+// TestForkFromCompactionLeavesPlainUserMessagesUnforkable keeps the relaxation
+// exactly as wide as documented: a user-role node that is NOT a compaction
+// boundary is still no fork point, and the existing refusal still answers.
+func TestForkFromCompactionLeavesPlainUserMessagesUnforkable(t *testing.T) {
+	f := newForkFixture(t)
+	self := uniqueForkName("plain")
+	convID := f.conversation(t)
+	appendNode(t, f.pool, convID, anthropic.NewUserMessage(anthropic.NewTextBlock("prompt")), nil)
+	f.child(t, self, "", self, f.owner, convID)
+
+	_, _, err := f.ctrl.resolveFork(context.Background(),
+		forkRequest(self, &protocol.ForkFrom{ChildID: self}, ""), users.Identity{UserID: f.owner})
+	requireExactControllerError(t, err, protocol.ErrFailedPrecondition,
+		"agent has no completed turn to fork from")
 }
 
 func TestForkFromClaudeSourceResolvesRootThread(t *testing.T) {

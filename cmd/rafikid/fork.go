@@ -203,11 +203,20 @@ func (c *Controller) forkSource(ctx context.Context, childID string) (childstore
 }
 
 // isCompletedTurn reports whether n is a turn a fork may start after: an
-// assistant message that left no tool call pending. A dangling tool_use is the
-// one shape a fork must skip, because the borrowed history would ask the new
-// child's model to answer a call that was never answered.
+// assistant message that left no tool call pending, OR a compaction boundary.
+// A dangling tool_use is the one shape a fork must skip, because the borrowed
+// history would ask the new child's model to answer a call that was never
+// answered; a compaction summary root is a user-role node whose whole purpose
+// is to stand in for the history before it, so it can never dangle. Without
+// this, a compacted conversation with no verbatim tail has NO forkable point.
 func isCompletedTurn(n *conv.Node) bool {
-	if n == nil || n.Msg.Role != msg.Assistant {
+	if n == nil {
+		return false
+	}
+	if n.Kind == conv.KindCompactionSummary {
+		return true
+	}
+	if n.Msg.Role != msg.Assistant {
 		return false
 	}
 	for _, block := range n.Msg.Content {
