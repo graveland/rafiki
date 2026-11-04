@@ -373,10 +373,12 @@ type Cockpit struct {
 	helpTop    int
 	railHidden bool
 	expandArgs bool
-	// showInjected draws the harness-injected system-role blocks the transcript
-	// hides by default. A VIEW flag only: the blocks stay in the session, so
-	// ^T re-shows history already fetched, with no refetch.
-	showInjected bool
+	// expandInjected draws injected messages at full length; collapsed they show
+	// their first few rows. It is a LEVEL OF DETAIL, not a visibility switch —
+	// they are always drawn (see renderer.expandInjected). A VIEW flag only: the
+	// blocks stay in the session, so ^T expands history already fetched, with no
+	// refetch.
+	expandInjected bool
 	// railPeek records that an explicit request revealed a rail the default look
 	// hides — ⇥ onto a hidden rail, or ^R below two rows — so committing or
 	// cancelling puts it back. Picking an agent is a round trip, not a mode
@@ -1551,15 +1553,16 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		c.invalidatePanes()
 		return c, nil
 	case key.Matches(msg, k.ToggleInjected):
-		// Same trap as ^O above, and worse: a hidden injected block leaves no
-		// line behind, so without the invalidation the cached prefix would keep
-		// showing (or keep omitting) blocks the flag no longer agrees with.
-		c.showInjected = !c.showInjected
+		// Same trap as ^O above: an injected block renders a different number
+		// of rows in each mode, and Lines reuses r.cached for everything below
+		// Finalized, so without the invalidation the toggle would reach only the
+		// live tail.
+		c.expandInjected = !c.expandInjected
 		c.invalidatePanes()
-		if c.showInjected {
-			c.setNotice("injected messages: shown")
+		if c.expandInjected {
+			c.setNotice("injected messages: expanded")
 		} else {
-			c.setNotice("injected messages: hidden")
+			c.setNotice("injected messages: collapsed")
 		}
 		return c, nil
 	case key.Matches(msg, k.ToggleImages):
@@ -2830,7 +2833,11 @@ func (c *Cockpit) footerHints() string {
 		c.keys.NextPane.Help().Key+" pane",
 		c.keys.ToggleRail.Help().Key+" rail",
 		c.keys.Help.Help().Key+" help",
+		// The two expansion keys sit together: a collapsed injected message
+		// says "[+N lines]" and a folded tool call says "[omitted N lines]",
+		// and neither marker can name the key that opens it.
 		c.keys.ExpandArgs.Help().Key+" "+c.keys.ExpandArgs.Help().Desc,
+		c.keys.ToggleInjected.Help().Key+" "+c.keys.ToggleInjected.Help().Desc,
 		c.keys.Redraw.Help().Key+" "+c.keys.Redraw.Help().Desc)
 	return strings.Join(parts, "  ")
 }
@@ -2882,7 +2889,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.ToggleRail, "Show or hide the rail (^B does the same). Hiding it leaves your agents running."},
 		entry{k.Help, "Show or hide this page."},
 		entry{k.ExpandArgs, "Expand or collapse tool-call details: full arguments and results."},
-		entry{k.ToggleInjected, "Show or hide injected messages: heartbeats and environment updates the harness added. Hidden by default."},
+		entry{k.ToggleInjected, "Expand or collapse injected messages: the notices the daemon and the agent's harness add. Drawn short by default."},
 		entry{k.ToggleImages, "Show or hide image thumbnails. Needs a terminal with Kitty graphics."},
 		entry{k.Redraw, "Repaint the screen. Try it when the display or the cursor looks wrong."},
 		entry{k.Quit, "Quit; press twice within two seconds to confirm. Your agents keep running."},
@@ -3020,10 +3027,10 @@ func (c *Cockpit) View() tea.View {
 		s := c.sessions[f]
 		p := c.pane(f)
 		lines := p.linesFor(s, convWidth, bodyHeight, renderOpts{
-			expandArgs:   c.expandArgs,
-			drawImages:   c.drawImages(),
-			smallIDs:     c.caps.smallIDs(),
-			showInjected: c.showInjected,
+			expandArgs:     c.expandArgs,
+			drawImages:     c.drawImages(),
+			smallIDs:       c.caps.smallIDs(),
+			expandInjected: c.expandInjected,
 		}, c.ghostRows(f, convWidth))
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly
@@ -3040,13 +3047,10 @@ func (c *Cockpit) View() tea.View {
 		}
 		conv = p.vp.View()
 		if strings.TrimSpace(ansi.Strip(conv)) == "" {
-			// "No messages yet" would be a lie when the transcript holds only
-			// injected blocks: there IS content, the filter is hiding it. Say
-			// how much, and name the key that shows it.
-			switch n := hiddenInjectedCount(s.Blocks, c.showInjected); {
-			case n > 0:
-				conv = styleMeta.Render(itoa(int64(n)) + " injected hidden — " +
-					c.keys.ToggleInjected.Help().Key)
+			// Injected messages are drawn now, so an empty pane means an empty
+			// transcript. The only honest non-empty case left is a fetch that
+			// has not landed.
+			switch {
 			case !c.historyInFlight[f]:
 				// Blank while a fetch is in flight: the blocks are on their
 				// way, and the pane should not describe a conversation it has

@@ -49,10 +49,10 @@ type keyMap struct {
 	Redraw        key.Binding
 	// ^Y is free: not in textareaKeys, and bound nowhere else in the cockpit.
 	ToggleImages key.Binding
-	// ToggleInjected shows the harness-injected system-role blocks the
-	// transcript hides by default. ^T is a textarea key (transpose), so like
-	// ^B/^G/^D it is grandfathered: you cannot transpose a character while
-	// typing in the prompt.
+	// ToggleInjected expands the injected messages the transcript draws
+	// collapsed — the two-level shape ^O gives tool arguments. ^T is a textarea
+	// key (transpose), so like ^B/^G/^D it is grandfathered: you cannot
+	// transpose a character while typing in the prompt.
 	ToggleInjected key.Binding
 	Abort          key.Binding
 
@@ -127,7 +127,7 @@ func defaultKeyMap() keyMap {
 		// ^T shows the harness-injected system-role messages -- heartbeat
 		// nudges, environment updates -- that the transcript hides by default.
 		// They are real history but not conversation, so the default is off.
-		ToggleInjected: key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("^T", "injected")),
+		ToggleInjected: key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("^T", "expand injected")),
 		// esc first: it is what muscle memory reaches for to stop a running
 		// turn, and it is free in the input pane (the textarea ignores it,
 		// and the other two panes match their own Escape before this).

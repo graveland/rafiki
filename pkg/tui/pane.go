@@ -47,25 +47,25 @@ type paneState struct {
 // passed as four positional bools, which read as a wall of false at every call
 // site and silently swap when a fifth arrives.
 type renderOpts struct {
-	expandArgs   bool
-	drawImages   bool
-	smallIDs     bool
-	showInjected bool
+	expandArgs     bool
+	drawImages     bool
+	smallIDs       bool
+	expandInjected bool
 }
 
 // paneSig identifies the rendered content. Two of the fields are geometry
 // because a resize genuinely does change every wrapped line, and the last is
 // the live tail's fingerprint, which is what moves during streaming.
 type paneSig struct {
-	blocks       int
-	finalized    int
-	width        int
-	height       int
-	expandArgs   bool
-	drawImages   bool
-	smallIDs     bool
-	showInjected bool
-	liveFP       string
+	blocks         int
+	finalized      int
+	width          int
+	height         int
+	expandArgs     bool
+	drawImages     bool
+	smallIDs       bool
+	expandInjected bool
+	liveFP         string
 	// ghost is the unacknowledged sends drawn after the transcript; they come
 	// and go without any block changing.
 	ghost string
@@ -88,27 +88,29 @@ func (p *paneState) linesFor(s *session.Session, width, height int, opts renderO
 		// part of the signature: without it the toggle flips a flag nothing reads.
 		// Same for drawImages — a mode change redraws every image row — and
 		// smallIDs, which changes the id colour a ready image renders with.
-		// showInjected likewise: it decides which blocks reach the layout.
-		expandArgs:   opts.expandArgs,
-		drawImages:   opts.drawImages,
-		smallIDs:     opts.smallIDs,
-		showInjected: opts.showInjected,
-		ghost:        strings.Join(ghost, "\x00"),
+		// expandInjected likewise: it decides how many rows an injected block
+		// renders, so a prefix cached in the other mode is wrong, not stale.
+		expandArgs:     opts.expandArgs,
+		drawImages:     opts.drawImages,
+		smallIDs:       opts.smallIDs,
+		expandInjected: opts.expandInjected,
+		ghost:          strings.Join(ghost, "\x00"),
 	}
 	if p.sigInit && sig == p.sig {
 		return nil
 	}
-	// A hidden block leaves no line behind, so a cached prefix built in the
-	// other mode is not stale, it is wrong. paneSig alone only forces a rebuild
-	// through linesFor; the renderer's own cache has to go with it.
-	if p.renderer.showInjected != opts.showInjected {
+	// An injected block renders a different number of rows in each mode, so a
+	// cached prefix built in the other one is wrong, not stale. paneSig alone
+	// only forces a rebuild through linesFor; the renderer's own cache has to go
+	// with it.
+	if p.renderer.expandInjected != opts.expandInjected {
 		p.invalidate()
 	}
 	p.sig, p.sigInit = sig, true
 	p.renderer.expandArgs = opts.expandArgs
 	p.renderer.drawImages = opts.drawImages
 	p.renderer.smallIDs = opts.smallIDs
-	p.renderer.showInjected = opts.showInjected
+	p.renderer.expandInjected = opts.expandInjected
 	lines := p.renderer.Lines(s.Blocks, s.Finalized, width)
 	// The renderer answers "nothing to draw" with nil, which is also this
 	// function's "nothing to do". Past the signature check this is a FRESH

@@ -3114,43 +3114,54 @@ func injectedCockpit(t *testing.T) *Cockpit {
 	return c
 }
 
-// Injected messages are real history but not conversation, so the transcript
-// hides them by default -- and hiding is a RENDER decision: the block stays in
-// the session, which is what lets ^T re-show it with no refetch.
-func TestCockpitHidesInjectedByDefault(t *testing.T) {
+// Injected messages are ALWAYS drawn: a reader who cannot see that the daemon
+// spoke cannot tell why the agent did what it did. They are drawn short, and ^T
+// is a level of detail rather than a visibility switch.
+func TestCockpitShowsInjectedCollapsedByDefault(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := injectedCockpit(t)
 
 	view := ansi.Strip(c.View().Content)
 	ck.StrContains(view, "hello there", "the transcript lost the user turn:\n")
-	ck.NotStrContains(view, "heartbeat", "an injected system-role message is shown by default:\n")
+	ck.StrContains(view, "heartbeat: keep going", "an injected message is not drawn by default:\n")
+	ck.False(c.expandInjected, "the default must be collapsed")
 
 	s := c.sessions["c_1"]
-	ck.Require().Len(s.Blocks, 2, "the hidden block must stay in the session model")
+	ck.Require().Len(s.Blocks, 2, "the injected block must be in the session model")
 	ck.Eq(session.KindInjected, s.Blocks[1].Kind, "block[1] kind")
 }
 
-// ^T brings the injected messages back and puts them away again, and neither
-// press may touch the session: the toggle is a view flag, so history already
-// fetched is re-shown without a refetch.
-func TestCockpitCtrlTTogglesInjected(t *testing.T) {
+// A long injected message is drawn short and COUNTED, so the reader knows there
+// is more; ^T draws all of it and collapses it again. Neither press may touch
+// the session: it is a view flag, so already-fetched history expands with no
+// refetch.
+func TestCockpitCtrlTExpandsInjected(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c := injectedCockpit(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.focusChild = "c_1"
+	long := "line one\nline two\nline three\nline four\nline five"
+	c.applyEvent(systemMessageEventFor("c_1", long))
 	s := c.sessions["c_1"]
-	ck.Require().Len(s.Blocks, 2, "setup")
+	ck.Require().Len(s.Blocks, 1, "setup")
+
+	collapsed := ansi.Strip(c.View().Content)
+	ck.StrContains(collapsed, "line one", "the first rows must be drawn:\n")
+	ck.NotStrContains(collapsed, "line five", "a long injected message was not collapsed:\n")
+	ck.StrContains(collapsed, "[+", "the collapsed block does not say how much it hides:\n")
 
 	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	ck.True(c.showInjected, "^T did not toggle showInjected")
-	ck.StrContains(ansi.Strip(c.View().Content), "heartbeat: keep going",
-		"^T did not reveal the injected message:\n")
+	ck.True(c.expandInjected, "^T did not expand")
+	expanded := ansi.Strip(c.View().Content)
+	ck.StrContains(expanded, "line five", "^T did not draw the whole injected message:\n")
+	ck.NotStrContains(expanded, "[+", "the truncation marker survived expansion:\n")
 
 	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	ck.False(c.showInjected, "^T did not toggle back")
-	ck.NotStrContains(ansi.Strip(c.View().Content), "heartbeat",
-		"^T did not hide the injected message again:\n")
+	ck.False(c.expandInjected, "^T did not collapse again")
+	ck.NotStrContains(ansi.Strip(c.View().Content), "line five",
+		"^T collapsed the flag but left the expanded rows on screen:\n")
 
-	ck.Len(s.Blocks, 2, "the toggle changed the session model; filtering is a render decision only")
-	ck.Eq(session.KindInjected, s.Blocks[1].Kind, "block[1] kind")
+	ck.Len(s.Blocks, 1, "the toggle changed the session model; the level of detail is a render decision only")
 }
 
 // ^T must be discoverable: a key that changes the transcript and appears
@@ -3164,15 +3175,18 @@ func TestHelpShowsInjectedToggle(t *testing.T) {
 	help := ansi.Strip(c.View().Content)
 	h := c.keys.ToggleInjected.Help()
 	ck.StrContains(help, h.Key, "the help overlay does not name the injected toggle's key:\n")
-	ck.StrContains(help, h.Desc, "the help overlay does not describe the injected toggle:\n")
+	// The page's own sentence, not the binding's short label: the page is what
+	// the reader reads, and it has to say that the key EXPANDS rather than
+	// reveals — that is the behaviour the key now has. Only the part that fits
+	// on one wrapped line is asserted, because the overlay wraps its column.
+	ck.StrContains(help, "Expand or collapse injected",
+		"the help overlay does not describe the injected toggle:\n")
 }
 
-// An empty pane has two very different causes, and the copy must not confuse
-// them. A transcript holding ONLY injected blocks has content -- the filter is
-// hiding it -- so "No messages yet" would be a lie; the pane names the count
-// and the key instead, and ^T then draws the blocks. A conversation with no
-// blocks at all keeps the "No messages yet" line.
-func TestCockpitNamesWhatItHidesWhenNothingElseIsLeft(t *testing.T) {
+// An injected-only transcript is CONTENT, not an empty conversation: it is
+// drawn, and "No messages yet" would be a lie. Only a transcript with no blocks
+// at all keeps the empty copy.
+func TestCockpitDrawsAnAllInjectedTranscript(t *testing.T) {
 	ck := assert.NewCollecting(t)
 
 	c := newTestCockpit("c_1")
@@ -3182,23 +3196,10 @@ func TestCockpitNamesWhatItHidesWhenNothingElseIsLeft(t *testing.T) {
 	c.applyEvent(systemMessageEventFor("c_1", "env: cwd=/work"))
 
 	view := ansi.Strip(c.View().Content)
-	ck.StrContains(view, "2 injected hidden", "an all-injected transcript must say how much it hides:\n")
-	ck.StrContains(view, c.keys.ToggleInjected.Help().Key, "the hidden-count line must name the key that shows them:\n")
+	ck.StrContains(view, "heartbeat: keep going", "an all-injected transcript was not drawn:\n")
+	ck.StrContains(view, "env: cwd=/work", "an all-injected transcript dropped a block:\n")
 	ck.NotStrContains(view, "No messages yet", "the pane claimed an all-injected transcript is empty:\n")
-
-	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	view = ansi.Strip(c.View().Content)
-	ck.StrContains(view, "heartbeat: keep going", "^T did not draw the injected blocks:\n")
-	ck.StrContains(view, "env: cwd=/work", "^T did not draw every injected block:\n")
-	ck.NotStrContains(view, "injected hidden", "the hidden-count line survived ^T:\n")
-
-	// Hiding them again must CLEAR the pane. A renderer with nothing to draw
-	// returns no lines, and a pane that keeps the rows it drew last frame shows
-	// blocks the filter says are hidden.
-	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	view = ansi.Strip(c.View().Content)
-	ck.NotStrContains(view, "heartbeat", "^T hid the blocks in the model but left them on screen:\n")
-	ck.StrContains(view, "2 injected hidden", "the pane did not go back to naming what it hides:\n")
+	ck.NotStrContains(view, "injected hidden", "the pane still speaks of hidden messages:\n")
 
 	empty := newTestCockpit("c_2")
 	empty.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -3241,4 +3242,18 @@ func TestOneMergedEchoRetiresEverySendItAnswers(t *testing.T) {
 
 	c.applyEvent(userMessageEventFor("c_1", "first\n\nsecond", 5))
 	ck.EqDeep([]string{"third"}, pendingTexts(c), "a merged echo left its sends behind")
+}
+
+// ^T is the only key that opens a collapsed injected message, and the marker
+// the block carries cannot name it. The footer is where a reader learns it —
+// beside ^O, which opens a folded tool call the same way.
+func TestFooterNamesTheInjectedToggle(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 200, Height: 30})
+
+	footer := ansi.Strip(c.footerHints())
+	h := c.keys.ToggleInjected.Help()
+	ck.StrContains(footer, h.Key+" "+h.Desc,
+		"the footer does not name the injected toggle:\n")
 }

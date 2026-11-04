@@ -865,7 +865,9 @@ func TestInjectedMessagesAreDecoratedByKind(t *testing.T) {
 		{"budget", "⊘", "budget"},
 		{"notify:github", "✉", "notification"},
 		{"claude-reminder", "↳", "harness reminder"},
-		{"", "↳", ""},
+		// An empty kind is an injected block whose wrapper named none: no
+		// glyph and no label, never a dangling separator.
+		{"", "", ""},
 		{"future-kind", "↳", "future-kind"},
 	} {
 		got := ansi.Strip(renderBlockFor(t, session.Block{
@@ -873,13 +875,40 @@ func TestInjectedMessagesAreDecoratedByKind(t *testing.T) {
 			Text:         "the body",
 			InjectedKind: tc.kind,
 		}))
-		ck.StrContains(got, tc.glyph, "kind %q: missing glyph", tc.kind)
+		// Every row carries the user message's bar, dimmed: an injected message
+		// reads as something that was said to the agent, not as chrome.
+		ck.StrContains(got, "▌", "kind %q: missing the message bar", tc.kind)
+		if tc.glyph != "" {
+			ck.StrContains(got, tc.glyph, "kind %q: missing glyph", tc.kind)
+		}
 		if tc.label != "" {
-			ck.StrContains(got, tc.label+" · ", "kind %q: missing label", tc.kind)
+			ck.StrContains(got, tc.label, "kind %q: missing label", tc.kind)
+			// The kind is its OWN ROW, not a prefix crowded against the text.
+			ck.StrContains(got, tc.glyph+" "+tc.label+"\n",
+				"kind %q: the label is not a title row of its own:\n%s", tc.kind, got)
 		} else {
-			ck.NotStrContains(got, " · ", "kind %q: an unlabelled kind drew a separator", tc.kind)
+			// No kind at all: the title row is the bare bar, never a stray glyph.
+			first, _, _ := strings.Cut(got, "\n")
+			ck.Eq("▌", strings.TrimRight(first, " "),
+				"kind %q: an unlabelled kind drew a title:\n%s", tc.kind, got)
 		}
 		ck.StrContains(got, "the body", "kind %q: the body is missing", tc.kind)
+	}
+}
+
+// The kind is named whether the block is collapsed or expanded — the whole
+// point of always showing it is that the reader can tell a restart from a job
+// exit at a glance.
+func TestInjectedKindIsNamedInBothModes(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	for _, expand := range []bool{false, true} {
+		r := newRenderer()
+		r.width = 80
+		r.expandInjected = expand
+		got := ansi.Strip(r.renderBlock(session.Block{
+			Kind: session.KindInjected, Text: "the body", InjectedKind: "daemon-restart",
+		}))
+		ck.StrContains(got, "daemon restart\n", "expand=%v: the kind is not named", expand)
 	}
 }
 
@@ -908,4 +937,76 @@ func renderBlockFor(t *testing.T, b session.Block) string {
 	r := newRenderer()
 	r.width = 80
 	return r.renderBlock(b)
+}
+
+// The block's padding is drawn as the BAR, not as a blank line: the gutter runs
+// unbroken from the row above the message to the row below it, so the block
+// reads as one unit. A blank row there broke the line and let the message
+// dissolve into whatever it landed next to.
+func TestInjectedBlockPadsWithItsOwnBar(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	got := ansi.Strip(renderBlockFor(t, session.Block{
+		Kind: session.KindInjected, InjectedKind: "jobs", Text: "one line",
+	}))
+	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+	ck.Len(lines, 3, "a one-line injected block is title, body, padding:\n%s", got)
+	ck.StrContains(lines[0], "job", "the first row is not the kind's title:\n%s", got)
+	ck.StrContains(lines[1], "one line", "the middle row is not the message:\n%s", got)
+	ck.Eq("▌", strings.TrimRight(lines[2], " "), "the row below is not the bar:\n%s", got)
+	// Not a blank line: a blank padding row would be an empty string.
+	for i, l := range lines {
+		ck.True(strings.TrimSpace(l) != "", "row %d is blank, not a bar:\n%s", i, got)
+	}
+}
+
+// The body is drawn DARKER than plaintext and the kind is the brightest thing
+// in the block, so the eye lands on what the message is before reading it. The
+// assertion is that the two differ: one colour for both is the bug this fixes.
+func TestInjectedBodyAndKindAreDrawnInDifferentColours(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	raw := renderBlockFor(t, session.Block{
+		Kind: session.KindInjected, InjectedKind: "jobs", Text: "the body",
+	})
+	ck.StrContains(raw, "\x1b[1;35m", "the title is not in its own colour: %q", raw)
+	// The body carries NO colour: it is ordinary text, because the title row is
+	// what identifies the block. A styled body would be the same experiment that
+	// made it unreadable.
+	ck.StrContains(raw, "\x1b[90m▌ \x1b[mthe body", "the body is not plain text under its bar: %q", raw)
+}
+
+// A row that ends on a hyphen must not become three rows: "mid-request."
+// rendered as "mid" / "-" / "request." because Wordwrap returns a row one cell
+// over the limit and Hardwrap then stranded the hyphen alone. Both halves of
+// the repair are pinned here.
+func TestWrappingKeepsAHyphenatedWordTogether(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	got := ansi.Strip(renderBlockFor(t, session.Block{
+		Kind: session.KindUser,
+		Text: "The daemon restarted while your previous turn was in flight; it was lost mid-request. Continue your work from exactly where it stopped.",
+	}))
+	for _, line := range strings.Split(got, "\n") {
+		ck.NotEq("-", strings.TrimSpace(line),
+			"a hyphen was stranded on a row of its own:\n%s", got)
+	}
+	// Split AT the hyphen is correct typography; the hyphen belongs to the end
+	// of the first half, not to the start of the second.
+	ck.StrContains(got, "mid-\n", "the hyphen is not at the end of its row:\n%s", got)
+	ck.StrContains(got, "\n▌ request.", "the second half does not start the next row:\n%s", got)
+}
+
+// No row may exceed the width it was folded to, whatever the text.
+func TestFoldedRowsNeverExceedTheWidth(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const width = 60
+	for _, text := range []string{
+		"short",
+		"a b c d e f g h i j k l m n o p q r s t u v w x y z a b c d e f g h i j k l m n o p q r s t u v w x y z",
+		"mid-request another-hyphenated-word and-another-one-that-goes-on-and-on-and-on",
+		"https://example.com/a/very/long/path/that/keeps/going/and/going/forever/index.html",
+	} {
+		for _, row := range wrapTo("▌ ", text, width) {
+			ck.True(ansi.StringWidth(ansi.Strip(row)) <= width,
+				"row %q is %d cells, over the %d limit", ansi.Strip(row), ansi.StringWidth(ansi.Strip(row)), width)
+		}
+	}
 }

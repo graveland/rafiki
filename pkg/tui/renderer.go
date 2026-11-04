@@ -371,12 +371,13 @@ type renderer struct {
 	// nothing visible.
 	expandArgs bool
 
-	// showInjected draws the harness-injected blocks the cockpit hides by
-	// default. Filtering happens HERE, at layout time, never in the session:
-	// the block stays in the model, so the toggle re-shows history already
-	// fetched without a refetch. Part of the cache key via paneSig for the same
-	// reason as expandArgs.
-	showInjected bool
+	// expandInjected draws injected messages at full length instead of their
+	// first few rows. It is a LEVEL OF DETAIL, not a visibility switch: an
+	// injected message is part of the conversation and is always drawn, because
+	// a reader who cannot see that the daemon spoke cannot tell why the agent
+	// did what it did. Part of the cache key via paneSig for the same reason as
+	// expandArgs: flipping it changes how many rows a block renders.
+	expandInjected bool
 
 	// images is the shared Kitty thumbnail store, or nil when this renderer
 	// must never draw pixels. drawImages and smallIDs are set per render by
@@ -448,7 +449,26 @@ var (
 	// screen. Everything that is not the agent's prose carries a prefix; the
 	// prose, the scarce thing, carries none and stands out by that absence.
 	styleThinkBar = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	// An injected message takes the user message's bar in a DARK grey: the shape
+	// says "said to this agent", the weight says "not by your user". Darker than
+	// plaintext is the whole point — the bar sits below the conversation's
+	// brightness, so the block reads as an aside rather than competing with the
+	// turn it interrupted.
+	styleInjectedBar = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	// The TITLE row carries the kind, and magenta is used nowhere else in the
+	// transcript: an injected block is identifiable from its first row without
+	// reading a word of it, and it cannot be mistaken for a user message (cyan),
+	// prose (default), thinking (grey) or a tool line (yellow). The body is left
+	// in ordinary text colour — dimming it made it illegible, and the title is
+	// what identifies the block.
+	styleInjectedKind = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)
 )
+
+// injectedPreviewRows is how much of an injected message is drawn before ^T.
+// Three: enough for the one-line notices that are most of them, short enough
+// that a pasted report does not bury the turn it interrupted.
+const injectedPreviewRows = 3
 
 // renderBlock converts one block into its styled string.
 func (r *renderer) renderBlock(b session.Block) string {
@@ -489,28 +509,50 @@ func (r *renderer) renderBlock(b session.Block) string {
 	case session.KindSystem:
 		return styleMeta.Render("⚙  ") + styleMeta.Render(sanitizeControlChars(b.Text))
 	case session.KindInjected:
-		// Real history, not a turn: a harness nudge reads as a footnote under
-		// its own gutter, in the same grey the system lines use — ⚙ already
-		// means an error or a compaction boundary, and this must not be
-		// mistaken for one. Wrapped so a long environment update stays inside
-		// the pane; hidden outright unless the reader asked for it.
+		// A message, not a turn: it takes the user message's solid bar so it
+		// reads as part of the conversation, in a dark grey rather than the
+		// user's cyan — the bar says "this is something that was said to this
+		// agent", the weight says "and it was not your user who said it".
 		//
-		// The gutter says WHICH kind of message this is, because they are not
-		// interchangeable: a daemon restart and a settled subagent both arrive
-		// from the same "not you" direction but mean very different things, and
-		// one grey ↳ for both made the transcript a wall of identical
-		// footnotes. The first line names the kind; every row carries the glyph.
+		// The KIND gets a row of its own rather than riding inline on the first
+		// line of content. Inline, the label was both cramped against the text
+		// and the only coloured thing in a paragraph that otherwise read as
+		// prose; as a title it identifies the block before a single word of the
+		// body is read, and the body can then stay in ordinary text colour
+		// instead of being dimmed into illegibility. They are not
+		// interchangeable: a daemon restart, a budget breach and a settled
+		// subagent all arrive from the same "not you" direction and mean very
+		// different things.
+		//
+		// Collapsed (the default) it shows a few rows of body and counts the
+		// rest; ^T shows all of it — the same two-level shape ^O gives tool
+		// arguments. The title row is never counted or truncated.
 		d := decorationFor(b.InjectedKind)
-		var sb strings.Builder
-		lines := strings.Split(strings.TrimRight(sanitizeControlChars(b.Text), "\n"), "\n")
-		for i, line := range lines {
-			gutter := d.glyph + " "
-			if i == 0 && d.label != "" {
-				gutter = d.glyph + " " + d.label + " · "
-			}
-			r.writeWrapped(&sb, d.style.Render(gutter), styleThink.Render(line))
+		bar := styleInjectedBar.Render("▌ ")
+		pad := styleInjectedBar.Render("▌")
+		title := pad
+		if d.label != "" {
+			title = bar + d.style.Render(d.glyph+" "+d.label)
 		}
-		return sb.String()
+		body := strings.TrimRight(sanitizeControlChars(b.Text), "\n")
+		if body == "" {
+			body = "(empty)"
+		}
+		rows := []string{title}
+		for _, line := range strings.Split(body, "\n") {
+			rows = append(rows, wrapTo(bar, line, r.width)...)
+		}
+		// rows[0] is the title; the body is rows[1:].
+		if bodyRows := len(rows) - 1; !r.expandInjected && bodyRows > injectedPreviewRows {
+			rows = append(rows[:1+injectedPreviewRows],
+				bar+styleMeta.Render("[+"+itoa(int64(bodyRows-injectedPreviewRows))+" lines]"))
+		}
+		// Breathing room below, drawn as the BAR rather than as a blank line:
+		// the gutter runs unbroken through the padding, so the block reads as
+		// one unit instead of a floating paragraph. A blank row would break the
+		// line and let the message dissolve into whatever it landed next to.
+		rows = append(rows, pad)
+		return strings.Join(rows, "\n") + "\n"
 	case session.KindScriptOutput:
 		// A script's output IS the transcript's content, not commentary: raw,
 		// never markdown (the glamour-joins-paragraphs trap), gutter weight
@@ -736,19 +778,19 @@ type injectedDecoration struct {
 func decorationFor(kind string) injectedDecoration {
 	switch inject.Family(inject.Kind(kind)) {
 	case inject.KindJob:
-		return injectedDecoration{"▣", "job", styleMeta}
+		return injectedDecoration{"▣", "job", styleInjectedKind}
 	case inject.KindSubagent:
-		return injectedDecoration{"⚑", "subagent", styleMeta}
+		return injectedDecoration{"⚑", "subagent", styleInjectedKind}
 	case inject.KindHeartbeat:
-		return injectedDecoration{"♥", "heartbeat", styleMeta}
+		return injectedDecoration{"♥", "heartbeat", styleInjectedKind}
 	case inject.KindSchedule:
-		return injectedDecoration{"◷", "schedule", styleMeta}
+		return injectedDecoration{"◷", "schedule", styleInjectedKind}
 	case inject.KindExecutor:
-		return injectedDecoration{"⌁", "executor", styleMeta}
+		return injectedDecoration{"⌁", "executor", styleInjectedKind}
 	case inject.KindScript:
-		return injectedDecoration{"▶", "script", styleMeta}
+		return injectedDecoration{"▶", "script", styleInjectedKind}
 	case inject.KindNotification:
-		return injectedDecoration{"✉", "notification", styleMeta}
+		return injectedDecoration{"✉", "notification", styleInjectedKind}
 	case inject.KindDaemonRestart:
 		return injectedDecoration{"⟳", "daemon restart", styleWarn}
 	case inject.KindRateLimit:
@@ -756,48 +798,18 @@ func decorationFor(kind string) injectedDecoration {
 	case inject.KindBudget:
 		return injectedDecoration{"⊘", "budget", styleWarn}
 	case inject.KindContext:
-		return injectedDecoration{"↳", "context", styleMeta}
+		return injectedDecoration{"↳", "context", styleInjectedKind}
 	case inject.KindClaudeReminder:
-		return injectedDecoration{"↳", "harness reminder", styleMeta}
+		return injectedDecoration{"↳", "harness reminder", styleInjectedKind}
 	}
 	// An empty kind is an injected block whose wrapper named none (a claude
 	// <system-reminder> from an older daemon, or a system-role row): no label,
 	// rather than a dangling separator. A kind this build does not know keeps
 	// its own name, so it is never mistaken for user text.
 	if kind == "" {
-		return injectedDecoration{"↳", "", styleMeta}
+		return injectedDecoration{"↳", "", styleInjectedKind}
 	}
-	return injectedDecoration{"↳", inject.Label(inject.Kind(kind)), styleMeta}
-}
-
-// hidesBlock reports whether b is left out of the transcript in the given
-// mode. It is the ONE filter predicate: Lines skips blocks with it, and the
-// cockpit counts what it is hiding with it, so the pane and its copy cannot
-// disagree about what the toggle would reveal.
-func hidesBlock(b session.Block, showInjected bool) bool {
-	return b.Kind == session.KindInjected && !showInjected
-}
-
-// hiddenInjectedCount is how many of blocks the mode hides. Derived at render
-// time from the blocks themselves: a stored count would be a second thing to
-// keep true.
-func hiddenInjectedCount(blocks []session.Block, showInjected bool) int {
-	var n int
-	for _, b := range blocks {
-		if hidesBlock(b, showInjected) {
-			n++
-		}
-	}
-	return n
-}
-
-// hides reports whether b is left out of the transcript in the current mode.
-//
-// Only injected blocks can be hidden, and the toggle is the only input. The
-// block is never removed from the session: a hidden block is one the layout
-// skipped, so re-showing it costs no refetch.
-func (r *renderer) hides(b session.Block) bool {
-	return hidesBlock(b, r.showInjected)
+	return injectedDecoration{"↳", inject.Label(inject.Kind(kind)), styleInjectedKind}
 }
 
 // Lines renders the transcript as display lines: cached output for the
@@ -833,9 +845,6 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 		r.liveOut = nil
 	}
 	for i := r.cachedUpTo; i < finalized; i++ {
-		if r.hides(blocks[i]) {
-			continue
-		}
 		r.cached = append(r.cached, blockLines(r.renderBlock(blocks[i]))...)
 	}
 	r.cachedUpTo = finalized
@@ -848,9 +857,6 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 		r.lastFP = fp
 		var tail []string
 		for i := finalized; i < len(blocks); i++ {
-			if r.hides(blocks[i]) {
-				continue
-			}
 			tail = append(tail, blockLines(r.renderBlock(blocks[i]))...)
 		}
 		r.liveOut = tail
@@ -888,11 +894,72 @@ func wrapTo(prefix, text string, width int) []string {
 	if avail < 8 {
 		avail = 8
 	}
-	wrapped := ansi.Hardwrap(ansi.Wordwrap(text, avail, " -"), avail, true)
-	rows := strings.Split(strings.TrimRight(wrapped, "\n"), "\n")
+	rows := foldToWidth(text, avail)
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, prefix+row)
+	}
+	return out
+}
+
+// foldToWidth word-wraps text to at most avail cells per row.
+//
+// Two library behaviours have to be undone here, and both showed up as
+// "mid-request." rendering as three rows: "mid", "-", "request.".
+//
+//   - ansi.Wordwrap can return a row ONE cell over the limit when the row ends
+//     on a breakpoint character — it appends the hyphen after deciding the line
+//     fits. That trailing character belongs to the word that follows, so it is
+//     moved onto the next row rather than left hanging.
+//   - ansi.Hardwrap, applied afterwards to catch an unbreakable word, then
+//     stranded that lone hyphen on a row of its own.
+//
+// So: word-wrap, repair the one-over rows, and only then hard-split whatever
+// is still too wide (a URL or a path, which has no breakpoint to fold at).
+func foldToWidth(text string, avail int) []string {
+	rows := strings.Split(strings.TrimRight(ansi.Wordwrap(text, avail, " -"), "\n"), "\n")
+	for i := 0; i < len(rows); i++ {
+		if ansi.StringWidth(rows[i]) <= avail {
+			continue
+		}
+		// The row went over because it ends on a hyphen Wordwrap appended
+		// after deciding the line fit. The whole hyphenated word belongs on
+		// the next row, not just its final character: moving one character
+		// gives "mid" / "-request.", which is as wrong as the stranded hyphen
+		// it replaced. No separator is inserted — the two halves are one word.
+		if strings.HasSuffix(rows[i], "-") {
+			if cut := strings.LastIndexByte(rows[i], ' '); cut > 0 {
+				tail := rows[i][cut+1:]
+				rows[i] = rows[i][:cut]
+				if i+1 < len(rows) {
+					rows[i+1] = tail + rows[i+1]
+				} else {
+					rows = append(rows, tail)
+				}
+				continue
+			}
+		}
+		// No hyphen to fold at: move one character so the row fits and let the
+		// hard-split pass below deal with anything still too wide.
+		r := []rune(rows[i])
+		if len(r) == 0 {
+			continue
+		}
+		last := r[len(r)-1]
+		rows[i] = string(r[:len(r)-1])
+		if i+1 < len(rows) {
+			rows[i+1] = string(last) + rows[i+1]
+			continue
+		}
+		rows = append(rows, string(last))
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if ansi.StringWidth(row) <= avail {
+			out = append(out, row)
+			continue
+		}
+		out = append(out, strings.Split(ansi.Hardwrap(row, avail, true), "\n")...)
 	}
 	return out
 }

@@ -78,7 +78,7 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | `^G` | Toggle the help page: every key with a sentence on what it does. `PgUp`/`PgDn`, `home`/`end` scroll it when it does not fit |
 | `^O` | Expand tool arguments in full rather than folded |
 | `^Y` | Toggle image thumbnails (Kitty-graphics terminals only) |
-| `^T` | Show the messages the agent's harness injected (hidden by default — see below) |
+| `^T` | Expand the messages the daemon and the harness injected — drawn short by default (see below) |
 | `^C`/`^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time |
 
 **Input pane**
@@ -140,14 +140,28 @@ argument (`⚒ bash go test ./...`) and truncate output from the *end* (where
 the error usually is). No mouse support, deliberately — capturing it would
 take away your terminal's own select-and-copy.
 
-A gutter marks the messages nothing human typed: the agent's own harness's
-reminders (a heartbeat nudge, an environment update, a file-changed notice) and
-the messages rafiki's daemon injects. They are stored history, so they are
-replayed with everything else, but they are not conversation and the transcript
-hides them until you press `^T`. Each kind carries its own glyph and names
-itself on the first row, so a restart is not a job exit:
+A solid `▌` bar marks the messages nothing human typed: the agent's own
+harness's reminders (a heartbeat nudge, an environment update, a file-changed
+notice) and the messages rafiki's daemon injects. It is the user message's bar
+in a dark grey rather than the user's cyan — the shape says "something was said
+to this agent", the weight says "and it was not you who said it".
 
-| Gutter | Kind |
+The KIND gets a title row of its own (`▌ ⟳ daemon restart`), in magenta —
+a colour used nowhere else in the transcript — with the urgent kinds in the
+warning colour. That row identifies the block before a word of the body is
+read, which is why the body can stay in ordinary text colour instead of being
+dimmed into illegibility. The bar runs unbroken through the padding row below
+the block, so the message reads as one unit.
+
+They are always drawn. Hiding them by default was wrong: a reader who cannot
+see that the daemon spoke cannot tell why the agent did what it did. They are
+drawn SHORT instead — three rows, then `[+N lines]` — and `^T` expands every
+injected message to its full text, the same two-level shape `^O` gives tool
+arguments. Both keys are named in the footer. Each kind carries its own glyph
+and names itself on the first row, expanded or not, so a restart is not a job
+exit:
+
+| Glyph | Kind |
 |---|---|
 | `⟳` | the daemon restarted under a working agent (in the warning colour) |
 | `⏸` | an upstream rate limit paused a turn (warning colour) |
@@ -161,10 +175,10 @@ itself on the first row, so a restart is not a job exit:
 | `⌁` | an executor-side condition |
 | `↳` | anything else — a harness reminder, a context update, a kind this build does not know |
 
-Hiding is a view decision: the messages stay in the transcript already
-fetched, so the toggle costs no refetch, and scrolling and the position
-readout are unaffected either way. A transcript whose ONLY blocks are injected
-says `N injected hidden — ^T` instead of claiming the conversation is empty.
+The level of detail is a view decision: the messages stay in the transcript
+already fetched, so the toggle costs no refetch, and scrolling and the position
+readout are unaffected either way. A transcript whose only blocks are injected
+is content, not an empty conversation, and is drawn as such.
 
 ## Activity and attention
 
