@@ -437,6 +437,15 @@ reports it does not exist, skip it and run the second. Neither extension declare
 a dependency on the other in `pg_depend`, so this order is caution rather than a
 requirement — but it is the safe order, and the order the daemon's WARN prints.
 
+**Stop the daemon before the drop.** The drop takes the extension's schemas
+(`_timescaledb_functions` among them) out from under any query already running,
+and a pooled connection whose cached plan names one of them fails with
+`schema "_timescaledb_functions" does not exist` (SQLSTATE 3F000) until it
+reconnects — that is a `recall indexer` WARN in the daemon log, not corruption,
+and it clears on its own once the drop finishes. Stopping the daemon first makes
+the window impossible; restarting it afterwards is worth doing anyway, because
+its connections predate the drop.
+
 Only when every database on the cluster answers `-` for `timescaledb` do you
 remove it from `shared_preload_libraries` in `postgresql.conf` and restart the
 server. Nothing rafiki's schema needs comes from it, so this is a step for a
