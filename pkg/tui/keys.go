@@ -239,14 +239,17 @@ func defaultKeyMap() keyMap {
 		Rename: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rename")),
 		// Fork opens the create form pointed at the selected child's history:
 		// the new conversation borrows everything up to the fork point, and
-		// both conversations keep running.
+		// both conversations keep running. A borrowed history that will not fit
+		// the destination model's window is not forked until the question it
+		// raises is answered — compacting on the source's model first, or not.
 		Fork: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "fork")),
 		// Tag pins a named, forkable handle to the child's last completed
 		// turn (`rafiki create --from-tag` resolves it later).
 		Tag: key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tag")),
 		// Capital M, like capital R: the switch CLOSES the old conversation
 		// once the fork lands, so it carries the heavier capitals. Lowercase
-		// letters are the read-only rail actions.
+		// letters are the read-only rail actions. Like f, an over-window
+		// history asks before it compacts.
 		SwitchModel: key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "switch model")),
 
 		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back to input")),
