@@ -74,11 +74,17 @@ the conversation row `FOR UPDATE` first (serialising concurrent compactors) and
 fences the write on the held conversation lease:
 
 - **Summary** as the first node of the chain, a ROOT of kind
-  `compaction_summary` with `derived_from_id` = the head it replaced, and
+  `compaction_summary` with `derived_from_id` = the head it replaced,
   `input_tokens` = the size of the context it replaced (the summary response's
-  input + cache read + cache creation). A summary is unique model output, so its
-  root seed does not mix in `derived_from` — derived-from is lineage here, not
-  identity.
+  input + cache read + cache creation), and `output_tokens` = the size of the
+  working set it leaves behind (the summary node plus the verbatim tail, the
+  same number the live `CompactionEnd` event reports as `PostTokens`). On a
+  summary row `output_tokens` is therefore a working-set size, NOT the
+  provider's completion tokens as it is on a turn row; it is what a later
+  history read serves as `CompactionBoundary.post_tokens`, so a fork continuing
+  from this boundary reads a recorded number instead of estimating one. A
+  summary is unique model output, so its root seed does not mix in
+  `derived_from` — derived-from is lineage here, not identity.
 - **Tail copies** as the nodes after it, `kind='compaction_tail'`, each carrying
   the original row's `stop_reason` and NULL token columns — a verbatim duplicate
   of a row that still exists earlier in the table.
