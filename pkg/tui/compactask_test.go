@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -13,26 +14,41 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	rafikiv1connect "go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 
 	"github.com/multigres/testkit/assert"
 )
 
 // compactClient is the ControlClient a compacting fork reaches. It records
 // every call in ORDER, because the composition's shape is the assertion:
-// spawn the intermediate, send it /compact, spawn the fork from it, close it.
+// spawn the intermediate, send it /compact, spawn the fork from it, stop it,
+// close it.
 //
-// Its history carries a compaction boundary only AFTER /compact was sent. That
-// is not decoration: compactfork reads a watermark before the send precisely
-// because a boundary that is already there satisfies the wait instantly with a
-// stale event, so a fake that always answered one would let that bug back in.
+// Two things here are deliberate rather than decoration, because a fake that
+// lets them slide lets the bug back in:
+//
+//   - the history carries a compaction boundary only AFTER /compact was sent.
+//     compactfork reads a watermark before the send precisely because a
+//     boundary already present satisfies the wait instantly with a stale event.
+//   - Close REFUSES a child that is still live, the way the daemon does. Close
+//     finalizes an EXITED child and answers ErrNotExited otherwise, so a fake
+//     that closed anything made the composition's stop step look optional —
+//     the sequence that failed every real run at its very last step.
 type compactClient struct {
 	rafikiv1connect.ControlClient
 
 	mu      sync.Mutex
 	events  []string
 	spawned []*rafikiv1.SpawnRequest
+	// live holds the children Spawn has handed out that no Kill has stopped
+	// yet; Close refuses those.
+	live map[string]bool
 	// compacted is set once /compact has been sent to the intermediate.
 	compacted bool
+}
+
+func newCompactClient() *compactClient {
+	return &compactClient{live: map[string]bool{}}
 }
 
 func (f *compactClient) record(ev string) {
@@ -56,6 +72,7 @@ func (f *compactClient) Spawn(_ context.Context, req *connect.Request[rafikiv1.S
 	f.mu.Lock()
 	f.spawned = append(f.spawned, req.Msg)
 	id := fmt.Sprintf("c_new%d", len(f.spawned))
+	f.live[id] = true
 	f.mu.Unlock()
 	f.record("spawn")
 	return connect.NewResponse(&rafikiv1.SpawnResponse{ChildId: id}), nil
@@ -88,11 +105,22 @@ func (f *compactClient) GetHistory(_ context.Context, req *connect.Request[rafik
 }
 
 func (f *compactClient) Close(_ context.Context, req *connect.Request[rafikiv1.CloseRequest]) (*connect.Response[rafikiv1.CloseResponse], error) {
+	f.mu.Lock()
+	live := f.live[req.Msg.GetChildId()]
+	f.mu.Unlock()
+	if live {
+		return nil, rpcreason.Attach(
+			connect.NewError(connect.CodeFailedPrecondition, errors.New("child is still running")),
+			protocol.ErrNotExited)
+	}
 	f.record("close:" + req.Msg.GetChildId())
 	return connect.NewResponse(&rafikiv1.CloseResponse{}), nil
 }
 
 func (f *compactClient) Kill(_ context.Context, req *connect.Request[rafikiv1.KillRequest]) (*connect.Response[rafikiv1.KillResponse], error) {
+	f.mu.Lock()
+	f.live[req.Msg.GetChildId()] = false
+	f.mu.Unlock()
 	f.record("kill:" + req.Msg.GetChildId())
 	return connect.NewResponse(&rafikiv1.KillResponse{}), nil
 }
@@ -187,7 +215,7 @@ func TestCompactAskOpensWhenOverWindow(t *testing.T) {
 func TestCompactAskYesRunsTheComposition(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("")
-	client := &compactClient{}
+	client := newCompactClient()
 	c.client = client
 	compactForm(t, c)
 
@@ -204,8 +232,8 @@ func TestCompactAskYesRunsTheComposition(t *testing.T) {
 	ck.Eq("", sm.switchSource, "a plain fork has no switch tail")
 
 	ck.EqDeep([]string{
-		"spawn", "send:c_new1", "spawn", "close:c_new1",
-	}, client.seen(), "spawn intermediate, compact it, fork from it, close it")
+		"spawn", "send:c_new1", "spawn", "kill:c_new1", "close:c_new1",
+	}, client.seen(), "spawn the intermediate, compact it, fork from it, stop it, then close it — a live child cannot be closed")
 
 	reqs := client.requests()
 	ck.Require().Eq(2, len(reqs), "spawn requests")
@@ -224,7 +252,7 @@ func TestCompactAskYesRunsTheComposition(t *testing.T) {
 func TestCompactAskNoSpawnsNothing(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("")
-	client := &compactClient{}
+	client := newCompactClient()
 	c.client = client
 	compactForm(t, c)
 
@@ -272,7 +300,7 @@ func TestCompactAskSkippedWhenTheWindowIsUnknown(t *testing.T) {
 func TestCompactAskSwitchReusesTheSwitchTail(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("")
-	client := &compactClient{}
+	client := newCompactClient()
 	c.client = client
 	compactForm(t, c)
 	c.form.switchSource = "c_1"
@@ -297,8 +325,8 @@ func TestCompactAskSwitchReusesTheSwitchTail(t *testing.T) {
 	ck.Eq("c_new2", sw.newID, "the fork took the source's place")
 
 	ck.EqDeep([]string{
-		"getchild:c_1", "spawn", "send:c_new1", "spawn", "close:c_new1",
+		"getchild:c_1", "spawn", "send:c_new1", "spawn", "kill:c_new1", "close:c_new1",
 		"kill:c_1", "close:c_1", "rename:scout", "routing:sort=price",
-	}, client.seen(), "the source is read, the history compacted, then the ordinary switch tail")
+	}, client.seen(), "the source is read, the history compacted and its helper stopped then closed, then the ordinary switch tail")
 	ck.Eq(protocol.KindFundi, client.requests()[1].GetKind(), "the fork is a fundi child")
 }
