@@ -39,24 +39,42 @@ func TestMigrateFullServerSchemaUnchanged(t *testing.T) {
 	c.Require().NoError(baseline.QueryRow(ctx,
 		`SELECT to_regclass('timescaledb_information.hypertables') IS NOT NULL`).Scan(&hasCatalog),
 		"probe the timescaledb catalog")
-	c.True(hasCatalog, "this test needs a server with timescaledb installed in template1; without it a plain-table assertion cannot tell a regression from a missing catalog")
-	for _, table := range []string{"conversation_turn", "broadcast", "raw_http_request"} {
-		var isHyper bool
-		c.Require().NoError(baseline.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM timescaledb_information.hypertables
-				 WHERE hypertable_name = $1)`, table).Scan(&isHyper), "probe hypertable %s at 0067", table)
-		c.False(isHyper, "%s is a hypertable at 0067; the baseline creates plain tables", table)
+	for _, table := range []string{"conversations.conversation_turn", "openrouter.broadcast", "conversations.raw_http_request"} {
+		if hasCatalog {
+			// The catalog is the direct answer when it is there.
+			var isHyper bool
+			c.Require().NoError(baseline.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM timescaledb_information.hypertables
+					 WHERE hypertable_schema = split_part($1, '.', 1)
+					   AND hypertable_name = split_part($1, '.', 2))`, table).Scan(&isHyper),
+				"probe hypertable %s at 0067", table)
+			c.False(isHyper, "%s is a hypertable at 0067; the baseline creates plain tables", table)
+			continue
+		}
+		// Without the catalog there is no hypertable to find, and a baseline
+		// that tried to create one could not have got this far: create_hypertable
+		// does not exist on a server without the extension, so migrateTo(67)
+		// above would have failed. Reaching here IS the assertion.
+		var kind string
+		c.Require().NoError(baseline.QueryRow(ctx,
+			`SELECT relkind::text FROM pg_class WHERE oid = $1::regclass`, table).Scan(&kind),
+			"probe %s at 0067", table)
+		c.Eq("r", kind, "%s must be an ordinary table at 0067", table)
 	}
 
 	// And nothing in the chain leaves one behind either.
-	for _, table := range []string{"conversation_turn", "broadcast", "raw_http_request"} {
-		var isHyper bool
-		c.Require().NoError(pool.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM timescaledb_information.hypertables
-				 WHERE hypertable_name = $1)`, table).Scan(&isHyper), "probe hypertable %s", table)
-		c.False(isHyper, "%s is a hypertable after the full chain", table)
+	if hasCatalog {
+		for _, table := range []string{"conversations.conversation_turn", "openrouter.broadcast", "conversations.raw_http_request"} {
+			var isHyper bool
+			c.Require().NoError(pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM timescaledb_information.hypertables
+					 WHERE hypertable_schema = split_part($1, '.', 1)
+					   AND hypertable_name = split_part($1, '.', 2))`, table).Scan(&isHyper),
+				"probe hypertable %s", table)
+			c.False(isHyper, "%s is a hypertable after the full chain", table)
+		}
 	}
 
 	// 0036: the bytea placeholders must become real vector columns, or every

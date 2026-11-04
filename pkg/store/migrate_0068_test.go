@@ -35,10 +35,38 @@ var hypertables0068 = []hypertable0068{
 	{"conversations.raw_http_request", "source", true},
 }
 
+// requireTimescaleDB skips a test whose FIXTURE needs TimescaleDB, on a server
+// that cannot provide it.
+//
+// rafiki no longer uses TimescaleDB, so the test database does not carry it —
+// and it could not be used even if the extension were installable, because the
+// library must be preloaded via shared_preload_libraries. These tests exist for
+// the other direction: migration 0068 converting a LEGACY database that still
+// has the hypertables, which only a server with the extension preloaded can
+// reproduce. Point RAFIKI_TEST_DSN at such a server to run them.
+//
+// A skip is right here and not a silent hole: the behaviour they pin (0068
+// converting a hypertable) cannot exist on a server without hypertables, so
+// there is nothing to assert, and the message says exactly what would run it.
+func requireTimescaleDB(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	var available bool
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) > 0 FROM pg_available_extensions WHERE name = 'timescaledb'`).Scan(&available); err != nil || !available {
+		t.Skip("timescaledb is not available on this server; 0068's conversion tests need a server with it in shared_preload_libraries (point RAFIKI_TEST_DSN at one)")
+	}
+	// Installable is not enough: TimescaleDB refuses to load unless the library
+	// was preloaded, and that refusal is the answer we want, not a failure.
+	if _, err := pool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS timescaledb`); err != nil {
+		t.Skip("timescaledb is not preloaded on this server; 0068's conversion tests need it in shared_preload_libraries (point RAFIKI_TEST_DSN at one)")
+	}
+}
+
 // makeHypertables turns the three tables into the hypertables prod runs, on top
 // of the plain tables the chain now creates. Run it after migrateTo(67).
 func makeHypertables(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
+	requireTimescaleDB(t, ctx, pool)
 	c := assert.NewAborting(t)
 	for _, ht := range hypertables0068 {
 		_, err := pool.Exec(ctx, fmt.Sprintf(
@@ -737,15 +765,34 @@ func rowContent0068(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table
 func compressAllChunks0068(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string) {
 	t.Helper()
 	c := assert.NewAborting(t)
+	// Uncompressed chunks only. add_columnstore_policy above is a real policy
+	// with a background job, so on a busy server a chunk can already be
+	// compressed by the time this runs, and compress_chunk reports that as an
+	// error rather than a no-op. What this helper promises is that every chunk
+	// ENDS compressed — which the probe below still asserts.
 	chunks := queryStrings(t, ctx, pool, `
 		SELECT format('%I.%I', chunk_schema, chunk_name)
 		  FROM timescaledb_information.chunks
 		 WHERE hypertable_schema = split_part($1, '.', 1)
+		   AND hypertable_name = split_part($1, '.', 2)
+		   AND NOT is_compressed`, table)
+	all := queryStrings(t, ctx, pool, `
+		SELECT format('%I.%I', chunk_schema, chunk_name)
+		  FROM timescaledb_information.chunks
+		 WHERE hypertable_schema = split_part($1, '.', 1)
 		   AND hypertable_name = split_part($1, '.', 2)`, table)
-	c.NotEmpty(chunks, "%s has no chunks; the fixture is wrong", table)
+	c.NotEmpty(all, "%s has no chunks; the fixture is wrong", table)
 	for _, chunk := range chunks {
-		_, err := pool.Exec(ctx, `SELECT compress_chunk($1::regclass, true)`, chunk)
-		c.Require().NoError(err, "compress %s of %s", chunk, table)
+		if _, err := pool.Exec(ctx, `SELECT compress_chunk($1::regclass, true)`, chunk); err != nil {
+			// The columnstore policy above is a real policy with a background
+			// job: it can compress this chunk between the catalog read and this
+			// call, and compress_chunk reports that as an error. Landing already
+			// compressed is the state this helper wants, so it is not a failure —
+			// the probe below is the assertion.
+			if !strings.Contains(err.Error(), "already compressed") {
+				c.Require().NoError(err, "compress %s of %s", chunk, table)
+			}
+		}
 	}
 	var compressed int
 	c.Require().NoError(pool.QueryRow(ctx, `
@@ -753,7 +800,7 @@ func compressAllChunks0068(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		 WHERE hypertable_schema = split_part($1, '.', 1)
 		   AND hypertable_name = split_part($1, '.', 2)
 		   AND is_compressed`, table).Scan(&compressed), "probe the compression of %s", table)
-	c.Eq(len(chunks), compressed, "%s: %d of %d chunks are compressed", table, compressed, len(chunks))
+	c.Eq(len(all), compressed, "%s: %d of %d chunks are compressed", table, compressed, len(all))
 }
 
 // scratchDatabaseName is the database the pool is connected to.
