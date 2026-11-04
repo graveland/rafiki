@@ -517,6 +517,11 @@ type Cockpit struct {
 	// resumeAsk is the pending "resume and send?" question after a message
 	// was refused because its target had exited, nil when none.
 	resumeAsk *resumeAsk
+	// compactAsk is the pending "compact before forking?" question a fork
+	// poses when the borrowed history no longer fits the destination model,
+	// nil when none. It is raised BY the create form, so it outranks the form
+	// in handleKey rather than following it.
+	compactAsk *compactAsk
 
 	// currency is the display conversion loaded once at construction, the
 	// same way modelView is -- a `rafiki config set` takes effect on the
@@ -1497,6 +1502,13 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if c.picker != nil {
 		return c.handlePickerKey(msg, max(1, c.bodyHeight()-pickerChrome))
+	}
+	// The compact question is raised BY the form — a fork whose history does
+	// not fit the model it is forking to — so it is checked BEFORE it. The
+	// form stays open behind the notice, and the next key must answer the
+	// question rather than edit the field that was last focused.
+	if c.compactAsk != nil {
+		return c, c.answerCompactAsk(msg.String())
 	}
 	if c.form != nil {
 		return c.handleFormKey(msg, c.form.suggestWindow(c.bodyHeight(), c.query))

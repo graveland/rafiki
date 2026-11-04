@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/compactfork"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
@@ -28,6 +29,13 @@ import (
 // would report a failure for a kill that then succeeds, which is the one
 // outcome worse than a slow one.
 const lifecycleTimeout = 3 * time.Minute
+
+// compactForkTimeout bounds a compacting fork: several RPCs and one slow
+// summary call on a conversation that is by definition near its model's
+// window. It must EXCEED compactfork's own default wait (20m) so that wait's
+// deadline is what fires, naming the step, rather than a bare context deadline
+// here that names nothing.
+const compactForkTimeout = 25 * time.Minute
 
 // forceShutdown is the shutdown grace a FORCED kill allows before the daemon
 // escalates to SIGKILL. One millisecond rather than zero: zero means "use the
@@ -112,6 +120,36 @@ type resumeAsk struct {
 	mode   rafikiv1.SendMode
 	text   string
 	images []stagedAttachment
+}
+
+// compactAsk is the question a fork poses when the source's borrowed history
+// no longer fits the model it is forking to. The answer is not a refusal: the
+// history is compacted first, on the SOURCE's own model (the only one that can
+// ingest it), in a visible intermediate child, and the real child forks from
+// the compacted result.
+//
+// It is modal like endAsk — the next key answers it, any other key cancels —
+// but unlike them it is raised BY the create form, which stays open behind the
+// notice. That is why the params ride here: a cancel must leave every field
+// exactly as the user left it, and the affirmative must spawn what the form
+// would have spawned.
+type compactAsk struct {
+	// sourceChildID, sourceName and sourceModel describe the fork source.
+	// sourceModel is what the INTERMEDIATE runs on: only the model that
+	// already holds the history can compact it.
+	sourceChildID string
+	sourceName    string
+	sourceModel   string
+	// destModel is the model the fork will run on, and window its context
+	// window; tokens is the source's prompt size, which did not fit it.
+	destModel string
+	tokens    int64
+	window    int32
+	// switchMode marks a model SWITCH: the fork's existing tail closes the
+	// source and renames the new child into its place.
+	switchMode bool
+	// params is exactly what the form would have spawned.
+	params spawnParams
 }
 
 type budgetSetMsg struct {
@@ -216,6 +254,65 @@ func (c *Cockpit) spawnCmd(p spawnParams) tea.Cmd {
 	}
 }
 
+// switchRequest reads the child a model switch replaces and returns the spawn
+// request its fork needs, plus the source itself for the finish step's rename
+// target and routing replay.
+//
+// Everything read here must be read BEFORE the source closes, which is why it
+// is one function rather than fields on the form: a switch and a COMPACTING
+// switch issue the same read, and both must describe the source identically or
+// the compacted continuation would land with a different cwd, parent or label
+// set than a plain switch of the same child.
+func (c *Cockpit) switchRequest(ctx context.Context, p spawnParams) (*rafikiv1.SpawnRequest, *rafikiv1.ChildSummary, error) {
+	get, err := c.client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: p.switchSource}))
+	if err != nil {
+		return nil, nil, err
+	}
+	src := get.Msg.GetChild()
+	// A sandboxed source must not switch: the sandbox block cannot be
+	// carried (ChildSummary does not expose it), so the continuation would
+	// land unconfined on the default executor.
+	if src.GetLabels()["rafiki/sandbox"] == "1" {
+		return nil, nil, fmt.Errorf("%s runs in a sandbox and a switch cannot carry the sandbox; fork it by hand instead", p.switchSource)
+	}
+
+	req := c.buildSpawnRequest(p)
+	// A switch is "same conversation, new model": the source's cwd and
+	// parent win over the form's, and a blank max-cost row carries the
+	// source's cap rather than reading as unlimited (matching the CLI's
+	// --max-cost-unset behaviour). A parented source STAYS parented —
+	// dropping the parent would move the switch out of the coordinator's
+	// lineage and rename it against the wrong sibling set.
+	if srcCwd := src.GetCwd(); srcCwd != "" {
+		req.Cwd = srcCwd
+	}
+	// ParentLabel honours the pre-rename fundi/parent spelling, the
+	// same fallback Rename and the lineage reads use.
+	if parent, ok := childstore.ParentLabel(src.GetLabels()); ok {
+		req.ParentChildId = parent
+	}
+	if req.MaxCost == nil && src.MaxCost != nil {
+		req.MaxCost = src.MaxCost
+	}
+	// The source's preset re-resolves: its allowlists and prompt are part
+	// of "the same conversation"; its model loses to the switch's model.
+	if pname := src.GetLabels()["rafiki/preset"]; pname != "" {
+		req.Preset = pname
+	}
+	labels := map[string]string{}
+	for k, v := range src.GetLabels() {
+		// Only USER labels carry over: rafiki/ and fundi/ are daemon
+		// namespaces, and "owner" is reserved outright (it feeds executor
+		// admission selectors) — spawning with any of them is refused.
+		if strings.HasPrefix(k, "rafiki/") || strings.HasPrefix(k, "fundi/") || k == "owner" {
+			continue
+		}
+		labels[k] = v
+	}
+	req.Labels = labels
+	return req, src, nil
+}
+
 // switchSpawnCmd is a model switch's FIRST step: read the source child (its
 // name, labels and routing spec — everything the follow-up needs that must be
 // read BEFORE the source closes), then spawn the fork the form described with
@@ -228,53 +325,10 @@ func (c *Cockpit) switchSpawnCmd(p spawnParams) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
 
-		get, err := c.client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: p.switchSource}))
+		req, src, err := c.switchRequest(ctx, p)
 		if err != nil {
 			return spawnedMsg{err: err, switchSource: p.switchSource}
 		}
-		src := get.Msg.GetChild()
-		// A sandboxed source must not switch: the sandbox block cannot be
-		// carried (ChildSummary does not expose it), so the continuation would
-		// land unconfined on the default executor.
-		if src.GetLabels()["rafiki/sandbox"] == "1" {
-			return spawnedMsg{err: fmt.Errorf("%s runs in a sandbox and a switch cannot carry the sandbox; fork it by hand instead", p.switchSource), switchSource: p.switchSource}
-		}
-
-		req := c.buildSpawnRequest(p)
-		// A switch is "same conversation, new model": the source's cwd and
-		// parent win over the form's, and a blank max-cost row carries the
-		// source's cap rather than reading as unlimited (matching the CLI's
-		// --max-cost-unset behaviour). A parented source STAYS parented —
-		// dropping the parent would move the switch out of the coordinator's
-		// lineage and rename it against the wrong sibling set.
-		if srcCwd := src.GetCwd(); srcCwd != "" {
-			req.Cwd = srcCwd
-		}
-		// ParentLabel honours the pre-rename fundi/parent spelling, the
-		// same fallback Rename and the lineage reads use.
-		if parent, ok := childstore.ParentLabel(src.GetLabels()); ok {
-			req.ParentChildId = parent
-		}
-		if req.MaxCost == nil && src.MaxCost != nil {
-			req.MaxCost = src.MaxCost
-		}
-		// The source's preset re-resolves: its allowlists and prompt are part
-		// of "the same conversation"; its model loses to the switch's model.
-		if pname := src.GetLabels()["rafiki/preset"]; pname != "" {
-			req.Preset = pname
-		}
-		labels := map[string]string{}
-		for k, v := range src.GetLabels() {
-			// Only USER labels carry over: rafiki/ and fundi/ are daemon
-			// namespaces, and "owner" is reserved outright (it feeds executor
-			// admission selectors) — spawning with any of them is refused.
-			if strings.HasPrefix(k, "rafiki/") || strings.HasPrefix(k, "fundi/") || k == "owner" {
-				continue
-			}
-			labels[k] = v
-		}
-		req.Labels = labels
-
 		resp, err := c.client.Spawn(ctx, connect.NewRequest(req))
 		if err != nil {
 			return spawnedMsg{err: err, switchSource: p.switchSource}
@@ -284,6 +338,51 @@ func (c *Cockpit) switchSpawnCmd(p spawnParams) tea.Cmd {
 			switchSource:  p.switchSource,
 			sourceName:    src.GetName(),
 			sourceRouting: src.GetRouting(),
+		}
+	}
+}
+
+// compactForkCmd runs a compacting fork and reports it as an ordinary spawn,
+// so the SAME applySpawned path finishes it: nothing here closes or renames
+// anything — for a switch that is switchFinishCmd's job, and for a plain fork
+// there is no tail at all.
+//
+// compactfork.Run owns the composition (spawn the intermediate on the source's
+// model, compact it, fork from the compacted result, close the intermediate).
+// Its Progress lines are not shown: the helper child is an ordinary row in the
+// rail, so the work is already visible where an operator looks for it, and a
+// notice stream here would fight the cockpit's one-line status.
+func (c *Cockpit) compactForkCmd(p spawnParams, sourceModel string, destWindow int32) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), compactForkTimeout)
+		defer cancel()
+
+		req := c.buildSpawnRequest(p)
+		var sourceName, sourceRouting string
+		if p.switchSource != "" {
+			// The switch tail needs what only the source can say, read before
+			// it closes — the same read, and the same refusal, as a plain
+			// switch's first step.
+			var src *rafikiv1.ChildSummary
+			var err error
+			req, src, err = c.switchRequest(ctx, p)
+			if err != nil {
+				return spawnedMsg{err: err, switchSource: p.switchSource}
+			}
+			sourceName, sourceRouting = src.GetName(), src.GetRouting()
+		}
+		fork, err := compactfork.Run(ctx, c.client, req, compactfork.Options{
+			SourceModel: sourceModel,
+			DestWindow:  destWindow,
+		})
+		if err != nil {
+			return spawnedMsg{err: err, switchSource: p.switchSource}
+		}
+		return spawnedMsg{
+			childID:       fork,
+			switchSource:  p.switchSource,
+			sourceName:    sourceName,
+			sourceRouting: sourceRouting,
 		}
 	}
 }
@@ -629,6 +728,47 @@ func (c *Cockpit) answerEndAsk(key string) tea.Cmd {
 	}
 	c.setNotice("cancelled")
 	return nil
+}
+
+// compactAskKey is the answer that runs the composition; every other key
+// cancels it.
+const compactAskKey = "y"
+
+// compactAskPrompt words the question for ask. Both numbers are named because
+// the question is how much does not fit, and the source's model is named
+// because that is where the compaction's spend lands — the intermediate child
+// runs on it, not on the destination.
+func compactAskPrompt(ask *compactAsk) string {
+	action := "fork"
+	if ask.switchMode {
+		action = "switch"
+	}
+	return ask.sourceName + " is at " + fmtTok(ask.tokens) + " tokens and " + ask.destModel +
+		" holds " + fmtTok(int64(ask.window)) + " — " + compactAskKey + " = compact on " +
+		ask.sourceModel + " first, then " + action + ", any other key cancels"
+}
+
+// answerCompactAsk consumes the key that answers the pending compactAsk.
+//
+// A cancel drops the question and nothing else: the form is still open with
+// every field the user set, so the answer to "it does not fit" can be a
+// different model, a different fork point, or nothing at all.
+func (c *Cockpit) answerCompactAsk(key string) tea.Cmd {
+	ask := c.compactAsk
+	c.compactAsk = nil
+	if key != compactAskKey {
+		c.setNotice("cancelled — nothing was created")
+		return nil
+	}
+	// The form stays up until the outcome lands (applySpawned closes it), and
+	// the composition takes minutes: without this a second ⏎ would start a
+	// second compaction.
+	if c.form != nil {
+		c.form.busy = true
+		c.form.submitted, c.form.hasSubmitted = ask.params, true
+	}
+	c.setNotice("compacting " + ask.sourceName + " on " + ask.sourceModel + "…")
+	return c.compactForkCmd(ask.params, ask.sourceModel, ask.window)
 }
 
 // dispatchEnd runs the confirmed outcome for id.

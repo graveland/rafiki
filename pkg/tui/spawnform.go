@@ -16,6 +16,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/modelquery"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -346,6 +347,64 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 		p.maxCost = &usd
 	}
 	return p, ""
+}
+
+// compactAskFor decides whether this submit is a fork whose borrowed history
+// cannot fit the model it is forking to, and builds the question if so. nil
+// means "spawn as asked".
+//
+// Two unknowns SKIP the question rather than guess, and neither is a refusal:
+//
+//   - a destination window no cached row answers for. Unknown is not "cannot"
+//     — the same rule modelquery.FitsWindow applies, and the same reason the
+//     picker keeps a locally-served model it has never priced.
+//   - a source whose model the rail has not seeded. The intermediate can only
+//     run on the source's model, so there is no composition to offer; spawning
+//     as asked is today's behaviour and the daemon still decides.
+func (c *Cockpit) compactAskFor(p spawnParams) *compactAsk {
+	if p.forkFrom == nil || p.forkFrom.ChildID == "" {
+		return nil
+	}
+	src, ok := c.rail.Get(p.forkFrom.ChildID)
+	if !ok || src.Model == "" {
+		return nil
+	}
+	window := c.modelWindow(p.kind, p.model)
+	if modelquery.FitsWindow(src.CtxTokens, window) {
+		return nil
+	}
+	name := src.Name
+	if name == "" {
+		name = src.ChildID
+	}
+	return &compactAsk{
+		sourceChildID: src.ChildID,
+		sourceName:    name,
+		sourceModel:   src.Model,
+		destModel:     p.model,
+		tokens:        src.CtxTokens,
+		window:        window,
+		switchMode:    p.switchSource != "",
+		params:        p,
+	}
+}
+
+// modelWindow is the context window the cockpit's cached catalog reports for a
+// model id on a kind, or 0 (unknown) when that kind's rows have not arrived or
+// no row's Id matches. Matching is by Id because that is exactly what the
+// form's model row holds and what SpawnRequest.model carries — the same rule
+// the CLI applies when it resolves a --compact destination, so the two surfaces
+// cannot disagree about whether a fork fits.
+func (c *Cockpit) modelWindow(kind, model string) int32 {
+	if model == "" {
+		return 0
+	}
+	for _, r := range c.models[kind] {
+		if r.GetId() == model {
+			return r.GetContextWindow()
+		}
+	}
+	return 0
 }
 
 // moveFocus cycles the focused row, wrapping in both directions. Only text
@@ -717,6 +776,16 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 					return c, nil
 				}
 			}
+		}
+		// An oversized fork is a question, not a refusal: the history can be
+		// compacted first, on the source's own model, and the fork made from
+		// the result. Asked AFTER the executor resolution because that step can
+		// open the executor picker and return — a compact question raised before
+		// it would be answered into a form that still has no machine chosen.
+		if ask := c.compactAskFor(p); ask != nil {
+			c.compactAsk = ask
+			c.setNotice(compactAskPrompt(ask))
+			return c, nil
 		}
 		f.busy, f.err = true, ""
 		// Keep exactly what went on the wire: applySpawned records the kind and
