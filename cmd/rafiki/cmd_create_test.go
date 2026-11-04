@@ -1134,3 +1134,32 @@ func TestForkOverflowMatchesAProviderQualifiedID(t *testing.T) {
 	c.Eq(declared, window, "a declared model's window comes from ModelInfo")
 	c.True(known, "known =")
 }
+
+// TestForkOverflowRefusesCompactWithATagFork pins the one combination --compact
+// cannot serve: a tag fork names no source child id (the daemon resolves the
+// tag at spawn time), so neither the source's model nor the borrowed history
+// can be read, and compactfork needs both. Refused BEFORE anything is spawned,
+// because an inert flag would leave the operator believing a compaction
+// happened while the fork fell through to the reactive overflow net.
+func TestForkOverflowRefusesCompactWithATagFork(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	err := compactRefusal(true, protocol.SpawnRequest{FromTag: "release"})
+	c.Require().Error(err, "--compact with --from-tag must be refused")
+	c.StrContains(err.Error(), "--compact", "the refusal names the flag")
+	c.StrContains(err.Error(), "--from-tag", "the refusal names the fork spelling that cannot work")
+	c.StrContains(err.Error(), "child id", "the refusal says what to do instead")
+
+	// A tag fork WITHOUT the flag is an ordinary fork and stays allowed.
+	c.NoError(compactRefusal(false, protocol.SpawnRequest{FromTag: "release"}), "a tag fork without --compact")
+
+	// --compact with no fork at all borrows nothing to compact.
+	err = compactRefusal(true, protocol.SpawnRequest{})
+	c.Require().Error(err, "--compact without a fork must be refused")
+	c.StrContains(err.Error(), "--fork-from", "the refusal names the flag that makes --compact meaningful")
+
+	// The shape that works: a child-id fork with the flag.
+	c.NoError(compactRefusal(true, protocol.SpawnRequest{
+		ForkFrom: &protocol.ForkFrom{ChildID: "c_01ABC"},
+	}), "a child-id fork with --compact")
+}

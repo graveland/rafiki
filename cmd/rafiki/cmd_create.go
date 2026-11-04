@@ -967,6 +967,30 @@ func forkOverflow(ctx context.Context, ep connectEndpoint, ctrl rafikiv1connect.
 	return tokens, window, tokens > 0 && window > 0, nil
 }
 
+// compactRefusal reports why --compact cannot apply to this spawn, or nil when
+// it can. It refuses BOTH ways the flag would otherwise be inert — a spawn that
+// borrows nothing, and a TAG fork — because an inert flag is the failure this
+// feature exists to prevent: the operator believes a compaction happened, none
+// does, and the fork falls through to the reactive overflow net.
+//
+// A tag fork is the one that cannot be made to work here: it names no source
+// child id (the daemon resolves the tag at spawn time), so the client cannot
+// read the source's model or measure the history it would borrow, and
+// compactfork needs both. Forking from the child id instead is the fix, and the
+// error says so.
+func compactRefusal(compact bool, req protocol.SpawnRequest) error {
+	if !compact {
+		return nil
+	}
+	if req.FromTag != "" {
+		return errors.New("--compact needs a fork source child id: a --from-tag fork's history cannot be measured; fork from the child id instead")
+	}
+	if req.ForkFrom == nil || req.ForkFrom.ChildID == "" {
+		return errors.New("--compact applies to --fork-from: it compacts the history a fork borrows, and this spawn borrows none")
+	}
+	return nil
+}
+
 // matchModelRow finds model's row in a listing: the row whose id IS model, else
 // the first row whose id ends in "/"+model. The listing is sorted by id, so the
 // suffix match is deterministic.
@@ -1065,12 +1089,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	compacting := false
 	var forkWindow int32
 	var sourceModel string
-	if compactFlag && (req.ForkFrom == nil || req.ForkFrom.ChildID == "") {
-		// A flag that silently did nothing would let an operator believe a
-		// compaction happened when the whole history was borrowed. A tag fork
-		// is excluded too: its source is resolved daemon-side, so the client
-		// has nothing to measure before the spawn.
-		return errors.New("--compact applies to --fork-from: it compacts the history that fork borrows, and a from-tag fork is resolved daemon-side")
+	if err := compactRefusal(compactFlag, req); err != nil {
+		return err
 	}
 	if req.ForkFrom != nil && req.ForkFrom.ChildID != "" {
 		tokens, window, known, err := forkOverflow(cmdCtx(cmd), ep, ctrl, req.ForkFrom.ChildID, req.Model)
