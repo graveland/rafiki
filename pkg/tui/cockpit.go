@@ -371,10 +371,10 @@ type Cockpit struct {
 	ready         bool
 	quitting      bool
 	status        string
-	// optimistic is the sends this client has issued and not yet seen captured,
-	// per child, plus the receipts and capture evidence that acknowledge them.
+	// optimistic is the sends this client has issued and not yet seen acknowledged,
+	// per child, plus receipts that beat their Send responses.
 	// They are drawn as an OVERLAY at the foot of the transcript -- a grey ghost
-	// while pending, a normal user row once acknowledged -- and never folded
+	// until acknowledged, then removed -- and never folded
 	// into session.Blocks, which is canonical stored state. See optimistic.go.
 	optimistic optimisticLedger
 	showHelp   bool
@@ -1163,15 +1163,6 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fundi row is retired here: a fetched transcript cannot say whether a
 		// row it holds is this send's capture or one this client had not loaded.
 		c.ackPendingFromHistory(msg.childID, s.Blocks)
-		// The same events are the BASELINE a later stream replay is measured
-		// against: a capture whose identity is already in this authoritative
-		// history was not new, whatever ordinal the replay carries. Only a
-		// receipt-mode child needs one — a fundi row is retired by its echo, and
-		// keeping a hash per user message for every fundi conversation would be
-		// memory nobody reads.
-		if c.ackModeFor(msg.childID) == ackReceipt {
-			c.optimistic.baseline(msg.childID, msg.events)
-		}
 		// The cursor takes the LOG watermark captured before the fetch -- never
 		// a conversation ordinal; ApplyHistory's doc has the full hazard. It is
 		// the resume point the subscription opens from. A session holding history
@@ -1514,13 +1505,6 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	// and its user messages must not clear a send that went elsewhere.
 	if len(s.Blocks) > before && countUserBlocks(s.Blocks) > usersBefore {
 		c.ackPending(id, newestUserText(s.Blocks))
-	}
-	// A captured user message is EVIDENCE that a claude send already reached
-	// the transcript. It is recorded whether or not its send has been
-	// acknowledged yet: evidence that arrives before the receipt is kept and
-	// re-examined when the receipt lands, never discarded.
-	if ev.GetUserMessage() != nil {
-		c.optimistic.capture(id, ev)
 	}
 	// A durable ledger mutation for the focused child is the refresh trigger;
 	// there is no polling.

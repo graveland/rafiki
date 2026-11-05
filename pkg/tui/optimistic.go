@@ -3,42 +3,20 @@
 package tui
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
-	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
-// This file is the cockpit's optimistic-send ledger: the messages this client
-// sent and has not yet seen captured, the receipts that acknowledge them, and
-// the capture evidence used to retire a row the transcript already shows.
-//
-// It is deliberately NOT part of session.Session. The session is canonical
-// transcript state built from events; an optimistic row is a claim about a
-// message that may not be in the transcript at all yet, and folding it in
-// would make a local guess indistinguishable from a stored row.
-//
-// The three display states, and what each one claims:
-//
-//   - pending (a grey ghost): rafiki has the message — the inbox row is
-//     committed, but the child's harness has not taken it into a turn;
-//   - sent (normal user decoration): the child's harness has it — a
-//     message_delivered receipt named this send's inbox id;
-//   - captured (the real transcript row): the model was sent it. The row
-//     disappears from this overlay in the same Update that draws the real one.
-//
-// A row must never go from pending straight to gone: the sent state exists so
-// the message stays visible for the whole window between custody and capture.
-// For a claude child that window is a turn long, which is why it is drawn with
-// the real row's decoration rather than as a footnote.
+// The optimistic-send ledger holds messages until the receiving harness accepts
+// custody. Claude's UUID receipt retires its row immediately, including images;
+// capture independently supplies the canonical transcript later. Fundi keeps
+// its persisted-user-row text acknowledgement. This overlay is deliberately
+// separate from session.Session's canonical transcript state.
 
 // ackMode says which acknowledgement mechanism a child's runtime provides, and
 // is captured ONCE, when the send is issued, before the RPC returns.
@@ -54,7 +32,7 @@ type ackMode int
 const (
 	// ackReceipt is the zero value and the mode of every child that is not
 	// known to be fundi. Only a message_delivered receipt naming the send's
-	// inbox id moves such a row to sent, and only capture evidence retires it.
+	// inbox id retires such a row.
 	//
 	// Unknown is receipt, not text, because the two mistakes are not
 	// symmetrical: treating a claude row as fundi can retire a message the
@@ -82,24 +60,12 @@ const (
 
 	// earlyReceiptTTL is how long a buffered receipt stays usable. Past it the
 	// RPC is presumed lost or the id was never ours, and guessing is worse
-	// than leaving the row pending: a wrong join would mark a send sent that
+	// than leaving the row pending: a wrong join would remove a send that
 	// nothing acknowledged.
 	earlyReceiptTTL = 60 * time.Second
-
-	// evidenceCap bounds the capture evidence retained for one child. It is the
-	// same bound as the early buffer and for the same reason: both are
-	// reordering/identification tolerances, not mailboxes. Evidence is retained
-	// while a send is PENDING (a capture that beats its receipt must still be
-	// usable when the receipt lands), so an unacknowledged send — a lost
-	// receipt, a retired launch generation — would otherwise keep a normalized
-	// copy of every later user message for the life of the cockpit, and every
-	// new capture re-scans all of it. The OLDEST goes: the earliest capture is
-	// the one a long-pending send is likeliest to have already been retired
-	// against.
-	evidenceCap = earlyReceiptCap
 )
 
-// optimisticSend is one message this client sent and has not seen captured.
+// optimisticSend is one message this client sent and has not seen acknowledged.
 type optimisticSend struct {
 	// attempt is this process's monotonic id for the Send RPC. Removing an
 	// attempt by text would remove a different send that happens to say the
@@ -107,21 +73,11 @@ type optimisticSend struct {
 	attempt uint64
 	// mode is the runtime acknowledgement mode, captured at send time.
 	mode ackMode
-	// text is the ORIGINAL text, exactly as typed: it is what the row draws and
-	// what the evidence matcher normalizes. Displayed content is never
-	// normalized, so a row reads back the way it was written.
-	text string
-	// images are the attachments sent with it, in wire order.
+	// text and images retain the original send for the pending display.
+	text   string
 	images []stagedAttachment
 	// inboxID is the row id SendResponse returned, "" until the RPC settles.
 	inboxID string
-	// sent records that a message_delivered receipt named inboxID: the
-	// child's harness took the message into a turn.
-	sent bool
-	// gen is the evidence generation at send time. Only capture evidence
-	// ingested AFTER this point can retire the row, so a message already in
-	// the transcript when the send was issued is never mistaken for its echo.
-	gen uint64
 }
 
 // displayText is what a PENDING row draws: the message, or a count of its
@@ -133,34 +89,6 @@ func (s optimisticSend) displayText() string {
 	return "(" + itoa(int64(len(s.images))) + " attached)"
 }
 
-// block is the row a SENT send draws, in the transcript's own vocabulary, so
-// the provisional row and the captured row that replaces it have one shape.
-func (s optimisticSend) block() session.Block {
-	b := session.Block{Kind: session.KindUser, Text: s.text}
-	for _, img := range s.images {
-		b.Images = append(b.Images, &rafikiv1.ImageBlock{MediaType: img.mediaType, Data: img.data})
-	}
-	return b
-}
-
-// captureEvidence is one captured user message, retained as proof that a send
-// reached the transcript.
-type captureEvidence struct {
-	// key is the message's identity: its ORIGINAL timestamp plus a digest of
-	// the whole UserMessage payload. Two copies of one stored message — a
-	// stream replay and a history read — share a key, so they are one piece of
-	// evidence, and an occurrence they carry can only be spent once.
-	key string
-	// gen is the ledger generation this evidence was ingested at.
-	gen uint64
-	// norm is the whole message's top-level user text, whitespace-normalized.
-	norm string
-	// used counts the occurrences of each normalized send text already spent
-	// out of this message. Shared across sends and across retries, because
-	// consumption is a property of the EVIDENCE, not of the attempt.
-	used map[string]int
-}
-
 // earlyReceipt is a delivery receipt that arrived before its Send RPC settled.
 type earlyReceipt struct {
 	id string
@@ -170,19 +98,10 @@ type earlyReceipt struct {
 // optimisticState is one child's optimistic-send ledger.
 type optimisticState struct {
 	// sends is every optimistic send to this child, oldest first. Order is the
-	// allocation order for evidence occurrences.
+	// order used to draw pending rows.
 	sends []optimisticSend
 	// early buffers receipts whose inbox id no settled send claims yet.
 	early []earlyReceipt
-	// baseline holds the evidence keys of the authoritative history loaded for
-	// this child. A capture whose key is in the baseline was already in the
-	// transcript before the ledger saw it — a replay, or a row the client had
-	// simply never loaded — and is never evidence.
-	baseline map[string]bool
-	// evidence is the retained capture evidence, oldest first.
-	evidence []*captureEvidence
-	// gen counts evidence ingested for this child.
-	gen uint64
 }
 
 // optimisticLedger holds every child's optimistic-send state.
@@ -229,7 +148,7 @@ func (l *optimisticLedger) state(child string) *optimisticState {
 	}
 	st := l.children[child]
 	if st == nil {
-		st = &optimisticState{baseline: map[string]bool{}}
+		st = &optimisticState{}
 		l.children[child] = st
 	}
 	return st
@@ -246,7 +165,6 @@ func (l *optimisticLedger) add(child string, mode ackMode, text string, images [
 		mode:    mode,
 		text:    text,
 		images:  slices.Clone(images),
-		gen:     st.gen,
 	})
 	return l.nextAttempt
 }
@@ -263,12 +181,10 @@ func (l *optimisticLedger) settle(child string, attempt uint64, inboxID string) 
 		return
 	}
 	st.sends[i].inboxID = inboxID
-	if inboxID != "" && st.consumeEarly(inboxID) {
-		st.sends[i].sent = true
-		st.reconcile()
+	if st.sends[i].mode == ackReceipt && inboxID != "" && st.consumeEarly(inboxID) {
+		st.sends = slices.Delete(st.sends, i, i+1)
 	}
 	st.dropSettledEarly()
-	l.releaseIfIdle(child)
 }
 
 // fail removes exactly the attempt whose RPC failed. Its siblings are other
@@ -282,7 +198,6 @@ func (l *optimisticLedger) fail(child string, attempt uint64) {
 		st.sends = slices.Delete(st.sends, i, i+1)
 	}
 	st.dropSettledEarly()
-	l.releaseIfIdle(child)
 }
 
 // deliver applies a message_delivered receipt naming inboxID.
@@ -290,7 +205,7 @@ func (l *optimisticLedger) fail(child string, attempt uint64) {
 // It is idempotent by construction: the rail and focus subscriptions overlap on
 // the durable tier, so the same receipt arrives twice, and a replayed receipt
 // arrives again after a reconnect. The second application finds the row already
-// sent (or already retired) and does nothing.
+// retired and does nothing.
 func (l *optimisticLedger) deliver(child, inboxID string) {
 	if inboxID == "" {
 		return
@@ -300,12 +215,10 @@ func (l *optimisticLedger) deliver(child, inboxID string) {
 		return
 	}
 	if i := st.indexOfInbox(inboxID); i >= 0 {
-		if st.sends[i].sent {
-			return
+		if st.sends[i].mode == ackReceipt {
+			st.sends = slices.Delete(st.sends, i, i+1)
+			st.dropSettledEarly()
 		}
-		st.sends[i].sent = true
-		st.reconcile()
-		l.releaseIfIdle(child)
 		return
 	}
 	// Nothing claims it yet. Buffer it only while an RPC is still outstanding
@@ -316,74 +229,6 @@ func (l *optimisticLedger) deliver(child, inboxID string) {
 	}
 }
 
-// capture ingests one captured user message as evidence, and reconciles the
-// rows already sent. Evidence arriving while a send is still PENDING is kept
-// and changes nothing: a capture cannot discharge a claim about custody.
-func (l *optimisticLedger) capture(child string, ev *rafikiv1.Event) {
-	st := l.get(child)
-	if st == nil || len(st.sends) == 0 {
-		// No send outstanding means no evidence bookkeeping is retained at
-		// all; evidence is only ever consulted by a sent row.
-		return
-	}
-	if !slices.ContainsFunc(st.sends, func(s optimisticSend) bool { return s.mode == ackReceipt }) {
-		// A fundi child can never spend it: retireByEvidence admits only a
-		// receipt-mode row, and a fundi row is retired by its echo's text.
-		// Retaining it would be memory for a matcher that never runs.
-		return
-	}
-	e, ok := evidenceOf(ev)
-	if !ok {
-		// No timestamp, or a payload that cannot be identified: retaining the
-		// optimistic row is the conservative answer, never guessing it away.
-		return
-	}
-	if e.norm == "" {
-		// No top-level user text (a tool-result turn, an image-only message):
-		// it can never carry a send's text, and retaining it would only grow
-		// the evidence list.
-		return
-	}
-	if st.baseline[e.key] || st.hasEvidence(e.key) {
-		return
-	}
-	st.gen++
-	e.gen = st.gen
-	e.used = map[string]int{}
-	st.evidence = append(st.evidence, e)
-	if len(st.evidence) > evidenceCap {
-		st.evidence = st.evidence[1:]
-	}
-	st.reconcile()
-	l.releaseIfIdle(child)
-}
-
-// baseline records the evidence keys of an authoritative history read.
-//
-// History is NEVER evidence. The API cannot say whether a row it returns is new
-// or merely one this client had not loaded, so treating a fetch as proof would
-// let a paginated page of old messages retire a fresh send. It is only ever a
-// baseline: a capture whose key is here was already in the transcript before the
-// ledger looked, and a stream replay of it supplies nothing.
-func (l *optimisticLedger) baseline(child string, evs []*rafikiv1.Event) {
-	if len(evs) == 0 {
-		return
-	}
-	st := l.state(child)
-	for _, ev := range evs {
-		e, ok := evidenceOf(ev)
-		if !ok {
-			continue
-		}
-		// A key already held as evidence stays evidence: it arrived on the
-		// stream first, and it was new then.
-		if st.hasEvidence(e.key) {
-			continue
-		}
-		st.baseline[e.key] = true
-	}
-}
-
 // expire drops buffered receipts past their TTL. The cockpit's existing 250ms
 // tick calls it; there is no separate poller.
 func (l *optimisticLedger) expire() {
@@ -391,7 +236,7 @@ func (l *optimisticLedger) expire() {
 		return
 	}
 	now := l.clock()
-	for child, st := range l.children {
+	for _, st := range l.children {
 		if len(st.early) == 0 {
 			continue
 		}
@@ -402,7 +247,6 @@ func (l *optimisticLedger) expire() {
 			}
 		}
 		st.early = kept
-		l.releaseIfIdle(child)
 	}
 }
 
@@ -411,80 +255,6 @@ func (l *optimisticLedger) expire() {
 // longer has.
 func (l *optimisticLedger) forget(child string) {
 	delete(l.children, child)
-}
-
-// releaseIfIdle releases evidence bookkeeping once nothing is outstanding.
-//
-// The evidence is RETIRED INTO the baseline rather than forgotten. A capture
-// that arrived only on the focus stream was never in the history baseline, so
-// dropping its key here would let a re-delivery after the idle period be new
-// evidence for the next send (gen 1 > the new send's gen 0) and retire a row
-// whose capture has not landed. The baseline is a few hashes per user message
-// and already outlives the release; this just makes it complete. It goes with
-// the child.
-func (l *optimisticLedger) releaseIfIdle(child string) {
-	st := l.get(child)
-	if st == nil {
-		return
-	}
-	if len(st.sends) > 0 || len(st.early) > 0 {
-		return
-	}
-	if st.baseline == nil {
-		st.baseline = map[string]bool{}
-	}
-	for _, e := range st.evidence {
-		st.baseline[e.key] = true
-	}
-	st.evidence = nil
-	st.gen = 0
-}
-
-// reconcile retires SENT rows whose text the retained evidence proves is
-// already in the transcript, in local send order and earliest occurrence first.
-func (st *optimisticState) reconcile() {
-	if len(st.evidence) == 0 || len(st.sends) == 0 {
-		return
-	}
-	kept := st.sends[:0]
-	for _, s := range st.sends {
-		if st.retireByEvidence(s) {
-			continue
-		}
-		kept = append(kept, s)
-	}
-	st.sends = kept
-}
-
-// retireByEvidence reports whether captured evidence already carries this send,
-// spending one non-overlapping occurrence if so.
-//
-// Only an ACKNOWLEDGED row is eligible: a pending row is a claim about custody,
-// and no capture can discharge it. Only a claude row is eligible: a fundi row is
-// retired by its echo's text, which is its runtime's own acknowledgement. An
-// attachment-bearing row is never eligible — retiring it would drop the images
-// from the display, and the text of a message with a screenshot is the least
-// reliable half of its identity.
-func (st *optimisticState) retireByEvidence(s optimisticSend) bool {
-	if !s.sent || s.mode != ackReceipt || len(s.images) > 0 {
-		return false
-	}
-	norm := normalizeText(s.text)
-	if norm == "" {
-		return false
-	}
-	for _, e := range st.evidence {
-		// Evidence older than the send cannot be its capture.
-		if e.gen <= s.gen {
-			continue
-		}
-		if e.used[norm] >= countOccurrences(e.norm, norm) {
-			continue
-		}
-		e.used[norm]++
-		return true
-	}
-	return false
 }
 
 func (st *optimisticState) indexOf(attempt uint64) int {
@@ -499,10 +269,6 @@ func (st *optimisticState) indexOfInbox(id string) int {
 // Send RPC, which is the only state in which a receipt can be early.
 func (st *optimisticState) unresolved() bool {
 	return slices.ContainsFunc(st.sends, func(s optimisticSend) bool { return s.inboxID == "" })
-}
-
-func (st *optimisticState) hasEvidence(key string) bool {
-	return slices.ContainsFunc(st.evidence, func(e *captureEvidence) bool { return e.key == key })
 }
 
 func (st *optimisticState) buffer(id string, now time.Time) {
@@ -543,87 +309,12 @@ func (st *optimisticState) sig() string {
 	var b strings.Builder
 	for _, s := range st.sends {
 		b.WriteString(strconv.FormatUint(s.attempt, 10))
-		if s.sent {
-			b.WriteByte('s')
-		} else {
-			b.WriteByte('p')
-		}
 		b.WriteString(strconv.Itoa(len(s.images)))
 		b.WriteByte(':')
 		b.WriteString(s.text)
 		b.WriteByte(0)
 	}
 	return b.String()
-}
-
-// evidenceOf derives a captured message's identity and normalized text.
-//
-// The key is the captured EVENT's own timestamp (seconds/nanos, from the stored
-// node's created_at) plus a digest of the whole UserMessage payload. It is
-// neither ordinal namespace on purpose: the event log's per-child ordinal and
-// the conversation's message ordinal are unrelated spaces, and publishEvent
-// rewrites the former after the fact.
-//
-// A missing or invalid timestamp means the message cannot be identified, and a
-// caller must retain its optimistic row rather than guess.
-func evidenceOf(ev *rafikiv1.Event) (*captureEvidence, bool) {
-	um := ev.GetUserMessage()
-	if um == nil {
-		return nil, false
-	}
-	ts := ev.GetTs()
-	if ts == nil || ts.CheckValid() != nil {
-		return nil, false
-	}
-	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(um)
-	if err != nil {
-		return nil, false
-	}
-	sum := sha256.Sum256(raw)
-	return &captureEvidence{
-		key:  fmt.Sprintf("%d.%09d:%x", ts.GetSeconds(), ts.GetNanos(), sum[:16]),
-		norm: normalizeText(userText(um)),
-	}, true
-}
-
-// userText is the top-level text a user message carries — its CONTENT blocks
-// only. Injected daemon notices live in UserMessage.injected, and tool results
-// are not text blocks at all, so neither can be mistaken for something the user
-// typed.
-func userText(um *rafikiv1.UserMessage) string {
-	var parts []string
-	for _, cb := range um.GetContent() {
-		if t := cb.GetText(); t != nil {
-			parts = append(parts, t.GetText())
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
-// normalizeText folds a message's whitespace so a wrapper's line breaks and
-// indentation cannot hide its text. Only MATCHING input is normalized; what a
-// row draws is the original.
-func normalizeText(s string) string {
-	return strings.Join(strings.Fields(s), " ")
-}
-
-// countOccurrences counts the NON-OVERLAPPING occurrences of needle in hay.
-// Non-overlapping is what lets one echoed "continue continue" answer two sends
-// and never more.
-func countOccurrences(hay, needle string) int {
-	if needle == "" {
-		return 0
-	}
-	n := 0
-	for off := 0; off+len(needle) <= len(hay); {
-		i := strings.Index(hay[off:], needle)
-		if i < 0 {
-			break
-		}
-		n++
-		off += i + len(needle)
-	}
-	return n
 }
 
 // ── Cockpit glue ────────────────────────────────────────────────────────────
@@ -642,7 +333,7 @@ func (c *Cockpit) ackModeFor(child string) ackMode {
 // overlayFor builds child's overlay: the signature that says when it changed,
 // and the builder the pane calls once it has applied its display flags. Both
 // are needed — the rows are what the pane draws, and the signature is what
-// makes a state change (pending → sent) rebuild a pane whose block list did not
+// makes a receipt removing a row rebuild a pane whose block list did not
 // move — and the rows are deferred for the reason pane.go's overlay type gives.
 // Empty when the child has no optimistic sends.
 func (c *Cockpit) overlayFor(child string) overlay {
@@ -652,23 +343,16 @@ func (c *Cockpit) overlayFor(child string) overlay {
 	}
 	return overlay{
 		sig:  st.sig(),
-		rows: func(width int) []string { return c.optimisticRows(child, st, width) },
+		rows: func(width int) []string { return c.optimisticRows(st, width) },
 	}
 }
 
-// optimisticRows draws one child's optimistic sends, oldest first: a pending
-// send as the grey ghost it has always been, a sent one with the same
-// decoration the captured row will carry.
-func (c *Cockpit) optimisticRows(child string, st *optimisticState, width int) []string {
+// optimisticRows draws pending sends as grey ghosts, oldest first.
+func (c *Cockpit) optimisticRows(st *optimisticState, width int) []string {
 	var rows []string
-	r := c.pane(child).renderer
 	for _, s := range st.sends {
-		if s.sent {
-			rows = append(rows, r.userBlockLines(s.block(), width)...)
-			continue
-		}
 		rows = append(rows, "")
-		// Sanitized in both states: an optimistic row is drawn from text the
+		// Sanitized: an optimistic row is drawn from text the
 		// user typed, which can carry an escape sequence like anything else
 		// that reaches the transcript.
 		for _, line := range strings.Split(sanitizeControlChars(s.displayText()), "\n") {
@@ -688,7 +372,7 @@ func (c *Cockpit) optimisticRows(child string, st *optimisticState, width int) [
 // (an image-only message echoes no text to match).
 //
 // Only ackText rows are candidates. A claude row is acknowledged by its receipt
-// and retired by capture evidence — never by text, whose oldest-send fallback
+// and retired immediately — never by text, whose oldest-send fallback
 // is precisely the wrong-ghost defect this path used to have.
 func (c *Cockpit) ackPending(child, text string) {
 	st := c.optimistic.get(child)
@@ -705,7 +389,6 @@ func (c *Cockpit) ackPending(child, text string) {
 		}
 		if p.text == text {
 			st.sends = slices.Delete(st.sends, i, i+1)
-			c.optimistic.releaseIfIdle(child)
 			return
 		}
 		if first < 0 {
@@ -714,7 +397,6 @@ func (c *Cockpit) ackPending(child, text string) {
 	}
 	if first >= 0 {
 		st.sends = slices.Delete(st.sends, first, first+1)
-		c.optimistic.releaseIfIdle(child)
 	}
 }
 
@@ -746,9 +428,6 @@ func (c *Cockpit) ackPendingRun(child, text string) bool {
 		rest = strings.TrimSpace(strings.TrimPrefix(rest, strings.TrimSpace(st.sends[i].text)))
 		st.sends = slices.Delete(st.sends, i, i+1)
 		retired = true
-	}
-	if retired {
-		c.optimistic.releaseIfIdle(child)
 	}
 	return retired
 }
@@ -795,7 +474,6 @@ func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
 		for j, p := range st.sends {
 			if p.mode == ackText && p.text == blocks[i].Text {
 				st.sends = slices.Delete(st.sends, j, j+1)
-				c.optimistic.releaseIfIdle(child)
 				break
 			}
 		}

@@ -182,51 +182,19 @@ is content, not an empty conversation, and is drawn as such.
 
 ## Unacknowledged sends
 
-A message you send is drawn at the foot of its agent's transcript until the
-transcript holds it. It has three states, and the row never disappears between
-them:
+A pending send is a grey-ground `▌` ghost: rafiki still owns delivery. For a
+**claude** child, the durable `message_delivered` receipt naming the inbox id
+returned by `Send` immediately removes that overlay, including image-bearing
+sends. Claude Code's UUID echo is the custody handoff; capture is not required.
+The canonical transcript arrives independently, so there may be a temporary
+gap between acceptance and capture rather than a stuck bright duplicate.
 
-| State | Drawn as | Says |
-|---|---|---|
-| pending | the grey-ground `▌` ghost | rafiki has it — the inbox row is committed |
-| sent | an ordinary user row, in the message's own text and images | the agent's harness took it into a turn |
-| captured | gone — the real transcript row is there instead | the model was sent it |
-
-The ghost is a claim about custody, not about the model reading it. For a
-**fundi** child the transcript row arrives quickly, so the middle state is
-rarely seen; its echo's text retires the ghost, exactly as it always has. For a
-**claude** child the transcript row only arrives with the capture, after the
-upstream response — a whole turn — so the sent row is what keeps the message on
-screen in between.
-
-A claude row is acknowledged only by a durable `message_delivered` event naming
-the inbox row id `Send` returned. Text never acknowledges it: the harness
-rewrites a mid-turn message inside prose of its own, and a text matcher both
-misses that and retires the wrong message. The receipt rides the rail's small
-event set too, so a send to an agent you are not looking at still advances.
-
-A claude row that has been acknowledged is removed only when a capture that
-arrived **after** the send proves the transcript already holds it. That
-matching is best-effort cosmetic identity, not provenance:
-
-- whitespace-normalized exact substrings, one occurrence per row, in send
-  order — three `continue`s need three occurrences;
-- a send whose text is a substring of another send's text can be retired by
-  that other send's capture ("continue" by the capture of "continue please").
-  The row that disappears is the shorter one, whose words the longer capture
-  still shows, so this costs a cosmetic row, not a message;
-- a message already in the transcript when you sent is never this send's
-  capture, and a history fetch never retires a claude row (it can only say what
-  the transcript holds, not whether a row is new);
-- a send carrying images is never matched, so its images stay on screen;
-- an event with no timestamp, or one this client cannot identify, leaves the
-  row where it is.
-
-The conservative failure is therefore a lingering duplicate row, never a
-message that vanishes while it is still only a claim. Closing the agent clears
-it. One narrow case reads the same way: a send to a fundi child issued before
-the rail has loaded that child's kind is treated as a claude send, so its ghost
-can outlive the echo.
+Text and history never acknowledge a claude send. A receipt that beats its
+Send response is buffered until the inbox id can be joined to its local
+attempt. Receipts also ride the rail feed, so unfocused sends retire too.
+A **fundi** child still retires its ghost when its persisted user row arrives,
+using the existing text matcher. A send made before the rail knows the child's
+kind uses the receipt path conservatively and can linger without a receipt.
 
 ## Activity and attention
 

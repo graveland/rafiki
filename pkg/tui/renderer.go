@@ -882,20 +882,6 @@ func (r *renderer) setWidth(width int) {
 	r.cached, r.cachedUpTo, r.lastFP, r.liveOut = nil, 0, "", nil
 }
 
-// userBlockLines renders one block with this renderer's own decoration,
-// outside the transcript cache.
-//
-// It is the optimistic overlay's renderer: a SENT row is drawn exactly as the
-// captured row that replaces it will be, so the message does not change shape
-// when the transcript catches up. It shares the renderer only for the image
-// store and the wrap width -- it never touches the cached transcript.
-func (r *renderer) userBlockLines(b session.Block, width int) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.setWidth(width)
-	return blockLines(r.renderBlock(b))
-}
-
 // interestingStop reports whether a stop reason tells the reader something.
 // The unusual endings — a truncated answer, a refusal, an error — all do.
 func interestingStop(reason string) bool {

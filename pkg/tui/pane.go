@@ -82,9 +82,7 @@ type paneSig struct {
 // frame. Building the rows eagerly, at the call site, renders them with the
 // PREVIOUS frame's flags while the transcript beside them uses the new ones —
 // and because the signature then records the new flags, the next frame is a
-// cache hit and the wrong rows stay on screen. ^Y with an already-ready
-// thumbnail was exactly that: a sent row's image flipped to a placeholder and
-// never came back.
+// cache hit and the wrong rows stay on screen.
 type overlay struct {
 	sig  string
 	rows func(width int) []string
