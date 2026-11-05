@@ -120,6 +120,8 @@ func TestEventRendererPrefixIsStableAcrossTypes(t *testing.T) {
 			"09:00:07  script_report c_prefix  impl progress {\"step\": 3}"},
 		{"delta", withTS(&rafikiv1.Event{ChildId: id, Payload: &rafikiv1.Event_ContentBlockDelta{ContentBlockDelta: &rafikiv1.ContentBlockDelta{TurnId: "t_1", Delta: &rafikiv1.ContentBlockDelta_Text{Text: "partial text"}}}}, atClock(9, 0, 8.0)),
 			"09:00:08  content_block_delta c_prefix  impl text=partial text"},
+		{"message delivered", withTS(&rafikiv1.Event{ChildId: id, Payload: &rafikiv1.Event_MessageDelivered{MessageDelivered: &rafikiv1.MessageDelivered{MessageId: "msg_42"}}}, atClock(9, 0, 9.0)),
+			"09:00:09  message_delivered c_prefix  impl msg_42"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

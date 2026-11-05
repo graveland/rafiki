@@ -153,6 +153,11 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 		detail = " renamed"
 	case *rafikiv1.Event_TasksChanged:
 		detail = fmt.Sprintf(" tasks %s (%d)", p.TasksChanged.GetKind(), len(p.TasksChanged.GetTasks()))
+	case *rafikiv1.Event_MessageDelivered:
+		// An acceptance receipt, not a message: the harness took this inbox row
+		// into a turn. The id is the one SendResponse returned, which is what a
+		// client matches its queued send on, so it is the whole line's value.
+		detail = " " + p.MessageDelivered.GetMessageId()
 	case *rafikiv1.Event_AgentStatus:
 		prev := r.status[id]
 		st := p.AgentStatus.GetState()

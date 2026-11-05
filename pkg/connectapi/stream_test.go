@@ -371,10 +371,10 @@ func TestStreamEventsSubtreeIncludeSelfAdmitsTheRoot(t *testing.T) {
 
 // A message_delivered receipt is durable, so a client that drops its stream
 // mid-turn is replayed the receipts it missed rather than reconstructing them:
-// publish, disconnect, resume and the receipt arrives exactly once, with the
-// inbox row id it names. A type filter naming message_delivered must include
-// it — that filter is how a client that cares only about acceptance avoids the
-// transcript traffic.
+// it arrives live, then once — and only once — across a disconnect and resume,
+// with the inbox row id it names. A type filter naming message_delivered must
+// include it — that filter is how a client that cares only about acceptance
+// avoids the transcript traffic.
 func TestMessageDeliveredReplay(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -385,18 +385,19 @@ func TestMessageDeliveredReplay(t *testing.T) {
 	receipt := &rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_MessageDelivered{
 		MessageDelivered: &rafikiv1.MessageDelivered{MessageId: "msg_42"},
 	}}
-	appendAndPublish(t, elog, bus, receipt)
-
 	subject := &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}}
 
-	// 1. Live: the receipt arrives as published, carrying its log ordinal.
+	// 1. Live: no cursor, so nothing replays, and the stream has opened (its
+	// headers are flushed only after it subscribed) before the receipt is
+	// published — the bus reaches only the subscribers present at publish time,
+	// so this can only be the live path.
 	live := setupStreamServer(t, emptyLineage(), elog, bus)
 	streamCtx, disconnect := context.WithCancel(ctx)
 	stream, err := live.StreamEvents(streamCtx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
 		Subject: subject,
-		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{"c_1": -1}},
 	}))
 	c.NoError(err, "StreamEvents")
+	appendAndPublish(t, elog, bus, receipt)
 	if !stream.Receive() {
 		t.Fatalf("the live stream delivered no receipt: %v", stream.Err())
 	}
