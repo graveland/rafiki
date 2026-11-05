@@ -266,6 +266,16 @@ func TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt(t *testing.T) {
 		"the receipt (ordinal %d) must precede the captured row (ordinal %d)",
 		firstReceipt.GetOrdinal(), firstRowEvent.GetOrdinal())
 
+	// Pin the timeline in the LOG rather than inferring it from the order the
+	// test happened to do things: message two was acknowledged while this
+	// capture was still blocked, so its receipt is a LOWER ordinal than the row
+	// that capture has just published.
+	c.Require().NotNil(firstRowEvent.Ordinal, "the captured row carries no ordinal")
+	c.Require().NotNil(secondReceipt.Ordinal, "the mid-turn receipt carries no ordinal")
+	c.Less(firstRowEvent.GetOrdinal(), secondReceipt.GetOrdinal(),
+		"the mid-turn receipt (ordinal %d) must precede the first capture's row (ordinal %d): it was acknowledged while that capture was blocked",
+		secondReceipt.GetOrdinal(), firstRowEvent.GetOrdinal())
+
 	// The capture that was in flight has now COMPLETED — the same turn, from
 	// pending to complete — which is what "released" means on this path.
 	c.Eq("complete", captureTurnStatus(t, firstCaptureTurn),

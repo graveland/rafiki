@@ -25,7 +25,6 @@ package capture
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -41,7 +40,7 @@ func TestDeliveryCorpusKeepsTheMidTurnWrapperAndBothIdenticalSends(t *testing.T)
 	ctx, pool, s := captureTestEnv(t)
 	convID, ref := clearTestConv(t, ctx, s, "delivery-corpus")
 
-	replayCorpus(t, ctx, s, convID, ref, filepath.Join("..", "..", "testdata", "claude-capture-delivery"), nil)
+	replayCorpus(t, ctx, s, convID, ref, deliveryCorpus, nil)
 
 	// Every user-role node in the tree, oldest first, with its stored text.
 	rows, err := pool.Query(ctx, `

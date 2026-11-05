@@ -67,7 +67,17 @@ What is NOT scrubbed, and is safe to commit: the prompts and completions
 `Authorization` and `X-Api-Key`), session uuids and timestamps (capture
 artefacts).
 
-`MCP servers were disabled for the recording` (`--strict-mcp-config
+The **response headers** are recorded as the upstream sent them, and they name
+the account the session ran on: `Anthropic-Organization-Id`,
+`Anthropic-Workspace-Id`, `Request-Id`, `Cf-Ray` and `Traceresponse` are all
+present. That is deliberate and matches the pre-existing corpus
+(`testdata/claude-capture/` ships the same headers from the same account):
+they are stable identifiers of the operator's own Anthropic account, not
+credentials, and nothing in the repository asserts on them. Scrubbing them
+would make a re-record's `git diff` noisier than the protocol changes it exists
+to show.
+
+**MCP servers were disabled for the recording** (`--strict-mcp-config
 --mcp-config '{"mcpServers":{}}'`): the operator's MCP inventory is personal,
 and it is 90 tool schemas that have nothing to do with message delivery.
 
@@ -96,5 +106,8 @@ result with:
 grep -o "/Users/[^\"']*\|@[a-z]*\.[a-z]*\.[a-z]*" testdata/claude-capture-delivery/*-request.http | sort -u
 ```
 
-The matching stdout half of the same session — the four acceptance echoes — is
-`pkg/child/testdata/claude/delivery_echo.jsonl`.
+The stdout half — the four acceptance echoes — is
+`pkg/child/testdata/claude/delivery_echo.jsonl`, recorded by a SEPARATE RUN of
+the same driver and script (its timestamps are ~7 minutes earlier), not by the
+run captured here. The frames it pins are the transport's, not this corpus's:
+the echo shape, and the two identical sends carrying different uuids.

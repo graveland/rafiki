@@ -63,6 +63,13 @@ func TestMessagesUpstreamURL(t *testing.T) {
 			set:  withBase(""),
 			want: "https://api.anthropic.com",
 		},
+		// The face appends "/v1/messages" to what this returns, and every sender
+		// trims the trailing slash. Without the same trim, one declaration gives a
+		// sender ".../anthropic/v1/messages" and this face ".../anthropic//v1/messages".
+		"a trailing slash is trimmed, as the senders trim it": {
+			set:  withBase("https://gw.example.test/anthropic/"),
+			want: "https://gw.example.test/anthropic",
+		},
 	} {
 		c.Eq(tc.want, messagesUpstreamURL(tc.set), "%s: upstream URL", name)
 	}

@@ -44,10 +44,11 @@ What it pins, and why it is not synthetic:
 - **`parent_tool_use_id` is `null`, not absent**, and the echoed `uuid` is
   exactly the one the daemon sent.
 
-The matching HTTP corpus (`testdata/claude-capture-delivery/`) is the same
-session's requests and responses: it shows the mid-turn message arriving WRAPPED
-("The user sent a new message while you were working: …"), which is why a
-text-matched acknowledgement retires the wrong row.
+The matching HTTP corpus (`testdata/claude-capture-delivery/`) comes from a
+SEPARATE RUN of the same driver and script (its responses are timestamped ~7
+minutes after these echoes), not from this run: it shows the mid-turn message
+arriving WRAPPED ("The user sent a new message while you were working: …"),
+which is why a text-matched acknowledgement retires the wrong row.
 
 ## Answers to the spike questions
 

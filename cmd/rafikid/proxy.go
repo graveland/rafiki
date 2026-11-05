@@ -608,7 +608,6 @@ func resolveDefaultModel(cfg Config) string {
 	return paths.Get(paths.DefaultModel)
 }
 
-// providersOrDefault returns set when non-nil, otherwise providers.Default().
 // anthropicDefaultBaseURL is the Messages face's upstream when the operator
 // has not declared one.
 const anthropicDefaultBaseURL = "https://api.anthropic.com"
@@ -625,16 +624,33 @@ const anthropicDefaultBaseURL = "https://api.anthropic.com"
 // decides both now, so a declared base_url cannot mean two things in one
 // daemon.
 //
+// The trailing slash is trimmed exactly as every sender trims it
+// (pkg/llm's senders do `strings.TrimRight(base, "/")`), because the face
+// appends "/v1/messages" to the result: without this, `base_url =
+// "https://gw/anthropic/"` would reach a sender as ".../anthropic/v1/messages"
+// and this face as ".../anthropic//v1/messages" — the same one-declaration,
+// two-meanings split this function exists to end.
+//
+// RULING (task 3.1 review): the CREDENTIAL is deliberately NOT resolved
+// through the provider here. The face sends ANTHROPIC_API_KEY (p.apiKey) on
+// every request it forwards, while a sender reads the provider's api_key_env;
+// the face's passthrough-auth path also keys off p.apiKey. Resolving the key
+// through the provider would change credential behaviour for every request on
+// this face, which is outside this change — an operator pointing the face at a
+// gateway puts the key in ANTHROPIC_API_KEY, and that is stated in the docs.
+// Only the URL moved.
+//
 // set is the operator's registry (nil = the built-in defaults, whose anthropic
 // entry declares no base_url), so an operator who declares none sees exactly
 // the URL they saw before.
 func messagesUpstreamURL(set *providers.Set) string {
 	if p, ok := providersOrDefault(set).Get("anthropic"); ok && p.BaseURL != "" {
-		return p.BaseURL
+		return strings.TrimRight(p.BaseURL, "/")
 	}
 	return anthropicDefaultBaseURL
 }
 
+// providersOrDefault returns set when non-nil, otherwise providers.Default().
 func providersOrDefault(set *providers.Set) *providers.Set {
 	if set != nil {
 		return set

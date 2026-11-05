@@ -215,8 +215,15 @@ loopback.
 A `[providers.anthropic]` entry may declare a `base_url` pointing at any
 Anthropic Messages API-compatible endpoint. It governs the **proxy face**
 (`/v1/messages`, and therefore every daemon-managed `claude` child, which talks
-to that face) as well as the in-process senders; with no `base_url` declared the
-face forwards to `https://api.anthropic.com` exactly as before.
+to that face) as well as the in-process senders; a trailing slash is trimmed, as
+the senders trim it, and with no `base_url` declared the face forwards to
+`https://api.anthropic.com` exactly as before.
+
+The credential does **not** follow the same path: the face sends
+`ANTHROPIC_API_KEY` (the daemon's own key) on every request it forwards and
+never reads the provider's `api_key_env`. Pointing the face at a gateway
+therefore means putting that gateway's key in `ANTHROPIC_API_KEY`, even if the
+provider entry names a different variable for its senders.
 
 ## OpenAI Responses providers
 

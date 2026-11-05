@@ -277,6 +277,23 @@ func (p *claudeProvider) GatedMessageID(line []byte) string {
 // echo, and a frame that fails to decode is a delivery the daemon never
 // acknowledges — so the two shapes are normalised here, once, for every
 // decoder in this package.
+//
+// RULING (task 3.1 review): this file is outside the task's touches list, and
+// the change stays anyway. Wave 1 shipped the acknowledgement dead against a
+// real binary — every hand-written fixture used a block array, so the parser
+// passed while the real echo produced nothing — and the task's own real
+// recording is what caught it. Fixing the parser the recording proved broken
+// is the point of that requirement; the recorded frames
+// (testdata/claude/delivery_echo.jsonl) pin it.
+//
+// An UNKNOWN shape (an object, a number, null) deliberately decodes to no
+// blocks instead of failing the frame. Both consumers degrade safely on that:
+// Parse needs only the block TYPES — a tool_result is what turns a user frame
+// into a tool event, and a content it cannot read simply has none — while
+// BusFrames' native path skips empty content and never invents a message from
+// it. Failing the frame instead would lose the frame's OTHER fields, and for a
+// replay frame that means losing the delivery uuid: an unknown content shape
+// must never cost an acknowledgement.
 type claudeContent []claudeContentBlock
 
 func (c *claudeContent) UnmarshalJSON(b []byte) error {
@@ -287,7 +304,8 @@ func (c *claudeContent) UnmarshalJSON(b []byte) error {
 	}
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
-		// null, a number, an object: nothing in this package reads those.
+		// A shape this package reads nothing from. Nil, not an error: see the
+		// doc comment — an unreadable content must not cost the frame.
 		*c = nil
 		return nil
 	}
