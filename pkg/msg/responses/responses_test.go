@@ -314,3 +314,22 @@ func TestInjectedTextIsNotedInResponses(t *testing.T) {
 		map[string]any{"type": "input_text", "text": "hi"},
 	}, plain["content"], "an unmarked block's part is its text unchanged")
 }
+
+func TestEncodeCacheKeyIndependentOfSessionID(t *testing.T) {
+	for _, mode := range modes {
+		for _, key := range []string{"", "fork-shared"} {
+			t.Run(mode.name+"/"+key, func(t *testing.T) {
+				c := assert.NewAborting(t)
+				encoded, err := mode.codec.Encode(&msg.Request{Model: "gpt-test", MaxTokens: 100}, msg.EncodeOptions{SessionID: "own-session", CacheKey: key})
+				c.NoError(err)
+				var body map[string]any
+				c.NoError(json.Unmarshal(encoded, &body))
+				want := key
+				if want == "" {
+					want = "own-session"
+				}
+				c.EqDiff(any(want), body["prompt_cache_key"])
+			})
+		}
+	}
+}

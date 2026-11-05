@@ -214,7 +214,8 @@ func (c Codec) Encode(req *msg.Request, opts msg.EncodeOptions) ([]byte, error) 
 		t := *req.Temperature
 		body.Temperature = &t
 	}
-	if opts.SessionID != "" {
+	body.PromptCacheKey = opts.CacheKey
+	if body.PromptCacheKey == "" {
 		body.PromptCacheKey = opts.SessionID
 	}
 

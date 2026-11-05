@@ -62,9 +62,10 @@ func DefaultCachePolicy() CachePolicy {
 // safe for concurrent use (two concurrent sends would each move the head, and
 // the capture and turn ordinals assume one writer).
 type Conversation struct {
-	client *Client
-	ID     string
-	cfg    convConfig
+	client        *Client
+	ID            string
+	cfg           convConfig
+	forkCacheNode string // immutable source node read from durable conversation state
 
 	// usedTokens is the total token count the last successful response
 	// reported (input + cache read + cache creation + output); 0 means "not
@@ -295,7 +296,11 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	if err != nil {
 		return nil, fmt.Errorf("llm: ensure conversation: %w", err)
 	}
-	return &Conversation{client: c, ID: convID, cfg: cfg}, nil
+	state, err := c.convs.Open(convID).State(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("llm: read conversation state: %w", err)
+	}
+	return &Conversation{client: c, ID: convID, cfg: cfg, forkCacheNode: state.ForkFromID}, nil
 }
 
 // UserText builds a single-text-block user message payload for Send.
@@ -856,6 +861,7 @@ func (conv *Conversation) usedForCheck(history []*convpkg.Node) int {
 // attempt; see sendStreaming's doc for why the trim-retry loop treats that as
 // an absolute "never retry" signal.
 func (conv *Conversation) sendAttempt(ctx context.Context, meta SendMeta, req *msg.Request, sink streamSink) (resp *msg.Response, delivered bool, err error) {
+	ctx = context.WithValue(ctx, forkCacheNodeKey{}, conv.forkCacheNode)
 	if !sink.active() {
 		resp, err = conv.client.send(ctx, meta, req, nil)
 		return resp, false, err

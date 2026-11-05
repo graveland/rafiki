@@ -987,8 +987,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, req *m
 	ctx, hdrs := c.rawTraceContext(ctx)
 	start := time.Now()
 
-	sessionID, _ := sessionIDFromContext(ctx)
-	dec, serr := sender.Stream(ctx, p.req, msg.EncodeOptions{SessionID: sessionID, Extra: p.extra})
+	dec, serr := sender.Stream(ctx, p.req, requestEncodeOptions(ctx, p.req, p.extra))
 	// The defer is registered BEFORE the error checks below, and guarded on
 	// dec != nil rather than serr == nil: Sender's contract does not forbid an
 	// implementation from returning (non-nil decoder, non-nil error).
@@ -1193,13 +1192,10 @@ func (c *Client) recordModelResult(req *msg.Request, err error, decision provide
 	}
 }
 
-// callSender issues one request through s. The session id rides EncodeOptions
-// as well as the context: the Anthropic kinds send it as a header through
-// sessionIDTransport, and the Responses codec puts it in the request body's
-// prompt_cache_key.
+// callSender issues one request through s. Session identity rides both context
+// and EncodeOptions for provider headers; cache routing is independent.
 func callSender(ctx context.Context, s Sender, req *msg.Request, extra map[string]any) (*msg.Response, error) {
-	sessionID, _ := sessionIDFromContext(ctx)
-	return s.Send(ctx, req, msg.EncodeOptions{SessionID: sessionID, Extra: extra})
+	return s.Send(ctx, req, requestEncodeOptions(ctx, req, extra))
 }
 
 // fallbackOpenRouterID translates the primary's provider-local model id to the

@@ -483,6 +483,11 @@ cached for the next.
 
 ## Forks
 
+Forks of one source node on one model share the provider cache routing key,
+including after resume. The key is `fork-` plus the first 32 hex characters of
+SHA-256(source node id + NUL + model id). The session id stays per conversation,
+including provider session headers; non-forks keep their session id as the cache key.
+
 A fork is a conversation that **borrows** another's history instead of copying
 it. The link is `conversation.fork_from` (migration 0065): one node id, written
 once when the conversation is created and never changed. It is the

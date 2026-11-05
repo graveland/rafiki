@@ -304,7 +304,7 @@ func TestResponsesChatGPTModeRequest(t *testing.T) {
 	})
 
 	ctx := WithSessionID(context.Background(), "sess-42")
-	_, err := s.Send(ctx, minimalRequest(), msg.EncodeOptions{})
+	_, err := s.Send(ctx, minimalRequest(), msg.EncodeOptions{CacheKey: "shared-cache"})
 	c.Require().NoError(err, "Send")
 
 	mu.Lock()
@@ -323,7 +323,7 @@ func TestResponsesChatGPTModeRequest(t *testing.T) {
 	c.EqDiff(false, got["store"], "store")
 	c.EqDiff(true, got["stream"], "stream")
 	c.EqDiff(any([]any{"reasoning.encrypted_content"}), got["include"], "include")
-	c.EqDiff("sess-42", got["prompt_cache_key"], "prompt_cache_key")
+	c.EqDiff("shared-cache", got["prompt_cache_key"], "prompt_cache_key")
 }
 
 // TestResponsesRetriesOnce401 pins the 401 rule: force a credential refresh and

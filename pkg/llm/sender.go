@@ -5,6 +5,7 @@ package llm
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,21 @@ import (
 type Sender interface {
 	Send(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*msg.Response, error)
 	Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error)
+}
+
+// forkCacheNodeKey carries the durable fork source, independent of session identity.
+type forkCacheNodeKey struct{}
+
+// requestEncodeOptions scopes fork cache routing to the model actually sent.
+// A 128-bit hash suffix keeps the key below the provider's 64-character cap.
+func requestEncodeOptions(ctx context.Context, req *msg.Request, extra map[string]any) msg.EncodeOptions {
+	sessionID, _ := sessionIDFromContext(ctx)
+	opts := msg.EncodeOptions{SessionID: sessionID, Extra: extra}
+	if node, _ := ctx.Value(forkCacheNodeKey{}).(string); node != "" {
+		sum := sha256.Sum256([]byte(node + "\x00" + req.Model))
+		opts.CacheKey = fmt.Sprintf("fork-%x", sum[:16])
+	}
+	return opts
 }
 
 // sessionIDContextKey is the context key WithSessionID writes and
