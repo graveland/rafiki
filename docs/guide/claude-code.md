@@ -65,8 +65,39 @@ tables, each with `turns`, an optional `name`, and:
 
 Daemon-managed headless children are launched with `--replay-user-messages`, so
 Claude Code echoes each user message it accepts into a turn back on stdout
-carrying the `uuid` the daemon wrote on it. Headless Claude **requires** this
-capability. The flag hard-requires `--input-format=stream-json` **and**
+carrying the `uuid` the daemon wrote on it. That echo is the child's only
+acceptance signal, and it is what `message_delivered` reports (see
+`docs/reference/control-protocol.md`, "`message_delivered`: a UI acceptance
+receipt"):
+
+```
+{"type":"user","message":{"role":"user","content":"<the text we sent>"},
+ "session_id":"…","parent_tool_use_id":null,"uuid":"<the uuid we sent>",
+ "timestamp":"…","isReplay":true}
+```
+
+Three details of the real frame are load-bearing, and all three were measured
+rather than assumed (Claude Code 2.1.290; the recording is
+`pkg/child/testdata/claude/delivery_echo.jsonl`, with provenance beside it):
+
+- `message.content` is a plain **string** for a text-only message — the binary
+  echoes the message it was handed, so it is not the block array an assistant
+  frame carries. A parser that only accepts arrays drops the frame silently.
+- the echoed `uuid` is the one the daemon wrote on the outbound frame, and it is
+  the message's whole identity: two deliberate sends of the SAME text come back
+  with two different uuids.
+- `parent_tool_use_id` is `null` (not absent) on a main-thread echo; a subagent
+  frame carries the spawning tool call's id instead and acknowledges nothing.
+
+The echo is emitted when the message is ACCEPTED into a turn, not when the
+model answers — and a message that arrives mid-turn is accepted immediately
+(and echoed) while the running turn keeps going, which is why the receipt can
+arrive a whole turn before the transcript row does. That row is the capture's
+claim, and a mid-turn message's captured text is Claude Code's own wrapper
+("The user sent a new message while you were working: …"), not what the user
+typed — the reason the acknowledgement names a row id instead of matching text.
+
+Headless Claude **requires** this capability. The flag hard-requires `--input-format=stream-json` **and**
 `--output-format=stream-json`, so it never reaches an interactive `rafiki claude`
 session, and rafiki never silently relaunches a child without it: a Claude Code
 that does not support it must be upgraded.

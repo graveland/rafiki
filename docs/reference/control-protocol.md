@@ -344,6 +344,70 @@ never a turn boundary. Pinned by `TestMessageDeliveredReplay`
 (`pkg/connectapi`) and `TestMessageDeliveredIsDurableAndNamed`
 (`pkg/eventlog`).
 
+**Who produces it.** One producer, and it is a `claude` child's own stdout. The
+daemon launches every headless claude child with `--replay-user-messages`
+(`claudeargv.ReplayUserMessages`), which makes the binary re-emit each user
+message it accepts into a turn as
+`{"type":"user","message":{…},"uuid":"<the uuid it was handed>","isReplay":true,…}`.
+The daemon mints a fresh UUIDv7 for the message, writes it on the outbound
+frame, and remembers `uuid → inbox row id` in memory
+(`cmd/rafikid/claude_delivery.go`); the echo resolves that entry and publishes
+the receipt naming the row.
+
+- **The echo bypasses the capture message gate on purpose.** A claude child's
+  `AssistantMessage`/`UserMessage` events are held behind the response row the
+  capture has not persisted yet (`pkg/child/message_gate.go`). The echo arrives
+  *before* that capture — it is the acceptance, not the result — so the receipt
+  is published straight from the child's stdout parse
+  (`SpawnSpec.OnUserReplay` → `Controller.publishEvent`), never through the
+  gate. Held events stay held; this one is not content and needs no ordering
+  behind a row.
+- **The registry is scoped to the LAUNCH that minted the uuid**, not to the
+  child. A resume or respawn starts a new process whose `--resume` replays old
+  frames, and a replayed uuid from a retired launch publishes nothing. Entries
+  are retired on the launch's exit, on a new launch beginning, and on a failed
+  write.
+- **The echo's `message.content` is a plain STRING** for a text-only message
+  (measured on 2.1.290): the binary echoes the message it was handed. A parser
+  that only accepts a block array drops the whole frame and acknowledges
+  nothing — `pkg/child/testdata/claude/delivery_echo.jsonl` is a real recording
+  of the shape, and `TestClaudeDeliveryParsesTheRecordedEchoShape` pins it.
+
+**Scope — what does NOT get a receipt.** A receipt is minted only for a
+**direct** (no `Source`), **single-row** claude **prompt or steer** batch
+(`tracksClaudeDelivery`). Everything else publishes none:
+
+- a coalesced multi-row batch (the echo names one message, and a batch would
+  have to guess which);
+- a notification the daemon injected (a job exit, a subagent report, a
+  schedule), which carries a `Source`;
+- an abort, which is a signal — claude has no abort frame;
+- every `fundi` and `script` child, which have no echo at all;
+- a slash command that was handled without an inbox row, which has no row id
+  to name.
+
+One deliberate exception, documented rather than special-cased: the daemon's own
+restart and rate-limit nudges are injected with a `Source` but persisted with it
+EMPTY, so they arrive as direct messages and do get a receipt. That is harmless
+— no client is waiting on that row id, and an unknown id is a no-op — and it is
+why the predicate stays the plain one. A client must therefore treat an
+unmatched `message_id` as ordinary, not as an error.
+
+The narrowness is real and client-visible: a client that sends a coalesced batch,
+or talks to a non-claude child, gets no receipt and must keep its own fallback.
+Pinned end to end by `TestClaudeDeliveryReceiptNamesTheInboxRow`,
+`TestClaudeDeliveryReceiptDoesNotWaitForTheCapture`,
+`TestClaudeDeliveryDuplicateEchoPublishesOneReceipt`,
+`TestClaudeDeliveryStaleReplayOnResumePublishesNothing`,
+`TestClaudeDeliveryReceiptReplaysAfterResubscribe` and
+`TestClaudeDeliveryKeepsFundiUntouched` (`test/integration`), which drive a real
+daemon, a real child process and the real stdout parse; by
+`TestClaudeDeliveryParsesTheRecordedEchoShape` and
+`TestClaudeDeliveryReplaysTheRecordedEchoFixture` (`pkg/child`) against the
+recorded frames; and, for what the capture stores, by
+`TestDeliveryCorpusKeepsTheMidTurnWrapperAndBothIdenticalSends`
+(`pkg/capture`, corpus `testdata/claude-capture-delivery`).
+
 #### Who produces the deltas
 
 `content_block_delta` is the only ephemeral type, and it reaches subscribers at
