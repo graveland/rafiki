@@ -1142,16 +1142,19 @@ func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(chi
 }
 
 // installChildHooks fills in every per-child callback a SpawnSpec carries,
-// including the ones only one kind gets.
+// including the ones only one kind gets, and returns the acknowledgement
+// GENERATION it minted for a claude launch (0 for any other kind).
 //
 // Every claude LAUNCH path — a fresh spawn, a manual resume, a crash-recovery
 // resume, a respawn after an abort, and a daraja-backed run (which is a
 // child.Spawn with a Runner, same as any other) — constructs a SpawnSpec and
 // calls this, so no path can end up with a hook that only works on the initial
-// spawn. It is also where a launch's acknowledgement GENERATION is minted: the
-// generation is bound into the callback installed below, so an echo from a
-// process this daemon has since replaced publishes nothing.
-func (c *Controller) installChildHooks(spec *child.SpawnSpec, kind string) {
+// spawn. The generation is bound into the callback installed below, so an echo
+// from a process this daemon has since replaced publishes nothing; the caller
+// hands it back to claudeDeliveries.attach once child.Spawn has produced the
+// instance, which is what lets the exit path retire THIS launch rather than
+// whatever happens to be current then.
+func (c *Controller) installChildHooks(spec *child.SpawnSpec, kind string) (claudeGen uint64) {
 	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(spec.ChildID)
 	// A script child's raw output is published as coalesced durable ScriptOutput
 	// events (script_output.go). Every other kind leaves the hook nil — its
@@ -1163,9 +1166,10 @@ func (c *Controller) installChildHooks(spec *child.SpawnSpec, kind string) {
 		// beginLaunch retires the previous launch's outstanding deliveries
 		// before the new process exists, so the callback below and the entries
 		// a delivery registers can only ever agree on one generation.
-		gen := c.claudeDeliveries.beginLaunch(spec.ChildID)
-		spec.OnUserReplay = c.claudeReplayHook(spec.ChildID, gen)
+		claudeGen = c.claudeDeliveries.beginLaunch(spec.ChildID)
+		spec.OnUserReplay = c.claudeReplayHook(spec.ChildID, claudeGen)
 	}
+	return claudeGen
 }
 
 func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {
@@ -2544,7 +2548,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		Provider:    prov,
 		Runner:      runner,
 	}
-	c.installChildHooks(&spec, req.Kind)
+	claudeGen := c.installChildHooks(&spec, req.Kind)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -2577,6 +2581,9 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			Message: err.Error(),
 		}
 	}
+	// The instance now exists, so its launch generation has an owner: the exit
+	// path retires THIS generation, never whatever is current when it runs.
+	c.claudeDeliveries.attach(ch, claudeGen)
 
 	// Register the child in the ChildManager immediately after spawn, so any
 	// watcher of the spawned announcement (below) finds the child ready in
@@ -3440,7 +3447,7 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 		Provider:    prov,
 		Runner:      runner,
 	}
-	c.installChildHooks(&spec, req.Kind)
+	claudeGen := c.installChildHooks(&spec, req.Kind)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -3455,6 +3462,9 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 			Message: err.Error(),
 		}
 	}
+	// The instance now exists, so its launch generation has an owner: the exit
+	// path retires THIS generation, never whatever is current when it runs.
+	c.claudeDeliveries.attach(ch, claudeGen)
 
 	// activateLiveChild (baseSnap != nil path): waits for Idle, replaces the
 	// old exited entry, builds the full Session from snap with Resume's
@@ -3570,7 +3580,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		Provider: prov,
 		Runner:   runner,
 	}
-	c.installChildHooks(&spec, req.Kind)
+	claudeGen := c.installChildHooks(&spec, req.Kind)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -3585,6 +3595,9 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 			Message: err.Error(),
 		}
 	}
+	// The instance now exists, so its launch generation has an owner: the exit
+	// path retires THIS generation, never whatever is current when it runs.
+	c.claudeDeliveries.attach(ch, claudeGen)
 
 	// activateLiveChild (baseSnap != nil path): waits for Idle, replaces the
 	// old exited entry, builds the full Session from snap with RespawnChild's
@@ -3904,6 +3917,16 @@ func (c *Controller) abortSpawn(childID string, ch *child.Child) {
 		c.darajaPool.DropReplay(childID)
 	}
 	c.dropInboxForForgotten(childID, "spawn aborted")
+	// A refused spawn never reaches handleChildExit, so the acknowledgement
+	// generation installChildHooks minted before child.Spawn is retired here —
+	// with the instance when there is one, and by "current" only when the
+	// process never started (nothing else can hold a generation for an id that
+	// was minted moments ago).
+	if ch != nil {
+		c.claudeDeliveries.endLaunch(childID, ch)
+	} else {
+		c.claudeDeliveries.abandonLaunch(childID)
+	}
 	// The per-child MCP secret is minted BEFORE the initial insert (buildEnv /
 	// scriptRunner run before writeRecord), and forgetMCPToken normally runs
 	// from handleChildExit — which never runs for a refused spawn, so the
@@ -5261,9 +5284,12 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	}
 
 	// No process is left to echo a delivery back, so this launch's outstanding
-	// receipts are retired here — before cm.Remove, and every relaunch waits for
-	// cm.Remove, so the generation this retires is the one that just died.
-	c.claudeDeliveries.endLaunch(childID)
+	// receipts are retired here. Scoped to the generation THIS Child instance
+	// was launched under, not to whatever is current: MarkExited (near the top
+	// of this handler) makes the child resumable, so a client can Resume it
+	// while the rest of this runs — and retiring the successor's generation
+	// would silently stop every receipt for the resumed launch.
+	c.claudeDeliveries.endLaunch(childID, ch)
 
 	// Tell the parent its worker is gone. This runs before Forget (which
 	// clears batches aimed AT this child, not at its parent) and before

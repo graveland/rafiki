@@ -59,7 +59,7 @@ func TestChildHooksInstallReplayOnlyForClaude(t *testing.T) {
 		{""},
 	} {
 		spec := child.SpawnSpec{ChildID: "c_" + tc.kind}
-		c.installChildHooks(&spec, tc.kind)
+		gen := c.installChildHooks(&spec, tc.kind)
 
 		ck.NotNil(spec.NativeSink, "%q: NativeSink hook is nil", tc.kind)
 		ck.NotNil(spec.OnMeta, "%q: OnMeta hook is nil", tc.kind)
@@ -68,8 +68,12 @@ func TestChildHooksInstallReplayOnlyForClaude(t *testing.T) {
 		if tc.kind == protocol.KindClaude {
 			ck.NotNil(spec.OnUserReplay,
 				"%q: a claude launch with no echo hook never publishes a delivery receipt", tc.kind)
+			// The generation is what the exit path retires, so a launch that
+			// mints none could never be torn down.
+			ck.True(gen != 0, "%q: installChildHooks minted no launch generation", tc.kind)
 			continue
 		}
 		ck.True(spec.OnUserReplay == nil, "%q: OnUserReplay must be nil for a kind that never echoes", tc.kind)
+		ck.Eq(uint64(0), gen, "%q: a non-claude launch minted a generation", tc.kind)
 	}
 }

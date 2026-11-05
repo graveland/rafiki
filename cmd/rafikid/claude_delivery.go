@@ -61,7 +61,14 @@ type claudeDeliveryRegistry struct {
 	// has no launch this daemon can acknowledge against, so a delivery to it
 	// carries no uuid at all.
 	gens map[string]uint64
-	rows map[claudeDeliveryKey]string
+	// insts is the generation each live Child INSTANCE was launched under. The
+	// exit path needs it because it is handed a Child, not a generation, and
+	// "whatever is current now" is not the same thing: a client can Resume the
+	// child while the old exit is still finishing (MarkExited is near the top of
+	// handleChildExit, endLaunch near the bottom), and retiring the successor's
+	// generation would silently stop every receipt for the resumed launch.
+	insts map[*child.Child]uint64
+	rows  map[claudeDeliveryKey]string
 }
 
 // beginLaunch starts a new launch generation for childID and retires every
@@ -145,15 +152,60 @@ func (r *claudeDeliveryRegistry) drop(childID string, gen uint64, deliveryUUID s
 	delete(r.rows, claudeDeliveryKey{childID: childID, gen: gen, uuid: deliveryUUID})
 }
 
-// endLaunch retires childID's current launch generation: its pending entries go
-// and the child stops accepting registrations until the next launch begins.
+// attach records which generation the live Child instance belongs to, so the
+// exit path can retire exactly the launch that died. A zero generation (a
+// non-claude launch) records nothing.
+func (r *claudeDeliveryRegistry) attach(ch *child.Child, gen uint64) {
+	if ch == nil || gen == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.insts == nil {
+		r.insts = make(map[*child.Child]uint64)
+	}
+	r.insts[ch] = gen
+}
+
+// endLaunch retires the generation the DYING Child instance was launched under:
+// its pending entries go, and the child stops accepting registrations until the
+// next launch begins.
 //
-// Generation-scoped by construction — only the generation the child is on NOW
-// is touched, and only that generation's entries. Called from handleChildExit,
-// which runs before cm.Remove, and every relaunch (Resume, RespawnChild) waits
-// for cm.Remove first, so the generation this retires is the one that just
-// died rather than a successor's.
-func (r *claudeDeliveryRegistry) endLaunch(childID string) {
+// It is the instance's generation, never "whatever is current": a client can
+// Resume a child as soon as its row reads exited, which happens near the TOP of
+// handleChildExit while this runs near the bottom — so the current generation
+// may already belong to the resumed process. When it does, this is a no-op and
+// the successor's generation (and any entries already registered under it)
+// survives; the same instance cannot be torn down twice, so a second call finds
+// nothing.
+func (r *claudeDeliveryRegistry) endLaunch(childID string, ch *child.Child) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	gen, ok := r.insts[ch]
+	if !ok {
+		return
+	}
+	delete(r.insts, ch)
+	if r.gens[childID] != gen {
+		return
+	}
+	delete(r.gens, childID)
+	for k := range r.rows {
+		if k.childID == childID && k.gen == gen {
+			delete(r.rows, k)
+		}
+	}
+}
+
+// abandonLaunch retires childID's current generation for a spawn that never
+// produced a Child, so a refused claude spawn leaves no generation behind.
+//
+// "Current" is safe HERE and only here: abortSpawn runs on an id that was minted
+// moments ago for this one spawn, so no other launch can hold a generation for
+// it, and there is no instance to key on because child.Spawn never returned one.
+// The exit path uses endLaunch, which is instance-scoped for exactly the reason
+// this one may not be.
+func (r *claudeDeliveryRegistry) abandonLaunch(childID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	gen, ok := r.gens[childID]
@@ -198,10 +250,18 @@ func (c *Controller) claudeReplayHook(childID string, gen uint64) func(string) {
 // claude will echo back, and therefore carries a delivery uuid.
 //
 // Only a DIRECT prompt or steer qualifies. A batch with a Source is a
-// notification the daemon injected (a job exit, a subagent report, a schedule)
-// and no client is waiting on it; an abort is a signal, not a message, and
-// claude has no abort frame at all. Exactly one row, because the echo names ONE
-// message and a coalesced batch would have to guess which.
+// notification the daemon injected (a job exit, a subagent report, a schedule);
+// an abort is a signal, not a message, and claude has no abort frame at all.
+// Exactly one row, because the echo names ONE message and a coalesced batch
+// would have to guess which.
+//
+// The daemon's OWN nudges (the restart and rate-limit continuations,
+// sendClaudeNudge) are a known exception: they are injected with a Source but
+// Controller.Send persists the wrapped text with the row's Source EMPTY, so they
+// arrive here as direct messages and do get a uuid and a receipt. That is
+// harmless rather than wrong — no client is waiting on that row id, and the
+// event contract says an unknown id is a no-op — so the predicate stays the
+// plain one instead of growing a second "is this really the user" signal.
 func tracksClaudeDelivery(kind string, b inbox.Batch) bool {
 	if kind != protocol.KindClaude {
 		return false
@@ -264,16 +324,33 @@ const claudeUnsupportedFlagHint = "rafiki launches every headless claude child w
 // claudeLaunchFailure builds the error event for a claude child that died at
 // LAUNCH, or nil for a child that ran and then stopped.
 //
-// The distinction is the session: a claude process reports its session id on
-// the first turn's system/init, so a child that exits with none never got that
-// far — the binary rejected its argv, could not authenticate, or died on
-// startup. A signal is a kill (an operator's, or the abort ladder), not a
-// launch failure, and exit 0 is a clean end. The stderr is carried verbatim
-// (bounded) rather than summarised, because the binary's own words are the
-// actionable part; the upgrade hint is added only when that text says a flag
-// was rejected, so it never claims a cause the child did not name.
+// A rejected FLAG is reported on both launch shapes, because the upgrade path
+// runs through both: a fresh spawn has no session yet, while a RESUMED child
+// always has one (that is what --resume uses) and is the shape most existing
+// children take when the daemon starts launching with a flag their binary does
+// not know. So the hint branch is decided by the stderr, not by the session.
+//
+// Everything else is reported only for a child that never established a
+// session: a claude process reports its id on the first turn's system/init, so
+// exiting without one means the binary rejected its argv, could not
+// authenticate, or died on startup — a launch failure. With a session, a
+// nonzero exit and unrelated stderr is an ordinary turn or auth failure, which
+// is not this event's business.
+//
+// A signal is a kill (an operator's, or the abort ladder), never a launch
+// failure, and exit 0 is a clean end. The stderr is carried verbatim (bounded)
+// rather than summarised, because the binary's own words are the actionable
+// part.
+//
+// SCOPE — RULING: this covers processes the DAEMON launches. A daraja-hosted
+// claude child's stderr is discarded on the executor host
+// (pkg/daraja/host.go's `io.Copy(io.Discard, stderr)` for non-script children),
+// so StderrSnapshot is empty there and this returns nil: an executor-routed
+// child on an old binary exits with only child_exited, and the operator must
+// read the executor's own log. Surfacing a host's stderr needs a host-protocol
+// change in the executor plane, which this change deliberately does not make.
 func claudeLaunchFailure(kind, sessionID string, res child.ShutdownResult, stderr []byte) *rafikiv1.ErrorEvent {
-	if kind != protocol.KindClaude || sessionID != "" {
+	if kind != protocol.KindClaude {
 		return nil
 	}
 	if res.Signal != "" || res.ExitCode == 0 {
@@ -283,8 +360,17 @@ func claudeLaunchFailure(kind, sessionID string, res child.ShutdownResult, stder
 	if tail == "" {
 		return nil
 	}
-	msg := fmt.Sprintf("claude exited (%d) before establishing a session:\n%s", res.ExitCode, tail)
-	if rejectsAFlag(tail) {
+	rejected := rejectsAFlag(tail)
+	if sessionID != "" && !rejected {
+		return nil
+	}
+	var msg string
+	if sessionID == "" {
+		msg = fmt.Sprintf("claude exited (%d) before establishing a session:\n%s", res.ExitCode, tail)
+	} else {
+		msg = fmt.Sprintf("claude exited (%d) while resuming session %s:\n%s", res.ExitCode, sessionID, tail)
+	}
+	if rejected {
 		msg += "\n\n" + claudeUnsupportedFlagHint
 	}
 	return &rafikiv1.ErrorEvent{Code: "claude_launch_failed", Message: msg}

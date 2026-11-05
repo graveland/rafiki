@@ -6,9 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -51,16 +55,27 @@ func newClaudeDeliveryHarness(t *testing.T, childIDs ...string) *claudeDeliveryH
 	return &claudeDeliveryHarness{c: c, events: events, evlog: evlog, store: store}
 }
 
-// launch runs the production SpawnSpec wiring for one claude launch and returns
-// the OnUserReplay callback it installed.
-func (h *claudeDeliveryHarness) launch(t *testing.T, childID string) func(string) {
+// launch runs the production launch wiring for one claude child and returns the
+// OnUserReplay callback it installed plus the instance the generation was
+// attached to — the same three steps Spawn, Resume and RespawnChild take:
+// installChildHooks mints the generation, child.Spawn produces the instance,
+// and attach binds one to the other.
+//
+// The instance is a zero-value *child.Child standing in for the process: these
+// tests never run one, and the registry keys on its identity alone.
+func (h *claudeDeliveryHarness) launch(t *testing.T, childID string) (func(string), *child.Child) {
 	t.Helper()
 	spec := child.SpawnSpec{ChildID: childID}
-	h.c.installChildHooks(&spec, protocol.KindClaude)
+	gen := h.c.installChildHooks(&spec, protocol.KindClaude)
 	if spec.OnUserReplay == nil {
 		t.Fatalf("installChildHooks installed no OnUserReplay for claude child %s", childID)
 	}
-	return spec.OnUserReplay
+	if gen == 0 {
+		t.Fatalf("installChildHooks minted no launch generation for claude child %s", childID)
+	}
+	ch := &child.Child{}
+	h.c.claudeDeliveries.attach(ch, gen)
+	return spec.OnUserReplay, ch
 }
 
 // writeEcho replaces the write with one that behaves like a claude child
@@ -92,11 +107,15 @@ func (h *claudeDeliveryHarness) send(t *testing.T, childID, text string) string 
 	return id
 }
 
-func (h *claudeDeliveryHarness) drain() []*rafikiv1.Event {
+func (h *claudeDeliveryHarness) drain() []*rafikiv1.Event { return drainEvents(h.events) }
+
+// drainEvents empties a native-bus subscription without waiting: every publish
+// this package makes is synchronous into the subscriber's channel.
+func drainEvents(events <-chan *rafikiv1.Event) []*rafikiv1.Event {
 	var got []*rafikiv1.Event
 	for {
 		select {
-		case ev := <-h.events:
+		case ev := <-events:
 			got = append(got, ev)
 		default:
 			return got
@@ -164,7 +183,7 @@ func assertUUIDv7(t *testing.T, s string) {
 func TestClaudeDeliverySynchronousEchoPublishesDuringTheWrite(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	hook := h.launch(t, "c_deliver")
+	hook, _ := h.launch(t, "c_deliver")
 
 	var written []string
 	pendingAtEcho := -1
@@ -195,7 +214,7 @@ func TestClaudeDeliverySynchronousEchoPublishesDuringTheWrite(t *testing.T) {
 func TestClaudeDeliveryDelayedEchoAfterTheRowIsConsumed(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	hook := h.launch(t, "c_deliver")
+	hook, _ := h.launch(t, "c_deliver")
 
 	var written []string
 	h.writeEcho(nil, &written, nil) // no echo during the write
@@ -215,7 +234,7 @@ func TestClaudeDeliveryDelayedEchoAfterTheRowIsConsumed(t *testing.T) {
 func TestClaudeDeliveryDuplicateTextsGetDistinctUUIDs(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	hook := h.launch(t, "c_deliver")
+	hook, _ := h.launch(t, "c_deliver")
 
 	var written []string
 	h.writeEcho(hook, &written, nil)
@@ -238,8 +257,8 @@ func TestClaudeDeliveryDuplicateTextsGetDistinctUUIDs(t *testing.T) {
 func TestClaudeDeliveryIgnoresForeignChildAndRetiredGeneration(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_one", "c_two")
-	hookOne := h.launch(t, "c_one")
-	hookTwo := h.launch(t, "c_two")
+	hookOne, instOne := h.launch(t, "c_one")
+	hookTwo, _ := h.launch(t, "c_two")
 
 	var written []string
 	h.writeEcho(nil, &written, nil)
@@ -256,12 +275,11 @@ func TestClaudeDeliveryIgnoresForeignChildAndRetiredGeneration(t *testing.T) {
 	ck.Empty(receipts(h.drain()), "another child's uuid published a receipt")
 
 	// The retired generation: a new launch replaces the one that minted it.
-	h.launch(t, "c_one")
+	hookCurrent, _ := h.launch(t, "c_one")
 	hookOne(written[0])
 	ck.Empty(receipts(h.drain()), "a retired launch's echo published a receipt")
 
 	// The current launch still works, for its own deliveries.
-	hookCurrent := h.launch(t, "c_one")
 	var after []string
 	h.writeEcho(hookCurrent, &after, nil)
 	rowID := h.send(t, "c_one", "after the relaunch")
@@ -269,6 +287,7 @@ func TestClaudeDeliveryIgnoresForeignChildAndRetiredGeneration(t *testing.T) {
 	ck.EqDiff([]string{rowID}, receipts(h.drain()), "receipts after the relaunch")
 
 	// c_two's own launch is untouched by any of c_one's relaunches.
+	_ = instOne
 	var two []string
 	h.writeEcho(hookTwo, &two, nil)
 	rowTwo := h.send(t, "c_two", "still its own child")
@@ -282,7 +301,7 @@ func TestClaudeDeliveryIgnoresForeignChildAndRetiredGeneration(t *testing.T) {
 func TestClaudeDeliveryWriteFailureDropsOnlyThatDelivery(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	hook := h.launch(t, "c_deliver")
+	hook, _ := h.launch(t, "c_deliver")
 
 	var written []string
 	h.c.sendFrameFn = func(_ string, frame json.RawMessage) error {
@@ -319,15 +338,16 @@ func TestClaudeDeliveryWriteFailureDropsOnlyThatDelivery(t *testing.T) {
 func TestClaudeDeliveryTeardownRetiresOnlyItsGeneration(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	hook := h.launch(t, "c_deliver")
+	hook, inst := h.launch(t, "c_deliver")
 
 	var written []string
 	h.writeEcho(nil, &written, nil)
 	h.send(t, "c_deliver", "hello")
 	ck.Len(written, 1, "frames written")
 
-	// Exactly what handleChildExit does.
-	h.c.claudeDeliveries.endLaunch("c_deliver")
+	// Exactly what handleChildExit does: retire the generation the instance was
+	// launched under.
+	h.c.claudeDeliveries.endLaunch("c_deliver", inst)
 
 	hook(written[0])
 	ck.Empty(receipts(h.drain()), "a receipt was published after teardown")
@@ -346,7 +366,7 @@ func TestClaudeDeliveryTeardownRetiresOnlyItsGeneration(t *testing.T) {
 func TestClaudeDeliveryResumeRetiresThePreviousLaunch(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	beforeResume := h.launch(t, "c_deliver")
+	beforeResume, _ := h.launch(t, "c_deliver")
 
 	var written []string
 	h.writeEcho(nil, &written, nil)
@@ -354,7 +374,7 @@ func TestClaudeDeliveryResumeRetiresThePreviousLaunch(t *testing.T) {
 	ck.Len(written, 1, "frames written before the resume")
 
 	// The resume: a fresh SpawnSpec, hence a fresh generation.
-	afterResume := h.launch(t, "c_deliver")
+	afterResume, _ := h.launch(t, "c_deliver")
 	beforeResume(written[0])
 	ck.Empty(receipts(h.drain()), "the pre-resume uuid published a receipt after the resume")
 
@@ -378,13 +398,19 @@ func TestClaudeDeliveryResumeRetiresThePreviousLaunch(t *testing.T) {
 func TestClaudeDeliveryOldLaunchCallbackRacingANewLaunchPublishesNothing(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	oldHook := h.launch(t, "c_deliver")
+	oldHook, _ := h.launch(t, "c_deliver")
 
 	var written []string
 	h.writeEcho(nil, &written, nil)
 	rowID := h.send(t, "c_deliver", "hello")
 	ck.Require().Len(written, 1, "frames written")
 	uuidUnderTest := written[0]
+
+	// The SpawnSpec is built HERE, on the test goroutine: the goroutine below
+	// runs the production launch wiring only, because a t.Fatalf there would
+	// runtime.Goexit that goroutine and hang wg.Wait until the package times
+	// out instead of reporting the cause.
+	resumeSpec := child.SpawnSpec{ChildID: "c_deliver"}
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -397,7 +423,8 @@ func TestClaudeDeliveryOldLaunchCallbackRacingANewLaunchPublishesNothing(t *test
 	go func() {
 		defer wg.Done()
 		<-start
-		h.launch(t, "c_deliver") // the new launch
+		gen := h.c.installChildHooks(&resumeSpec, protocol.KindClaude) // the new launch
+		h.c.claudeDeliveries.attach(&child.Child{}, gen)
 	}()
 	close(start)
 	wg.Wait()
@@ -414,6 +441,155 @@ func TestClaudeDeliveryOldLaunchCallbackRacingANewLaunchPublishesNothing(t *test
 	// again — whatever the race above resolved to.
 	oldHook(uuidUnderTest)
 	ck.Empty(receipts(h.drain()), "a retired launch's callback published a receipt after the new launch took over")
+}
+
+// A Resume can start while the previous exit is still finishing: MarkExited
+// runs near the TOP of handleChildExit and the receipt teardown near the
+// bottom, and resumeClaimed only asks that the row read exited. So the exit must
+// retire the generation ITS instance was launched under, never whatever is
+// current — retiring the successor's would silently stop every receipt for the
+// resumed launch, with no error anywhere.
+func TestClaudeDeliveryStaleExitDoesNotRetireANewLaunch(t *testing.T) {
+	ck := assert.NewAborting(t)
+	h := newClaudeDeliveryHarness(t, "c_deliver")
+	oldHook, oldInst := h.launch(t, "c_deliver")
+
+	var written []string
+	h.writeEcho(nil, &written, nil)
+	h.send(t, "c_deliver", "hello")
+	ck.Require().Len(written, 1, "frames written")
+
+	// The Resume: a new generation for the same child, minted while the old
+	// exit has not run its teardown yet.
+	newHook, newInst := h.launch(t, "c_deliver")
+
+	// The old exit now finishes, exactly as handleChildExit does.
+	h.c.claudeDeliveries.endLaunch("c_deliver", oldInst)
+
+	// The resumed launch still owns the child: a delivery is tracked and its
+	// receipt publishes.
+	var resumed []string
+	h.writeEcho(newHook, &resumed, nil)
+	resumedRow := h.send(t, "c_deliver", "after the resume")
+	ck.Require().Len(resumed, 1, "frames written for the resumed launch")
+	assertUUIDv7(t, resumed[0])
+	ck.EqDiff([]string{resumedRow}, receipts(h.drain()), "the resumed launch's receipt")
+
+	// And the dead launch's own outstanding uuid is gone.
+	oldHook(written[0])
+	ck.Empty(receipts(h.drain()), "the dead launch's uuid published a receipt")
+
+	// The successor's teardown still works.
+	h.c.claudeDeliveries.endLaunch("c_deliver", newInst)
+	_, live := h.c.claudeDeliveries.register("c_deliver", "0198e5f2-9c3a-7def-8a1b-4c2d9e0f1a2b", "row")
+	ck.False(live, "the successor's own teardown left its generation live")
+}
+
+// A spawn that never produced a Child is torn down by abortSpawn, which is not
+// handleChildExit: without its own retirement the generation installChildHooks
+// minted would stay in the map for a child that no longer exists.
+func TestClaudeDeliveryAbortedSpawnRetiresItsGeneration(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+
+	// The child.Spawn FAILED, so there is no instance: the generation is
+	// retired by "current", which is safe only because the id was minted for
+	// this spawn moments ago.
+	spec := child.SpawnSpec{ChildID: "c_abort_nil"}
+	ck.Require().True(ctrl.installChildHooks(&spec, protocol.KindClaude) != 0, "generation")
+	_, ok := ctrl.claudeDeliveries.register("c_abort_nil", "uuid-1", "row-1")
+	ck.Require().True(ok, "register")
+	ctrl.abortSpawn("c_abort_nil", nil)
+	ck.Eq(0, ctrl.claudeDeliveries.entryCount("c_abort_nil"), "entries after abortSpawn")
+	_, live := ctrl.claudeDeliveries.register("c_abort_nil", "uuid-2", "row-2")
+	ck.False(live, "abortSpawn left a refused spawn's generation live")
+
+	// The child.Spawn SUCCEEDED and a later step refused the spawn: the
+	// generation is retired through the instance it was attached to. A real
+	// spawned child, because abortSpawn shuts the process down.
+	childID := spawnTestChild(t, ctrl, nil)
+	inst, liveChild := ctrl.cm.Get(childID)
+	ck.Require().True(liveChild, "the spawned child is not live")
+	_, ok = ctrl.claudeDeliveries.register(childID, "uuid-3", "row-3")
+	ck.Require().True(ok, "register")
+	ctrl.abortSpawn(childID, inst)
+	ck.Eq(0, ctrl.claudeDeliveries.entryCount(childID), "entries after abortSpawn")
+	_, live = ctrl.claudeDeliveries.register(childID, "uuid-4", "row-4")
+	ck.False(live, "abortSpawn left the aborted instance's generation live")
+}
+
+// handleChildExit is where BOTH registry call sites live, and neither is
+// reachable from the pure functions above: deleting either call leaves those
+// tests green. This drives the real exit path — a spawned child killed through
+// the controller, so monitorChild calls handleChildExit — with a delivery
+// registered against the live launch.
+func TestClaudeDeliveryExitRetiresTheLaunchGeneration(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	childID := spawnTestChild(t, ctrl, nil)
+
+	_, ok := ctrl.claudeDeliveries.register(childID, "0198e5f2-9c3a-7def-8a1b-4c2d9e0f1a2b", "row_1")
+	ck.Require().True(ok, "a spawned claude child has no launch generation")
+	ck.Eq(1, ctrl.claudeDeliveries.entryCount(childID), "registered entries")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := ctrl.Kill(ctx, childID, 5*time.Second, 5*time.Second); err != nil {
+		t.Fatalf("Kill(%s): %v", childID, err)
+	}
+	ck.Require().True(waitForChildRemoval(ctrl.cm, childID, 15*time.Second),
+		"handleChildExit never finished for %s", childID)
+
+	ck.Eq(0, ctrl.claudeDeliveries.entryCount(childID),
+		"handleChildExit left the launch's outstanding receipts registered")
+	_, live := ctrl.claudeDeliveries.register(childID, "another", "row_2")
+	ck.False(live, "handleChildExit left the child's launch generation live")
+}
+
+// The other handleChildExit call site: a claude child that died at launch
+// publishes the binary's own words, with the upgrade hint when they name a
+// rejected flag. Driven through handleChildExit, not the pure builder, so
+// deleting the publish leaves this red.
+func TestClaudeDeliveryExitPublishesARejectedFlag(t *testing.T) {
+	ck := assert.NewAborting(t)
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available: this test needs a real process")
+	}
+	ctrl := newTestController(t)
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "old-claude.sh")
+	script := "#!/bin/sh\necho \"error: unknown option '--replay-user-messages'\" >&2\nexit 1\n"
+	ck.NoError(os.WriteFile(binary, []byte(script), 0o700), "write the fake binary")
+
+	const childID = "c_old_claude"
+	ch, err := child.Spawn(context.Background(), child.SpawnSpec{
+		ChildID:  childID,
+		Cwd:      dir,
+		PiBinary: "/bin/sh",
+		Argv:     []string{binary},
+		Provider: child.ClaudeProvider{},
+	})
+	ck.Require().NoError(err, "Spawn")
+	<-ch.Done()
+
+	ctrl.st.Insert(&childstore.Session{ChildID: childID, Kind: protocol.KindClaude, Status: protocol.StatusStreaming})
+	ctrl.cm.Add(childID, ch)
+
+	events, cancel := ctrl.native.SubscribeAll()
+	defer cancel()
+
+	ctrl.handleChildExit(childID, ch)
+
+	var got *rafikiv1.Event
+	for _, ev := range drainEvents(events) {
+		if p := ev.GetError(); p != nil && p.GetCode() == "claude_launch_failed" {
+			got = ev
+		}
+	}
+	ck.Require().True(got != nil, "handleChildExit published no claude_launch_failed event")
+	ck.StrContains(got.GetError().GetMessage(), "unknown option '--replay-user-messages'",
+		"the child's own stderr must reach the event")
+	ck.StrContains(got.GetError().GetMessage(), claudeUnsupportedFlagHint, "the upgrade hint")
 }
 
 // Only a direct claude prompt or steer of exactly one row carries a delivery
@@ -444,7 +620,7 @@ func TestClaudeDeliveryUntrackedBatchesCarryNoUUID(t *testing.T) {
 	// And the funnel honours it: a sourced batch for a live claude child is
 	// written with no uuid, and its echo path stays empty.
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	hook := h.launch(t, "c_deliver")
+	hook, _ := h.launch(t, "c_deliver")
 	var written []string
 	h.writeEcho(hook, &written, nil)
 
@@ -487,6 +663,16 @@ func TestClaudeDeliveryLaunchFailureSurfacesTheRejectedFlag(t *testing.T) {
 	ck.StrContains(ev.GetMessage(), claudeUnsupportedFlagHint, "the upgrade hint")
 	ck.StrContains(ev.GetMessage(), "--replay-user-messages", "the hint must name the flag")
 
+	// The UPGRADE path is a resumed child, not a fresh one: an existing child
+	// always carries a session id (that is what --resume uses), so gating the
+	// hint on "no session yet" would miss every child a daemon upgrade breaks.
+	// A rejected flag is a rejected flag on both shapes.
+	resumed := claudeLaunchFailure(protocol.KindClaude, "sess-1", child.ShutdownResult{ExitCode: 1}, rejected)
+	ck.Require().True(resumed != nil, "a RESUMED claude child whose binary rejected a flag published nothing")
+	ck.StrContains(resumed.GetMessage(), "unknown option '--replay-user-messages'", "the binary's own error on a resume")
+	ck.StrContains(resumed.GetMessage(), claudeUnsupportedFlagHint, "the upgrade hint on a resume")
+	ck.StrContains(resumed.GetMessage(), "sess-1", "the event must name the session it failed to resume")
+
 	// Anything else carries its stderr without claiming a cause it did not name.
 	auth := claudeLaunchFailure(protocol.KindClaude, "", child.ShutdownResult{ExitCode: 1},
 		[]byte("Error: invalid API key"))
@@ -501,8 +687,11 @@ func TestClaudeDeliveryLaunchFailureSurfacesTheRejectedFlag(t *testing.T) {
 		res       child.ShutdownResult
 		stderr    []byte
 	}{
-		{"a child that ran a turn and stopped", protocol.KindClaude, "sess-1", child.ShutdownResult{ExitCode: 1}, rejected},
+		// A resumed child that exits nonzero with stderr naming no flag is an
+		// ordinary turn/auth failure, not a launch failure.
+		{"a resumed child that ran a turn and stopped", protocol.KindClaude, "sess-1", child.ShutdownResult{ExitCode: 1}, []byte("Error: invalid API key")},
 		{"a killed child", protocol.KindClaude, "", child.ShutdownResult{ExitCode: 137, Signal: "killed"}, rejected},
+		{"a resumed child that was killed", protocol.KindClaude, "sess-1", child.ShutdownResult{ExitCode: 137, Signal: "killed"}, rejected},
 		{"a clean exit", protocol.KindClaude, "", child.ShutdownResult{ExitCode: 0}, rejected},
 		{"no stderr to report", protocol.KindClaude, "", child.ShutdownResult{ExitCode: 1}, nil},
 		{"another kind", protocol.KindFundi, "", child.ShutdownResult{ExitCode: 1}, rejected},
@@ -522,7 +711,7 @@ func containsHint(msg string) bool {
 func TestClaudeDeliveryDuplicateEchoPublishesOneReceipt(t *testing.T) {
 	ck := assert.NewAborting(t)
 	h := newClaudeDeliveryHarness(t, "c_deliver")
-	hook := h.launch(t, "c_deliver")
+	hook, inst := h.launch(t, "c_deliver")
 
 	var written []string
 	h.writeEcho(nil, &written, nil)
@@ -536,7 +725,7 @@ func TestClaudeDeliveryDuplicateEchoPublishesOneReceipt(t *testing.T) {
 	// Nothing is left behind for the uuid, and nothing at all once the launch
 	// is torn down.
 	ck.Eq(0, h.c.claudeDeliveries.entryCount("c_deliver"), "entries left after the echo")
-	h.c.claudeDeliveries.endLaunch("c_deliver")
+	h.c.claudeDeliveries.endLaunch("c_deliver", inst)
 	ck.Eq(0, h.c.claudeDeliveries.entryCount("c_deliver"), "entries left after teardown")
 }
 
