@@ -4,7 +4,6 @@ package tui
 
 import (
 	"slices"
-	"strings"
 
 	"charm.land/bubbles/v2/viewport"
 
@@ -66,15 +65,18 @@ type paneSig struct {
 	smallIDs       bool
 	expandInjected bool
 	liveFP         string
-	// ghost is the unacknowledged sends drawn after the transcript; they come
-	// and go without any block changing.
-	ghost string
+	// overlay is the optimistic sends drawn after the transcript. It is a
+	// signature, not the rows themselves: a row moving from pending to sent
+	// changes what is drawn without changing a single block, and joining the
+	// rendered rows would carry a thumbnail's escape sequences into a
+	// comparison made on every frame.
+	overlay string
 }
 
 // linesFor returns the rendered transcript, or NIL when the pane is already
 // showing it. A nil result means "nothing to do" and is distinct from an empty
 // one, which means "this transcript has no lines".
-func (p *paneState) linesFor(s *session.Session, width, height int, opts renderOpts, ghost []string) []string {
+func (p *paneState) linesFor(s *session.Session, width, height int, opts renderOpts, ov overlay) []string {
 	sig := paneSig{
 		blocks:    len(s.Blocks),
 		finalized: s.Finalized,
@@ -94,7 +96,7 @@ func (p *paneState) linesFor(s *session.Session, width, height int, opts renderO
 		drawImages:     opts.drawImages,
 		smallIDs:       opts.smallIDs,
 		expandInjected: opts.expandInjected,
-		ghost:          strings.Join(ghost, "\x00"),
+		overlay:        ov.sig,
 	}
 	if p.sigInit && sig == p.sig {
 		return nil
@@ -120,11 +122,11 @@ func (p *paneState) linesFor(s *session.Session, width, height int, opts renderO
 	if lines == nil {
 		lines = []string{}
 	}
-	if len(ghost) == 0 {
+	if len(ov.rows) == 0 {
 		return lines
 	}
 	// A copy: lines may be the renderer's cached slice.
-	return append(slices.Clone(lines), ghost...)
+	return append(slices.Clone(lines), ov.rows...)
 }
 
 // invalidate forces the next linesFor to rebuild, discarding the renderer's

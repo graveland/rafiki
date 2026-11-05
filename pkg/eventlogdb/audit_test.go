@@ -33,6 +33,14 @@ var allowedProtoMarshalers = map[string]bool{
 	"pkg/eventlog/memory.go":          true, // persisted: the same payload, in-memory store
 	"cmd/rafiki/cmd_conversations.go": true, // CLI output
 	"cmd/rafiki/protoout.go":          true, // CLI output, the generic emitter
+	// An IN-MEMORY evidence fingerprint, not a persisted proto: the cockpit
+	// digests a captured UserMessage to recognise the same stored message
+	// across a stream replay and a history read (pkg/tui/optimistic.go's
+	// evidenceOf). The digest is never stored, never sent to the daemon and
+	// never decoded back — it exists only to compare two in-process copies for
+	// cosmetic deduplication, so it needs neither pkg/eventlog's Record.Decode
+	// nor a stored-payload guarantee.
+	"pkg/tui/optimistic.go": true,
 }
 
 // TestPersistedProtoMarshalSitesAreAudited walks every non-test .go file under

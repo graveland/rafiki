@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -233,12 +232,19 @@ type sendFailedMsg struct {
 	mode   rafikiv1.SendMode
 	text   string
 	images []stagedAttachment
+	// attempt names the local optimistic send this failure retires. Removing it
+	// by text would take another send that happens to say the same thing with
+	// it.
+	attempt uint64
 }
 
-// pendingSend is one message sent to childID and not yet echoed.
-type pendingSend struct {
+// sendAcceptedMsg carries the inbox row id a successful Send RPC returned, and
+// the local attempt it belongs to. That id is the ONLY handle a delivery
+// receipt names, so a row that never receives one can never be acknowledged.
+type sendAcceptedMsg struct {
 	childID string
-	text    string
+	attempt uint64
+	inboxID string
 }
 
 // previewTickMsg fires previewDebounce after the rail cursor landed on a row
@@ -365,10 +371,12 @@ type Cockpit struct {
 	ready         bool
 	quitting      bool
 	status        string
-	// pending is the sends the daemon has not yet echoed back, oldest first.
-	// Each is drawn as a ghost user message at the foot of its own child's
-	// transcript until the real one arrives.
-	pending    []pendingSend
+	// optimistic is the sends this client has issued and not yet seen captured,
+	// per child, plus the receipts and capture evidence that acknowledge them.
+	// They are drawn as an OVERLAY at the foot of the transcript -- a grey ghost
+	// while pending, a normal user row once acknowledged -- and never folded
+	// into session.Blocks, which is canonical stored state. See optimistic.go.
+	optimistic optimisticLedger
 	showHelp   bool
 	helpTop    int
 	railHidden bool
@@ -614,6 +622,7 @@ func NewCockpit(opts Options) *Cockpit {
 		profileName:              opts.ProfileName,
 		showProfileBadge:         opts.ShowProfileBadge,
 		historyInFlight:          make(map[string]bool),
+		optimistic:               newOptimisticLedger(time.Now),
 		caps:                     newTermCaps(opts.Images, os.Getenv),
 		images:                   newImageStore(nil),
 		osc7501:                  newOSC7501Emitter(os.Getenv),
@@ -1084,6 +1093,14 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c.membershipChanged = true
 				continue
 			}
+			if d := ev.GetMessageDelivered(); d != nil {
+				// The receipt is OPTIMISTIC STATE, not transcript: it is the only
+				// thing that advances an unfocused child's row, and it must never
+				// reach Session.Apply from this feed. A rail-delivered event one
+				// ordinal ahead of the focus stream's own copy would advance that
+				// session's cursor past an event it never applied.
+				c.optimistic.deliver(ev.GetChildId(), d.GetMessageId())
+			}
 			c.applyRailEvent(ev)
 		}
 		return c, tea.Batch(waitForRailEvent(c.railCh), c.maybeReseed(nil), c.syncOSC())
@@ -1142,9 +1159,19 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.ApplyHistory(ev)
 		}
 		// The message may have been persisted while this child was not being
-		// streamed (a claude child's echo only arrives with its capture), in
-		// which case the history is the acknowledgement.
+		// streamed, in which case the history is the acknowledgement. Only a
+		// fundi row is retired here: a fetched transcript cannot say whether a
+		// row it holds is this send's capture or one this client had not loaded.
 		c.ackPendingFromHistory(msg.childID, s.Blocks)
+		// The same events are the BASELINE a later stream replay is measured
+		// against: a capture whose identity is already in this authoritative
+		// history was not new, whatever ordinal the replay carries. Only a
+		// receipt-mode child needs one — a fundi row is retired by its echo, and
+		// keeping a hash per user message for every fundi conversation would be
+		// memory nobody reads.
+		if c.ackModeFor(msg.childID) == ackReceipt {
+			c.optimistic.baseline(msg.childID, msg.events)
+		}
 		// The cursor takes the LOG watermark captured before the fetch -- never
 		// a conversation ordinal; ApplyHistory's doc has the full hazard. It is
 		// the resume point the subscription opens from. A session holding history
@@ -1179,11 +1206,19 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case sendFailedMsg:
-		c.dropPending(msg.childID, msg.text)
+		// Only THIS attempt goes: two sends can carry identical text, and a
+		// failure of one says nothing about the other.
+		c.optimistic.fail(msg.childID, msg.attempt)
 		if c.askToResume(msg) {
 			return c, nil
 		}
 		c.status = "send failed: " + msg.err.Error()
+		return c, nil
+
+	case sendAcceptedMsg:
+		// The inbox id is the handle every delivery receipt names. Recording it
+		// also joins a receipt that beat this response (see optimisticLedger).
+		c.optimistic.settle(msg.childID, msg.attempt, msg.inboxID)
 		return c, nil
 
 	case modelsLoadedMsg:
@@ -1228,6 +1263,10 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			c.notice = ""
 		}
 		c.frame++
+		// Buffered delivery receipts expire on the frame the cockpit already
+		// runs, rather than on a poller of their own: nothing else here needs a
+		// timer, and a receipt past its TTL is only unusable state.
+		c.optimistic.expire()
 		// Readiness is coalesced here on purpose: a history replay readies
 		// dozens of thumbnails in a burst, and each invalidation re-renders
 		// every transcript through glamour.
@@ -1434,6 +1473,14 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	c.applyRailEvent(ev)
 	id := ev.GetChildId()
 
+	// A delivery receipt is optimistic state on BOTH feeds: the rail carries it
+	// for a child nothing is streaming, and the focus stream carries it for the
+	// viewed one. Applied here as well as there because the two overlap on the
+	// durable tier; the application is idempotent by inbox id.
+	if d := ev.GetMessageDelivered(); d != nil {
+		c.optimistic.deliver(id, d.GetMessageId())
+	}
+
 	// ONLY the session the subscription is on may be advanced. The rail
 	// subscription covers every child in the subject but carries none of their
 	// content, so applying an event to a retained session nothing is streaming
@@ -1467,6 +1514,13 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	// and its user messages must not clear a send that went elsewhere.
 	if len(s.Blocks) > before && countUserBlocks(s.Blocks) > usersBefore {
 		c.ackPending(id, newestUserText(s.Blocks))
+	}
+	// A captured user message is EVIDENCE that a claude send already reached
+	// the transcript. It is recorded whether or not its send has been
+	// acknowledged yet: evidence that arrives before the receipt is kept and
+	// re-examined when the receipt lands, never discarded.
+	if ev.GetUserMessage() != nil {
+		c.optimistic.capture(id, ev)
 	}
 	// A durable ledger mutation for the focused child is the refresh trigger;
 	// there is no polling.
@@ -2082,6 +2136,10 @@ func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, imag
 		return nil
 	}
 	req := &rafikiv1.SendRequest{ChildId: child, Mode: mode}
+	// attempt is the local optimistic send this RPC settles, 0 when the send
+	// gets no overlay row at all (an abort, or a slash command the daemon
+	// consumes without recording a message).
+	var attempt uint64
 	if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
 		// An attachment alone is a message. Requiring text would mean a
 		// screenshot with nothing to say could not be sent at all.
@@ -2107,20 +2165,21 @@ func (c *Cockpit) sendTo(child string, mode rafikiv1.SendMode, text string, imag
 		// clear. slashOverride sends one as a PROMPT whatever key was pressed,
 		// so the mode clause only guards a caller that bypassed it.
 		if _, _, slash := slashcmd.Parse(text); !slash || mode != rafikiv1.SendMode_SEND_MODE_PROMPT {
-			shown := text
-			if shown == "" {
-				shown = "(" + itoa(int64(len(images))) + " attached)"
-			}
-			c.pending = append(c.pending, pendingSend{childID: child, text: shown})
+			// The acknowledgement mode is captured HERE, before the RPC: the
+			// inbox id a claude row is acknowledged by only arrives with the
+			// response, and until it does the row must already be committed to
+			// the receipt path (see ackMode).
+			attempt = c.optimistic.add(child, c.ackModeFor(child), text, images)
 		}
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if _, err := c.client.Send(ctx, connect.NewRequest(req)); err != nil {
-			return sendFailedMsg{err: err, childID: child, mode: mode, text: text, images: images}
+		resp, err := c.client.Send(ctx, connect.NewRequest(req))
+		if err != nil {
+			return sendFailedMsg{err: err, childID: child, mode: mode, text: text, images: images, attempt: attempt}
 		}
-		return nil
+		return sendAcceptedMsg{childID: child, attempt: attempt, inboxID: resp.Msg.GetMessageId()}
 	}
 }
 
@@ -2567,6 +2626,10 @@ func (c *Cockpit) shutdown() {
 		c.stopRail()
 		c.stopRail = nil
 	}
+	// The optimistic overlay goes with the process: nothing will ever
+	// acknowledge a send this cockpit issued, and keeping it would only make
+	// an exit look like a partial one.
+	c.optimistic = newOptimisticLedger(time.Now)
 }
 
 // ── View ────────────────────────────────────────────────────────────────────
@@ -3125,7 +3188,7 @@ func (c *Cockpit) View() tea.View {
 			drawImages:     c.drawImages(),
 			smallIDs:       c.caps.smallIDs(),
 			expandInjected: c.expandInjected,
-		}, c.ghostRows(f, convWidth))
+		}, c.overlayFor(f, convWidth))
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly
 		// created agent until it is asked something. The renderer used to
@@ -3458,123 +3521,6 @@ func quotaWindowReadout(label string, w *rafikiv1.RateLimitWindow, now time.Time
 	return out
 }
 
-// ghostRows draws child's unacknowledged sends as user messages on a grey
-// ground, to follow its transcript until the real user message replaces them.
-func (c *Cockpit) ghostRows(child string, width int) []string {
-	var rows []string
-	for _, p := range c.pending {
-		if p.childID != child {
-			continue
-		}
-		rows = append(rows, "")
-		for _, line := range strings.Split(sanitizeControlChars(p.text), "\n") {
-			for _, row := range wrapTo("▌ ", line, width) {
-				rows = append(rows, styleGhost.Width(width).Render(row))
-			}
-		}
-	}
-	return rows
-}
-
-// ackPending retires the pending sends to child that the echoed text answers.
-// Sends made before the agent's next turn can be merged into ONE user message
-// (the API forbids consecutive user turns), so one echo may answer several:
-// every pending send, oldest first, that the echo reads as a consecutive run
-// of is retired. With no such run an exact match wins, else the oldest send
-// (an image-only message echoes no text to match).
-func (c *Cockpit) ackPending(child, text string) {
-	if c.ackPendingRun(child, text) {
-		return
-	}
-	first := -1
-	for i, p := range c.pending {
-		if p.childID != child {
-			continue
-		}
-		if p.text == text {
-			c.pending = slices.Delete(c.pending, i, i+1)
-			return
-		}
-		if first < 0 {
-			first = i
-		}
-	}
-	if first >= 0 {
-		c.pending = slices.Delete(c.pending, first, first+1)
-	}
-}
-
-// ackPendingRun is ackPending's matching half, and its only exacting one: it
-// retires the pending sends to child that text reads as a consecutive run of,
-// oldest first, reporting whether it retired any. One echo answers several
-// sends when the daemon merged them into one user message, and that message's
-// text is exactly the sends joined in order.
-//
-// It never falls back to "retire something anyway": a caller that matches
-// against HISTORY must not retire a ghost on an unrelated block, so the
-// oldest-send fallback lives in ackPending, where the text is known to be the
-// message that just arrived.
-func (c *Cockpit) ackPendingRun(child, text string) bool {
-	rest := strings.TrimSpace(text)
-	retired := false
-	for rest != "" {
-		i := slices.IndexFunc(c.pending, func(p pendingSend) bool {
-			t := strings.TrimSpace(p.text)
-			return p.childID == child && t != "" && strings.HasPrefix(rest, t)
-		})
-		if i < 0 {
-			break
-		}
-		rest = strings.TrimSpace(strings.TrimPrefix(rest, strings.TrimSpace(c.pending[i].text)))
-		c.pending = slices.Delete(c.pending, i, i+1)
-		retired = true
-	}
-	return retired
-}
-
-// ackPendingFromHistory retires pending sends to child that a fetched
-// transcript already holds. The echo is not necessarily the last block -- the
-// agent may have answered before the fetch landed -- so every user block is
-// checked, newest first.
-//
-// The newest user block gets ackPendingRun, because it is still the likeliest
-// echo and one row can carry several merged sends ("a\nb"). An OLDER user
-// block only ever matches exactly: a prefix match against history would retire
-// the ghost of a message that merely starts the same way. The trailing block
-// alone keeps ackPending's oldest-send fallback, which is what an image-only
-// message (no text to match) needs.
-func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
-	if len(blocks) == 0 {
-		return
-	}
-	if i := trailingUserIndex(blocks); i >= 0 {
-		c.ackPending(child, blocks[i].Text)
-		blocks = slices.Delete(slices.Clone(blocks), i, i+1)
-	}
-	newest := -1
-	for i := len(blocks) - 1; i >= 0; i-- {
-		if blocks[i].Kind == session.KindUser {
-			newest = i
-			break
-		}
-	}
-	for i := len(blocks) - 1; i >= 0 && c.hasPending(child); i-- {
-		if blocks[i].Kind != session.KindUser {
-			continue
-		}
-		if i == newest {
-			c.ackPendingRun(child, blocks[i].Text)
-			continue
-		}
-		for j, p := range c.pending {
-			if p.childID == child && p.text == blocks[i].Text {
-				c.pending = slices.Delete(c.pending, j, j+1)
-				break
-			}
-		}
-	}
-}
-
 func countUserBlocks(blocks []session.Block) int {
 	n := 0
 	for _, b := range blocks {
@@ -3608,16 +3554,4 @@ func trailingUserIndex(blocks []session.Block) int {
 		return i
 	}
 	return -1
-}
-
-func (c *Cockpit) hasPending(child string) bool {
-	return slices.ContainsFunc(c.pending, func(p pendingSend) bool { return p.childID == child })
-}
-
-// dropPending removes the pending send to child with this text, or every one
-// to child when text is empty.
-func (c *Cockpit) dropPending(child, text string) {
-	c.pending = slices.DeleteFunc(c.pending, func(p pendingSend) bool {
-		return p.childID == child && (text == "" || p.text == text)
-	})
 }

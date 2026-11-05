@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 
@@ -34,6 +36,16 @@ func newTestCockpit(focus string) *Cockpit {
 func summaryFor(id, name string, latest int32) *rafikiv1.ChildSummary {
 	return &rafikiv1.ChildSummary{ChildId: id, Name: name, Status: "idle",
 		Labels: map[string]string{}, LatestOrdinal: &latest}
+}
+
+// fundiSummary is a summary for a child declared FUNDI, which is what the
+// legacy text acknowledgement requires: a child whose kind is unknown is
+// treated as claude (see ackMode), so a test of the text path must say which
+// runtime it is describing.
+func fundiSummary(id, name string, latest int32) *rafikiv1.ChildSummary {
+	s := summaryFor(id, name, latest)
+	s.Kind = protocol.KindFundi
+	return s
 }
 
 func turnEndFor(id string, ord int32) *rafikiv1.Event {
@@ -313,7 +325,7 @@ func TestPendingGhostSitsAboveTheWorkingSpinner(t *testing.T) {
 	c.rail.Seed([]*rafikiv1.ChildSummary{
 		{ChildId: "c_1", Name: "scout", Status: "streaming", Labels: map[string]string{}},
 	})
-	c.pending = []pendingSend{{"c_1", "hello"}}
+	c.optimistic.add("c_1", ackText, "hello", nil)
 
 	got := ansi.Strip(c.View().Content)
 	ck.StrContains(got, "▌ hello", "ghost missing")
@@ -1755,7 +1767,7 @@ func TestPendingClearsWhenTheMessageComesBack(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
@@ -1789,7 +1801,7 @@ func TestSlashCommandLeavesNoPendingEcho(t *testing.T) {
 func TestRailDeliveryAheadOfFocusDoesNotEatTheUserMessage(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "go for it", nil)
@@ -2580,8 +2592,9 @@ func TestSendExpandsAndClearsPastes(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	ck.Require().Len(c.pending, 1, "pending")
-	ck.StrContains(c.pending[0].text, "a line", "the sent prompt kept the token instead of the text: %q", truncate(c.pending[0].text, 60))
+	sends := c.optimistic.get("c_1").sends
+	ck.Require().Len(sends, 1, "pending")
+	ck.StrContains(sends[0].text, "a line", "the sent prompt kept the token instead of the text: %q", truncate(sends[0].text, 60))
 	ck.Empty(c.pastes, "pastes outlived the prompt they belonged to")
 }
 
@@ -2807,10 +2820,10 @@ func TestRedrawInvalidatesThePaneCache(t *testing.T) {
 	s.Blocks = []session.Block{{Kind: session.KindUser, Text: "hello", Final: true}}
 	s.Finalized = 1
 
-	c.Require().NotNil(p.linesFor(s, 80, 24, renderOpts{}, nil), "first render returned nil")
-	c.Require().Nil(p.linesFor(s, 80, 24, renderOpts{}, nil), "second render should have been a cache hit")
+	c.Require().NotNil(p.linesFor(s, 80, 24, renderOpts{}, overlay{}), "first render returned nil")
+	c.Require().Nil(p.linesFor(s, 80, 24, renderOpts{}, overlay{}), "second render should have been a cache hit")
 	p.invalidate()
-	c.NotNil(p.linesFor(s, 80, 24, renderOpts{}, nil), "invalidate did not force a rebuild")
+	c.NotNil(p.linesFor(s, 80, 24, renderOpts{}, overlay{}), "invalidate did not force a rebuild")
 }
 
 // TestClosingARowKeepsTheCursorWhereTheRowWas pins that the cursor lands on the
@@ -2959,11 +2972,23 @@ func TestModelReadoutNamesTheKind(t *testing.T) {
 	}
 }
 
-// pendingTexts is the unacknowledged sends' text, oldest first, nil when none.
+// pendingTexts is the optimistic sends' text, oldest first across every child,
+// nil when none.
 func pendingTexts(c *Cockpit) []string {
+	type row struct {
+		attempt uint64
+		text    string
+	}
+	var rows []row
+	for _, st := range c.optimistic.children {
+		for _, p := range st.sends {
+			rows = append(rows, row{p.attempt, p.text})
+		}
+	}
+	slices.SortFunc(rows, func(a, b row) int { return int(a.attempt) - int(b.attempt) })
 	var out []string
-	for _, p := range c.pending {
-		out = append(out, p.text)
+	for _, r := range rows {
+		out = append(out, r.text)
 	}
 	return out
 }
@@ -2976,7 +3001,7 @@ func TestPendingSendIsGhostedInTheTranscriptUntilItsEchoArrives(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello there", nil)
@@ -2994,7 +3019,7 @@ func TestEchoLandingAheadOfThePlaceholderRetiresTheGhost(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello there", nil)
@@ -3011,7 +3036,7 @@ func TestHistoryEndingOnEchoAndPlaceholderRetiresTheGhost(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.pending = []pendingSend{{"c_1", "hello there"}}
+	c.optimistic.add("c_1", ackText, "hello there", nil)
 	c.ackPendingFromHistory("c_1", []session.Block{
 		{Kind: session.KindUser, Text: "hello there", Final: true},
 		{Kind: session.KindAssistant},
@@ -3028,7 +3053,8 @@ func TestHistoryHoldsAMergedEchoBehindAReply(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.pending = []pendingSend{{"c_1", "first"}, {"c_1", "second"}}
+	c.optimistic.add("c_1", ackText, "first", nil)
+	c.optimistic.add("c_1", ackText, "second", nil)
 	c.ackPendingFromHistory("c_1", []session.Block{
 		{Kind: session.KindUser, Text: "first\nsecond", Final: true},
 		{Kind: session.KindAssistant, Text: "done", Final: true},
@@ -3043,7 +3069,7 @@ func TestHistoryDoesNotRetireAGhostOnAnOlderPrefixMatch(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.pending = []pendingSend{{"c_1", "yes"}}
+	c.optimistic.add("c_1", ackText, "yes", nil)
 	c.ackPendingFromHistory("c_1", []session.Block{
 		{Kind: session.KindUser, Text: "yes please, go ahead", Final: true},
 		{Kind: session.KindUser, Text: "another message", Final: true},
@@ -3058,7 +3084,7 @@ func TestPendingSendsRetireInOrderOfTheirEchoes(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4), summaryFor("c_2", "two", 4)}})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4), fundiSummary("c_2", "two", 4)}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "first", nil)
@@ -3082,10 +3108,10 @@ func TestPendingGhostStaysWithItsAgent(t *testing.T) {
 		{ChildId: "c_1", Name: "scout", Labels: map[string]string{}},
 		{ChildId: "c_2", Name: "other", Labels: map[string]string{}},
 	})
-	ck.EqDeep([]string(nil), c.ghostRows("c_2", 80), "no ghost for an agent with nothing pending")
-	c.pending = []pendingSend{{"c_1", "hello"}}
-	ck.Len(c.ghostRows("c_1", 80), 2, "blank separator plus one row")
-	ck.Len(c.ghostRows("c_2", 80), 0, "ghost followed the user to another agent")
+	ck.EqDeep([]string(nil), c.overlayFor("c_2", 80).rows, "no ghost for an agent with nothing pending")
+	c.optimistic.add("c_1", ackText, "hello", nil)
+	ck.Len(c.overlayFor("c_1", 80).rows, 2, "blank separator plus one row")
+	ck.Len(c.overlayFor("c_2", 80).rows, 0, "ghost followed the user to another agent")
 }
 
 // ── injected (system-role) messages ─────────────────────────────────────────
@@ -3214,7 +3240,7 @@ func TestPendingClearsWhenHistoryHoldsTheEchoBehindAReply(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
@@ -3233,7 +3259,7 @@ func TestOneMergedEchoRetiresEverySendItAnswers(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "first", nil)

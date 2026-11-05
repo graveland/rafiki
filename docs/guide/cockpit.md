@@ -180,6 +180,50 @@ already fetched, so the toggle costs no refetch, and scrolling and the position
 readout are unaffected either way. A transcript whose only blocks are injected
 is content, not an empty conversation, and is drawn as such.
 
+## Unacknowledged sends
+
+A message you send is drawn at the foot of its agent's transcript until the
+transcript holds it. It has three states, and the row never disappears between
+them:
+
+| State | Drawn as | Says |
+|---|---|---|
+| pending | the grey-ground `▌` ghost | rafiki has it — the inbox row is committed |
+| sent | an ordinary user row, in the message's own text and images | the agent's harness took it into a turn |
+| captured | gone — the real transcript row is there instead | the model was sent it |
+
+The ghost is a claim about custody, not about the model reading it. For a
+**fundi** child the transcript row arrives quickly, so the middle state is
+rarely seen; its echo's text retires the ghost, exactly as it always has. For a
+**claude** child the transcript row only arrives with the capture, after the
+upstream response — a whole turn — so the sent row is what keeps the message on
+screen in between.
+
+A claude row is acknowledged only by a durable `message_delivered` event naming
+the inbox row id `Send` returned. Text never acknowledges it: the harness
+rewrites a mid-turn message inside prose of its own, and a text matcher both
+misses that and retires the wrong message. The receipt rides the rail's small
+event set too, so a send to an agent you are not looking at still advances.
+
+A claude row that has been acknowledged is removed only when a capture that
+arrived **after** the send proves the transcript already holds it. That
+matching is best-effort cosmetic identity, not provenance:
+
+- whitespace-normalized exact substrings, one occurrence per row, in send
+  order — three `continue`s need three occurrences;
+- a message already in the transcript when you sent is never this send's
+  capture, and a history fetch never retires a claude row (it can only say what
+  the transcript holds, not whether a row is new);
+- a send carrying images is never matched, so its images stay on screen;
+- an event with no timestamp, or one this client cannot identify, leaves the
+  row where it is.
+
+The conservative failure is therefore a lingering duplicate row, never a
+message that vanishes while it is still only a claim. Closing the agent clears
+it. One narrow case reads the same way: a send to a fundi child issued before
+the rail has loaded that child's kind is treated as a claude send, so its ghost
+can outlive the echo.
+
 ## Activity and attention
 
 ```

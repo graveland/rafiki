@@ -918,7 +918,7 @@ func (c *Cockpit) forgetChild(childID string) tea.Cmd {
 	}
 	wasFocused := c.focused() == childID
 
-	c.dropPending(childID, "")
+	c.forgetOptimistic(childID)
 	c.rail.Remove(childID)
 	delete(c.sessions, childID)
 	c.evictPane(childID)

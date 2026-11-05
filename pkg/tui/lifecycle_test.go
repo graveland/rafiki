@@ -457,9 +457,10 @@ func TestSendToExitedAgentAsksToResume(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := railWith(t, "c_1")
 	exitChild(c, "c_1")
-	c.pending = []pendingSend{{"c_1", "hello"}}
+	msg := exitedSendFailure("c_1", "hello")
+	msg.attempt = c.optimistic.add("c_1", ackText, "hello", nil)
 
-	c.Update(exitedSendFailure("c_1", "hello"))
+	c.Update(msg)
 
 	ck.Require().NotNil(c.resumeAsk, "an exited-agent send failure must open the resume question")
 	ck.Eq("hello", c.resumeAsk.text, "draft held by the question")

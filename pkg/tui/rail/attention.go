@@ -46,6 +46,14 @@ func Types() []string {
 		// signal rather than a row patch: the cockpit answers it with a
 		// ListChildren reconcile (see Cockpit.membershipChanged).
 		"child_closed",
+		// message_delivered is a UI acceptance receipt, not content: it says
+		// the child's harness took an inbox row into a turn, and its whole
+		// payload is that row's id. It rides the rail so an UNFOCUSED child's
+		// optimistic row can advance from pending to sent — the focus stream
+		// only covers the viewed child, so without it a send to another agent
+		// would stay a ghost until it was focused again. The rail never feeds
+		// it into a session.
+		"message_delivered",
 	}
 }
 

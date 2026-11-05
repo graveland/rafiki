@@ -821,13 +821,9 @@ func decorationFor(kind string) injectedDecoration {
 // rather than one string is what lets viewport.SetContentLines take it
 // directly, and makes a future prepend's YOffset shift exactly len(prepended).
 func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string {
-	if width != r.width {
-		// Every cached line was wrapped to the old width.
-		r.width = width
-		r.cached, r.cachedUpTo, r.lastFP, r.liveOut = nil, 0, "", nil
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.setWidth(width)
 
 	if finalized < 0 {
 		finalized = 0
@@ -872,6 +868,32 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 	out = append(out, r.cached...)
 	out = append(out, r.liveOut...)
 	return out
+}
+
+// setWidth adopts width, discarding a cache wrapped to the old one. Every
+// cached line was folded to the previous width, so a resize invalidates the
+// lot; it is one reset per resize rather than one per frame because width only
+// changes on a terminal resize.
+func (r *renderer) setWidth(width int) {
+	if width == r.width {
+		return
+	}
+	r.width = width
+	r.cached, r.cachedUpTo, r.lastFP, r.liveOut = nil, 0, "", nil
+}
+
+// userBlockLines renders one block with this renderer's own decoration,
+// outside the transcript cache.
+//
+// It is the optimistic overlay's renderer: a SENT row is drawn exactly as the
+// captured row that replaces it will be, so the message does not change shape
+// when the transcript catches up. It shares the renderer only for the image
+// store and the wrap width -- it never touches the cached transcript.
+func (r *renderer) userBlockLines(b session.Block, width int) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setWidth(width)
+	return blockLines(r.renderBlock(b))
 }
 
 // interestingStop reports whether a stop reason tells the reader something.
