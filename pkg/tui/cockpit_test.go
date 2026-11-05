@@ -2972,6 +2972,16 @@ func TestModelReadoutNamesTheKind(t *testing.T) {
 	}
 }
 
+// overlayRows renders child's optimistic overlay at width, the way a pane
+// rebuild does once its display flags are applied.
+func overlayRows(c *Cockpit, child string, width int) []string {
+	ov := c.overlayFor(child)
+	if ov.rows == nil {
+		return nil
+	}
+	return ov.rows(width)
+}
+
 // pendingTexts is the optimistic sends' text, oldest first across every child,
 // nil when none.
 func pendingTexts(c *Cockpit) []string {
@@ -3108,10 +3118,10 @@ func TestPendingGhostStaysWithItsAgent(t *testing.T) {
 		{ChildId: "c_1", Name: "scout", Labels: map[string]string{}},
 		{ChildId: "c_2", Name: "other", Labels: map[string]string{}},
 	})
-	ck.EqDeep([]string(nil), c.overlayFor("c_2", 80).rows, "no ghost for an agent with nothing pending")
+	ck.EqDeep([]string(nil), overlayRows(c, "c_2", 80), "no ghost for an agent with nothing pending")
 	c.optimistic.add("c_1", ackText, "hello", nil)
-	ck.Len(c.overlayFor("c_1", 80).rows, 2, "blank separator plus one row")
-	ck.Len(c.overlayFor("c_2", 80).rows, 0, "ghost followed the user to another agent")
+	ck.Len(overlayRows(c, "c_1", 80), 2, "blank separator plus one row")
+	ck.Len(overlayRows(c, "c_2", 80), 0, "ghost followed the user to another agent")
 }
 
 // ── injected (system-role) messages ─────────────────────────────────────────

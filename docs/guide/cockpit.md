@@ -211,6 +211,10 @@ matching is best-effort cosmetic identity, not provenance:
 
 - whitespace-normalized exact substrings, one occurrence per row, in send
   order — three `continue`s need three occurrences;
+- a send whose text is a substring of another send's text can be retired by
+  that other send's capture ("continue" by the capture of "continue please").
+  The row that disappears is the shorter one, whose words the longer capture
+  still shows, so this costs a cosmetic row, not a message;
 - a message already in the transcript when you sent is never this send's
   capture, and a history fetch never retires a claude row (it can only say what
   the transcript holds, not whether a row is new);

@@ -3188,7 +3188,7 @@ func (c *Cockpit) View() tea.View {
 			drawImages:     c.drawImages(),
 			smallIDs:       c.caps.smallIDs(),
 			expandInjected: c.expandInjected,
-		}, c.overlayFor(f, convWidth))
+		}, c.overlayFor(f))
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly
 		// created agent until it is asked something. The renderer used to

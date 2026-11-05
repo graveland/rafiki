@@ -73,6 +73,23 @@ type paneSig struct {
 	overlay string
 }
 
+// overlay is the optimistic rows drawn after the transcript: their cache
+// signature, and a builder for the rows themselves.
+//
+// The rows are LAZY because they are rendered through the same per-child
+// renderer as the transcript, and that renderer's display flags (drawImages,
+// smallIDs, expandArgs, expandInjected) are applied by linesFor on the rebuild
+// frame. Building the rows eagerly, at the call site, renders them with the
+// PREVIOUS frame's flags while the transcript beside them uses the new ones —
+// and because the signature then records the new flags, the next frame is a
+// cache hit and the wrong rows stay on screen. ^Y with an already-ready
+// thumbnail was exactly that: a sent row's image flipped to a placeholder and
+// never came back.
+type overlay struct {
+	sig  string
+	rows func(width int) []string
+}
+
 // linesFor returns the rendered transcript, or NIL when the pane is already
 // showing it. A nil result means "nothing to do" and is distinct from an empty
 // one, which means "this transcript has no lines".
@@ -122,11 +139,16 @@ func (p *paneState) linesFor(s *session.Session, width, height int, opts renderO
 	if lines == nil {
 		lines = []string{}
 	}
-	if len(ov.rows) == 0 {
+	if ov.rows == nil {
+		return lines
+	}
+	// Rendered HERE, after the flags above: see the type's doc.
+	ghost := ov.rows(width)
+	if len(ghost) == 0 {
 		return lines
 	}
 	// A copy: lines may be the renderer's cached slice.
-	return append(slices.Clone(lines), ov.rows...)
+	return append(slices.Clone(lines), ghost...)
 }
 
 // invalidate forces the next linesFor to rebuild, discarding the renderer's

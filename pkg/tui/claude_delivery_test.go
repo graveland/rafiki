@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"connectrpc.com/connect"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/ansi/kitty"
 	"github.com/multigres/testkit/assert"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -489,7 +490,7 @@ func TestClaudeDeliveryAttachmentBearingSendIsNeverMatched(t *testing.T) {
 	feedFocus(c, capturedFor("c_1", "look at this", 2, time.Unix(100, 0)))
 
 	ck.Require().Len(sends(c, "c_1"), 1, "an image send stays in the overlay")
-	ck.StrContains(strings.Join(c.overlayFor("c_1", c.convWidth()).rows, "\n"),
+	ck.StrContains(strings.Join(overlayRows(c, "c_1", c.convWidth()), "\n"),
 		session.ImagePlaceholder(&rafikiv1.ImageBlock{MediaType: "image/png", Data: []byte("png")}),
 		"the image must still be drawn")
 }
@@ -700,6 +701,137 @@ func TestClaudeDeliveryBothStatesAreSanitized(t *testing.T) {
 	ck.StrContains(ansi.Strip(c.View().Content), "red text", "the text itself is kept")
 }
 
+// A sent row's image follows the transcript's own display flags: ^Y must flip
+// it to the placeholder line on the very frame it rebuilds, and back again.
+//
+// The rows are rendered by the pane's renderer, whose flags linesFor applies on
+// the rebuild frame — so building the overlay eagerly, at the call site,
+// rendered it with the PREVIOUS frame's flags while the transcript used the new
+// ones. The signature then recorded the new flags, the next frame was a cache
+// hit, and the stale rows stayed on screen for the rest of the session.
+func TestClaudeDeliverySentImageFollowsTheImagesToggle(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+	// Kitty mode forced, so drawImages is a real decision rather than a probe.
+	c.caps = newTermCaps("kitty", func(string) string { return "" })
+	img := stagedAttachment{mediaType: "image/png", data: pngOf(t, 400, 300)}
+
+	sendNow(t, c, "c_1", "look at this", img)
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+
+	// Ready the thumbnail BEFORE any render, so nothing later invalidates the
+	// pane: the ^Y toggle is then the only thing that changes the mode.
+	block := &rafikiv1.ImageBlock{MediaType: "image/png", Data: img.data}
+	c.images.lookup(block)
+	q := c.images.takeQueued(false)
+	ck.Require().Len(q, 1, "the sent row's image must be queued for a thumbnail")
+	ck.Require().True(c.images.ready(runThumb(t, q[0])), "thumbnail ready")
+	ck.Require().True(c.drawImages(), "kitty mode with thumbnails on")
+
+	ck.Greater(0, strings.Count(c.View().Content, string(kitty.Placeholder)),
+		"a sent row with a ready thumbnail must draw its pixel rows")
+
+	_, _ = c.Update(newCtrlY())
+	ck.True(c.imagesHidden, "^Y must hide the thumbnails")
+	ck.Eq(0, strings.Count(c.View().Content, string(kitty.Placeholder)),
+		"the frame ^Y rebuilds must not keep the stale pixel rows")
+	ck.StrContains(ansi.Strip(c.View().Content), session.ImagePlaceholder(block),
+		"the sent row must fall back to the placeholder line")
+
+	_, _ = c.Update(newCtrlY())
+	ck.False(c.imagesHidden, "^Y again must show them")
+	ck.Greater(0, strings.Count(c.View().Content, string(kitty.Placeholder)),
+		"and the pixel rows must come back")
+}
+
+// Evidence released when the ledger goes idle is retired into the baseline, so
+// a capture re-delivered later can never be new evidence for the next send.
+func TestClaudeDeliveryReleasedEvidenceIsNotNewForTheNextSend(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1", "row-2"}})
+	capture := capturedFor("c_1", "hello", 1, time.Unix(100, 0))
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 2))
+	feedFocus(c, capture)
+	ck.Require().Len(sends(c, "c_1"), 0, "the first send is captured")
+	st := c.optimistic.get("c_1")
+	ck.Require().Len(st.evidence, 0, "an idle ledger releases its evidence")
+	ck.True(st.baseline[evidenceKeyOf(t, capture)], "the released key must survive in the baseline")
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-2", 3))
+	ck.Require().Len(sends(c, "c_1"), 1, "the second send is acknowledged")
+
+	// The same capture again, after the release: not new evidence.
+	feedFocus(c, capture)
+	ck.Len(sends(c, "c_1"), 1, "a re-delivered capture must not retire a later send")
+}
+
+// Evidence is bounded per child, and a fundi child retains none at all.
+func TestClaudeDeliveryEvidenceIsCappedAndFundiKeepsNone(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	l := newOptimisticLedger(time.Now)
+
+	l.add("c_1", ackReceipt, "hello", nil)
+	for i := 0; i < evidenceCap+2; i++ {
+		l.capture("c_1", capturedFor("c_1", "m"+itoa(int64(i)), int32(i), time.Unix(int64(1000+i), 0)))
+	}
+	st := l.get("c_1")
+	ck.Require().Len(st.evidence, evidenceCap, "evidence is capped")
+	ck.Eq("m2", st.evidence[0].norm, "the oldest evidence is the one evicted")
+	ck.Eq("m"+itoa(int64(evidenceCap+1)), st.evidence[len(st.evidence)-1].norm, "the newest survives")
+
+	// A fundi child can never spend evidence, so it retains none.
+	l.add("c_2", ackText, "hello", nil)
+	l.capture("c_2", capturedFor("c_2", "hello", 1, time.Unix(100, 0)))
+	ck.Len(l.get("c_2").evidence, 0, "a fundi child must not accumulate evidence")
+}
+
+// Forgetting a child drops its whole optimistic state: the buffer, the
+// evidence and the baseline.
+func TestClaudeDeliveryForgettingAChildClearsItsBufferAndEvidence(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	// An RPC in flight (its command is deliberately never run), a receipt that
+	// beat it, and a capture that arrived while the row is still pending: both
+	// halves of the state are populated.
+	c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
+	feedRail(c, deliveredFor("c_1", "row-1", 1))
+	feedFocus(c, capturedFor("c_1", "hello", 2, time.Unix(100, 0)))
+	ck.Require().Len(c.optimistic.get("c_1").early, 1, "a receipt is buffered")
+	ck.Require().Len(c.optimistic.get("c_1").evidence, 1, "and a capture is retained")
+
+	c.forgetChild("c_1")
+
+	ck.Nil(c.optimistic.get("c_1"), "a forgotten child must leave no optimistic state at all")
+}
+
+// A second history fetch — a page further back — carries rows this client has
+// never seen, and they must not become evidence: history cannot say whether a
+// row it returns is new.
+func TestClaudeDeliveryASecondFetchOfOlderRowsIsNotEvidence(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	c.Update(historyMsg{childID: "c_1", after: 1, events: []*rafikiv1.Event{
+		capturedFor("c_1", "an old message", 1, time.Unix(50, 0)),
+	}})
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 2))
+	ck.Require().Len(sends(c, "c_1"), 1, "acknowledged, not captured")
+
+	// A page further back, with a row that matches the send and that this
+	// client has never seen.
+	c.Update(historyMsg{childID: "c_1", after: 2, events: []*rafikiv1.Event{
+		capturedFor("c_1", "hello", 0, time.Unix(10, 0)),
+	}})
+
+	ck.Len(sends(c, "c_1"), 1, "a previously unseen older row must not retire the send")
+	ck.Len(c.optimistic.get("c_1").evidence, 0, "and must not be retained as evidence")
+}
+
 // A slash command and an abort get no optimistic row: the daemon consumes one
 // without recording a message, and the other is not a message at all.
 func TestClaudeDeliverySlashAndAbortLeaveNoOverlay(t *testing.T) {
@@ -727,6 +859,17 @@ func (f *fakeClock) now() time.Time          { return f.at }
 func (f *fakeClock) advance(d time.Duration) { f.at = f.at.Add(d) }
 
 func proto32(n int32) *int32 { return &n }
+
+// evidenceKeyOf is the ledger's identity for a captured event, so a test can
+// look for it in the baseline.
+func evidenceKeyOf(t *testing.T, ev *rafikiv1.Event) string {
+	t.Helper()
+	e, ok := evidenceOf(ev)
+	if !ok {
+		t.Fatalf("no evidence identity for %v", ev)
+	}
+	return e.key
+}
 
 // streamMsg arms one of the cockpit's real stream waiters and returns what it
 // produced, so a test can push an event down the actual channel and apply the

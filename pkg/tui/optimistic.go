@@ -85,6 +85,18 @@ const (
 	// than leaving the row pending: a wrong join would mark a send sent that
 	// nothing acknowledged.
 	earlyReceiptTTL = 60 * time.Second
+
+	// evidenceCap bounds the capture evidence retained for one child. It is the
+	// same bound as the early buffer and for the same reason: both are
+	// reordering/identification tolerances, not mailboxes. Evidence is retained
+	// while a send is PENDING (a capture that beats its receipt must still be
+	// usable when the receipt lands), so an unacknowledged send — a lost
+	// receipt, a retired launch generation — would otherwise keep a normalized
+	// copy of every later user message for the life of the cockpit, and every
+	// new capture re-scans all of it. The OLDEST goes: the earliest capture is
+	// the one a long-pending send is likeliest to have already been retired
+	// against.
+	evidenceCap = earlyReceiptCap
 )
 
 // optimisticSend is one message this client sent and has not seen captured.
@@ -314,6 +326,12 @@ func (l *optimisticLedger) capture(child string, ev *rafikiv1.Event) {
 		// all; evidence is only ever consulted by a sent row.
 		return
 	}
+	if !slices.ContainsFunc(st.sends, func(s optimisticSend) bool { return s.mode == ackReceipt }) {
+		// A fundi child can never spend it: retireByEvidence admits only a
+		// receipt-mode row, and a fundi row is retired by its echo's text.
+		// Retaining it would be memory for a matcher that never runs.
+		return
+	}
 	e, ok := evidenceOf(ev)
 	if !ok {
 		// No timestamp, or a payload that cannot be identified: retaining the
@@ -333,6 +351,9 @@ func (l *optimisticLedger) capture(child string, ev *rafikiv1.Event) {
 	e.gen = st.gen
 	e.used = map[string]int{}
 	st.evidence = append(st.evidence, e)
+	if len(st.evidence) > evidenceCap {
+		st.evidence = st.evidence[1:]
+	}
 	st.reconcile()
 	l.releaseIfIdle(child)
 }
@@ -394,9 +415,13 @@ func (l *optimisticLedger) forget(child string) {
 
 // releaseIfIdle releases evidence bookkeeping once nothing is outstanding.
 //
-// The baseline is deliberately kept: it is what makes a replay of an already
-// loaded capture ineligible, and it is a few hashes per user message. It goes
-// with the child.
+// The evidence is RETIRED INTO the baseline rather than forgotten. A capture
+// that arrived only on the focus stream was never in the history baseline, so
+// dropping its key here would let a re-delivery after the idle period be new
+// evidence for the next send (gen 1 > the new send's gen 0) and retire a row
+// whose capture has not landed. The baseline is a few hashes per user message
+// and already outlives the release; this just makes it complete. It goes with
+// the child.
 func (l *optimisticLedger) releaseIfIdle(child string) {
 	st := l.get(child)
 	if st == nil {
@@ -404,6 +429,12 @@ func (l *optimisticLedger) releaseIfIdle(child string) {
 	}
 	if len(st.sends) > 0 || len(st.early) > 0 {
 		return
+	}
+	if st.baseline == nil {
+		st.baseline = map[string]bool{}
+	}
+	for _, e := range st.evidence {
+		st.baseline[e.key] = true
 	}
 	st.evidence = nil
 	st.gen = 0
@@ -608,23 +639,21 @@ func (c *Cockpit) ackModeFor(child string) ackMode {
 	return ackReceipt
 }
 
-// overlay is the optimistic rows drawn after the transcript, plus the
-// signature that says when they changed. Both are needed: the rows are what the
-// pane draws, and the signature is what makes a state change (pending → sent)
-// rebuild a pane whose block list did not move.
-type overlay struct {
-	rows []string
-	sig  string
-}
-
-// overlayFor builds child's overlay at width. Empty when the child has no
-// optimistic sends.
-func (c *Cockpit) overlayFor(child string, width int) overlay {
+// overlayFor builds child's overlay: the signature that says when it changed,
+// and the builder the pane calls once it has applied its display flags. Both
+// are needed — the rows are what the pane draws, and the signature is what
+// makes a state change (pending → sent) rebuild a pane whose block list did not
+// move — and the rows are deferred for the reason pane.go's overlay type gives.
+// Empty when the child has no optimistic sends.
+func (c *Cockpit) overlayFor(child string) overlay {
 	st := c.optimistic.get(child)
 	if st == nil || len(st.sends) == 0 {
 		return overlay{}
 	}
-	return overlay{rows: c.optimisticRows(child, st, width), sig: st.sig()}
+	return overlay{
+		sig:  st.sig(),
+		rows: func(width int) []string { return c.optimisticRows(child, st, width) },
+	}
 }
 
 // optimisticRows draws one child's optimistic sends, oldest first: a pending
