@@ -1,6 +1,6 @@
 ---
 name: managing-presets
-description: Use when filling, tuning or creating preset seats for subagent dispatches - covers the agent_models survey, the four-seat group convention (coordinator, implementer, reviewer, final-reviewer), rafiki preset put/get, hard provider bans, and the tuning loop that compares what children actually ran on against their preset.
+description: Use when filling, tuning or creating preset seats for subagent dispatches - covers the agent_models survey, the four-seat group convention (coordinator, implementer, reviewer, final-reviewer), rafiki preset put/get, field notes on models, and the tuning loop that compares what children actually ran on against their preset.
 ---
 
 # Managing presets
@@ -57,13 +57,10 @@ schedule you do not control. Survey at tuning time:
   only resolve Anthropic ids; a `fundi` preset needs a provider-qualified one.
   Hand either the wrong shape and it spawns, attaches, and never answers.
 
-## Hard bans (enforce these in every seat)
+## Field notes
 
-- **Subagent dispatches are BANNED on Anthropic models** (anything containing
-  `anthropic`/`claude` in the id). They burn the personal subscription's 5h/7d
-  windows (`quota_status`) and have run an order of magnitude over comparable
-  OpenRouter dispatches. Only pick a model over $1/mtok when the human says to.
-- **Avoid `deepseek-v4-flash`** — it cannot reliably make tool calls.
+- `claude`-kind seats spend the subscription's 5h/7d windows (`quota_status`).
+  Weigh that on a seat with high fan-out, where one run spawns it many times.
 - `z-ai/glm-5.3-flash` has completed full implement/review/fix waves and is a
   sound default seat; `z-ai/glm-5.3` is the stronger final-review step up when
   the work earns it. These are observations, not promises — the survey outranks
