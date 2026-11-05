@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package integration_test
+
+// The capture half of the delivery acknowledgement, end to end: a REAL daemon
+// forwards a REAL child's /v1/messages request to a fake upstream the operator's
+// providers.toml names, so the whole capture path runs — begin, decompose,
+// store, report, gate release, publish — and the test can hold it open.
+//
+// This is the file the proxy face's `base_url` support exists for. Before it,
+// `[providers.anthropic] base_url` moved every sender and not the Messages
+// face, so a harness could not point the face at a local server and the claim
+// this file checks — that the acknowledgement arrives BEFORE the capture, and
+// that an older capture publishes without the newly acknowledged message — had
+// no live proof at all.
+//
+// What is proven here, in order:
+//
+//  1. the receipt for message 1 arrives while message 1's own request is
+//     blocked at the upstream, i.e. before any capture exists;
+//  2. a second message sent MID-TURN is acknowledged immediately, still while
+//     that request is blocked;
+//  3. releasing request 1 publishes message 1's row and NOT message 2's — an
+//     older in-flight capture cannot contain a message acknowledged after it
+//     was built;
+//  4. the next request carries message 2 WRAPPED in Claude Code's mid-turn
+//     prose, and its capture publishes that wrapped row — which is exactly why
+//     the acknowledgement names a row id instead of matching text.
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
+)
+
+// ─── the fake upstream ───────────────────────────────────────────────────────
+
+// captureUpstream is an Anthropic Messages endpoint the daemon forwards to
+// because providers.toml declares it as [providers.anthropic] base_url. Every
+// request parks until its gate is closed, so a test controls exactly when a
+// capture can complete.
+type captureUpstream struct {
+	srv *httptest.Server
+
+	mu     sync.Mutex
+	bodies [][]byte
+	gates  map[int]chan struct{}
+	// arrived receives the index of each request as it reaches the handler, so
+	// a test waits on the REQUEST, never on a clock.
+	arrived chan int
+}
+
+func newCaptureUpstream(t *testing.T) *captureUpstream {
+	t.Helper()
+	u := &captureUpstream{gates: map[int]chan struct{}{}, arrived: make(chan int, 16)}
+	u.srv = httptest.NewServer(http.HandlerFunc(u.serve))
+	t.Cleanup(u.srv.Close)
+	return u
+}
+
+// gate returns the channel that holds request n until it is closed.
+func (u *captureUpstream) gate(n int) chan struct{} {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.gates[n] == nil {
+		u.gates[n] = make(chan struct{})
+	}
+	return u.gates[n]
+}
+
+// body returns the request body the upstream received for request n.
+func (u *captureUpstream) body(n int) string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if n < 0 || n >= len(u.bodies) {
+		return ""
+	}
+	return string(u.bodies[n])
+}
+
+func (u *captureUpstream) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/v1/messages" || r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	raw := make([]byte, 0, 64*1024)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Body.Read(buf)
+		raw = append(raw, buf[:n]...)
+		if err != nil {
+			break
+		}
+	}
+
+	u.mu.Lock()
+	n := len(u.bodies)
+	u.bodies = append(u.bodies, raw)
+	gate := u.gates[n]
+	u.mu.Unlock()
+	u.arrived <- n
+	if gate != nil {
+		<-gate
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	for _, ev := range []string{
+		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_capture_` + fmt.Sprint(n) + `","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}` + "\n\n",
+		`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n",
+		`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}` + "\n\n",
+		`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n",
+		`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}` + "\n\n",
+		`event: message_stop` + "\n" + `data: {"type":"message_stop"}` + "\n\n",
+	} {
+		_, _ = w.Write([]byte(ev))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+}
+
+// writeAnthropicBaseProviders writes the providers.toml that points the
+// anthropic provider — and with it the proxy face — at baseURL.
+func writeAnthropicBaseProviders(t *testing.T, baseURL string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "providers.toml")
+	body := fmt.Sprintf(`default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+base_url = %q
+api_key_env = "ANTHROPIC_API_KEY"
+`, baseURL)
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte(body), 0o600), "write providers fixture")
+	return path
+}
+
+// ─── event helpers ───────────────────────────────────────────────────────────
+
+// userMessageMatching matches a durable UserMessage event for childID whose
+// text satisfies predicate.
+func userMessageMatching(childID string, predicate func(string) bool) func(*rafikiv1.Event) bool {
+	return func(ev *rafikiv1.Event) bool {
+		return ev.GetChildId() == childID && ev.GetUserMessage() != nil && predicate(eventText(ev))
+	}
+}
+
+// childUserTexts returns every user-message text the stream has buffered for
+// the child, live or replayed — a diagnosis and an assertion source.
+func childUserTexts(stream *eventStream, childID string) []string {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	var out []string
+	for _, ev := range stream.events {
+		if ev.GetChildId() == childID && ev.GetUserMessage() != nil {
+			out = append(out, eventText(ev))
+		}
+	}
+	return out
+}
+
+// ─── the test ────────────────────────────────────────────────────────────────
+
+// TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt is the whole ordering
+// story in one session: two messages, one capture held open across both.
+func TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt(t *testing.T) {
+	t.Parallel()
+	c := assert.NewCollecting(t)
+
+	up := newCaptureUpstream(t)
+	firstGate := up.gate(0)
+	secondGate := up.gate(1)
+
+	d, _ := claudeDeliveryDaemon(t,
+		"RAFIKI_PROVIDERS="+writeAnthropicBaseProviders(t, up.srv.URL),
+		"FAKE_CLAUDE_TURNS=1",
+		// A bare Anthropic id, so the request stays on the native-Anthropic route
+		// the configured base_url governs.
+		"FAKE_CLAUDE_REQUEST_MODEL=claude-haiku-4-5",
+	)
+	client := d.control(t)
+	childID := spawnClaudeChild(t, d)
+	stream := d.openEvents(t, childEventsSubject(childID), nil, eventWatermark(t, client, childID))
+
+	// ── 1. message one, acknowledged before its capture can happen ───────────
+	const first = "the first message"
+	firstRow := sendPromptRow(t, client, childID, first)
+	firstReceipt := stream.waitEvent(t, deliveredEvent(childID, firstRow), 60*time.Second)
+	c.Eq(firstRow, firstReceipt.GetMessageDelivered().GetMessageId(), "the receipt names the row Send returned")
+
+	select {
+	case n := <-up.arrived:
+		c.Eq(0, n, "the first request the upstream sees")
+	case <-time.After(60 * time.Second):
+		t.Fatalf("the daemon never forwarded the child's request to the configured base_url; providers.toml pointed at %s", up.srv.URL)
+	}
+	c.EqDeep(0, len(childUserTexts(stream, childID)), "a transcript row was published while the capture was still blocked")
+
+	// ── 2. message two, sent MID-TURN, acknowledged with the capture blocked ─
+	const second = "a message sent mid-turn"
+	secondRow := sendPromptRow(t, client, childID, second)
+	secondReceipt := stream.waitEvent(t, deliveredEvent(childID, secondRow), 60*time.Second)
+	c.Eq(secondRow, secondReceipt.GetMessageDelivered().GetMessageId(), "the mid-turn receipt names its own row")
+	c.NotEq(firstRow, secondRow, "the two sends are distinct inbox rows")
+	c.EqDeep(0, len(childUserTexts(stream, childID)), "a transcript row was published while the capture was still blocked")
+
+	// ── 3. release the FIRST capture: it publishes message one, not two ─────
+	close(firstGate)
+	firstRowEvent := stream.waitEvent(t, userMessageMatching(childID, func(s string) bool {
+		return strings.Contains(s, first)
+	}), 60*time.Second)
+
+	// Less(want, got) asserts got < want: the receipt precedes the row it
+	// announced, and that row is the capture's.
+	c.Less(firstRowEvent.GetOrdinal(), firstReceipt.GetOrdinal(),
+		"the receipt (ordinal %d) must precede the captured row (ordinal %d)",
+		firstReceipt.GetOrdinal(), firstRowEvent.GetOrdinal())
+
+	// The older in-flight capture was built before message two existed, so its
+	// request cannot carry it — and its capture must not publish it.
+	c.NotStrContains(up.body(0), second, "the first request carries the mid-turn message")
+	for _, text := range childUserTexts(stream, childID) {
+		c.NotStrContains(text, second, "a capture published a message it never carried: %q", text)
+	}
+
+	// ── 4. the NEXT capture carries message two, WRAPPED ────────────────────
+	select {
+	case n := <-up.arrived:
+		c.Eq(1, n, "the second request the upstream sees")
+	case <-time.After(90 * time.Second):
+		t.Fatalf("the child never sent a second request; buffered user rows: %q", childUserTexts(stream, childID))
+	}
+	secondBody := up.body(1)
+	c.StrContains(secondBody, "while you were working", "the mid-turn request's wrapper")
+	c.StrContains(secondBody, second, "the wrapper keeps the user's original words")
+
+	close(secondGate)
+	wrapped := stream.waitEvent(t, userMessageMatching(childID, func(s string) bool {
+		return strings.Contains(s, "while you were working")
+	}), 90*time.Second)
+	c.StrContains(eventText(wrapped), second, "the published row keeps the original text inside the wrapper")
+	c.NotEq(second, strings.TrimSpace(eventText(wrapped)),
+		"the published row is the user's text verbatim; the wrapper is the reason a text match fails")
+
+	// The receipt for message two still preceded the row that carries it.
+	c.Less(wrapped.GetOrdinal(), secondReceipt.GetOrdinal(),
+		"the mid-turn receipt (ordinal %d) must precede its captured row (ordinal %d)",
+		secondReceipt.GetOrdinal(), wrapped.GetOrdinal())
+}

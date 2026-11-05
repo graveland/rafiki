@@ -427,16 +427,18 @@ func TestClaudeDeliveryRejectsTheReplayFlag(t *testing.T) {
 	c.Contains(launch.Argv, "--replay-user-messages", "the daemon must launch headless claude with the replay flag")
 }
 
-// TestClaudeDeliveryReceiptDoesNotWaitForTheCapture is the ordering claim that
-// makes the receipt useful: it arrives while the turn's own /v1/messages
-// request is still BLOCKED — before any capture exists to publish a row.
+// TestClaudeDeliveryReceiptPrecedesAFailedCapture is the ordering claim on the
+// FAILURE path: the receipt arrives while the turn's own /v1/messages request
+// is still blocked, and the capture's report — a failed turn — is a strictly
+// later event.
 //
 // The block is real, not simulated: the fixture holds the request until the
 // test creates a gate file, and the request it eventually sends is one the
 // proxy refuses (a provider-qualified model with no OpenRouter key), so the
 // whole capture path runs — begin, report, gate release, turn_failed — without
-// a network or an upstream.
-func TestClaudeDeliveryReceiptDoesNotWaitForTheCapture(t *testing.T) {
+// a network or an upstream. Its SUCCESS-path sibling, with a real upstream and
+// a real capture, is TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt.
+func TestClaudeDeliveryReceiptPrecedesAFailedCapture(t *testing.T) {
 	t.Parallel()
 	c := assert.NewCollecting(t)
 

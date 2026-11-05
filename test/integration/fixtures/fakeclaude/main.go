@@ -193,7 +193,7 @@ type fixture struct {
 
 	mu      sync.Mutex
 	history []accepted // every message this process accepted, in order
-	pending []accepted // accepted while a turn was in flight, not yet carried
+	carried int        // how many of them a request has already carried
 	inTurn  bool
 	turnN   int
 	inited  bool
@@ -266,17 +266,12 @@ func (f *fixture) readLineLoop() {
 		}
 		rememberLastEcho(in.UUID, text)
 
-		if !f.turns {
-			continue
+		// A turn runs on its own goroutine, so this loop keeps reading: that is
+		// what makes a mid-turn message possible at all — the binary accepts and
+		// echoes it while the previous request is still in flight.
+		if f.turns {
+			f.maybeStartTurn()
 		}
-		if midTurn {
-			// Queued behind the running turn; the next request carries it.
-			f.mu.Lock()
-			f.pending = append(f.pending, accepted{uuid: in.UUID, text: text, midTurn: true})
-			f.mu.Unlock()
-			continue
-		}
-		f.startTurn()
 	}
 
 	if f.turns {
@@ -285,30 +280,49 @@ func (f *fixture) readLineLoop() {
 	close(f.done)
 }
 
-// drain runs the turns queued behind the last one, so a mid-turn message sent
-// just before stdin closed is still carried by a request.
+// maybeStartTurn starts a request carrying every message accepted so far, when
+// one is not already running and something new has arrived.
+func (f *fixture) maybeStartTurn() {
+	f.mu.Lock()
+	if f.inTurn || f.carried == len(f.history) {
+		f.mu.Unlock()
+		return
+	}
+	f.inTurn = true
+	f.mu.Unlock()
+	go f.runTurn()
+}
+
+// drain waits for the last in-flight turn and any message queued behind it, so
+// a send that lands just before stdin closes is still carried by a request.
 func (f *fixture) drain() {
 	for {
 		f.mu.Lock()
-		queued := len(f.pending)
+		idle := !f.inTurn && f.carried == len(f.history)
 		f.mu.Unlock()
-		if queued == 0 {
+		if idle {
 			return
 		}
-		f.startTurn()
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// startTurn runs one request synchronously, carrying every message accepted so
-// far — the mid-turn ones wrapped the way Claude Code wraps them.
-func (f *fixture) startTurn() {
+// runTurn runs one request, carrying every message accepted so far — the
+// mid-turn ones wrapped the way Claude Code wraps them. It runs on its own
+// goroutine (see maybeStartTurn) and starts the next one when it finishes.
+func (f *fixture) runTurn() {
 	f.mu.Lock()
 	f.turnN++
 	n := f.turnN
-	f.inTurn = true
-	f.pending = nil
 	history := append([]accepted(nil), f.history...)
+	f.carried = len(history)
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.inTurn = false
+		f.mu.Unlock()
+		f.maybeStartTurn()
+	}()
 
 	body := map[string]any{
 		"model":      f.model,
@@ -328,10 +342,6 @@ func (f *fixture) startTurn() {
 
 	f.holdIfAsked(n)
 	status, id, text := f.post(body)
-
-	f.mu.Lock()
-	f.inTurn = false
-	f.mu.Unlock()
 
 	if status != "ok" {
 		record(map[string]any{"event": "turn_end", "n": n, "message_id": id, "status": status})
@@ -489,18 +499,32 @@ func assistantMessage(id, model, text string) map[string]any {
 
 // write emits one stdout frame. Every write is flushed: the daemon's reader
 // must see the echo the instant it exists, not when a buffer fills.
+//
+// Frames come from TWO goroutines — the stdin reader (echoes) and a turn's own
+// goroutine (assistant/result) — and a partial line interleaved with another
+// would corrupt the stream for the daemon's parser, so writes are serialised.
 func (f *fixture) write(v any) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
 	b = append(b, '\n')
+	writeMu.Lock()
 	_, _ = os.Stdout.Write(b)
+	writeMu.Unlock()
 }
+
+// writeMu serialises stdout frames across the fixture's goroutines.
+var writeMu sync.Mutex
+
+// recordMu serialises the observation log, which the same goroutines write.
+var recordMu sync.Mutex
 
 // record appends one observation line to the events file, flushing it. The
 // tests wait on these lines rather than on a clock.
 func record(v any) {
+	recordMu.Lock()
+	defer recordMu.Unlock()
 	dir := os.Getenv("FAKE_CLAUDE_DIR")
 	if dir == "" {
 		return

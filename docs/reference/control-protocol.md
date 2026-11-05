@@ -396,7 +396,8 @@ unmatched `message_id` as ordinary, not as an error.
 The narrowness is real and client-visible: a client that sends a coalesced batch,
 or talks to a non-claude child, gets no receipt and must keep its own fallback.
 Pinned end to end by `TestClaudeDeliveryReceiptNamesTheInboxRow`,
-`TestClaudeDeliveryReceiptDoesNotWaitForTheCapture`,
+`TestClaudeDeliveryReceiptPrecedesAFailedCapture`,
+`TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt`,
 `TestClaudeDeliveryDuplicateEchoPublishesOneReceipt`,
 `TestClaudeDeliveryStaleReplayOnResumePublishesNothing`,
 `TestClaudeDeliveryReceiptReplaysAfterResubscribe` and
