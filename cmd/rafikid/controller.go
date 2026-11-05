@@ -410,6 +410,18 @@ type Controller struct {
 	sentMu     sync.Mutex
 	sentFrames map[string]sentFrame
 
+	// claudeDeliveries maps a claude delivery uuid to the inbox row it names,
+	// per LAUNCH. Separate from sentFrames on purpose — a claude row is
+	// consumed on the write, and this only ever drives a receipt. See
+	// claude_delivery.go.
+	claudeDeliveries claudeDeliveryRegistry
+
+	// sendFrameFn, when non-nil, replaces Controller.sendFrame for delivery.
+	// A test seam: a claude child's acceptance echo arrives on its own stdout
+	// goroutine, so the "echo landed before the write returned" ordering can
+	// only be reproduced by a write that calls the hook itself.
+	sendFrameFn func(childID string, frame json.RawMessage) error
+
 	// coster resolves what an agent subtree has spent. An interface rather
 	// than *insights.Insights so the admission logic is testable without a
 	// database — the number's correctness is insights' problem, what the
@@ -1126,6 +1138,33 @@ func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(chi
 		// a slow capture write must not delay the mapping a later span needs.
 		c.trace.ObserveSubagent(childID, obs.MessageID, obs.ParentToolUseID)
 		c.HandleSubagentObservation(childID, obs)
+	}
+}
+
+// installChildHooks fills in every per-child callback a SpawnSpec carries,
+// including the ones only one kind gets.
+//
+// Every claude LAUNCH path — a fresh spawn, a manual resume, a crash-recovery
+// resume, a respawn after an abort, and a daraja-backed run (which is a
+// child.Spawn with a Runner, same as any other) — constructs a SpawnSpec and
+// calls this, so no path can end up with a hook that only works on the initial
+// spawn. It is also where a launch's acknowledgement GENERATION is minted: the
+// generation is bound into the callback installed below, so an echo from a
+// process this daemon has since replaced publishes nothing.
+func (c *Controller) installChildHooks(spec *child.SpawnSpec, kind string) {
+	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(spec.ChildID)
+	// A script child's raw output is published as coalesced durable ScriptOutput
+	// events (script_output.go). Every other kind leaves the hook nil — its
+	// output keeps the old paths and nothing else changes.
+	if kind == protocol.KindScript {
+		spec.OnScriptOutput = c.scriptOutputHook(spec.ChildID)
+	}
+	if kind == protocol.KindClaude {
+		// beginLaunch retires the previous launch's outstanding deliveries
+		// before the new process exists, so the callback below and the entries
+		// a delivery registers can only ever agree on one generation.
+		gen := c.claudeDeliveries.beginLaunch(spec.ChildID)
+		spec.OnUserReplay = c.claudeReplayHook(spec.ChildID, gen)
 	}
 }
 
@@ -2505,13 +2544,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		Provider:    prov,
 		Runner:      runner,
 	}
-	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
-	// A script child's raw output is published as coalesced durable
-	// ScriptOutput events (script_output.go). Every other kind leaves the
-	// hook nil — its output keeps the old paths and nothing else changes.
-	if req.Kind == protocol.KindScript {
-		spec.OnScriptOutput = c.scriptOutputHook(childID)
-	}
+	c.installChildHooks(&spec, req.Kind)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -3407,13 +3440,7 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 		Provider:    prov,
 		Runner:      runner,
 	}
-	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
-	// A script child's raw output is published as coalesced durable
-	// ScriptOutput events (script_output.go). Every other kind leaves the
-	// hook nil — its output keeps the old paths and nothing else changes.
-	if req.Kind == protocol.KindScript {
-		spec.OnScriptOutput = c.scriptOutputHook(childID)
-	}
+	c.installChildHooks(&spec, req.Kind)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -3543,13 +3570,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		Provider: prov,
 		Runner:   runner,
 	}
-	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
-	// A script child's raw output is published as coalesced durable
-	// ScriptOutput events (script_output.go). Every other kind leaves the
-	// hook nil — its output keeps the old paths and nothing else changes.
-	if req.Kind == protocol.KindScript {
-		spec.OnScriptOutput = c.scriptOutputHook(childID)
-	}
+	c.installChildHooks(&spec, req.Kind)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -5222,6 +5243,28 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		}},
 	})
 
+	// Read once and reused below: a script child's settle tail comes from the
+	// same bounded buffer.
+	stderr := ch.StderrSnapshot()
+
+	// A claude child that died at LAUNCH says so: ChildExited carries only a
+	// code, and the binary's own stderr (a rejected flag, a bad credential) is
+	// the actionable part. Published before the settlement notice below so a
+	// coordinator reads why it died, not just that it did. Never a relaunch and
+	// never a probe — the fix for a rejected flag is to upgrade Claude Code.
+	if ev := claudeLaunchFailure(snap.Kind, snap.SessionID, res, stderr); ev != nil {
+		c.publishEvent(childID, &rafikiv1.Event{
+			ChildId: childID,
+			Ts:      timestamppb.Now(),
+			Payload: &rafikiv1.Event_Error{Error: ev},
+		})
+	}
+
+	// No process is left to echo a delivery back, so this launch's outstanding
+	// receipts are retired here — before cm.Remove, and every relaunch waits for
+	// cm.Remove, so the generation this retires is the one that just died.
+	c.claudeDeliveries.endLaunch(childID)
+
 	// Tell the parent its worker is gone. This runs before Forget (which
 	// clears batches aimed AT this child, not at its parent) and before
 	// cm.Remove, which is the observable "teardown complete" signal.
@@ -5249,7 +5292,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		// fragment carries the stored SetResult — or, when the script never
 		// called SetResult, the last 4 KiB of its stderr. Every other kind
 		// keeps the plain "exited" reason with no tail.
-		reason, tail := scriptSettleFor(snap.Kind, res, ch.StderrSnapshot())
+		reason, tail := scriptSettleFor(snap.Kind, res, stderr)
 		c.notifySubagentSettled(childID, reason, tail, d.excludeMCPUser)
 	}
 

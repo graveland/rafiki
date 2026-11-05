@@ -5,6 +5,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -37,4 +38,38 @@ func TestChildHooksMetaIgnoresEmptySessionID(t *testing.T) {
 	snap, ok := c.st.Get("c_test")
 	ck.True(ok, "session missing from store")
 	ck.Eq("sess-good", snap.SessionID, "SessionID")
+}
+
+// installChildHooks is the ONE place a SpawnSpec's callbacks are installed, and
+// every claude LAUNCH path — spawn, resume, respawn, a daraja-backed run — goes
+// through it. A claude child must always carry the acceptance-echo callback
+// (without it nothing ever publishes a delivery receipt), no other kind may
+// (nothing else echoes a message back), and a script child is the only one with
+// the raw-output hook.
+func TestChildHooksInstallReplayOnlyForClaude(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := &Controller{st: childstore.New(), cm: newChildManager()}
+
+	for _, tc := range []struct {
+		kind string
+	}{
+		{protocol.KindClaude},
+		{protocol.KindFundi},
+		{protocol.KindScript},
+		{""},
+	} {
+		spec := child.SpawnSpec{ChildID: "c_" + tc.kind}
+		c.installChildHooks(&spec, tc.kind)
+
+		ck.NotNil(spec.NativeSink, "%q: NativeSink hook is nil", tc.kind)
+		ck.NotNil(spec.OnMeta, "%q: OnMeta hook is nil", tc.kind)
+		ck.NotNil(spec.OnSubagent, "%q: OnSubagent hook is nil", tc.kind)
+		ck.Eq(tc.kind == protocol.KindScript, spec.OnScriptOutput != nil, "%q: OnScriptOutput", tc.kind)
+		if tc.kind == protocol.KindClaude {
+			ck.NotNil(spec.OnUserReplay,
+				"%q: a claude launch with no echo hook never publishes a delivery receipt", tc.kind)
+			continue
+		}
+		ck.True(spec.OnUserReplay == nil, "%q: OnUserReplay must be nil for a kind that never echoes", tc.kind)
+	}
 }

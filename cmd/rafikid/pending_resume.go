@@ -376,7 +376,7 @@ func (c *Controller) sendClaudeNudge(childID string, kind inject.Kind, text stri
 		Mode:   inbox.ModePrompt,
 		Source: string(kind),
 		Frags:  []string{text},
-	}, "")
+	}, "", "")
 	if err != nil {
 		return err
 	}

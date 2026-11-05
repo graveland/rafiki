@@ -29,10 +29,11 @@ import (
 
 func TestBuildInjectionFrameShapes(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		batch inbox.Batch
-		id    string
-		want  string
+		name         string
+		batch        inbox.Batch
+		id           string
+		deliveryUUID string
+		want         string
 	}{
 		{
 			name:  "direct prompt",
@@ -45,6 +46,13 @@ func TestBuildInjectionFrameShapes(t *testing.T) {
 			batch: inbox.Batch{ChildID: "c_1", Mode: inbox.ModeSteer, Frags: []string{"stop"}},
 			id:    "F1",
 			want:  `{"type":"steer","id":"F1","message":"stop"}`,
+		},
+		{
+			name:         "a direct message names itself for the acceptance echo",
+			batch:        inbox.Batch{ChildID: "c_1", Mode: inbox.ModePrompt, Frags: []string{"hello"}},
+			id:           "F1",
+			deliveryUUID: "0198e5f2-9c3a-7def-8a1b-4c2d9e0f1a2b",
+			want:         `{"type":"prompt","id":"F1","delivery_uuid":"0198e5f2-9c3a-7def-8a1b-4c2d9e0f1a2b","message":"hello"}`,
 		},
 		{
 			name:  "abort carries no id: nothing acks it",
@@ -82,7 +90,7 @@ func TestBuildInjectionFrameShapes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewCollecting(t)
-			got, err := buildInjectionFrame(tc.batch, tc.id)
+			got, err := buildInjectionFrame(tc.batch, tc.id, tc.deliveryUUID)
 			c.Require().NoError(err, "buildInjectionFrame")
 			c.Eq(tc.want, string(got), "frame =\n  %s\nwant\n", got)
 		})
@@ -1115,7 +1123,7 @@ func TestBuildInjectionFrameCoercesAnUnrepresentableSource(t *testing.T) {
 	got, err := buildInjectionFrame(inbox.Batch{
 		ChildID: "c_1", Mode: inbox.ModePrompt,
 		Source: `Bad Source"><x`, Frags: []string{"news"},
-	}, "F1")
+	}, "F1", "")
 	c.Require().NoError(err, "an unrepresentable source failed the frame")
 
 	var frame struct {

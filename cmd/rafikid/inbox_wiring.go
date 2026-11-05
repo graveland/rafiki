@@ -159,13 +159,19 @@ func inboundFromFrame(childID string, frame json.RawMessage) (inbox.Inbound, boo
 // decorate. A direct message (Source empty) is never wrapped — that text IS the
 // user's own.
 //
+// deliveryUUID names this message to a harness that acknowledges by echo (a
+// claude child, see claude_delivery.go). It is written only where one echo can
+// name one row, and omitted otherwise — so a frame that carried none is
+// byte-identical to what it always was, and a fundi child's `id` (a FRAME id,
+// which its own runtime consumes) is never confused with it.
+//
 // The source is COERCED, never refused. A render failure here would be a
 // poison message: deliverInbox returns the error, Queue.deliver stops at the
 // first one and leaves the batch pending, so it retries forever and blocks
 // every later message to that child. A renamed kind is strictly better than a
 // permanently stalled inbox, and every writer today passes a constant that
 // needs no coercion at all.
-func buildInjectionFrame(b inbox.Batch, frameID string) (json.RawMessage, error) {
+func buildInjectionFrame(b inbox.Batch, frameID, deliveryUUID string) (json.RawMessage, error) {
 	if b.Mode == inbox.ModeAbort {
 		return json.RawMessage(`{"type":"abort"}`), nil
 	}
@@ -191,11 +197,12 @@ func buildInjectionFrame(b inbox.Batch, frameID string) (json.RawMessage, error)
 	// existing frame is byte-identical to what it was, which keeps a fundi
 	// child built before this change parsing them unchanged.
 	out, err := json.Marshal(struct {
-		Type        string             `json:"type"`
-		ID          string             `json:"id,omitempty"`
-		Message     string             `json:"message"`
-		Attachments []inbox.Attachment `json:"attachments,omitempty"`
-	}{kind, frameID, body, b.Attachments})
+		Type         string             `json:"type"`
+		ID           string             `json:"id,omitempty"`
+		DeliveryUUID string             `json:"delivery_uuid,omitempty"`
+		Message      string             `json:"message"`
+		Attachments  []inbox.Attachment `json:"attachments,omitempty"`
+	}{kind, frameID, deliveryUUID, body, b.Attachments})
 	if err != nil {
 		return nil, fmt.Errorf("inbox: marshal injection frame: %w", err)
 	}
@@ -225,6 +232,10 @@ func (c *Controller) childFrameLimit(childID string) int {
 // refused at delivery. It materialises the base64 to measure it, which is the
 // price of not duplicating the frame's shape: a send is one human action, and
 // the payload is about to be marshalled for the inbox row anyway.
+//
+// It renders no delivery uuid: this measurement is consulted only for a runtime
+// that HAS a frame limit (childFrameLimit is fundi-only), and a fundi frame
+// carries an `id` rather than a uuid.
 func promptFrameBytes(in inbox.Inbound) (int, error) {
 	id, _ := inbox.NewID()
 	frame, err := buildInjectionFrame(inbox.Batch{
@@ -233,7 +244,7 @@ func promptFrameBytes(in inbox.Inbound) (int, error) {
 		Source:      in.Source,
 		Frags:       []string{in.Text},
 		Attachments: in.Attachments,
-	}, id)
+	}, id, "")
 	if err != nil {
 		return 0, err
 	}
@@ -275,10 +286,13 @@ func (c *Controller) rejectBatch(b inbox.Batch, reason string) error {
 // deliverInbox writes one batch to its child and reports whether an ack is
 // coming.
 //
-// Only a fundi child confirms consumption: it is the only runtime that speaks
-// a protocol with the seam. A claude child's rows are consumed on the write,
+// Only a fundi child confirms consumption: it is the only runtime that speaks a
+// protocol with the seam. A claude child's rows are consumed on the write,
 // which is exactly today's guarantee and no worse — but it is also why a
-// claude child's queue does not survive a restart.
+// claude child's queue does not survive a restart. What a claude child reports
+// instead is an ACCEPTANCE RECEIPT, which changes no inbox state: the message
+// is named with a delivery uuid (claude_delivery.go) and the echo that comes
+// back publishes a durable event naming this row.
 //
 // A SCRIPT child gets neither: its stdin carries no frame protocol, so the
 // write is skipped and the batch is left PENDING for its Receive stream to
@@ -352,8 +366,23 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 		frameID = id
 	}
 
-	frame, err := buildInjectionFrame(b, frameID)
+	// A claude child acknowledges by ECHOING the message it accepted, so the
+	// message has to be named before it is written. Registered before the frame
+	// is even built: the echo arrives on the child's own stdout goroutine and
+	// can land before sendFrame returns, and an entry written afterwards would
+	// be missing exactly the one the echo resolves. The registry is not
+	// sentFrames — a claude row is consumed on the write below, so nothing here
+	// waits for the ack and nothing here touches inbox state.
+	deliveryUUID, deliveryGen, err := c.claudeDeliveryFor(b)
 	if err != nil {
+		return false, err
+	}
+
+	frame, err := buildInjectionFrame(b, frameID, deliveryUUID)
+	if err != nil {
+		if deliveryUUID != "" {
+			c.claudeDeliveries.drop(b.ChildID, deliveryGen, deliveryUUID)
+		}
 		return false, err
 	}
 
@@ -368,6 +397,9 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 			len(frame), limit)
 		slog.Warn("inbox: refusing an oversized message", "childId", b.ChildID,
 			"rows", len(b.IDs), "bytes", len(frame), "limit", limit)
+		if deliveryUUID != "" {
+			c.claudeDeliveries.drop(b.ChildID, deliveryGen, deliveryUUID)
+		}
 		if err := c.rejectBatch(b, reason); err != nil {
 			return false, err
 		}
@@ -387,15 +419,30 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 		c.sentMu.Unlock()
 	}
 
-	if err := c.sendFrame(b.ChildID, frame); err != nil {
+	if err := c.sendChildFrame(b.ChildID, frame); err != nil {
 		if awaitAck {
 			c.sentMu.Lock()
 			delete(c.sentFrames, frameID)
 			c.sentMu.Unlock()
 		}
+		// Only THIS delivery's entry goes: the child may still be alive, and
+		// the rows stay pending for the retry, which will mint its own uuid.
+		if deliveryUUID != "" {
+			c.claudeDeliveries.drop(b.ChildID, deliveryGen, deliveryUUID)
+		}
 		return false, err
 	}
 	return awaitAck, nil
+}
+
+// sendChildFrame writes one delivery frame to its child, honouring the
+// sendFrameFn seam a test uses to reproduce an acceptance echo that lands before
+// the write returns. Production always takes the real path.
+func (c *Controller) sendChildFrame(childID string, frame json.RawMessage) error {
+	if c.sendFrameFn != nil {
+		return c.sendFrameFn(childID, frame)
+	}
+	return c.sendFrame(childID, frame)
 }
 
 // consumeFrames retires the rows behind frames the child confirmed it took
@@ -577,12 +624,14 @@ func (c *Controller) flushInboxSourceSteer(childID, source string, orphans []inb
 // prompt exactly when the news was urgent enough to interrupt a turn.
 func (c *Controller) deliverOrphans(childID string, orphans []inbox.Inbound) {
 	for _, b := range inbox.Coalesce(orphans, c.inboxBatch) {
-		frame, err := buildInjectionFrame(b, "")
+		// No delivery uuid: an orphan has no row, so an echo could name
+		// nothing. It is delivered and forgotten.
+		frame, err := buildInjectionFrame(b, "", "")
 		if err != nil {
 			slog.Warn("eventbuf: marshal orphan frame", "childId", childID, "error", err)
 			continue
 		}
-		if err := c.sendFrame(b.ChildID, frame); err != nil {
+		if err := c.sendChildFrame(b.ChildID, frame); err != nil {
 			slog.Warn("eventbuf: orphan injection failed",
 				"childId", b.ChildID, "source", b.Source, "error", err)
 		}
