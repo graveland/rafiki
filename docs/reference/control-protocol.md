@@ -270,7 +270,7 @@ clear message instead of misbehaving.
 
 | Tier | Contents | Cursor | Resumable |
 |---|---|---|---|
-| Durable | Persisted messages, lifecycle events (`child_spawned`, `child_exited`), turns, tool executions | Per-child gap-free `ordinal` | Yes, exactly |
+| Durable | Persisted messages, lifecycle events (`child_spawned`, `child_exited`), turns, tool executions, UI acceptance receipts (`message_delivered`) | Per-child gap-free `ordinal` | Yes, exactly |
 | Ephemeral | Live content deltas (`content_block_delta`) | None | No, by design |
 
 `StreamEvents` uses `EventSubject` predicates, `EventTier`, and `EventCursor` (per-child ordinals).
@@ -315,6 +315,34 @@ closed child is never replayed, clients treat `ChildClosed` as a SIGNAL — they
 re-list with `ListChildren` rather than patching one row — and the TUI and the
 web UI also re-list on a slow timer, as a backstop for a daemon that predates
 the event.
+
+#### `message_delivered`: a UI acceptance receipt
+
+`message_delivered` is a durable event with one field: `message_id`, the INBOX
+ROW id the client sent — the same id `SendResponse.message_id` returned when
+the prompt was accepted. It says the child's harness took that message into a
+turn. It is a receipt, not a result:
+
+- **Not proof the model read it**, and **not a durability guarantee for the
+  message**. A crash between the receipt and the turn it announced loses that
+  turn exactly as it would without the event.
+- **No inbox-state transition.** The row is consumed, retracted or redelivered
+  exactly as it would have been: nothing about delivery, retries, or the
+  capture message gate consults this event, and it is never fed through the
+  gate.
+- **Additive.** No new RPC, no `SendResponse` field, no protocol-epoch bump: a
+  daemon that predates it publishes nothing, and a client that predates it
+  drops the payload it does not know.
+
+It rides the ordinary durable path — appended to the child's event log with the
+next ordinal, then published live — so `StreamEvents` replays it like any other
+durable event and `types: ["message_delivered"]` filters down to it. Replay is
+at-least-once here as everywhere, so a client may see the same receipt twice:
+the effect must key on `message_id` and be idempotent, and an id the client does
+not know — or a payload it does not recognise — is a no-op, never an error and
+never a turn boundary. Pinned by `TestMessageDeliveredReplay`
+(`pkg/connectapi`) and `TestMessageDeliveredIsDurableAndNamed`
+(`pkg/eventlog`).
 
 #### Who produces the deltas
 

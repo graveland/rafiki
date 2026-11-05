@@ -270,6 +270,8 @@ func TypeName(ev *rafikiv1.Event) string {
 		return "tasks_changed"
 	case *rafikiv1.Event_ChildClosed:
 		return "child_closed"
+	case *rafikiv1.Event_MessageDelivered:
+		return "message_delivered"
 	case *rafikiv1.Event_Error:
 		return "error"
 	case *rafikiv1.Event_Retry:

@@ -836,6 +836,23 @@ class OperatorState:
         return obj
 
 @dataclasses.dataclass
+class MessageDelivered:
+    message_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.message_id != "":
+            out["messageId"] = self.message_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "MessageDelivered":
+        obj = cls()
+        _v = _d.get("messageId")
+        if _v is not None:
+            obj.message_id = _v
+        return obj
+
+@dataclasses.dataclass
 class Event:
     child_id: str = ""
     ordinal: Optional[int] = None
@@ -860,6 +877,7 @@ class Event:
     tasks_changed: Optional[TasksChanged] = None
     child_closed: Optional[ChildClosed] = None
     system_message: Optional[SystemMessage] = None
+    message_delivered: Optional[MessageDelivered] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -869,7 +887,7 @@ class Event:
             out["ordinal"] = self.ordinal
         if self.ts is not None:
             out["ts"] = _ts_out(self.ts)
-        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state, self.child_renamed, self.tasks_changed, self.child_closed, self.system_message) if x is not None]
+        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output, self.operator_state, self.child_renamed, self.tasks_changed, self.child_closed, self.system_message, self.message_delivered) if x is not None]
         if len(_set_payload) > 1:
             raise ValueError("Event: at most one arm of oneof 'payload' may be set")
         if self.user_message is not None:
@@ -912,6 +930,8 @@ class Event:
             out["childClosed"] = self.child_closed.to_dict()
         if self.system_message is not None:
             out["systemMessage"] = self.system_message.to_dict()
+        if self.message_delivered is not None:
+            out["messageDelivered"] = self.message_delivered.to_dict()
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "Event":
@@ -985,6 +1005,9 @@ class Event:
         _v = _d.get("systemMessage")
         if _v is not None:
             obj.system_message = SystemMessage.from_dict(_v)
+        _v = _d.get("messageDelivered")
+        if _v is not None:
+            obj.message_delivered = MessageDelivered.from_dict(_v)
         return obj
 
 

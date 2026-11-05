@@ -395,3 +395,79 @@ async fn a_caller_cursor_seeds_the_first_open() {
     );
     assert_eq!(seen.lock().expect("lock")[0].cursor, request.cursor);
 }
+
+/// A `message_delivered` receipt is an ordinary durable event: it decodes to
+/// its own payload arm, advances the cursor like any other, and is neither an
+/// interruption nor a terminal error. A client that does not use it ignores it;
+/// one that does reads the inbox row id it names.
+#[tokio::test]
+async fn a_message_delivered_receipt_follows_as_its_own_payload() {
+    let receipt = pb::Event {
+        payload: Some(pb::event::Payload::MessageDelivered(pb::MessageDelivered {
+            message_id: "msg_42".to_string(),
+        })),
+        ..event("c_1", 0)
+    };
+    let (stub, seen) = scripted(
+        vec![
+            events(vec![receipt], Tail::Eof),
+            events(vec![event("c_1", 1)], Tail::Silent),
+        ],
+        None,
+    );
+    let client = Client::new(&serve(stub).await, None).expect("a client");
+    let mut follow = client.follow_events(all_events(), quick(5_000));
+
+    match next_item(&mut follow).await.expect("the receipt") {
+        Followed::Event(event) => match event.payload {
+            Some(pb::event::Payload::MessageDelivered(delivered)) => {
+                assert_eq!(delivered.message_id, "msg_42")
+            }
+            other => panic!("the receipt decoded as {other:?}"),
+        },
+        other => panic!("the receipt arrived as {other:?}"),
+    }
+
+    // The truncation is the only interruption: the receipt was not one.
+    assert!(matches!(
+        next_item(&mut follow).await.expect("an interruption"),
+        Followed::Interrupted { .. }
+    ));
+    // The re-open carries the receipt's ordinal, so the follower never replays
+    // a receipt it already yielded.
+    assert_eq!(
+        ordinal_of(&next_item(&mut follow).await.expect("the re-opened event")),
+        Some(1)
+    );
+    let seen = seen.lock().expect("lock");
+    let cursor = seen[1].cursor.as_ref().expect("the re-open's cursor");
+    assert_eq!(cursor.ordinals.get("c_1"), Some(&0));
+}
+
+/// The receipt's wire tag is part of the contract: the daemon publishes it at
+/// field 31, so a client built against this proto decodes that number. A
+/// renumbering would leave the payload unknown here rather than erroring on
+/// the wire, which is exactly the kind of silent divergence this pins.
+#[test]
+fn a_message_delivered_receipt_decodes_on_its_wire_tag() {
+    let ev = pb::Event {
+        child_id: "c_1".to_string(),
+        ordinal: Some(0),
+        payload: Some(pb::event::Payload::MessageDelivered(pb::MessageDelivered {
+            message_id: "msg_42".to_string(),
+        })),
+        ..Default::default()
+    };
+    let wire = ev.encode_to_vec();
+    // key = (31 << 3) | 2 (length-delimited) = 250, a two-byte varint.
+    assert!(
+        wire.windows(2).any(|pair| pair == [0xfa, 0x01]),
+        "message_delivered is not field 31: {wire:?}"
+    );
+    match pb::Event::decode(&wire[..]).expect("decodes").payload {
+        Some(pb::event::Payload::MessageDelivered(delivered)) => {
+            assert_eq!(delivered.message_id, "msg_42")
+        }
+        other => panic!("decoded as {other:?}"),
+    }
+}

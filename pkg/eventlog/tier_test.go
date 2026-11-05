@@ -30,6 +30,7 @@ func TestTierOf(t *testing.T) {
 		// durableTypes[TypeName(ev)], so a deleted arm silently reclassifies the
 		// event ephemeral behind a green TestEveryEventTypeHasATier.
 		{Payload: &rafikiv1.Event_CompactionBoundary{CompactionBoundary: &rafikiv1.CompactionBoundary{}}},
+		{Payload: &rafikiv1.Event_MessageDelivered{MessageDelivered: &rafikiv1.MessageDelivered{}}},
 	}
 	for _, ev := range durable {
 		got := eventlog.TierOf(ev)
@@ -57,4 +58,19 @@ func TestEveryEventTypeHasATier(t *testing.T) {
 		n := string(fields.Get(i).Name())
 		c.False(!have[n], "Event.payload field %q is not classified in tier.go", n)
 	}
+}
+
+// MessageDelivered is a UI acceptance receipt that must survive a resume, so
+// it is durable and carries the wire name of its oneof field. Both halves are
+// pinned together because TierOf classifies THROUGH TypeName: a demoted
+// durableTypes entry — or a deleted TypeName arm, which reads "unknown" — makes
+// a receipt invisible to every replayed stream, and a client that reconnects
+// mid-turn would never learn its send was accepted.
+func TestMessageDeliveredIsDurableAndNamed(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ev := &rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_MessageDelivered{
+		MessageDelivered: &rafikiv1.MessageDelivered{MessageId: "msg_42"},
+	}}
+	c.Eq("message_delivered", eventlog.TypeName(ev), "TypeName(MessageDelivered)")
+	c.Eq(eventlog.TierDurable, eventlog.TierOf(ev), "TierOf(MessageDelivered)")
 }

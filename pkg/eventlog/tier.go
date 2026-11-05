@@ -54,6 +54,10 @@ var durableTypes = map[string]bool{
 	// Durable because the rail stream subscribes at this tier: an ephemeral
 	// close would never reach the cockpit that is still drawing the row.
 	"child_closed": true,
+	// A UI acceptance receipt. Durable so a resuming client is REPLAYED the
+	// receipts it missed instead of having to reconstruct them; the message_id
+	// makes a repeat idempotent.
+	"message_delivered": true,
 }
 
 // ephemeralTypes is listed explicitly rather than left as a default so that

@@ -2012,6 +2012,64 @@ func (x *OperatorState) GetMsg() string {
 	return ""
 }
 
+// MessageDelivered is a durable-tier event: a UI ACCEPTANCE RECEIPT saying the
+// child's harness took an inbox message into a turn. It is NOT proof the model
+// read the message and NOT a durability guarantee for the message itself.
+//
+// message_id is the INBOX ROW id the client sent — the id SendResponse carries
+// back — never a Claude session UUID and never a conversation ordinal. Nothing
+// about the inbox changes when this is published: the row is consumed,
+// retracted or redelivered exactly as it would have been without it, so a
+// client's whole answer is to mark that send accepted. A client that does not
+// know the id (or does not know this payload) does nothing.
+//
+// It is durable so a receipt is REPLAYED to a resuming subscriber rather than
+// reconstructed from anything; replay can therefore repeat one the client
+// already saw, which is why the effect keyed on message_id must be idempotent.
+type MessageDelivered struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MessageId     string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MessageDelivered) Reset() {
+	*x = MessageDelivered{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MessageDelivered) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MessageDelivered) ProtoMessage() {}
+
+func (x *MessageDelivered) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MessageDelivered.ProtoReflect.Descriptor instead.
+func (*MessageDelivered) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *MessageDelivered) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
 // Event is the stream envelope.
 //
 // ordinal is set on DURABLE-tier events. pkg/eventlog/tier.go is the authority
@@ -2062,6 +2120,7 @@ type Event struct {
 	//	*Event_TasksChanged
 	//	*Event_ChildClosed
 	//	*Event_SystemMessage
+	//	*Event_MessageDelivered
 	Payload       isEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2069,7 +2128,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[28]
+	mi := &file_rafiki_v1_event_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2081,7 +2140,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[28]
+	mi := &file_rafiki_v1_event_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2094,7 +2153,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{28}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *Event) GetChildId() string {
@@ -2305,6 +2364,15 @@ func (x *Event) GetSystemMessage() *SystemMessage {
 	return nil
 }
 
+func (x *Event) GetMessageDelivered() *MessageDelivered {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_MessageDelivered); ok {
+			return x.MessageDelivered
+		}
+	}
+	return nil
+}
+
 type isEvent_Payload interface {
 	isEvent_Payload()
 }
@@ -2389,6 +2457,10 @@ type Event_SystemMessage struct {
 	SystemMessage *SystemMessage `protobuf:"bytes,30,opt,name=system_message,json=systemMessage,proto3,oneof"`
 }
 
+type Event_MessageDelivered struct {
+	MessageDelivered *MessageDelivered `protobuf:"bytes,31,opt,name=message_delivered,json=messageDelivered,proto3,oneof"`
+}
+
 func (*Event_UserMessage) isEvent_Payload() {}
 
 func (*Event_AssistantMessage) isEvent_Payload() {}
@@ -2428,6 +2500,8 @@ func (*Event_TasksChanged) isEvent_Payload() {}
 func (*Event_ChildClosed) isEvent_Payload() {}
 
 func (*Event_SystemMessage) isEvent_Payload() {}
+
+func (*Event_MessageDelivered) isEvent_Payload() {}
 
 var File_rafiki_v1_event_proto protoreflect.FileDescriptor
 
@@ -2575,7 +2649,10 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\rdisplay_state\x18\x01 \x01(\tR\fdisplayState\x12\x1d\n" +
 	"\n" +
 	"waiting_on\x18\x02 \x01(\tR\twaitingOn\x12\x10\n" +
-	"\x03msg\x18\x03 \x01(\tR\x03msg\"\x9f\v\n" +
+	"\x03msg\x18\x03 \x01(\tR\x03msg\"1\n" +
+	"\x10MessageDelivered\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\"\xeb\v\n" +
 	"\x05Event\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1d\n" +
 	"\aordinal\x18\x02 \x01(\x05H\x01R\aordinal\x88\x01\x01\x12*\n" +
@@ -2601,7 +2678,8 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\rchild_renamed\x18\x1b \x01(\v2\x17.rafiki.v1.ChildRenamedH\x00R\fchildRenamed\x12>\n" +
 	"\rtasks_changed\x18\x1c \x01(\v2\x17.rafiki.v1.TasksChangedH\x00R\ftasksChanged\x12;\n" +
 	"\fchild_closed\x18\x1d \x01(\v2\x16.rafiki.v1.ChildClosedH\x00R\vchildClosed\x12A\n" +
-	"\x0esystem_message\x18\x1e \x01(\v2\x18.rafiki.v1.SystemMessageH\x00R\rsystemMessageB\t\n" +
+	"\x0esystem_message\x18\x1e \x01(\v2\x18.rafiki.v1.SystemMessageH\x00R\rsystemMessage\x12J\n" +
+	"\x11message_delivered\x18\x1f \x01(\v2\x1b.rafiki.v1.MessageDeliveredH\x00R\x10messageDeliveredB\t\n" +
 	"\apayloadB\n" +
 	"\n" +
 	"\b_ordinalJ\x04\b\x03\x10\x04R\n" +
@@ -2629,7 +2707,7 @@ func file_rafiki_v1_event_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_rafiki_v1_event_proto_goTypes = []any{
 	(StopReason)(0),               // 0: rafiki.v1.StopReason
 	(*Usage)(nil),                 // 1: rafiki.v1.Usage
@@ -2660,10 +2738,11 @@ var file_rafiki_v1_event_proto_goTypes = []any{
 	(*ScriptReport)(nil),          // 26: rafiki.v1.ScriptReport
 	(*ScriptOutput)(nil),          // 27: rafiki.v1.ScriptOutput
 	(*OperatorState)(nil),         // 28: rafiki.v1.OperatorState
-	(*Event)(nil),                 // 29: rafiki.v1.Event
-	nil,                           // 30: rafiki.v1.ChildClosed.LabelsEntry
-	(*durationpb.Duration)(nil),   // 31: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 32: google.protobuf.Timestamp
+	(*MessageDelivered)(nil),      // 29: rafiki.v1.MessageDelivered
+	(*Event)(nil),                 // 30: rafiki.v1.Event
+	nil,                           // 31: rafiki.v1.ChildClosed.LabelsEntry
+	(*durationpb.Duration)(nil),   // 32: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 33: google.protobuf.Timestamp
 }
 var file_rafiki_v1_event_proto_depIdxs = []int32{
 	7,  // 0: rafiki.v1.ToolResultBlock.content:type_name -> rafiki.v1.ContentBlock
@@ -2680,10 +2759,10 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	0,  // 11: rafiki.v1.TurnEnd.stop_reason:type_name -> rafiki.v1.StopReason
 	1,  // 12: rafiki.v1.TurnEnd.usage:type_name -> rafiki.v1.Usage
 	16, // 13: rafiki.v1.TasksChanged.tasks:type_name -> rafiki.v1.TaskChange
-	31, // 14: rafiki.v1.ToolExecutionEnd.duration:type_name -> google.protobuf.Duration
-	32, // 15: rafiki.v1.Retry.resume_at:type_name -> google.protobuf.Timestamp
-	30, // 16: rafiki.v1.ChildClosed.labels:type_name -> rafiki.v1.ChildClosed.LabelsEntry
-	32, // 17: rafiki.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	32, // 14: rafiki.v1.ToolExecutionEnd.duration:type_name -> google.protobuf.Duration
+	33, // 15: rafiki.v1.Retry.resume_at:type_name -> google.protobuf.Timestamp
+	31, // 16: rafiki.v1.ChildClosed.labels:type_name -> rafiki.v1.ChildClosed.LabelsEntry
+	33, // 17: rafiki.v1.Event.ts:type_name -> google.protobuf.Timestamp
 	8,  // 18: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
 	10, // 19: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
 	11, // 20: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
@@ -2704,11 +2783,12 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	17, // 35: rafiki.v1.Event.tasks_changed:type_name -> rafiki.v1.TasksChanged
 	24, // 36: rafiki.v1.Event.child_closed:type_name -> rafiki.v1.ChildClosed
 	9,  // 37: rafiki.v1.Event.system_message:type_name -> rafiki.v1.SystemMessage
-	38, // [38:38] is the sub-list for method output_type
-	38, // [38:38] is the sub-list for method input_type
-	38, // [38:38] is the sub-list for extension type_name
-	38, // [38:38] is the sub-list for extension extendee
-	0,  // [0:38] is the sub-list for field type_name
+	29, // 38: rafiki.v1.Event.message_delivered:type_name -> rafiki.v1.MessageDelivered
+	39, // [39:39] is the sub-list for method output_type
+	39, // [39:39] is the sub-list for method input_type
+	39, // [39:39] is the sub-list for extension type_name
+	39, // [39:39] is the sub-list for extension extendee
+	0,  // [0:39] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
@@ -2733,7 +2813,7 @@ func file_rafiki_v1_event_proto_init() {
 	}
 	file_rafiki_v1_event_proto_msgTypes[22].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[24].OneofWrappers = []any{}
-	file_rafiki_v1_event_proto_msgTypes[28].OneofWrappers = []any{
+	file_rafiki_v1_event_proto_msgTypes[29].OneofWrappers = []any{
 		(*Event_UserMessage)(nil),
 		(*Event_AssistantMessage)(nil),
 		(*Event_TurnStart)(nil),
@@ -2754,6 +2834,7 @@ func file_rafiki_v1_event_proto_init() {
 		(*Event_TasksChanged)(nil),
 		(*Event_ChildClosed)(nil),
 		(*Event_SystemMessage)(nil),
+		(*Event_MessageDelivered)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2761,7 +2842,7 @@ func file_rafiki_v1_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_event_proto_rawDesc), len(file_rafiki_v1_event_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   30,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

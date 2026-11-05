@@ -285,6 +285,17 @@ plus position and role. A fundi tool result is its own `UserMessage` (a
 `tool_result` block), published in tool_use order; steers drained together are
 one merged event.
 
+`message_delivered` is a durable ACCEPTANCE RECEIPT, and it is not a message:
+`message_id` is the inbox row id the send was given (`SendResponse.message_id`),
+and the event says the child's harness took that message into a turn. It is not
+proof the model read it, not a durability guarantee for the message itself, and
+it changes no inbox state — `settled()`/`wait()` do not treat it as anything.
+Because it is durable, a resume REPLAYS it, so the same receipt can arrive
+twice: key any effect on `message_id`, and treat an unknown id — or a payload
+this client does not recognise — as a no-op rather than an error or a turn
+boundary. The generated `Event` decodes it (`event.message_delivered`); a
+daemon that predates the event publishes nothing.
+
 `get_history` returns the transcript along the conversation head's history, not
 every stored row: a prompt retracted before it was answered, and the superseded
 sibling reply a retry left behind, are omitted. A live `stream_events` feed

@@ -429,6 +429,25 @@ pub struct OperatorState {
     #[prost(string, tag = "3")]
     pub msg: ::prost::alloc::string::String,
 }
+/// MessageDelivered is a durable-tier event: a UI ACCEPTANCE RECEIPT saying the
+/// child's harness took an inbox message into a turn. It is NOT proof the model
+/// read the message and NOT a durability guarantee for the message itself.
+///
+/// message_id is the INBOX ROW id the client sent — the id SendResponse carries
+/// back — never a Claude session UUID and never a conversation ordinal. Nothing
+/// about the inbox changes when this is published: the row is consumed,
+/// retracted or redelivered exactly as it would have been without it, so a
+/// client's whole answer is to mark that send accepted. A client that does not
+/// know the id (or does not know this payload) does nothing.
+///
+/// It is durable so a receipt is REPLAYED to a resuming subscriber rather than
+/// reconstructed from anything; replay can therefore repeat one the client
+/// already saw, which is why the effect keyed on message_id must be idempotent.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MessageDelivered {
+    #[prost(string, tag = "1")]
+    pub message_id: ::prost::alloc::string::String,
+}
 /// Event is the stream envelope.
 ///
 /// ordinal is set on DURABLE-tier events. pkg/eventlog/tier.go is the authority
@@ -462,7 +481,7 @@ pub struct Event {
     pub ts: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(
         oneof = "event::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 29, 30"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 29, 30, 31"
     )]
     pub payload: ::core::option::Option<event::Payload>,
 }
@@ -510,6 +529,8 @@ pub mod event {
         ChildClosed(super::ChildClosed),
         #[prost(message, tag = "30")]
         SystemMessage(super::SystemMessage),
+        #[prost(message, tag = "31")]
+        MessageDelivered(super::MessageDelivered),
     }
 }
 /// StopReason normalizes how a turn ended across providers. The provider's own

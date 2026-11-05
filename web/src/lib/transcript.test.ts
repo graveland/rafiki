@@ -9,6 +9,7 @@ import {
   ContentBlockDeltaSchema,
   ContentBlockSchema,
   EventSchema,
+  MessageDeliveredSchema,
   SystemMessageSchema,
   TextBlockSchema,
   ToolResultBlockSchema,
@@ -225,6 +226,32 @@ it('a system_message renders under its own kind, not as a user turn', async () =
   await flush()
   expect(conversation.blocks.map((block) => block.kind)).toEqual(['system', 'user'])
   expect(conversation.blocks[0].text).toBe('Environment update')
+  conversation.dispose()
+})
+
+it('a message_delivered receipt changes nothing on screen', async () => {
+  // The receipt is a UI acceptance signal the browser does not act on yet
+  // (optimistic-send parity is a later change). It must be tolerated: no blank
+  // user block, no status change, no cost, no new turn — and it must still
+  // advance the cursor so a reconnect does not replay it forever.
+  const receipt = create(EventSchema, {
+    childId: 'c',
+    ordinal: 1,
+    payload: {
+      case: 'messageDelivered',
+      value: create(MessageDeliveredSchema, { messageId: 'msg_42' }),
+    },
+  })
+  const events = [userEvent('c', 'hi', 0), receipt]
+  const { control } = fakeControl({ stream: (_i, o) => replay(events, o?.signal) })
+  const conversation = new Conversation('c', { control })
+  await conversation.open()
+  await flush()
+  expect(conversation.blocks.map((block) => block.kind)).toEqual(['user'])
+  expect(conversation.blocks[0].text).toBe('hi')
+  expect(conversation.status).toBe('')
+  expect(conversation.turnCostUsd).toBeUndefined()
+  expect(conversation.cursor).toBe(1)
   conversation.dispose()
 })
 

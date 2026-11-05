@@ -368,3 +368,71 @@ func TestStreamEventsSubtreeIncludeSelfAdmitsTheRoot(t *testing.T) {
 	}
 	c.Eq("c_root", stream.Msg().GetChildId(), "child id")
 }
+
+// A message_delivered receipt is durable, so a client that drops its stream
+// mid-turn is replayed the receipts it missed rather than reconstructing them:
+// publish, disconnect, resume and the receipt arrives exactly once, with the
+// inbox row id it names. A type filter naming message_delivered must include
+// it — that filter is how a client that cares only about acceptance avoids the
+// transcript traffic.
+func TestMessageDeliveredReplay(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	elog := eventlog.NewMemory()
+	bus := &liveBus{}
+	receipt := &rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_MessageDelivered{
+		MessageDelivered: &rafikiv1.MessageDelivered{MessageId: "msg_42"},
+	}}
+	appendAndPublish(t, elog, bus, receipt)
+
+	subject := &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}}
+
+	// 1. Live: the receipt arrives as published, carrying its log ordinal.
+	live := setupStreamServer(t, emptyLineage(), elog, bus)
+	streamCtx, disconnect := context.WithCancel(ctx)
+	stream, err := live.StreamEvents(streamCtx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: subject,
+		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{"c_1": -1}},
+	}))
+	c.NoError(err, "StreamEvents")
+	if !stream.Receive() {
+		t.Fatalf("the live stream delivered no receipt: %v", stream.Err())
+	}
+	ordinal := stream.Msg().GetOrdinal()
+	c.Eq("msg_42", stream.Msg().GetMessageDelivered().GetMessageId(), "live receipt message id")
+	disconnect()
+
+	// 2. Resume from the receipt's ordinal: replay must not repeat it. No event
+	// source, so the stream ends after replay and a repeat would be the only
+	// thing it could send.
+	resumed := setupStreamServer(t, emptyLineage(), elog, nil)
+	again, err := resumed.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: subject,
+		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{"c_1": ordinal}},
+	}))
+	c.NoError(err, "StreamEvents")
+	if again.Receive() {
+		t.Fatalf("the receipt replayed twice: %v", again.Msg())
+	}
+	c.NoError(again.Err(), "resumed stream ended with error")
+
+	// 3. A type filter naming message_delivered includes it, from the start.
+	filtered := setupStreamServer(t, emptyLineage(), elog, nil)
+	only, err := filtered.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: subject,
+		Types:   []string{"message_delivered"},
+		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{"c_1": -1}},
+	}))
+	c.NoError(err, "StreamEvents")
+	if !only.Receive() {
+		t.Fatalf("a message_delivered filter excluded the receipt: %v", only.Err())
+	}
+	c.Eq("msg_42", only.Msg().GetMessageDelivered().GetMessageId(), "filtered receipt message id")
+	c.Eq(ordinal, only.Msg().GetOrdinal(), "the replayed receipt keeps its ordinal")
+	if only.Receive() {
+		t.Fatalf("the filter delivered a second event: %v", only.Msg())
+	}
+	c.NoError(only.Err(), "filtered stream ended with error")
+}
