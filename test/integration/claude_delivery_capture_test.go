@@ -28,6 +28,7 @@ package integration_test
 //     the acknowledgement names a row id instead of matching text.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -170,6 +171,39 @@ func childUserTexts(stream *eventStream, childID string) []string {
 	return out
 }
 
+// pendingCaptureTurn returns the id of the child's ONE pending capture turn.
+// "pending" is the state InsertTurnIntent writes BEFORE the upstream is called,
+// so a pending turn PROVES the proxy is mid-capture — not merely holding a
+// request the child has not sent yet.
+func pendingCaptureTurn(t *testing.T, childID string) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	pool := openPool(t, os.Getenv("RAFIKI_TEST_DSN"))
+	defer pool.Close()
+	var ids []string
+	c.NoError(pool.QueryRow(context.Background(), `
+		SELECT coalesce(array_agg(t.id::text), '{}')
+		  FROM conversations.conversation_turn t
+		  JOIN conversations.conversation c ON c.id = t.conversation_id
+		 WHERE c.external_ref = $1 AND t.status::text = 'pending'`, childID).Scan(&ids),
+		"read the pending capture turn for %s", childID)
+	c.EqDeep(1, len(ids), "pending capture turns for the child")
+	return ids[0]
+}
+
+// captureTurnStatus reports one capture turn's status.
+func captureTurnStatus(t *testing.T, turnID string) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	pool := openPool(t, os.Getenv("RAFIKI_TEST_DSN"))
+	defer pool.Close()
+	var status string
+	c.NoError(pool.QueryRow(context.Background(),
+		`SELECT status::text FROM conversations.conversation_turn WHERE id = $1::uuid`, turnID).Scan(&status),
+		"read capture turn %s", turnID)
+	return status
+}
+
 // ─── the test ────────────────────────────────────────────────────────────────
 
 // TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt is the whole ordering
@@ -205,6 +239,11 @@ func TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		t.Fatalf("the daemon never forwarded the child's request to the configured base_url; providers.toml pointed at %s", up.srv.URL)
 	}
+	// The capture is genuinely IN FLIGHT at the proxy — not a request the child
+	// merely has not sent yet: beginCapture has already resolved the child's
+	// conversation and written the turn intent, and the proxy is parked on the
+	// upstream with nothing stored and nothing reported.
+	firstCaptureTurn := pendingCaptureTurn(t, childID)
 	c.EqDeep(0, len(childUserTexts(stream, childID)), "a transcript row was published while the capture was still blocked")
 
 	// ── 2. message two, sent MID-TURN, acknowledged with the capture blocked ─
@@ -226,6 +265,11 @@ func TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt(t *testing.T) {
 	c.Less(firstRowEvent.GetOrdinal(), firstReceipt.GetOrdinal(),
 		"the receipt (ordinal %d) must precede the captured row (ordinal %d)",
 		firstReceipt.GetOrdinal(), firstRowEvent.GetOrdinal())
+
+	// The capture that was in flight has now COMPLETED — the same turn, from
+	// pending to complete — which is what "released" means on this path.
+	c.Eq("complete", captureTurnStatus(t, firstCaptureTurn),
+		"the blocked capture's turn must complete once the upstream answers")
 
 	// The older in-flight capture was built before message two existed, so its
 	// request cannot carry it — and its capture must not publish it.

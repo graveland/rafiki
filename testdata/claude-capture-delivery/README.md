@@ -44,10 +44,13 @@ Prompts were dull on purpose: they are recorded verbatim.
 
 ## What was scrubbed, and why
 
-Everything below was replaced by VALUE only — the request bodies keep their
-structure, block counts and ordering, because the tests parse them and the
-delivery shapes are the point. This follows the same rule
-`pkg/child/testdata/claude/NOTES.md` documents for its own recordings.
+**Values only.** Every substitution below replaces a value and nothing else: the
+request bodies keep the recording's structure, block counts, key order and
+ordering, because the tests parse them and the delivery shapes are the point.
+This follows the same rule `pkg/child/testdata/claude/NOTES.md` documents for
+its own recordings, and the stdout half of this session
+(`pkg/child/testdata/claude/delivery_echo.jsonl`) is **verbatim** — nothing in
+it was touched, because those four lines carry no personal data to remove.
 
 | Field | Placeholder |
 |---|---|
