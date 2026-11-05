@@ -23,6 +23,7 @@ func TestBuildClaudeArgv_Defaults(t *testing.T) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
+		claudeargv.ReplayUserMessages,
 		"--dangerously-skip-permissions",
 		"--disallowedTools", "AskUserQuestion",
 	}
@@ -54,6 +55,9 @@ func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
+		// Headless children acknowledge accepted messages, so the replay flag is
+		// part of the stream-json contract Build emits first.
+		claudeargv.ReplayUserMessages,
 		"--model", "glm-5.2", // vals.ModelArgs — exactly one --model
 		"--mcp-config=" + vals.MCPConfig, // Build renders the flag against the bare-JSON Values
 		"--resume", "sess-abc",

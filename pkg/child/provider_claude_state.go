@@ -191,6 +191,11 @@ type claudeStreamFrame struct {
 	// (the Task tool); it names the spawning tool call so the activity can be
 	// attributed and indented downstream.
 	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
+	// UUID and IsReplay mark the acceptance echo of a user message the daemon
+	// sent (--replay-user-messages). It names a delivery and carries no new
+	// content, so both translators suppress it: see Parse's "user_replay".
+	UUID     string `json:"uuid,omitempty"`
+	IsReplay bool   `json:"isReplay,omitempty"`
 	// Result-frame token/cost totals for the turn (present only on type=result).
 	TotalCostUSD float64      `json:"total_cost_usd,omitempty"`
 	Usage        *claudeUsage `json:"usage,omitempty"`
@@ -309,6 +314,13 @@ func (p *claudeProvider) BusFrames(line []byte, ts int64) [][]byte {
 
 	case "user":
 		if f.Message == nil {
+			return nil
+		}
+		if f.IsReplay {
+			// An acceptance echo of a message we sent: its content is ours already,
+			// and translating it would append tool results (and open a turn) for a
+			// message that is not new. Parse turns the echo into the delivery
+			// acknowledgement instead.
 			return nil
 		}
 		return p.emitUser(f.Message.Content, f.ParentToolUseID, ts)
@@ -671,6 +683,12 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 			return nil
 		}
 		if f.ParentToolUseID != "" {
+			return nil
+		}
+		if f.IsReplay {
+			// An acceptance echo carries no new native content — the message's own
+			// row is the transcript, written when we sent it. Parse turns the echo
+			// into the delivery acknowledgement.
 			return nil
 		}
 		return p.nativeUser(f.Message.Content, ts)

@@ -49,11 +49,33 @@ type claudeFrame struct {
 	SessionID     string   `json:"session_id,omitempty"`
 	Model         string   `json:"model,omitempty"`
 	SlashCommands []string `json:"slash_commands,omitempty"`
-	Message       *struct {
+	// UUID and IsReplay mark the acceptance echo of a user message the daemon
+	// sent (see replayDeliveryUUID). Every other frame carries neither.
+	UUID     string `json:"uuid,omitempty"`
+	IsReplay bool   `json:"isReplay,omitempty"`
+	// ParentToolUseID names the Task tool call that produced a subagent frame.
+	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
+	Message         *struct {
 		Content []struct {
 			Type string `json:"type"`
 		} `json:"content"`
 	} `json:"message,omitempty"`
+}
+
+// replayDeliveryUUID reports the delivery uuid a user frame acknowledges, and
+// false for every frame that acknowledges nothing: the echo must be marked
+// isReplay and carry the uuid back (that is what NAMES the message), and a
+// subagent frame belongs to a Task child's own traffic, never to a delivery
+// this daemon made.
+//
+// Whether the uuid is one THIS daemon minted is deliberately not asked here:
+// the parser is per-child and stateless, and an unknown uuid (a stale replay
+// from a previous launch) is the controller's to drop.
+func (f claudeFrame) replayDeliveryUUID() (string, bool) {
+	if f.Type != "user" || !f.IsReplay || f.UUID == "" || f.ParentToolUseID != "" {
+		return "", false
+	}
+	return f.UUID, true
 }
 
 // Normalizes is true: claude's stdout is its native stream-json, translated to
@@ -67,6 +89,8 @@ func (ClaudeProvider) Normalizes() bool { return true }
 //   - assistant (with content)    → agent_start, then one tool_execution_start
 //     per tool_use content block
 //   - user (with tool_result)     → one tool_execution_end per tool_result block
+//   - user (isReplay)             → one user_replay carrying the echoed uuid —
+//     an ACCEPTANCE echo, so it completes no tool call and is not content
 //   - system/status               → compaction_start while claude reports
 //     "compacting" (re-sent every 30s as a heartbeat), compaction_end once it
 //     reports null
@@ -115,6 +139,15 @@ func (ClaudeProvider) Parse(line []byte) ParseResult {
 		}
 
 	case "user":
+		if uuid, ok := f.replayDeliveryUUID(); ok {
+			// claude accepted a message we sent into a turn and echoed it back with
+			// the uuid we gave it. The echo is the acknowledgement and nothing
+			// else: whatever content it echoes is content we already have (we
+			// wrote it), so it must never re-open a turn, complete a tool call or
+			// become transcript.
+			res.Events = append(res.Events, ParsedEvent{Type: "user_replay", DeliveryUUID: uuid})
+			break
+		}
 		if f.Message != nil {
 			for _, blk := range f.Message.Content {
 				if blk.Type == "tool_result" {
@@ -138,11 +171,21 @@ func (ClaudeProvider) Parse(line []byte) ParseResult {
 // stream-json stdin messages. prompt/steer become a user message; everything
 // else (including pi-only frames like set_session_name) is dropped, since claude
 // has no equivalent and silently writing them would corrupt the input stream.
+//
+// A prompt/steer may carry `delivery_uuid`, which is copied to the envelope's
+// top-level `uuid`: with --replay-user-messages (claudeargv.ReplayUserMessages)
+// claude echoes that uuid back when the message is accepted into a turn, which
+// is the delivery acknowledgement. The frame's own `id` is a different thing —
+// fundi's runtime consumes it — and is never reused as the uuid, so a child that
+// has no delivery uuid still emits exactly the bytes it always did.
 func (ClaudeProvider) EncodeOutbound(frame []byte) []byte {
 	var in struct {
-		Type        string `json:"type"`
-		Message     string `json:"message"`
-		Attachments []struct {
+		Type string `json:"type"`
+		// DeliveryUUID names this message for the acknowledgement; absent for
+		// frames no one acknowledges (a coalesced notification, an abort).
+		DeliveryUUID string `json:"delivery_uuid,omitempty"`
+		Message      string `json:"message"`
+		Attachments  []struct {
 			MediaType string `json:"media_type"`
 			Data      []byte `json:"data"`
 		} `json:"attachments"`
@@ -159,11 +202,12 @@ func (ClaudeProvider) EncodeOutbound(frame []byte) []byte {
 		// llm.UserContent.
 		env := struct {
 			Type    string `json:"type"`
+			UUID    string `json:"uuid,omitempty"`
 			Message struct {
 				Role    string `json:"role"`
 				Content any    `json:"content"`
 			} `json:"message"`
-		}{Type: "user"}
+		}{Type: "user", UUID: in.DeliveryUUID}
 		env.Message.Role = "user"
 		env.Message.Content = in.Message
 		if len(in.Attachments) > 0 {

@@ -63,6 +63,14 @@ tables, each with `turns`, an optional `name`, and:
 `testdata/claude-capture.toml` is the worked example and the default for
 `make capture-claude`.
 
+Daemon-managed headless children are launched with `--replay-user-messages`, so
+Claude Code echoes each user message it accepts into a turn back on stdout
+carrying the `uuid` the daemon wrote on it. Headless Claude **requires** this
+capability. The flag hard-requires `--input-format=stream-json` **and**
+`--output-format=stream-json`, so it never reaches an interactive `rafiki claude`
+session, and rafiki never silently relaunches a child without it: a Claude Code
+that does not support it must be upgraded.
+
 One client-side gotcha when pointing Claude Code at any proxy by hand: its
 SSE-ping stream-idle watchdog only activates when the base URL host is
 exactly `api.anthropic.com`, so a thinking phase with >300s between content

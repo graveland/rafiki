@@ -76,6 +76,20 @@ const coordinationWaiting = " Waiting: a subagent you spawn is not announced on 
 	"warnings on MCP tools describe the best-effort log channel a client relies on for a " +
 	"TOP-LEVEL agent it spawned; they are not your channel and are not a reason to poll."
 
+// ReplayUserMessages makes claude echo every user message it ACCEPTS back onto
+// stdout as `{"type":"user","isReplay":true,"uuid":"<the uuid we sent>"}`.
+//
+// A headless child requires it: that echo is the only signal that a message
+// reached a turn (claude's own user frames otherwise carry tool results only).
+// There is deliberately no probe, no version floor and no retry without the
+// flag — a Claude Code that does not support it must be upgraded, and rafiki
+// never silently relaunches a child without it.
+//
+// It cannot reach ModeInteractive: the flag hard-requires
+// --input-format=stream-json AND --output-format=stream-json, which are the
+// headless contract Build emits (see its doc comment).
+const ReplayUserMessages = "--replay-user-messages"
+
 // NativeSchedulerTools are Claude Code's own scheduling tools. A daemon-managed
 // child that carries the MCP surface gets rafiki's same-named tools instead
 // (mcp__rafiki__CronCreate etc.), which persist with the conversation; the
@@ -162,13 +176,15 @@ type Params struct {
 // Build returns argv EXCLUDING the binary itself, matching
 // child.SpawnSpec.Argv.
 //
-// The four base flags are the stream-json contract: -p makes claude headless,
-// the two format flags select the newline-delimited JSON protocol, and
-// --verbose is what makes it emit the per-turn frames rather than only a final
-// result. Dropping any of them yields a child that runs and cannot be parsed.
-// They — along with the permission default and the --disallowedTools pair —
-// are emitted only in ModeHeadless: ModeInteractive keeps the TTY, a human
-// answers permission prompts, and AskUserQuestion has a renderer.
+// The base flags are the stream-json contract: -p makes claude headless, the
+// two format flags select the newline-delimited JSON protocol, --verbose is
+// what makes it emit the per-turn frames rather than only a final result, and
+// ReplayUserMessages is what makes it echo each accepted user message back with
+// the uuid we sent. Dropping any of them yields a child that runs and cannot be
+// parsed, or one that parses and can never be acknowledged. They — along with
+// the permission default and the --disallowedTools pair — are emitted only in
+// ModeHeadless: ModeInteractive keeps the TTY, a human answers permission
+// prompts, and AskUserQuestion has a renderer.
 func Build(p Params) []string {
 	var argv []string
 	if p.Mode == ModeHeadless {
@@ -177,6 +193,7 @@ func Build(p Params) []string {
 			"--input-format", "stream-json",
 			"--output-format", "stream-json",
 			"--verbose",
+			ReplayUserMessages,
 		)
 	}
 	if len(p.ModelArgs) > 0 {

@@ -18,8 +18,10 @@ import (
 )
 
 // The base flags are what makes claude speak the stream-json protocol daraja
-// relays and rafikid parses. A build that omits any of them produces a child
-// that runs and is unintelligible, which is far worse than one that fails.
+// relays and rafikid parses, and what makes it acknowledge an accepted message.
+// A build that omits any of them produces a child that runs and is
+// unintelligible, or one that can never be acknowledged, which is far worse than
+// one that fails.
 func TestBuildAlwaysCarriesTheStreamJSONContract(t *testing.T) {
 	got := Build(Params{})
 	for _, want := range []string{
@@ -27,6 +29,7 @@ func TestBuildAlwaysCarriesTheStreamJSONContract(t *testing.T) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
+		ReplayUserMessages,
 	} {
 		assert.NewCollecting(t).Contains(got, want, "Build()")
 	}
@@ -114,9 +117,9 @@ func TestBuildAppendsExtraArgsLast(t *testing.T) {
 	assert.NewAborting(t).False(len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar", "want ExtraArgs last, got %v", argv)
 }
 
-// The additive wave's pin: a Params that sets only Model must produce argv
-// byte-identical to the pre-Mode, pre-MCPConfig builder, so every existing
-// caller that leaves the new fields zero is unaffected.
+// The headless argv pin: a Params that sets only Model must produce exactly
+// this argv, so a flag added or dropped by accident is visible here rather than
+// only in a child that fails at launch.
 func TestBuildHeadlessUnchanged(t *testing.T) {
 	got := Build(Params{Model: "x"})
 	want := []string{
@@ -124,6 +127,7 @@ func TestBuildHeadlessUnchanged(t *testing.T) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
+		ReplayUserMessages,
 		"--model", "x",
 		"--dangerously-skip-permissions",
 		"--disallowedTools", "AskUserQuestion",
@@ -232,6 +236,7 @@ func TestBuildInteractiveOmitsHeadlessFlags(t *testing.T) {
 		"--verbose",
 		"--dangerously-skip-permissions",
 		"--disallowedTools",
+		ReplayUserMessages,
 	} {
 		assert.NewCollecting(t).NotContains(got, unwanted, "Build(interactive)")
 	}

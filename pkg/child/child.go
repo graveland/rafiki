@@ -86,6 +86,23 @@ type SpawnSpec struct {
 	// May fire many times per subagent; the implementation dedupes.
 	OnSubagent func(SubagentObservation)
 
+	// OnUserReplay fires when claude echoes back a user message the daemon sent
+	// into a turn (--replay-user-messages), carrying the delivery uuid that
+	// message was written with. That echo is the delivery acknowledgement.
+	//
+	// Called SYNCHRONOUSLY from the readStdout goroutine, outside metaMu and
+	// WITHOUT the message gate: the acknowledgement arrives before the capture
+	// persists anything, so holding it behind a message row would delay the very
+	// signal that says the message was accepted. It is not transcript content and
+	// drives no state transition, so it is never routed through the state machine
+	// or the native sink either.
+	//
+	// The callback owns validation: the child reports every valid echo, and
+	// whether a uuid belongs to this child's CURRENT launch is the daemon's
+	// question (a stale replay from a previous launch must publish nothing).
+	// Nil wherever a child has no acknowledgement to report.
+	OnUserReplay func(deliveryUUID string)
+
 	// OnScriptOutput, when non-nil, receives one raw chunk of a SCRIPT child's
 	// output: the "stdout" chunks come from handleFrame's script_output
 	// ParsedEvents, the "stderr" chunks are split out of the stderr drain (a
@@ -305,6 +322,7 @@ type Child struct {
 	gate           *messageGate
 	onMeta         func(SnifferMetadata)
 	onSubagent     func(SubagentObservation)
+	onUserReplay   func(string)
 	onScriptOutput func(stream, line string, terminated bool)
 	// preShutdownStatus is the status before BeginShutdown was called, captured
 	// so handleChildExit can record the child's real pre-exit state (idle,
@@ -423,6 +441,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		nativeSink:     spec.NativeSink,
 		onMeta:         spec.OnMeta,
 		onSubagent:     spec.OnSubagent,
+		onUserReplay:   spec.OnUserReplay,
 		onScriptOutput: spec.OnScriptOutput,
 		transitionCh:   make(chan struct{}, 1),
 		idle:           make(chan struct{}),
@@ -989,6 +1008,10 @@ func frameType(line []byte) string {
 // handleFrame routes one stdout line through the child's ProtocolProvider and
 // applies the normalized result to the state machine + sniffed metadata. Called
 // exclusively from the readStdout goroutine.
+//
+// A user_replay event is the one thing here that is NOT applied to the state
+// machine: it is a delivery acknowledgement, handed straight to OnUserReplay
+// after metaMu is dropped.
 func (c *Child) handleFrame(line []byte) {
 	res := c.provider.Parse(line)
 
@@ -1022,6 +1045,7 @@ func (c *Child) handleFrame(line []byte) {
 	}
 
 	var scriptLines []string
+	var replayUUIDs []string
 	for _, e := range res.Events {
 		if e.Type == "script_output" {
 			// A script child's raw stdout line: not a state-machine event (the
@@ -1030,6 +1054,15 @@ func (c *Child) handleFrame(line []byte) {
 			// fired after metaMu is dropped: the hook must never run under a
 			// lock the coalescer's publish path could wait on.
 			scriptLines = append(scriptLines, e.Text)
+			continue
+		}
+		if e.Type == "user_replay" {
+			// A delivery acknowledgement: claude accepted a message we sent into
+			// a turn and echoed its uuid back. It is neither a state transition
+			// (the machine would ignore it, but routing it there at all would
+			// make an acknowledgement look like lifecycle) nor native content —
+			// it leaves by the replay hook below, outside metaMu.
+			replayUUIDs = append(replayUUIDs, e.DeliveryUUID)
 			continue
 		}
 		switch e.Type {
@@ -1042,6 +1075,17 @@ func (c *Child) handleFrame(line []byte) {
 	}
 
 	c.metaMu.Unlock()
+
+	if len(replayUUIDs) > 0 && c.onUserReplay != nil {
+		// Fired here, on the stdout goroutine and outside every lock: the
+		// acknowledgement must not wait on metaMu (a session-id write), on the
+		// native sink's message gate (which is holding events behind a row the
+		// capture has not persisted yet) or on a goroutine of its own (which
+		// could reorder it against the lifecycle events of the same frame).
+		for _, uuid := range replayUUIDs {
+			c.onUserReplay(uuid)
+		}
+	}
 
 	if len(scriptLines) > 0 && c.onScriptOutput != nil {
 		for _, line := range scriptLines {

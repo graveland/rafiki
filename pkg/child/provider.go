@@ -87,17 +87,27 @@ type ParseResult struct {
 	Meta    SnifferMetadata
 	HasMeta bool
 
-	// Events are normalized state-machine events applied in order. Type strings
-	// match the StateMachine vocabulary: agent_start, agent_end,
-	// tool_execution_start, tool_execution_end, compaction_start,
-	// compaction_end, auto_retry_start, extension_error.
+	// Events are normalized events applied in order. MOST are state-machine
+	// events, whose Type strings match the StateMachine vocabulary: agent_start,
+	// agent_end, tool_execution_start, tool_execution_end, compaction_start,
+	// compaction_end, auto_retry_start, extension_error. Two ride the same slice
+	// without reaching the machine, because the Child consumes them itself:
+	// script_output (the daemon's per-line output hook) and user_replay (the
+	// delivery-acknowledgement hook).
 	Events []ParsedEvent
 }
 
-// ParsedEvent is one normalized state-machine event.
+// ParsedEvent is one normalized event — a state-machine event for most Type
+// values, and a Child-consumed signal for script_output and user_replay.
 type ParsedEvent struct {
 	Type       string
 	RetryError string // set only for auto_retry_start
+	// DeliveryUUID is set only for Type "user_replay": the uuid claude echoed
+	// back for a message the daemon sent, which is the delivery acknowledgement.
+	// The event never reaches the state machine — the Child hands the uuid to
+	// SpawnSpec.OnUserReplay from the stdout parse path, bypassing the message
+	// gate — because an acceptance is not transcript content.
+	DeliveryUUID string
 	// Text carries the raw line, set only for script_output events: a script
 	// child's stdout is free-form text, not a JSONL protocol, so the line IS
 	// the payload and the daemon publishes it (coalesced) as the child's
