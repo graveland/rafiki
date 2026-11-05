@@ -1,0 +1,64 @@
+HTTP/1.1 200 OK
+Anthropic-Organization-Id: 0a518565-263c-4160-a9ac-6352799211db
+Anthropic-Ratelimit-Unified-5h-Reset: 1793866200
+Anthropic-Ratelimit-Unified-5h-Status: allowed
+Anthropic-Ratelimit-Unified-5h-Utilization: 0.02
+Anthropic-Ratelimit-Unified-7d-Reset: 1793988000
+Anthropic-Ratelimit-Unified-7d-Status: allowed_warning
+Anthropic-Ratelimit-Unified-7d-Surpassed-Threshold: 0.75
+Anthropic-Ratelimit-Unified-7d-Utilization: 0.98
+Anthropic-Ratelimit-Unified-Fallback-Percentage: 0.5
+Anthropic-Ratelimit-Unified-Overage-Disabled-Reason: out_of_credits
+Anthropic-Ratelimit-Unified-Overage-Status: rejected
+Anthropic-Ratelimit-Unified-Representative-Claim: seven_day
+Anthropic-Ratelimit-Unified-Reset: 1793988000
+Anthropic-Ratelimit-Unified-Status: allowed_warning
+Anthropic-Ratelimit-Unified-Upgrade-Paths: upgrade_plan,overage
+Anthropic-Workspace-Id: wrkspc_018b8WGdDeGtTZqBKfn7LC9J
+Cache-Control: no-cache
+Cf-Cache-Status: DYNAMIC
+Cf-Ray: a5593907fa29b4a4-YVR
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
+Content-Type: text/event-stream; charset=utf-8
+Date: Thu, 05 Nov 2026 04:47:51 GMT
+Request-Id: req_011CgjB9JMvdTWoSerNNnrvq
+Server: cloudflare
+Server-Timing: x-originResponse;dur=101
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+Traceresponse: 00-14be2c4e02bc2e29f6c9f1765b81f4a8-e24adcb6639fc32d-01
+Vary: Accept-Encoding
+X-Robots-Tag: none
+
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_011CgjB9JZ5jZQSmHF3CPHhZ","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":60,"cache_read_input_tokens":41298,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":60},"output_tokens":8,"service_tier":"standard","inference_geo":"not_available","speed":"standard"},"diagnostics":null,"context_management":null}     }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}         }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":null}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"ErgDCtABCBMYAipAJZrde06AreL5ZsgoMdX0kb3yj2nR69D2ObAe7TH8MXRYeBVJhseDgkxLob2iDdmkybQ4JEmeyWftiRFUNXd+uzIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okMGE1MTg1NjUtMjYzYy00MTYwLWE5YWMtNjM1Mjc5OTIxMWRichBZ5LAmMoRv377DQ65Y+P2oiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAH3lLDXBrABAhIMcAH4u5DDYb5lyPvKGgxb8xE85+7ZzEUvJC8iMEuCqqXMWvF1/NxqtlsIAHHVN1UpwGv/UfMOoLyOMmWegpiwIF0It8UsmiFDwmyUbyqUAYxCih0a5qQ6I+ysAdUaZ10w5SSXuco+9E7g6imQHoTb5PRR2+XxuYmXUmh5dYiQOyBZ1pQvJgqYKEcjVKAAW1ka9XcduMAooI6QlkPZZLWUdiEKSWq0kiqLHg+lk8fJtp0nSJ980ZBWqVq6guT/iJqWwPsD6xyJEiZ9wrzU1QkEGcP/qCY6p86k5xEoIpIyl9PW1DIYAQ=="}      }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0           }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"twice"}             }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1     }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":60,"cache_read_input_tokens":41298,"output_tokens":43,"output_tokens_details":{"thinking_tokens":36},"iterations":[{"input_tokens":10,"output_tokens":43,"cache_read_input_tokens":41298,"cache_creation_input_tokens":60,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":60},"type":"message"}]},"context_management":{"applied_edits":[]}       }
+
+event: message_stop
+data: {"type":"message_stop"     }
+

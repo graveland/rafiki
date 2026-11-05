@@ -418,16 +418,26 @@ func TestToolResultsWithSameIDDifferentContentAreSiblings(t *testing.T) {
 	c.Eq(reply, mustParent(t, ctx, pool, nodeB), "tool result B's parent")
 }
 
-// fixtureReplay drives testdata/claude-capture through capture exactly as the
-// proxy does: each request attaches by its diagnostics.previous_message_id and
-// its response is appended under the request head. ref is the conversation's
-// external_ref, which MarkClearPending resolves. before, when non-nil, is called
-// with the conversation's head immediately before each request is attached, so a
-// test can pin what a boundary was cut from.
+// fixtureReplay drives testdata/claude-capture through capture; see
+// replayCorpus for the contract.
 func fixtureReplay(t *testing.T, ctx context.Context, s *CaptureStore, convID, ref string, before func(n int, headBefore string)) {
 	t.Helper()
+	replayCorpus(t, ctx, s, convID, ref, filepath.Join("..", "..", "testdata", "claude-capture"), before)
+}
+
+// replayCorpus drives one recorded Claude Code corpus through capture exactly
+// as the proxy does: each request attaches by its
+// diagnostics.previous_message_id and its response is appended under the
+// request head. ref is the conversation's external_ref, which MarkClearPending
+// resolves. before, when non-nil, is called with the conversation's head
+// immediately before each request is attached, so a test can pin what a
+// boundary was cut from.
+//
+// dir is the corpus, so a second recording (claude-capture-delivery) replays
+// through the same code rather than a copy that could drift.
+func replayCorpus(t *testing.T, ctx context.Context, s *CaptureStore, convID, ref, dir string, before func(n int, headBefore string)) {
+	t.Helper()
 	c := assert.NewAborting(t)
-	dir := filepath.Join("..", "..", "testdata", "claude-capture")
 	for n := 1; ; n++ {
 		name := fmt.Sprintf("%06d-request.http", n)
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
