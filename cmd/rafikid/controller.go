@@ -2576,6 +2576,15 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		// otherwise accumulate one observer entry per attempt, each holding a
 		// pending link nothing will ever consume.
 		c.trace.ChildGone(childID)
+		// Same for the launch generation installChildHooks minted a few lines
+		// up: a Spawn that fails to exec never reaches abortSpawn (there is no
+		// instance to attach), so without this a retrying spawner would leave
+		// one dead generation per failed attempt. No store row exists and
+		// claudeDeliveryFor's snapshot check refuses registration, so it could
+		// never acknowledge anything — a bounded leak, not a correctness hole.
+		if claudeGen != 0 {
+			c.claudeDeliveries.abandonLaunch(childID)
+		}
 		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: err.Error(),

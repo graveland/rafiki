@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -729,6 +730,27 @@ func TestClaudeDeliveryDuplicateEchoPublishesOneReceipt(t *testing.T) {
 	ck.Eq(0, h.c.claudeDeliveries.entryCount("c_deliver"), "entries left after teardown")
 }
 
+// A claude child whose process cannot be exec'd never reaches abortSpawn: there
+// is no instance for the generation installChildHooks minted to attach to, so
+// Spawn's own early return has to retire it. Without that a coordinator retrying
+// a failed spawn leaves one dead generation per attempt.
+func TestClaudeDeliveryFailedExecLeavesNoGeneration(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	req := protocol.SpawnRequest{
+		Kind:      protocol.KindClaude,
+		Cwd:       t.TempDir(),
+		PiBinary:  filepath.Join(t.TempDir(), "no-such-claude-binary"),
+		NoSession: true,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := ctrl.Spawn(ctx, req, users.Identity{})
+	ck.Require().Error(err, "a spawn whose binary does not exist must fail")
+	ck.Eq(0, ctrl.claudeDeliveries.generationCount(),
+		"a spawn that never exec'd left its launch generation behind")
+}
+
 // entryCount is a test-only view of one child's outstanding entries, so a test
 // can assert the registry does not leak without reaching into its maps.
 func (r *claudeDeliveryRegistry) entryCount(childID string) int {
@@ -741,4 +763,12 @@ func (r *claudeDeliveryRegistry) entryCount(childID string) int {
 		}
 	}
 	return n
+}
+
+// generationCount is a test-only view of how many launch generations the
+// registry still holds, so a test can prove a failed launch left none behind.
+func (r *claudeDeliveryRegistry) generationCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.gens)
 }
