@@ -347,7 +347,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	auth := server.ContextAuthenticator{}
 	messages := server.NewMessagesProxy(captureStore, auth, anthropicKey,
-		"https://api.anthropic.com", defaultModel, client.Catalog(), logger)
+		messagesUpstreamURL(opts.Providers), defaultModel, client.Catalog(), logger)
 	// The SAME registry the client's senders were built from, so a turn it
 	// prices is the turn they sent: without it costFields looks a
 	// provider-local id up raw, and a Responses-kind model's row (recorded bare,
@@ -609,6 +609,32 @@ func resolveDefaultModel(cfg Config) string {
 }
 
 // providersOrDefault returns set when non-nil, otherwise providers.Default().
+// anthropicDefaultBaseURL is the Messages face's upstream when the operator
+// has not declared one.
+const anthropicDefaultBaseURL = "https://api.anthropic.com"
+
+// messagesUpstreamURL is the base URL the proxy face forwards /v1/messages to:
+// the configured "anthropic" provider's base_url when it is set, and the
+// public Anthropic API otherwise.
+//
+// This face was the ONE anthropic path that ignored base_url: every sender
+// honours it (llm.SenderForKey), so an operator pointing [providers.anthropic]
+// at an Anthropic-compatible endpoint — a Fireworks-style gateway, a local
+// stand-in — got that endpoint for fundi children and api.anthropic.com here,
+// on the face every claude child talks through. One provider-config path
+// decides both now, so a declared base_url cannot mean two things in one
+// daemon.
+//
+// set is the operator's registry (nil = the built-in defaults, whose anthropic
+// entry declares no base_url), so an operator who declares none sees exactly
+// the URL they saw before.
+func messagesUpstreamURL(set *providers.Set) string {
+	if p, ok := providersOrDefault(set).Get("anthropic"); ok && p.BaseURL != "" {
+		return p.BaseURL
+	}
+	return anthropicDefaultBaseURL
+}
+
 func providersOrDefault(set *providers.Set) *providers.Set {
 	if set != nil {
 		return set

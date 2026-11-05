@@ -210,6 +210,14 @@ check more permissive. And the `rafiki mcp login` callback listener on
 destination the daemon contacts, and it does not let any outbound request reach
 loopback.
 
+## Anthropic-compatible providers
+
+A `[providers.anthropic]` entry may declare a `base_url` pointing at any
+Anthropic Messages API-compatible endpoint. It governs the **proxy face**
+(`/v1/messages`, and therefore every daemon-managed `claude` child, which talks
+to that face) as well as the in-process senders; with no `base_url` declared the
+face forwards to `https://api.anthropic.com` exactly as before.
+
 ## OpenAI Responses providers
 
 Besides `anthropic`, `anthropic-openrouter` and the generic `openai` kind (Chat
