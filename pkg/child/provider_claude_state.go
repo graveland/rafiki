@@ -200,10 +200,10 @@ type claudeStreamFrame struct {
 	TotalCostUSD float64      `json:"total_cost_usd,omitempty"`
 	Usage        *claudeUsage `json:"usage,omitempty"`
 	Message      *struct {
-		ID      string               `json:"id"`
-		Role    string               `json:"role"`
-		Model   string               `json:"model,omitempty"`
-		Content []claudeContentBlock `json:"content"`
+		ID      string        `json:"id"`
+		Role    string        `json:"role"`
+		Model   string        `json:"model,omitempty"`
+		Content claudeContent `json:"content"`
 	} `json:"message,omitempty"`
 	// CompactMetadata is present on system/compact_boundary frames (Claude
 	// Code's own compaction having just run). Absent otherwise.
@@ -264,6 +264,35 @@ func (p *claudeProvider) GatedMessageID(line []byte) string {
 		return ""
 	}
 	return f.Message.ID
+}
+
+// claudeContent is a message's content, which claude writes in TWO shapes:
+// a block ARRAY (an assistant message, a tool result) and a plain STRING — the
+// shape of the acceptance echo of a text-only user message, measured on
+// 2.1.290:
+//
+//	{"type":"user","message":{"role":"user","content":"…"},"isReplay":true,…}
+//
+// Decoding it as []claudeContentBlock fails the WHOLE frame for that ordinary
+// echo, and a frame that fails to decode is a delivery the daemon never
+// acknowledges — so the two shapes are normalised here, once, for every
+// decoder in this package.
+type claudeContent []claudeContentBlock
+
+func (c *claudeContent) UnmarshalJSON(b []byte) error {
+	var blocks []claudeContentBlock
+	if err := json.Unmarshal(b, &blocks); err == nil {
+		*c = blocks
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		// null, a number, an object: nothing in this package reads those.
+		*c = nil
+		return nil
+	}
+	*c = claudeContent{{Type: "text", Text: s}}
+	return nil
 }
 
 // claudeContentBlock is one assistant/user content block in claude's wire shape.

@@ -14,6 +14,41 @@ Two fixtures: `startup_and_turn.jsonl` (text-only turn) and `turn_with_tool.json
 **The committed fixtures are scrubbed** — see "Scrubbing" at the bottom before you
 regenerate them.
 
+## `delivery_echo.jsonl` — a REAL recording (not scrubbed)
+
+The four acceptance echoes a **Claude Code 2.1.290** session actually wrote,
+captured 2026-11-05 through `rafikid proxy record --exec` with
+`test/integration/fixtures/claudedriver` driving the session:
+
+```
+claude -p --input-format stream-json --output-format stream-json --verbose \
+       --replay-user-messages --model haiku
+```
+
+Prompts were `Reply with exactly one word: …` and the session was dull on
+purpose; nothing machine-identifying survives in these four lines (a session id,
+uuids and timestamps are capture artefacts, per "Scrubbing" below).
+
+What it pins, and why it is not synthetic:
+
+- **`message.content` is a plain STRING.** The daemon writes a text prompt as
+  `{"content":"…"}`, and the binary echoes the message it was handed, string
+  and all. Every hand-written fixture in `provider_claude_delivery_test.go` used
+  a block ARRAY, so the parser — which decoded content as `[]block` — failed the
+  whole frame and acknowledged nothing against a real binary while every
+  synthetic test passed. `claudeContent` in `provider_claude_state.go` now
+  accepts both shapes; `TestClaudeDeliveryParsesTheRecordedEchoShape` pins this
+  file.
+- **Two identical sends carry two different uuids.** Lines 3 and 4 are the same
+  text with `00061278-…` and `cb0c3c77-…`: identity is the uuid, never the text.
+- **`parent_tool_use_id` is `null`, not absent**, and the echoed `uuid` is
+  exactly the one the daemon sent.
+
+The matching HTTP corpus (`testdata/claude-capture-delivery/`) is the same
+session's requests and responses: it shows the mid-turn message arriving WRAPPED
+("The user sent a new message while you were working: …"), which is why a
+text-matched acknowledgement retires the wrong row.
+
 ## Answers to the spike questions
 
 1. **Does `system/init` appear before any user message is sent?**

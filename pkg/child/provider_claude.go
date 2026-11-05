@@ -55,10 +55,11 @@ type claudeFrame struct {
 	IsReplay bool   `json:"isReplay,omitempty"`
 	// ParentToolUseID names the Task tool call that produced a subagent frame.
 	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
-	Message         *struct {
-		Content []struct {
-			Type string `json:"type"`
-		} `json:"content"`
+	// Content is decoded through claudeContent so BOTH wire shapes work: an
+	// array (an assistant message, a tool result) and the plain STRING a
+	// text-only echo carries. See claudeContent's doc comment.
+	Message *struct {
+		Content claudeContent `json:"content"`
 	} `json:"message,omitempty"`
 }
 

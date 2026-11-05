@@ -5,10 +5,21 @@ package child
 // from a real claude binary. The real recordings live in testdata/claude (see
 // its NOTES.md) and proving the flag against an actual binary belongs to the
 // integration task — these fixtures cannot.
+//
+// ONE exception, and it is the reason this file has a regression test at all:
+// TestClaudeDeliveryParsesTheRecordedEchoShape carries a VERBATIM line from a
+// Claude Code 2.1.290 session (testdata/claude-capture-delivery). Every
+// hand-written frame here had a block-ARRAY content, and the binary sends a
+// plain STRING for a text-only message — so the hand-written fixtures all
+// passed while the real echo failed to decode at all. Never add a shape to
+// this file that a recording has not confirmed.
 
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,6 +154,13 @@ func TestClaudeDeliveryParseAcknowledgesOnlyAValidReplayUserFrame(t *testing.T) 
 			line: `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"uuid":"` + uuid + `","isReplay":true}`,
 			want: uuid,
 		},
+		// The shape the real binary writes for a text-only message: content is
+		// a plain string, not a block array. See
+		// TestClaudeDeliveryParsesTheRecordedEchoShape.
+		"replay text as a plain string": {
+			line: `{"type":"user","message":{"role":"user","content":"hi"},"uuid":"` + uuid + `","isReplay":true}`,
+			want: uuid,
+		},
 		"replay tool result": {
 			line: `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]},"uuid":"` + uuid + `","isReplay":true}`,
 			want: uuid,
@@ -186,6 +204,93 @@ func TestClaudeDeliveryParseAcknowledgesOnlyAValidReplayUserFrame(t *testing.T) 
 		}
 		c.Eq(tc.want, got, "%s: acknowledgement uuid for %s; got", name, tc.line)
 	}
+}
+
+// TestClaudeDeliveryParsesTheRecordedEchoShape pins the ONE frame shape a real
+// binary actually sends, verbatim from a Claude Code 2.1.290 session recorded
+// through `rafikid proxy record` (testdata/claude-capture-delivery):
+//
+//	{"type":"user","message":{"role":"user","content":"Reply with exactly one
+//	 word: twice"},"session_id":"…","parent_tool_use_id":null,
+//	 "uuid":"00061278-…","timestamp":"…","isReplay":true}
+//
+// content is a STRING here, because that is what the daemon wrote on stdin and
+// the binary echoes the message it was handed. Decoding it as a block array
+// fails the whole frame, and a frame that fails to decode is a delivery nobody
+// acknowledges — the feature would have shipped dead against the real binary
+// while every hand-written fixture passed.
+func TestClaudeDeliveryParsesTheRecordedEchoShape(t *testing.T) {
+	c := assert.NewAborting(t)
+	const (
+		uuid = "00061278-b851-494a-b7b3-6ab922096f62"
+		line = `{"type":"user","message":{"role":"user","content":"Reply with exactly one word: twice"},"session_id":"f274f8a6-308e-458a-a60d-3f7ef03e5464","parent_tool_use_id":null,"uuid":"` + uuid + `","timestamp":"2026-11-05T04:40:54.971Z","isReplay":true}`
+	)
+
+	res := ClaudeProvider{}.Parse([]byte(line))
+	var got []string
+	for _, e := range res.Events {
+		if e.Type == "user_replay" {
+			got = append(got, e.DeliveryUUID)
+		}
+	}
+	c.EqDeep([]string{uuid}, got, "the recorded echo must yield exactly one acknowledgement")
+
+	// The same line through the stateful translator: an echo is a receipt, not
+	// content, so nothing may reach the bus from it.
+	c.EqDeep(0, len(newClaudeProvider().BusFrames([]byte(line), time.Now().UnixMilli())),
+		"the recorded echo produced bus frames")
+}
+
+// TestClaudeDeliveryReplaysTheRecordedEchoFixture runs the four acceptance
+// echoes a REAL Claude Code 2.1.290 session wrote (testdata/claude/
+// delivery_echo.jsonl, provenance in its NOTES.md) through the parser and the
+// stateful translator.
+//
+// It is the only test here backed by a recording rather than by a hand-written
+// frame, and it exists because the hand-written ones were all the same shape:
+// the real echo carries a STRING content, and the parser used to drop the whole
+// frame. Two of these four lines are the SAME text with different uuids, which
+// is the property the design rests on — identity is the uuid, never the text.
+func TestClaudeDeliveryReplaysTheRecordedEchoFixture(t *testing.T) {
+	c := assert.NewAborting(t)
+	raw, err := os.ReadFile(filepath.Join("testdata", "claude", "delivery_echo.jsonl"))
+	c.NoError(err, "read the recorded echo fixture")
+
+	var (
+		uuids []string
+		texts []string
+	)
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		res := ClaudeProvider{}.Parse([]byte(line))
+		c.EqDeep(1, len(res.Events), "one frame produced %d events; want exactly the acknowledgement", len(res.Events))
+		c.Eq("user_replay", res.Events[0].Type, "event type")
+		uuids = append(uuids, res.Events[0].DeliveryUUID)
+
+		var f struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		}
+		c.NoError(json.Unmarshal([]byte(line), &f), "decode the recorded line")
+		texts = append(texts, f.Message.Content)
+
+		c.EqDeep(0, len(newClaudeProvider().BusFrames([]byte(line), time.Now().UnixMilli())),
+			"a recorded echo produced bus frames")
+	}
+
+	c.EqDeep([]string{
+		"f540deea-d016-4b57-bb51-ee8722ba078b",
+		"ef58e126-fde1-494f-a1cb-3110a57487c0",
+		"00061278-b851-494a-b7b3-6ab922096f62",
+		"cb0c3c77-82c5-460a-9d60-91dc272a287d",
+	}, uuids, "the recorded acknowledgements, in order")
+
+	// The two deliberate repeats: identical text, distinct uuids.
+	c.Eq(texts[2], texts[3], "the recorded fixture's last two sends are the same text")
+	c.NotEq(uuids[2], uuids[3], "the two identical sends share a uuid; identity must be the uuid, not the text")
 }
 
 // A replay echo is a receipt, not content. Neither translator may turn it into
