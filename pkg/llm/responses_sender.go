@@ -260,8 +260,8 @@ func (s *responsesSender) Stream(ctx context.Context, req *msg.Request, opts msg
 // reaching the same answer.
 func (s *responsesSender) post(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (*http.Request, *http.Response, error) {
 	if opts.SessionID == "" {
-		// Session identity also supplies the default prompt_cache_key when no
-		// independent cache routing key is set.
+		// The session id rides the body (prompt_cache_key) as well as the header,
+		// so it is resolved before the body is encoded.
 		opts.SessionID, _ = sessionIDFromContext(ctx)
 	}
 	sessionID := opts.SessionID

@@ -12,7 +12,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/msg"
-	"go.graveland.dev/rafiki/pkg/msg/responses"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -31,7 +30,7 @@ func (s *cacheRecordingSender) Stream(ctx context.Context, req *msg.Request, opt
 	return s.Sender.Stream(ctx, req, opts)
 }
 
-func TestForkCacheKeySurvivesEngineRebuild(t *testing.T) {
+func TestForkRoutingIDSurvivesEngineRebuild(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
 			c := assert.NewAborting(t)
@@ -63,29 +62,23 @@ func TestForkCacheKeySurvivesEngineRebuild(t *testing.T) {
 					c.NoError(err)
 				}
 				c.Len(sender.options, 1)
-				c.Eq(eng.conv.ID, eng.State().SessionID)
-				c.Eq(eng.conv.ID, sender.options[0].SessionID, "fork routing must not change session headers")
+				c.Eq(eng.conv.ID, eng.State().SessionID, "the engine's own session stays its conversation")
 				return eng, sender.options[0]
 			}
 			ref := "fork-cache-" + sourceID
 			first, a := build("claude-x", ref, node)
 			sibling, b := build("claude-x", ref+"-sibling", node)
 			c.NotEq(first.conv.ID, sibling.conv.ID)
-			c.NotEq(a.SessionID, b.SessionID)
-			c.NotEq("", a.CacheKey)
 			sum := sha256.Sum256([]byte(node + "\x00claude-x"))
-			c.Eq(fmt.Sprintf("fork-%x", sum[:16]), a.CacheKey)
-			c.True(len(a.CacheKey) <= 64)
-			c.Eq(a.CacheKey, b.CacheKey)
+			c.Eq(fmt.Sprintf("fork-%x", sum[:16]), a.SessionID, "a fork sends the shared routing id")
+			c.Eq(a.SessionID, b.SessionID, "siblings of one node on one model share it")
 			_, other := build("claude-y", ref+"-other-model", node)
-			c.NotEq(a.CacheKey, other.CacheKey)
+			c.NotEq(a.SessionID, other.SessionID, "another model routes on its own")
 			rebuilt, resumed := build("claude-x", ref, "")
 			c.Eq(first.conv.ID, rebuilt.conv.ID, "rebuild must reopen the stored fork")
-			c.Eq(a.CacheKey, resumed.CacheKey, "rebuild has no spawn-time fork option")
+			c.Eq(a.SessionID, resumed.SessionID, "rebuild has no spawn-time fork option")
 			plain, normal := build("claude-x", ref+"-plain", "")
-			body, err := (responses.Codec{Mode: responses.ModeAPI}).Encode(&msg.Request{Model: "gpt-test", MaxTokens: 100}, normal)
-			c.NoError(err)
-			c.True(strings.Contains(string(body), `"prompt_cache_key":"`+plain.conv.ID+`"`), "non-fork routing keeps the conversation id")
+			c.Eq(plain.conv.ID, normal.SessionID, "a non-fork sends its own conversation id")
 		})
 	}
 }

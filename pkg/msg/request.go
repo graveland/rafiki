@@ -162,7 +162,6 @@ func (r *Response) StopReasonWire() string {
 // EncodeOptions are the per-call knobs a codec's Encode honours.
 type EncodeOptions struct {
 	Stream    bool
-	SessionID string         // per-conversation session identity
-	CacheKey  string         // Responses prompt_cache_key; empty falls back to SessionID
+	SessionID string         // the Responses codec puts it in prompt_cache_key; others ignore it
 	Extra     map[string]any // top-level body fields merged after encoding (OpenRouter "provider", provider extras)
 }

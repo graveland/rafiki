@@ -25,19 +25,34 @@ type Sender interface {
 	Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error)
 }
 
-// forkCacheNodeKey carries the durable fork source, independent of session identity.
+// forkCacheNodeKey carries a forked conversation's source node, read from its
+// durable fork edge when the conversation is opened.
 type forkCacheNodeKey struct{}
 
-// requestEncodeOptions scopes fork cache routing to the model actually sent.
-// A 128-bit hash suffix keeps the key below the provider's 64-character cap.
-func requestEncodeOptions(ctx context.Context, req *msg.Request, extra map[string]any) msg.EncodeOptions {
-	sessionID, _ := sessionIDFromContext(ctx)
-	opts := msg.EncodeOptions{SessionID: sessionID, Extra: extra}
-	if node, _ := ctx.Value(forkCacheNodeKey{}).(string); node != "" {
-		sum := sha256.Sum256([]byte(node + "\x00" + req.Model))
-		opts.CacheKey = fmt.Sprintf("fork-%x", sum[:16])
+// routeFork returns ctx carrying the session id a request sends on the wire.
+// Every wire use of it is sticky routing for a provider's prompt cache:
+// OpenRouter's and the Anthropic kinds' session header, the ChatGPT
+// session-id header (which that backend routes its cache on) and the turn
+// state remembered under it, and the Responses prompt_cache_key. Forks of one
+// source node send a byte-identical prefix, so a forked conversation sends a
+// session id shared by every fork of that node on that model, and siblings
+// reach one cache. The model actually sent is hashed in, so a failover model
+// routes on its own; the 128-bit suffix keeps the id under prompt_cache_key's
+// 64-character cap. A non-fork keeps its own conversation id.
+func routeFork(ctx context.Context, req *msg.Request) context.Context {
+	node, _ := ctx.Value(forkCacheNodeKey{}).(string)
+	if node == "" {
+		return ctx
 	}
-	return opts
+	sum := sha256.Sum256([]byte(node + "\x00" + req.Model))
+	return WithSessionID(ctx, fmt.Sprintf("fork-%x", sum[:16]))
+}
+
+// encodeOptions carries ctx's session id into EncodeOptions for the senders
+// that put it in the request body rather than a header.
+func encodeOptions(ctx context.Context, extra map[string]any) msg.EncodeOptions {
+	sessionID, _ := sessionIDFromContext(ctx)
+	return msg.EncodeOptions{SessionID: sessionID, Extra: extra}
 }
 
 // sessionIDContextKey is the context key WithSessionID writes and
