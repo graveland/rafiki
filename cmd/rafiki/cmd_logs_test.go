@@ -743,6 +743,17 @@ func TestCompleteLogsOffersChildren(t *testing.T) {
 // The registered handler is prefixCompletions over allNativeTypes, so the
 // candidates are asserted through it directly (cobra keeps its completion
 // registry private).
+//
+// The retired names are listed EXPLICITLY rather than matched by prefix:
+// `message_delivered` is native vocabulary (a durable acceptance receipt), so
+// a `message_` prefix rule would ban a name this client offers on purpose. The
+// list is the pi AgentSessionEvent vocabulary that did not survive the Connect
+// migration — the message triple, the agent brackets, and the start/end pairs
+// native events replaced with one boundary (`compaction_boundary`, `retry`,
+// `operator_state`). Names that DID survive (`turn_start`, `turn_end`,
+// `tool_execution_start`, `tool_execution_end`) are native and are offered,
+// as is `content_block_delta` — the one ephemeral native type, which
+// resolveTypeFilter accepts and bumps the tier for.
 func TestCompleteTypesOffersNativeNames(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	for _, newCmd := range []func() *cobra.Command{newLogsCmd, newTailCmd} {
@@ -750,7 +761,27 @@ func TestCompleteTypesOffersNativeNames(t *testing.T) {
 	}
 	got := prefixCompletions(allNativeTypes(), "agent_")
 	ck.True(containsCandidate(got, "agent_status"), "--types candidates %v missing agent_status", got)
-	for _, c := range allNativeTypes() {
-		ck.False(strings.HasPrefix(c, "message_"), "--types candidate %q is framed-era vocabulary", c)
+
+	// A receipt is native vocabulary: it completes under its own prefix, which
+	// is what fails if the type ever loses its name classification.
+	got = prefixCompletions(allNativeTypes(), "message_")
+	ck.True(containsCandidate(got, "message_delivered"), "--types candidates %v missing message_delivered", got)
+
+	staleFrames := []string{
+		// pi's AgentSessionEvent frames and the state-machine vocabulary built
+		// on them: the message triple, the agent brackets, and the start/end
+		// pairs native events replaced with one boundary (compaction_boundary,
+		// retry, operator_state).
+		"agent_start", "agent_end", "agent_settled",
+		"message_start", "message_update", "message_end",
+		"compaction_start", "compaction_end",
+		"batch_wait_start", "batch_wait_end",
+		"auto_retry_start",
+		"extension_ui_request", "extension_error",
+		"response",
+	}
+	candidates := allNativeTypes()
+	for _, stale := range staleFrames {
+		ck.False(containsCandidate(candidates, stale), "--types candidate %q is framed-era vocabulary, not a native event type", stale)
 	}
 }
