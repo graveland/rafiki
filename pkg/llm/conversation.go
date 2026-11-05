@@ -62,10 +62,19 @@ func DefaultCachePolicy() CachePolicy {
 // safe for concurrent use (two concurrent sends would each move the head, and
 // the capture and turn ordinals assume one writer).
 type Conversation struct {
-	client        *Client
-	ID            string
-	cfg           convConfig
-	forkCacheNode string // immutable source node read from durable conversation state
+	client *Client
+	ID     string
+	cfg    convConfig
+	// forkNode is the source node of the conversation's durable fork edge, ""
+	// for a non-fork. It never changes once the conversation exists.
+	forkNode string
+	// routeNode is forkNode while the working path still runs through it (the
+	// request begins with the prefix the fork's siblings share), else "".
+	// routeFor sets it from the working set each request is built from, so a
+	// compaction or clear, which restarts the path at a fresh root, stops a fork
+	// routing with siblings whose prefix it no longer sends (routeFork,
+	// sender.go).
+	routeNode string
 
 	// usedTokens is the total token count the last successful response
 	// reported (input + cache read + cache creation + output); 0 means "not
@@ -300,7 +309,7 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	if err != nil {
 		return nil, fmt.Errorf("llm: read conversation state: %w", err)
 	}
-	return &Conversation{client: c, ID: convID, cfg: cfg, forkCacheNode: state.ForkFromID}, nil
+	return &Conversation{client: c, ID: convID, cfg: cfg, forkNode: state.ForkFromID}, nil
 }
 
 // UserText builds a single-text-block user message payload for Send.
@@ -523,6 +532,7 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*ms
 			if err != nil {
 				return 0, nil, nil, "", false
 			}
+			conv.routeFor(h)
 			msgs, rowStart, err := mergeForRequestRows(h, newReplayContext(conv.ID, scfg.tools))
 			if err != nil {
 				return 0, nil, nil, "", false
@@ -531,6 +541,7 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*ms
 		}
 	}
 
+	conv.routeFor(history)
 	msgs, rowStart, err := mergeForRequestRows(history, newReplayContext(conv.ID, scfg.tools))
 	if err != nil {
 		return nil, fmt.Errorf("llm: %w", err)
@@ -615,6 +626,23 @@ func (conv *Conversation) handle() *convpkg.Handle {
 // GetHistory/rafiki logs want that.
 func (conv *Conversation) loadHistory(ctx context.Context) ([]*convpkg.Node, error) {
 	return conv.handle().Working(ctx)
+}
+
+// routeFor records whether the request about to be built from history still
+// begins with the fork's borrowed prefix (Conversation.routeNode). Only the send
+// paths call it, on the goroutine that owns the Conversation; History, which
+// other goroutines read, never writes it.
+func (conv *Conversation) routeFor(history []*convpkg.Node) {
+	conv.routeNode = ""
+	if conv.forkNode == "" {
+		return
+	}
+	for _, n := range history {
+		if n.ID == conv.forkNode {
+			conv.routeNode = conv.forkNode
+			return
+		}
+	}
 }
 
 // appendMessage writes one message as the next node under the conversation's
@@ -861,7 +889,7 @@ func (conv *Conversation) usedForCheck(history []*convpkg.Node) int {
 // attempt; see sendStreaming's doc for why the trim-retry loop treats that as
 // an absolute "never retry" signal.
 func (conv *Conversation) sendAttempt(ctx context.Context, meta SendMeta, req *msg.Request, sink streamSink) (resp *msg.Response, delivered bool, err error) {
-	ctx = context.WithValue(ctx, forkCacheNodeKey{}, conv.forkCacheNode)
+	ctx = context.WithValue(ctx, forkCacheNodeKey{}, conv.routeNode)
 	if !sink.active() {
 		resp, err = conv.client.send(ctx, meta, req, nil)
 		return resp, false, err

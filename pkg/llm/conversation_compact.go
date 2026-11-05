@@ -29,6 +29,9 @@ import (
 // no partial state; an End event is still emitted so observers stay balanced
 // with the Start event (with zero tokens on failure).
 func (conv *Conversation) compact(ctx context.Context, span trace.Span, history []*convpkg.Node, scfg sendConfig, trigger, instructions string) (bool, error) {
+	// The summary request carries the pre-compaction history, so it routes as
+	// that history does; the request after it is built from the fresh root.
+	conv.routeFor(history)
 	p := *conv.cfg.compaction
 	if conv.onCompact != nil {
 		conv.onCompact(CompactionEvent{Phase: CompactionStart, Trigger: trigger})

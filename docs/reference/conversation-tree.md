@@ -483,18 +483,25 @@ cached for the next.
 
 ## Forks
 
-A forked conversation sends a routing id shared by every fork of the same source
-node on the same model, wherever a session id reaches the wire: a provider's
-session header (OpenRouter's `x-session-id`, `session_header`), the ChatGPT
-`session-id` header and the turn state remembered under it, and the Responses
-`prompt_cache_key`. Each of those exists for sticky routing to a prompt cache,
-and siblings send a byte-identical prefix, so sharing the id is what lets them
-read one cache; the ChatGPT backend routes its cache on `session-id` alone. The
-id is `fork-` plus the first 32 hex characters of SHA-256(source node id + NUL +
-model id), so a failover model routes on its own. It is read from the durable
-fork edge when the conversation opens, so it survives a resume. A non-fork sends
-its own conversation id. Everything off the wire (the engine's session id,
-capture) keeps the conversation's own id (`routeFork`, `pkg/llm/sender.go`).
+While a forked conversation's working path still runs through its source node,
+its requests send a routing id shared by every fork of that node on the same
+model, wherever a session id reaches the wire: a provider's session header
+(OpenRouter's `x-session-id`, `session_header`), the ChatGPT `session-id` header
+and the turn state remembered under it, and the Responses `prompt_cache_key`.
+Each of those exists for sticky routing to a prompt cache, and such requests
+begin with the history the siblings borrow, so sharing the id is what lets them
+read one cache (siblings with different system prompts or tools share the route
+but not the cached prefix); the ChatGPT backend routes its cache on `session-id`
+alone. The id is `fork-` plus the first 32 hex characters of SHA-256(source node
+id + NUL + model id), so a failover model routes on its own. Whether the path
+runs through the node is re-read with every working set
+(`Conversation.loadHistory`), from the durable fork edge, so it survives a
+resume, and a compaction or `/clear`, which restarts the path at a fresh root,
+returns the fork to its own conversation id, as a non-fork always sends. Batch
+requests carry no session id. The id changes what is sent, not whom it is
+attributed to: raw request capture records the shared id as it went out, under
+the conversation's own id, and the engine's session id is the conversation's
+(`routeFork`, `pkg/llm/sender.go`).
 
 A fork is a conversation that **borrows** another's history instead of copying
 it. The link is `conversation.fork_from` (migration 0065): one node id, written

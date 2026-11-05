@@ -25,8 +25,8 @@ type Sender interface {
 	Stream(ctx context.Context, req *msg.Request, opts msg.EncodeOptions) (msg.StreamDecoder, error)
 }
 
-// forkCacheNodeKey carries a forked conversation's source node, read from its
-// durable fork edge when the conversation is opened.
+// forkCacheNodeKey carries a forked conversation's source node while the
+// request's working path still runs through it (Conversation.routeNode).
 type forkCacheNodeKey struct{}
 
 // routeFork returns ctx carrying the session id a request sends on the wire.
@@ -34,8 +34,9 @@ type forkCacheNodeKey struct{}
 // OpenRouter's and the Anthropic kinds' session header, the ChatGPT
 // session-id header (which that backend routes its cache on) and the turn
 // state remembered under it, and the Responses prompt_cache_key. Forks of one
-// source node send a byte-identical prefix, so a forked conversation sends a
-// session id shared by every fork of that node on that model, and siblings
+// source node begin with the same borrowed history, so a forked conversation
+// whose request still carries it sends a session id shared by every fork of
+// that node on that model, and siblings with the same system prompt and tools
 // reach one cache. The model actually sent is hashed in, so a failover model
 // routes on its own; the 128-bit suffix keeps the id under prompt_cache_key's
 // 64-character cap. A non-fork keeps its own conversation id.
