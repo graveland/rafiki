@@ -131,45 +131,95 @@ func claudeSwitchCockpit(t *testing.T, model string, exited bool) *Cockpit {
 	return c
 }
 
-// A switch of a live claude child between Anthropic ids restarts it in place;
-// a clone, an exited source, a launch-registered model and any destination
-// outside Claude Code's own ids all take the fork.
-func TestRestartableSource(t *testing.T) {
+// A claude-kind switch restarts the live child in place between Anthropic ids;
+// every other pairing says why not, naming the way out, instead of quietly
+// forking into another runtime.
+func TestRestartPlan(t *testing.T) {
 	sw := func(model string) spawnParams {
-		return spawnParams{model: model, switchSource: "c_src", forkFrom: &protocol.ForkFrom{ChildID: "c_src"}}
+		return spawnParams{model: model, kind: protocol.KindClaude, switchSource: "c_src", forkFrom: &protocol.ForkFrom{ChildID: "c_src"}}
 	}
 	for name, tc := range map[string]struct {
 		srcModel string
 		exited   bool
 		p        spawnParams
-		want     string
+		wantWhy  string
 	}{
-		"anthropic to anthropic":     {"claude-opus-5", false, sw("anthropic/claude-sonnet-5"), "c_src"},
-		"bare id":                    {"claude-opus-5", false, sw("claude-sonnet-5"), "c_src"},
-		"to another provider forks":  {"claude-opus-5", false, sw("openrouter/z-ai/glm-5.3-flash"), ""},
-		"to a tier alias forks":      {"claude-opus-5", false, sw("anthropic/opus-latest"), ""},
-		"from a non-anthropic forks": {"z-ai/glm-5.3-flash", false, sw("claude-sonnet-5"), ""},
-		"exited source forks":        {"claude-opus-5", true, sw("claude-sonnet-5"), ""},
-		"clone forks": {"claude-opus-5", false, func() spawnParams {
+		"anthropic to anthropic": {"claude-opus-5", false, sw("anthropic/claude-sonnet-5"), ""},
+		"bare id":                {"claude-opus-5", false, sw("claude-sonnet-5"), ""},
+		"to another provider":    {"claude-opus-5", false, sw("openrouter/z-ai/glm-5.3-flash"), "set kind to fundi"},
+		"to a tier alias":        {"claude-opus-5", false, sw("anthropic/opus-latest"), "set kind to fundi"},
+		"from a non-anthropic":   {"z-ai/glm-5.3-flash", false, sw("claude-sonnet-5"), "set kind to fundi"},
+		"exited source":          {"claude-opus-5", true, sw("claude-sonnet-5"), "has exited"},
+		"clone": {"claude-opus-5", false, func() spawnParams {
 			p := sw("claude-sonnet-5")
 			p.keepSource = true
 			return p
-		}(), ""},
-		"plain fork forks": {"claude-opus-5", false, spawnParams{model: "claude-sonnet-5"}, ""},
+		}(), "a clone is a fork"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := claudeSwitchCockpit(t, tc.srcModel, tc.exited)
-			assert.NewCollecting(t).Eq(tc.want, c.restartableSource(tc.p), "restartableSource")
+			src, why := c.restartPlan(tc.p)
+			ck := assert.NewCollecting(t)
+			if tc.wantWhy == "" {
+				ck.Eq("c_src", src, "the child to restart")
+				ck.Eq("", why, "no refusal")
+				return
+			}
+			ck.Eq("", src, "nothing to restart")
+			ck.StrContains(why, tc.wantWhy, "the refusal names the way out")
 		})
 	}
 }
 
-func TestRestartableSourceIsNeverAFundiChild(t *testing.T) {
-	c := switchFormFor(t, "scout")
-	p, problem := c.form.params(c.currency)
+// A claude source's switch form opens on kind claude with the row unlocked; a
+// fundi source's stays locked to its fork.
+func TestSwitchFormKindRow(t *testing.T) {
 	ck := assert.NewCollecting(t)
+	c := claudeSwitchCockpit(t, "claude-opus-5", false)
+	c.selected = "c_src"
+	c.switchModelSelected()
+	ck.Require().NotNil(c.form, "form")
+	ck.Eq(protocol.KindClaude, c.form.kind(), "a claude source keeps claude by default")
+	ck.False(c.form.kindLocked(), "the kind row is a choice")
+	ck.Eq("claude-opus-5", c.form.inputs[fieldModel].Value(), "model prefilled")
+
+	// Flipping to fundi blanks the model (the source's id belongs to claude),
+	// and flipping back restores it; the rest of the prefill is untouched.
+	c.form.inputs[fieldName].SetValue("scout")
+	c.form.cycleKind(+1)
+	c.kindChanged()
+	ck.Eq(protocol.KindFundi, c.form.kind(), "kind")
+	ck.Eq("", c.form.inputs[fieldModel].Value(), "the claude id is not a fundi model")
+	ck.Eq("scout", c.form.inputs[fieldName].Value(), "name kept")
+	c.form.cycleKind(+1)
+	c.kindChanged()
+	ck.Eq("claude-opus-5", c.form.inputs[fieldModel].Value(), "model restored on the source's own kind")
+
+	ck.True(switchFormFor(t, "scout").form.kindLocked(), "a fundi source's fork is fundi only")
+}
+
+// Kind claude with a model a restart cannot carry stays in the form with the
+// reason; flipping the kind to fundi forks it, as before.
+func TestClaudeSwitchToOpenRouterNeedsFundiKind(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeSwitchCockpit(t, "claude-opus-5", false)
+	client := &sendClient{}
+	c.client = client
+	c.selected = "c_src"
+	c.switchModelSelected()
+	c.form.inputs[fieldModel].SetValue("openrouter/z-ai/glm-5.3-flash")
+
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	ck.Nil(cmd, "nothing is sent")
+	ck.Require().NotNil(c.form, "the form stays open")
+	ck.StrContains(c.form.err, "set kind to fundi", "reason")
+	ck.Len(client.sent, 0, "no /model")
+
+	c.form.setKind(protocol.KindFundi)
+	p, problem := c.form.params(c.currency)
 	ck.Eq("", problem, "params")
-	ck.Eq("", c.restartableSource(p), "a fundi source forks")
+	ck.Eq(protocol.KindFundi, p.kind, "the fork runs as fundi")
+	ck.Eq("c_src", p.tailSource(), "and replaces the source")
 }
 
 type sendClient struct {

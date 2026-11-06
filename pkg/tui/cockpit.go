@@ -861,6 +861,12 @@ func (c *Cockpit) switchModelOf(id, model string) tea.Cmd {
 	c.form.setForkFrom(id)
 	c.form.switchSource = id
 	if n, ok := c.rail.Get(id); ok {
+		c.form.sourceKind = n.Kind
+		if n.Kind == protocol.KindClaude {
+			// Stay on claude by default: it restarts in place. The kind row is
+			// open so a fork onto any other model is one keystroke away.
+			c.form.setKind(protocol.KindClaude)
+		}
 		c.form.sourceName = strings.TrimSpace(n.Name)
 		c.form.sourceModel = n.Model
 		c.form.inputs[fieldName].SetValue(c.form.sourceName)

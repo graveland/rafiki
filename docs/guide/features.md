@@ -98,6 +98,9 @@
   the source's name filled in (`/model [id]` in the input box opens the same
   form): leave the name and the fork replaces the source; change or clear it
   and the fork is a clone under the new name while the source keeps running.
+  A claude child's form opens on kind claude, which restarts it in place on
+  another Anthropic model (same child, same session); set the kind to fundi to
+  fork it onto any other model instead.
   `/model` is handled by the cockpit alone, so an agent cannot send it.
 - **Conversation review** — an LLM-driven pass over your own captured history
   that detects skill gaps and triages findings, on demand

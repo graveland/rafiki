@@ -134,6 +134,10 @@ type spawnForm struct {
 	// sourceModel is the model the switch form was opened on. A switch that
 	// keeps both the name and this model changes nothing and is refused.
 	sourceModel string
+	// sourceKind is the kind of the child a switch form was opened on. A
+	// claude source keeps its kind row: claude restarts it in place on another
+	// Anthropic model, fundi forks it onto anything.
+	sourceKind string
 
 	// submitted is the last request this form sent, kept so a SUCCESSFUL spawn
 	// can record exactly what went on the wire (the resolved kind and budget)
@@ -255,6 +259,13 @@ func (f *spawnForm) setForkFrom(childID string) {
 	}
 	f.forkFrom = &protocol.ForkFrom{ChildID: childID}
 	f.inputs[fieldName].SetValue("")
+}
+
+// kindLocked reports whether the kind row is a fixed fact rather than a
+// choice: a fork can only be fundi, except a claude source's switch, where
+// claude (restart in place) and fundi (fork) are both real answers.
+func (f *spawnForm) kindLocked() bool {
+	return f.forkFrom != nil && f.sourceKind != protocol.KindClaude
 }
 
 // branches reports whether a switch form has become a clone: the name row no
@@ -423,26 +434,27 @@ func (c *Cockpit) compactAskFor(p spawnParams) *compactAsk {
 	}
 }
 
-// restartableSource is the child to restart in place for this submit, or "".
-//
-// Only a SWITCH of a live claude child qualifies, and only when both its
-// current and the requested model are ones Claude Code accepts as a plain
-// --model (proxyenv.RestartModel / AnthropicModel); a clone, an exited source
-// and every other pairing take the fork. The daemon re-checks all of it, so a
-// stale rail can only cost a refused command, never a wrong restart.
-func (c *Cockpit) restartableSource(p spawnParams) string {
-	src := p.tailSource()
-	if src == "" {
-		return ""
+// restartPlan decides a claude-kind switch: the child to restart in place, or
+// the reason it cannot be (and what to change instead). Only a SWITCH of a
+// LIVE claude child qualifies, and only when both its current and the
+// requested model are ones Claude Code accepts as a plain --model
+// (proxyenv.RestartModel / AnthropicModel). The daemon re-checks all of it, so
+// a stale rail can only cost a refused command, never a wrong restart.
+func (c *Cockpit) restartPlan(p spawnParams) (src, why string) {
+	if p.keepSource {
+		return "", "a clone is a fork, and a fork runs as fundi: set kind to fundi, or keep the name to switch in place"
 	}
-	n, ok := c.rail.Get(src)
-	if !ok || n.Kind != protocol.KindClaude || n.Exited {
-		return ""
+	n, ok := c.rail.Get(p.tailSource())
+	if !ok || n.Exited {
+		return "", "this child has exited, so there is nothing to restart: set kind to fundi to fork it onto " + p.model
 	}
-	if _, ok := proxyenv.RestartModel(p.model); !ok || !proxyenv.AnthropicModel(n.Model) {
-		return ""
+	if _, ok := proxyenv.RestartModel(p.model); !ok {
+		return "", p.model + " is not a Claude model a running claude child can restart onto: pick a claude-* model, or set kind to fundi to fork onto it"
 	}
-	return src
+	if !proxyenv.AnthropicModel(n.Model) {
+		return "", "this child was launched on " + n.Model + ", which cannot be changed in place: set kind to fundi to fork it"
+	}
+	return n.ChildID, ""
 }
 
 // modelWindow is the context window the cockpit's cached catalog reports for a
@@ -470,12 +482,20 @@ func (f *spawnForm) moveFocus(delta int) {
 	next := (int(f.focus) + delta + int(spawnFieldCount)) % int(spawnFieldCount)
 	// A fork's kind row is LOCKED — only fundi can be forked to — so tabbing
 	// steps over it rather than parking on a row that cannot change.
-	if f.forkFrom != nil && spawnField(next) == fieldKind {
+	if f.kindLocked() && spawnField(next) == fieldKind {
 		next = (next + delta + int(spawnFieldCount)) % int(spawnFieldCount)
 	}
 	f.focus = spawnField(next)
 	if f.focus != fieldKind {
 		f.inputs[f.focus].Focus()
+	}
+}
+
+func (f *spawnForm) setKind(kind string) {
+	for i, k := range spawnKinds {
+		if k == kind {
+			f.kindIx = i
+		}
 	}
 }
 
@@ -528,9 +548,12 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 	case f.branches():
 		b.WriteString(styleRailFocused.Render("clone of " + f.switchSource +
 			" · it keeps running; carries its labels and parent"))
+	case f.switchSource != "" && f.sourceKind == protocol.KindClaude && f.kind() == protocol.KindClaude:
+		b.WriteString(styleRailFocused.Render("switch model of " + f.switchSource +
+			" · restarts it in place on another Anthropic model · kind fundi forks instead"))
 	case f.switchSource != "":
 		b.WriteString(styleRailFocused.Render("switch model of " + f.switchSource +
-			" · replaces it and keeps its name; carries its labels and parent · rename to clone instead"))
+			" · forks it and replaces it, keeping its name · carries its labels and parent · rename to clone instead"))
 	case f.forkFrom != nil:
 		b.WriteString(styleRailFocused.Render("fork of " + f.forkFrom.ChildID))
 	default:
@@ -566,7 +589,7 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 		b.WriteString(padTo(styleMeta.Render(label), fieldLabelWidth))
 
 		if i == fieldKind {
-			if f.forkFrom != nil {
+			if f.kindLocked() {
 				// Locked: the fork decides the kind, so the row renders state
 				// rather than offering a choice it will not honour.
 				b.WriteString(styleMeta.Render("(fundi — fork)"))
@@ -860,10 +883,17 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 				}
 			}
 		}
-		if src := c.restartableSource(p); src != "" {
-			// A claude child moving between Anthropic models does not need a
-			// fork: the daemon relaunches the same process on the new model
-			// and resumes its session, so the child keeps its id and history.
+		if f.sourceKind == protocol.KindClaude && p.kind == protocol.KindClaude && p.switchSource != "" {
+			// Kind claude on a claude source means "keep it claude": restart it
+			// in place, or say why that cannot be done rather than quietly
+			// forking it into a different runtime.
+			src, why := c.restartPlan(p)
+			if why != "" {
+				f.err = why
+				return c, nil
+			}
+			// The daemon relaunches the same process on the new model and
+			// resumes its session, so the child keeps its id and history.
 			c.form = nil
 			c.setNotice("restarting " + src + " on " + p.model + "…")
 			return c, c.sendTo(src, rafikiv1.SendMode_SEND_MODE_PROMPT, "/model "+p.model, nil)
@@ -952,6 +982,18 @@ func (c *Cockpit) rememberedCostField(kind string) string {
 // a claude child cannot run on whatever served the fundi one.
 func (c *Cockpit) kindChanged() tea.Cmd {
 	kind := c.form.kind()
+	if c.form.switchSource != "" {
+		// A switch keeps what the source supplied (executor, cap); only the
+		// model belongs to the kind, and the source's own is only valid there.
+		model := ""
+		if kind == c.form.sourceKind {
+			model = c.form.sourceModel
+		}
+		c.form.inputs[fieldModel].SetValue(model)
+		c.form.suggestCur = -1
+		c.form.refreshSuggestions(c.models[kind], c.modelView)
+		return tea.Batch(c.fetchModelsCmd(kind), c.fetchExecutorsCmd(kind))
+	}
 	// The two kinds have different model universes, so a model carried across
 	// a kind change is very likely one the new kind cannot resolve. Swap in
 	// that kind's own remembered model instead of leaving a stale id behind.
