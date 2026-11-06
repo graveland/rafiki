@@ -13,6 +13,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -139,4 +140,82 @@ func TestSlashModelIsRefusedForFundi(t *testing.T) {
 	ck.Require().True(errors.As(err, &ce), "want a coded error, got %v", err)
 	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "code")
 	ck.Empty(rec.accepted(), "nothing queued")
+}
+
+// silentClaude logs its argv and then prints nothing until it is prompted, like
+// a claude child resumed after a daemon restart: no system/init, so the live
+// process has announced no session id yet.
+func silentClaude(t *testing.T) (script, log string) {
+	t.Helper()
+	dir := t.TempDir()
+	script = filepath.Join(dir, "silentclaude.sh")
+	log = filepath.Join(dir, "argv.log")
+	body := "#!/bin/bash\n" +
+		"echo \"$*\" >> " + log + "\n" +
+		"while IFS= read -r line; do :; done\n" +
+		"while true; do sleep 0.05; done\n"
+	assert.NewAborting(t).NoError(os.WriteFile(script, []byte(body), 0o755), "write fake")
+	return script, log
+}
+
+func spawnSilentClaude(t *testing.T, script string) (*Controller, string) {
+	t.Helper()
+	ctrl := newTestController(t)
+	res, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
+		Kind: protocol.KindClaude, Cwd: t.TempDir(), PiBinary: script, NoSession: true,
+	}, users.Identity{})
+	assert.NewAborting(t).NoError(err, "spawn claude")
+	return ctrl, res.ChildID
+}
+
+// A child that has not announced a session this run still resumes the one the
+// store recorded: /model must not demand a live id the process cannot have yet.
+func TestSlashModelResumesTheRecordedSessionWhenNoneIsLive(t *testing.T) {
+	ck := assert.NewAborting(t)
+	script, argvLog := silentClaude(t)
+	c, id := spawnSilentClaude(t, script)
+	ck.NoError(c.st.Update(id, func(s *childstore.Session) { s.SessionID = "recorded-sess" }), "record session")
+	// Interrupting before the script has run its first line would leave no
+	// launch to count.
+	for d := time.Now().Add(5 * time.Second); time.Now().Before(d); time.Sleep(10 * time.Millisecond) {
+		if raw, _ := os.ReadFile(argvLog); len(raw) > 0 {
+			break
+		}
+	}
+
+	_, err := c.handleSlashCommand(t.Context(), modelCommand(id, "/model claude-sonnet-5"))
+	ck.Require().NoError(err, "/model")
+
+	var lines []string
+	for d := time.Now().Add(5 * time.Second); time.Now().Before(d); time.Sleep(20 * time.Millisecond) {
+		raw, rerr := os.ReadFile(argvLog)
+		if os.IsNotExist(rerr) {
+			continue
+		}
+		ck.Require().NoError(rerr, "read argv log")
+		lines = strings.Split(strings.TrimSpace(string(raw)), "\n")
+		if len(lines) >= 2 {
+			break
+		}
+	}
+	ck.Require().Len(lines, 2, "launches: spawn + restart")
+	ck.StrContains(lines[1], "--resume recorded-sess", "the recorded session is resumed")
+	ck.StrContains(lines[1], "--model claude-sonnet-5", "on the new model")
+}
+
+// With no session anywhere there is nothing to carry over; say so in /model's
+// own words, and leave the model alone.
+func TestSlashModelRefusesAChildWithNoSessionAtAll(t *testing.T) {
+	ck := assert.NewAborting(t)
+	script, _ := silentClaude(t)
+	c, id := spawnSilentClaude(t, script)
+	before, _ := c.st.Get(id)
+
+	_, err := c.handleSlashCommand(t.Context(), modelCommand(id, "/model claude-sonnet-5"))
+	var ce *connectapi.ControllerError
+	ck.Require().True(errors.As(err, &ce), "want a coded error, got %v", err)
+	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "code")
+	ck.StrContains(ce.Message, "no session yet", "message")
+	after, _ := c.st.Get(id)
+	ck.Eq(before.Model, after.Model, "model untouched")
 }

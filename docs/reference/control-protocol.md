@@ -2176,7 +2176,7 @@ persist-and-deliver path, so their `message_id` names the queued row.
 `/model` is an operator command: a child credential is refused
 (`permission_denied`), so an agent cannot move a conversation to another model.
 It rewrites the child's stored model and runs the abort cycle (interrupt, then
-restart with `--resume` — `Pool.Restart` for a daraja-routed child, whose
+restart with `--resume` of the live session id, else the recorded one (a child resumed after a daemon restart announces none until its next prompt); a child with neither is refused — `Pool.Restart` for a daraja-routed child, whose
 launch environment is fixed). The current and the requested model must both be
 ones Claude Code accepts as a plain `--model` (`proxyenv.RestartModel` /
 `AnthropicModel`: a concrete `claude-*` id, `anthropic/` prefix optional);

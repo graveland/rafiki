@@ -103,6 +103,10 @@ func (c *Controller) switchClaudeModel(ctx context.Context, snap childstore.Snap
 	if target == snap.Model {
 		return nil
 	}
+	if ch, ok := c.cm.Get(snap.ChildID); ok && liveOrRecordedSessionID(ch, snap) == "" {
+		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs,
+			Message: "/model: this child has no session yet (it has not taken a turn), so there is nothing to carry over; spawn it on the model you want"}
+	}
 	if err := c.st.Update(snap.ChildID, func(s *childstore.Session) { s.Model = target }); err != nil {
 		return err
 	}

@@ -4533,6 +4533,17 @@ func isAbortFrame(frame []byte) bool {
 	return hdr.Type == "abort"
 }
 
+// liveOrRecordedSessionID is the session a claude restart resumes: the id the
+// running process announced, else the one the store recorded. A claude child
+// resumed after a daemon restart prints no system/init until its next prompt,
+// so its live id is empty while the recorded one still names the conversation.
+func liveOrRecordedSessionID(ch *child.Child, snap childstore.Snapshot) string {
+	if id := ch.Metadata().SessionID; id != "" {
+		return id
+	}
+	return snap.SessionID
+}
+
 // handleClaudeAbort cancels an in-flight turn on a claude child. claude -p has
 // no in-band abort frame, so we SIGINT the process (claude flushes a
 // "[Request interrupted by user]" frame + result:error_during_execution, which
@@ -4574,7 +4585,7 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 	// conversation rather than silently starting a fresh session. Without any
 	// sniffed id there is nothing to resume — refuse rather than discard history
 	// (this window only exists before claude's first system/init).
-	sessionID := ch.Metadata().SessionID
+	sessionID := liveOrRecordedSessionID(ch, snap)
 	if sessionID == "" {
 		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
 	}
@@ -4661,7 +4672,7 @@ func (c *Controller) handleDarajaClaudeAbort(childID string, ch *child.Child, sn
 	if c.darajaPool == nil {
 		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: "daraja pool not wired"}
 	}
-	sessionID := ch.Metadata().SessionID
+	sessionID := liveOrRecordedSessionID(ch, snap)
 	if sessionID == "" {
 		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
 	}
