@@ -2153,7 +2153,7 @@ path) and `Controller.Send` (`cmd/rafikid/controller.go`, the framed path
 `SendFrame` uses and the path the spawners deliver a spawn's initial `prompt`
 through), before anything is persisted. Only `PROMPT` text is interpreted;
 `STEER` and `ABORT` never are. The name is matched exactly and case-sensitively
-against the registered set — `clear`, `compact`, `exit` — so an unregistered
+against the registered set — `clear`, `compact`, `exit`, `model` — so an unregistered
 `/foo` is an ordinary prompt, and a registered command a child kind does not
 support is `InvalidArgument` (`protocol.ErrInvalidArgs`). There is no escape: a
 prompt beginning with a registered name is interpreted, never delivered as
@@ -2165,12 +2165,25 @@ regardless.
 | `/clear` | mark the conversation and arm the session-id guard, then forward the text as a user message | queue the text; the engine appends a `clear` root through `conv.Handle.Append`, which starts a fresh working set and writes no horizon | `InvalidArgument` |
 | `/compact [text]` | forward the text as a user message | queue the text; the engine runs a manual compaction (`text` = extra summary instructions) | `InvalidArgument` |
 | `/exit` | `Kill` | `Kill` | `Kill` |
+| `/model <id>` | restart the process on `<id>` with `--resume` (same child id and session); queues nothing | `InvalidArgument` (the cockpit forks instead) | `InvalidArgument` |
 
 `/exit` calls `Kill` synchronously (resumable — it never sets `closed_at`, the
 same `childScoped` rule as the `Kill` verb) and queues nothing, so the
 response's `message_id` is empty, exactly as for a claude abort. `/clear` and
 `/compact` do their side effects and fall through to the ordinary
 persist-and-deliver path, so their `message_id` names the queued row.
+
+`/model` is an operator command: a child credential is refused
+(`permission_denied`), so an agent cannot move a conversation to another model.
+It rewrites the child's stored model and runs the abort cycle (interrupt, then
+restart with `--resume` — `Pool.Restart` for a daraja-routed child, whose
+launch environment is fixed). The current and the requested model must both be
+ones Claude Code accepts as a plain `--model` (`proxyenv.RestartModel` /
+`AnthropicModel`: a concrete `claude-*` id, `anthropic/` prefix optional);
+anything else is `InvalidArgument` naming `rafiki models switch`, and a failed
+restart puts the previous model back. The in-flight turn is lost and the prompt
+cache starts cold. The cockpit's `/model` line and `M` form send it for a live
+claude child switching between such ids, and fork otherwise.
 
 For a fundi child the daemon does no side effect: the queued prompt reaches
 `Engine.runSlash` (`pkg/fundi/engine.go`), which runs it against the

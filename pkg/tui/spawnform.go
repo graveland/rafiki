@@ -18,6 +18,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/modelquery"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
 // spawnKinds are the child kinds the cockpit can create, in cycle order.
@@ -82,6 +83,20 @@ type spawnParams struct {
 	// and take its name. Empty on an ordinary spawn.
 	forkFrom     *protocol.ForkFrom
 	switchSource string
+	// keepSource turns a switch into a CLONE: the same fork, carrying the
+	// source's cwd, parent, labels and cap, but under the name the form holds
+	// and with the source left running. Set when a switch form's name row no
+	// longer holds the source's name.
+	keepSource bool
+}
+
+// tailSource is the child the spawn's follow-up closes and renames over, or ""
+// when there is no follow-up: a plain fork, or a clone that keeps its source.
+func (p spawnParams) tailSource() string {
+	if p.keepSource {
+		return ""
+	}
+	return p.switchSource
 }
 
 // spawnForm is the modal shown by `n` on the agents pane.
@@ -112,6 +127,13 @@ type spawnForm struct {
 	// takes its name. Reported in the title so the heavier operation is named
 	// before it runs.
 	switchSource string
+	// sourceName is the name the switch form was opened with (the source's own).
+	// The name row decides the operation: left as is, the fork REPLACES the
+	// source; changed or cleared, it BRANCHES from it. See branches.
+	sourceName string
+	// sourceModel is the model the switch form was opened on. A switch that
+	// keeps both the name and this model changes nothing and is refused.
+	sourceModel string
 
 	// submitted is the last request this form sent, kept so a SUCCESSFUL spawn
 	// can record exactly what went on the wire (the resolved kind and budget)
@@ -235,6 +257,14 @@ func (f *spawnForm) setForkFrom(childID string) {
 	f.inputs[fieldName].SetValue("")
 }
 
+// branches reports whether a switch form has become a clone: the name row no
+// longer holds the source's name. A live sibling's name is unique, so keeping
+// the name is only possible by replacing the source, and any other name leaves
+// the source running beside the new child.
+func (f *spawnForm) branches() bool {
+	return f.switchSource != "" && strings.TrimSpace(f.inputs[fieldName].Value()) != f.sourceName
+}
+
 // refreshSuggestions recomputes the typeahead from the catalog and whatever is
 // typed in the model row.
 //
@@ -323,12 +353,16 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 		preset:       f.preset,
 		forkFrom:     f.forkFrom,
 		switchSource: f.switchSource,
+		keepSource:   f.branches(),
+	}
+	if p.switchSource != "" && !p.keepSource && p.model == f.sourceModel {
+		return spawnParams{}, "nothing to change: pick another model, or rename to clone this one"
 	}
 	// A switch exists to CHANGE the model: an empty row would "switch" to the
 	// daemon's default, which is not a decision anyone made. The fork-only
 	// form may still leave it blank.
 	if p.switchSource != "" && p.model == "" {
-		return spawnParams{}, "model is required for a switch — pick the model to switch to"
+		return spawnParams{}, "model is required for a switch or clone — pick the model it runs on"
 	}
 	if raw := strings.TrimSpace(f.inputs[fieldMaxCost].Value()); raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)
@@ -384,9 +418,31 @@ func (c *Cockpit) compactAskFor(p spawnParams) *compactAsk {
 		destModel:     p.model,
 		tokens:        src.CtxTokens,
 		window:        window,
-		switchMode:    p.switchSource != "",
+		switchMode:    p.tailSource() != "",
 		params:        p,
 	}
+}
+
+// restartableSource is the child to restart in place for this submit, or "".
+//
+// Only a SWITCH of a live claude child qualifies, and only when both its
+// current and the requested model are ones Claude Code accepts as a plain
+// --model (proxyenv.RestartModel / AnthropicModel); a clone, an exited source
+// and every other pairing take the fork. The daemon re-checks all of it, so a
+// stale rail can only cost a refused command, never a wrong restart.
+func (c *Cockpit) restartableSource(p spawnParams) string {
+	src := p.tailSource()
+	if src == "" {
+		return ""
+	}
+	n, ok := c.rail.Get(src)
+	if !ok || n.Kind != protocol.KindClaude || n.Exited {
+		return ""
+	}
+	if _, ok := proxyenv.RestartModel(p.model); !ok || !proxyenv.AnthropicModel(n.Model) {
+		return ""
+	}
+	return src
 }
 
 // modelWindow is the context window the cockpit's cached catalog reports for a
@@ -469,9 +525,12 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 	f.viewSummary = v.summary()
 	var b strings.Builder
 	switch {
+	case f.branches():
+		b.WriteString(styleRailFocused.Render("clone of " + f.switchSource +
+			" · it keeps running; carries its labels and parent"))
 	case f.switchSource != "":
 		b.WriteString(styleRailFocused.Render("switch model of " + f.switchSource +
-			" · carries its cwd, parent and budget"))
+			" · replaces it and keeps its name; carries its labels and parent · rename to clone instead"))
 	case f.forkFrom != nil:
 		b.WriteString(styleRailFocused.Render("fork of " + f.forkFrom.ChildID))
 	default:
@@ -800,6 +859,14 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 					return c, nil
 				}
 			}
+		}
+		if src := c.restartableSource(p); src != "" {
+			// A claude child moving between Anthropic models does not need a
+			// fork: the daemon relaunches the same process on the new model
+			// and resumes its session, so the child keeps its id and history.
+			c.form = nil
+			c.setNotice("restarting " + src + " on " + p.model + "…")
+			return c, c.sendTo(src, rafikiv1.SendMode_SEND_MODE_PROMPT, "/model "+p.model, nil)
 		}
 		// An oversized fork is a question, not a refusal: the history can be
 		// compacted first, on the source's own model, and the fork made from

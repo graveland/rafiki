@@ -94,7 +94,11 @@
   fork on the new model — cross-provider included, claude conversation to an
   OpenRouter id — then closes the source and renames the fork into its name,
   so the rail reads "same conversation, new model" while the old one stays
-  queryable one fork edge behind.
+  queryable one fork edge behind. In the cockpit the switch form opens with
+  the source's name filled in (`/model [id]` in the input box opens the same
+  form): leave the name and the fork replaces the source; change or clear it
+  and the fork is a clone under the new name while the source keeps running.
+  `/model` is handled by the cockpit alone, so an agent cannot send it.
 - **Conversation review** — an LLM-driven pass over your own captured history
   that detects skill gaps and triages findings, on demand
   (`rafiki conversations review`) or automatically on close (`rafiki close

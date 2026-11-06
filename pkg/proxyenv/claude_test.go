@@ -313,3 +313,20 @@ func TestClaudeEnvMCPConfigIsBareJSON(t *testing.T) {
 	}
 	c.True(json.Valid([]byte(v.MCPConfig)), "Values.MCPConfig is not valid JSON: %q", v.MCPConfig)
 }
+
+func TestRestartModel(t *testing.T) {
+	for in, want := range map[string]string{
+		"claude-sonnet-5":           "claude-sonnet-5",
+		"anthropic/claude-opus-5-5": "claude-opus-5-5",
+		"  claude-haiku-4-5  ":      "claude-haiku-4-5",
+		"anthropic/opus-latest":     "",
+		"opus":                      "",
+		"openrouter/z-ai/glm-5":     "",
+		"anthropic/claude/x":        "",
+		"":                          "",
+	} {
+		got, ok := RestartModel(in)
+		assert.NewCollecting(t).Eq(want != "", ok, "RestartModel(%q) ok", in)
+		assert.NewCollecting(t).Eq(want, got, "RestartModel(%q)", in)
+	}
+}

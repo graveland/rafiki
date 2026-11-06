@@ -23,6 +23,9 @@ const (
 	Clear   Command = "clear"
 	Compact Command = "compact"
 	Exit    Command = "exit"
+	// Model restarts a claude child on another Anthropic model. It is an
+	// operator command: the daemon refuses it from a child credential.
+	Model Command = "model"
 )
 
 // Parse reports the registered command text invokes, and the text after it.
@@ -48,6 +51,8 @@ func Parse(text string) (cmd Command, args string, ok bool) {
 		cmd = Compact
 	case Exit:
 		cmd = Exit
+	case Model:
+		cmd = Model
 	default:
 		return "", "", false
 	}
@@ -57,7 +62,7 @@ func Parse(text string) (cmd Command, args string, ok bool) {
 // supported maps a child kind to the commands it handles. A kind absent from
 // the table handles none.
 var supported = map[string]map[Command]bool{
-	protocol.KindClaude: {Clear: true, Compact: true, Exit: true},
+	protocol.KindClaude: {Clear: true, Compact: true, Exit: true, Model: true},
 	protocol.KindFundi:  {Clear: true, Compact: true, Exit: true},
 	protocol.KindScript: {Exit: true},
 }

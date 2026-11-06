@@ -890,15 +890,18 @@ func TestSpawnFormForkLocksKindAndSeedsTheSourceModel(t *testing.T) {
 }
 
 // A switch (`M`) is the fork form with the heavier post-spawn: the source
-// closes and the new child takes its name. The model row starts EMPTY — the
-// whole point is to change it — and the title names the operation before it
-// runs.
-func TestSpawnFormSwitchSeedsEmptyAndMarksTheSource(t *testing.T) {
+// closes and the new child takes its name. Every row opens prefilled from the
+// source, so the form shows what the result would be, and the title names the
+// operation before it runs.
+func TestSpawnFormSwitchPrefillsFromTheSource(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := profiledCockpit("switch-form", Options{})
 	sum := summaryFor("c_src", "source", 0)
 	sum.Kind = protocol.KindFundi
 	sum.Model = "fakeor/mini"
+	sum.Cwd = "/work/src"
+	cap := 2.5
+	sum.MaxCost = &cap
 	c.rail.Seed([]*rafikiv1.ChildSummary{sum})
 	c.selected = "c_src"
 
@@ -907,17 +910,32 @@ func TestSpawnFormSwitchSeedsEmptyAndMarksTheSource(t *testing.T) {
 	ck.Require().NotNil(c.form, "the form must be open")
 	ck.Eq("c_src", c.form.forkFrom.ChildID, "the fork source is also the switch source")
 	ck.Eq("c_src", c.form.switchSource, "switch source")
-	ck.Eq("", c.form.inputs[fieldModel].Value(), "the model row starts empty: switching means changing it")
+	ck.Eq("source", c.form.inputs[fieldName].Value(), "name")
+	ck.Eq("fakeor/mini", c.form.inputs[fieldModel].Value(), "model")
+	ck.Eq("/work/src", c.form.inputs[fieldCwd].Value(), "cwd")
+	ck.Eq(costField(2.5, c.currency), c.form.inputs[fieldMaxCost].Value(), "cap")
 	ck.StrContains(c.form.view(80, 24, c.modelView, nil, c.currency), "switch model of c_src",
 		"the title names the heavier operation")
 
-	// An empty model row is refused: a switch exists to CHANGE the model, and
-	// "the daemon's default" is not a decision anyone made.
+	// Submitted as it opened, a switch changes nothing: refuse it.
 	_, problem := c.form.params(c.currency)
+	ck.StrContains(problem, "nothing to change", "an unchanged switch must be refused")
+
+	// A blank model row is not "the daemon's default" for a switch.
+	c.form.inputs[fieldModel].SetValue("")
+	_, problem = c.form.params(c.currency)
 	ck.StrContains(problem, "model is required", "a blank switch model must be refused")
 
 	c.form.inputs[fieldModel].SetValue("openrouter/z-ai/glm-5.3-flash")
 	p, problem := c.form.params(c.currency)
 	ck.Eq("", problem, "params with a model set")
 	ck.Eq("c_src", p.switchSource, "params.switchSource")
+	ck.False(p.keepSource, "an untouched name replaces the source")
+
+	// A clone onto the same model is allowed: only the name differs.
+	c.form.inputs[fieldModel].SetValue("fakeor/mini")
+	c.form.inputs[fieldName].SetValue("source-2")
+	p, problem = c.form.params(c.currency)
+	ck.Eq("", problem, "a clone may keep the model")
+	ck.True(p.keepSource, "renamed → clone")
 }

@@ -151,12 +151,11 @@ func TestSwitchCompositionCarriesSourceAndStopsBeforeClose(t *testing.T) {
 
 	ck.Require().Len(client.spawned, 1, "spawns")
 	req := client.spawned[0]
-	ck.Eq("/work/scout", req.GetCwd(), "the source's cwd wins over the form's")
+	ck.Eq("/somewhere/else", req.GetCwd(), "the form's cwd is used: it opens prefilled with the source's")
 	ck.Eq("c_coord", req.GetParentChildId(), "a subagent's switch stays under its coordinator")
 	ck.Eq("review:fixer", req.GetPreset(),
 		"the source's preset re-resolves: its allowlists and prompt are part of the seat")
-	ck.Require().NotNil(req.GetMaxCost(), "the source's cap")
-	ck.Eq(3.5, req.GetMaxCost(), "the source's cap carries over when the form left it blank")
+	ck.Nil(req.MaxCost, "a blank cap row is unlimited, not the source's cap coming back")
 	ck.Require().NotNil(req.GetForkFrom(), "fork")
 	ck.Eq("c_src", req.GetForkFrom().ChildId, "fork source")
 	ck.EqDiff(map[string]string{"team": "x"}, req.GetLabels(),

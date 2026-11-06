@@ -124,6 +124,23 @@ func AnthropicModel(model string) bool {
 	return strings.HasPrefix(m, "claude") || strings.HasSuffix(m, "-latest")
 }
 
+// RestartModel reports the bare model id a running claude child can be
+// restarted onto in place, and whether model qualifies.
+//
+// A restart rebuilds argv only: the launch environment (the registered custom
+// model option, tool-search) is fixed, and Claude Code rejects a plain --model
+// that is not one of its own Anthropic ids. So only a concrete Anthropic id
+// ("claude-opus-5", with or without the "anthropic/" prefix the catalog
+// spells) qualifies; a "<tier>-latest" name or another provider's slash id
+// needs the launch-time registration and goes through a fork instead.
+func RestartModel(model string) (string, bool) {
+	bare := strings.TrimPrefix(strings.TrimSpace(model), "anthropic/")
+	if strings.Contains(bare, "/") || !strings.HasPrefix(strings.ToLower(bare), "claude") {
+		return "", false
+	}
+	return bare, true
+}
+
 // ClaudeOptions describes one proxied Claude Code session.
 type ClaudeOptions struct {
 	// URL is the rafiki base URL. Empty means "not proxied": Claude sets

@@ -277,22 +277,21 @@ func (c *Cockpit) switchRequest(ctx context.Context, p spawnParams) (*rafikiv1.S
 	}
 
 	req := c.buildSpawnRequest(p)
-	// A switch is "same conversation, new model": the source's cwd and
-	// parent win over the form's, and a blank max-cost row carries the
-	// source's cap rather than reading as unlimited (matching the CLI's
-	// --max-cost-unset behaviour). A parented source STAYS parented —
-	// dropping the parent would move the switch out of the coordinator's
-	// lineage and rename it against the wrong sibling set.
-	if srcCwd := src.GetCwd(); srcCwd != "" {
-		req.Cwd = srcCwd
+	// A switch's fork spawns UNNAMED: the source holds the name until its close
+	// lands, and the finish step renames the fork into it. A clone keeps the
+	// form's name, since the source stays.
+	if !p.keepSource {
+		req.Name = ""
 	}
+	// A switch is "same conversation, new model": the source's parent wins
+	// over the form's. A parented source STAYS parented — dropping the parent
+	// would move the switch out of the coordinator's lineage and rename it
+	// against the wrong sibling set. The cwd and cap come from the form, which
+	// opened prefilled with the source's.
 	// ParentLabel honours the pre-rename fundi/parent spelling, the
 	// same fallback Rename and the lineage reads use.
 	if parent, ok := childstore.ParentLabel(src.GetLabels()); ok {
 		req.ParentChildId = parent
-	}
-	if req.MaxCost == nil && src.MaxCost != nil {
-		req.MaxCost = src.MaxCost
 	}
 	// The source's preset re-resolves: its allowlists and prompt are part
 	// of "the same conversation"; its model loses to the switch's model.
@@ -335,7 +334,7 @@ func (c *Cockpit) switchSpawnCmd(p spawnParams) tea.Cmd {
 		}
 		return spawnedMsg{
 			childID:       resp.Msg.GetChildId(),
-			switchSource:  p.switchSource,
+			switchSource:  p.tailSource(),
 			sourceName:    src.GetName(),
 			sourceRouting: src.GetRouting(),
 		}
@@ -380,7 +379,7 @@ func (c *Cockpit) compactForkCmd(p spawnParams, sourceModel string, destWindow i
 		}
 		return spawnedMsg{
 			childID:       fork,
-			switchSource:  p.switchSource,
+			switchSource:  p.tailSource(),
 			sourceName:    sourceName,
 			sourceRouting: sourceRouting,
 		}

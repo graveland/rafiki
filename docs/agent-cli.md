@@ -1130,14 +1130,16 @@ status`).
 ## Slash commands
 
 A prompt whose trimmed text begins with a registered `/command` (`/clear`,
-`/compact`, `/exit`) is a slash command, interpreted by the daemon before the
+`/compact`, `/exit`, `/model`) is a slash command, interpreted by the daemon before the
 message is queued (`handleSlashCommand`, `cmd/rafikid/slash_commands.go`) — no
 client-side parsing, on every path that reaches `Send` (the cockpit, `rafiki
 send`'s prompt frame, `agent_send`, and a spawn's initial prompt). An
 unregistered `/foo` is an ordinary prompt; a registered command a child kind
 does not support is `InvalidArgument`. `/exit` kills the child (resumable,
 `Kill`'s `childScoped` rule) and queues nothing; `claude` and `fundi` support
-all three, `script` only `/exit`. On a `fundi` child `/compact [text]` and
+the first three, `script` only `/exit`; `/model <id>` (claude only, operator
+only) restarts the child on another Anthropic model, see
+`docs/reference/control-protocol.md`. On a `fundi` child `/compact [text]` and
 `/clear` are queued like any prompt and run by the engine in queue order, after
 any turn in flight, producing no turn of their own (`/compact`'s text is extra
 summary instructions); see `docs/reference/fundi-compaction.md`.

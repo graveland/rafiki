@@ -837,27 +837,60 @@ func (c *Cockpit) forkSelected() tea.Cmd {
 	return tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
 }
 
-// switchModelSelected opens the create form as a model SWITCH of the selected
-// child: same borrowed history, but on submit the fork spawns, the source
-// closes, and the new child takes the source's name — so from the rail it
-// looks like the conversation changed models, while the old conversation
-// stays in the lineage at its old model. The model row starts EMPTY (the
-// whole point is to change it, and a switch refuses a blank one); the budget
-// row seeds from the source's cap, since a switch carries it unless edited —
-// the rail row is where that cap already lives.
+// switchModelSelected opens the model switch form on the selected child.
 func (c *Cockpit) switchModelSelected() tea.Cmd {
-	id := c.selected
+	return c.switchModelOf(c.selected, "")
+}
+
+// switchModelOf opens the create form as a model SWITCH of id: same borrowed
+// history, and the name row holds the source's name. Submitted as it stands,
+// the fork spawns, the source closes and the new child takes the name — so
+// from the rail it looks like the conversation changed models, while the old
+// conversation stays in the lineage at its old model. Rename it (or clear the
+// row) and the same form branches instead: the source keeps running and the
+// fork lands under the new name (spawnForm.branches).
+//
+// Every row opens prefilled from the source's rail row — name, model, cwd and
+// cap — so the form shows what the result would be; the model is the /model
+// line's argument when it gave one. What a row holds is what the fork gets.
+func (c *Cockpit) switchModelOf(id, model string) tea.Cmd {
 	if id == "" {
 		return nil
 	}
 	c.form = newSpawnForm()
 	c.form.setForkFrom(id)
 	c.form.switchSource = id
-	if n, ok := c.rail.Get(id); ok && n.MaxCost > 0 {
-		c.form.inputs[fieldMaxCost].SetValue(costField(n.MaxCost, c.currency))
+	if n, ok := c.rail.Get(id); ok {
+		c.form.sourceName = strings.TrimSpace(n.Name)
+		c.form.sourceModel = n.Model
+		c.form.inputs[fieldName].SetValue(c.form.sourceName)
+		c.form.inputs[fieldModel].SetValue(n.Model)
+		if n.Cwd != "" {
+			c.form.inputs[fieldCwd].SetValue(n.Cwd)
+		}
+		if n.MaxCost > 0 {
+			c.form.inputs[fieldMaxCost].SetValue(costField(n.MaxCost, c.currency))
+		}
+	}
+	if model != "" {
+		c.form.inputs[fieldModel].SetValue(model)
 	}
 	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 	return tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
+}
+
+// modelLine recognises the /model line the cockpit handles itself and returns
+// its argument. It is deliberately not a slashcmd: the daemon never sees it, so
+// nothing but a person at this keyboard can switch a conversation's model.
+func modelLine(text string) (arg string, ok bool) {
+	fields := strings.Fields(text)
+	if len(fields) == 0 || fields[0] != "/model" || len(fields) > 2 {
+		return "", false
+	}
+	if len(fields) == 2 {
+		arg = fields[1]
+	}
+	return arg, true
 }
 
 // tagSelected opens the tag modal on the selected child, naming its last
@@ -1832,6 +1865,11 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if mode := c.modeForKey(msg); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
 		text := strings.TrimSpace(c.expandPastes(c.ta.Value()))
+		if arg, ok := modelLine(text); ok && mode != rafikiv1.SendMode_SEND_MODE_ABORT && c.focused() != "" {
+			c.ta.Reset()
+			c.pastes = nil
+			return c, c.switchModelOf(c.focused(), arg)
+		}
 		mode = c.slashOverride(mode, text)
 		if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
 			// An attachment alone is a message: a screenshot with nothing to
@@ -3099,7 +3137,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.Rename, "Rename the agent."},
 		entry{k.Fork, "Fork the agent: a new conversation borrowing its history; both keep running."},
 		entry{k.Tag, "Tag the agent's last completed turn, making the point forkable by name."},
-		entry{k.SwitchModel, "Switch the agent's model: spawns a fork on the model you pick, closes the old conversation, keeps the name."},
+		entry{k.SwitchModel, "Switch the agent's model (or type /model [id]): spawns a fork on the model you pick, closes the old conversation, keeps the name. Change the name first to branch instead — the old conversation keeps running."},
 		entry{k.Escape, "Leave the rail without opening anything."},
 	)...)
 	right = append(right, group("reading",
