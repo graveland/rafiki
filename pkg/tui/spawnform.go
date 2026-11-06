@@ -427,6 +427,30 @@ func (f *spawnForm) cycleKind(delta int) {
 	f.kindIx = (f.kindIx + delta + len(spawnKinds)) % len(spawnKinds)
 }
 
+// paste inserts clipboard text into the focused row.
+//
+// The kind row has no text field, so a paste there is dropped rather than
+// vanishing into an input nobody can see. The model row re-filters its
+// typeahead exactly as a typed character does — pasting a model id is a common
+// way to fill that row, and a list still filtered by the PREVIOUS value would
+// hide the model just pasted.
+//
+// textinput's own sanitizer folds newlines and tabs to spaces, so a multi-line
+// paste lands as one line, which is what every field here holds.
+func (f *spawnForm) paste(content string, all []*rafikiv1.ModelRow, v modelView) tea.Cmd {
+	if f.focus == fieldKind {
+		return nil
+	}
+	before := f.inputs[fieldModel].Value()
+	var cmd tea.Cmd
+	f.inputs[f.focus], cmd = f.inputs[f.focus].Update(tea.PasteMsg{Content: content})
+	if f.focus == fieldModel && f.inputs[fieldModel].Value() != before {
+		f.suggestCur = -1
+		f.refreshSuggestions(all, v)
+	}
+	return cmd
+}
+
 // update routes a keystroke into the focused row. Returns the command the
 // textinput asked for, if any.
 func (f *spawnForm) update(msg tea.KeyPressMsg) tea.Cmd {

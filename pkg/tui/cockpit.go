@@ -1341,6 +1341,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case tea.PasteMsg:
+		if cmd, owned := c.pasteToModal(msg.Content); owned {
+			return c, cmd
+		}
 		return c, c.handlePaste(msg.Content)
 
 	case clipboardPasteMsg:
@@ -1924,6 +1927,50 @@ func (c *Cockpit) killLine() {
 		c.pastes = nil
 		c.attachments = nil
 	}
+}
+
+// pasteToModal delivers a bracketed paste to the text field of whichever modal
+// is up, following handleKey's precedence exactly.
+//
+// A paste is not a keystroke: bubbletea decodes bracketed paste into tea.PasteMsg,
+// which never reaches handleKey, so every paste used to fall straight through to
+// the prompt box BEHIND the modal — and when the pane focus was the rail,
+// handlePaste's own focusInput guard dropped it instead. That is why typing into
+// the create form's name row worked and ⌘V into it did nothing.
+//
+// owned=false means no modal is up, so the paste takes its ordinary path into the
+// prompt box. A modal with no text field of its own (the sort band, the executor
+// browser, a one-key ask) swallows the paste rather than letting it land in a box
+// the user cannot see — the same rule handleKey applies to every key.
+func (c *Cockpit) pasteToModal(content string) (tea.Cmd, bool) {
+	if content == "" {
+		return nil, false
+	}
+	switch {
+	case c.query != nil, c.execPicker != nil:
+		return nil, true
+	case c.picker != nil:
+		return c.picker.paste(content, c.modelView), true
+	case c.compactAsk != nil:
+		return nil, true
+	case c.form != nil:
+		return c.form.paste(content, c.models[c.form.kind()], c.modelView), true
+	case c.budgetForm != nil:
+		var cmd tea.Cmd
+		c.budgetForm.input, cmd = c.budgetForm.input.Update(tea.PasteMsg{Content: content})
+		return cmd, true
+	case c.renameForm != nil:
+		var cmd tea.Cmd
+		c.renameForm.input, cmd = c.renameForm.input.Update(tea.PasteMsg{Content: content})
+		return cmd, true
+	case c.tagForm != nil:
+		var cmd tea.Cmd
+		c.tagForm.input, cmd = c.tagForm.input.Update(tea.PasteMsg{Content: content})
+		return cmd, true
+	case c.endAsk != nil, c.resumeAsk != nil:
+		return nil, true
+	}
+	return nil, false
 }
 
 // handlePaste folds a large paste into a token rather than unrolling it.

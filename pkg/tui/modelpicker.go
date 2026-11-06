@@ -742,6 +742,21 @@ func (c *Cockpit) handlePickerKey(msg tea.KeyPressMsg, window int) (tea.Model, t
 	return c, cmd
 }
 
+// paste inserts clipboard text into the filter box, restarting the list exactly
+// as a typed character does. Pasting an id is how a filter usually gets filled;
+// a cursor left where it was would select whatever lands under it in the new,
+// shorter list.
+func (p *modelPicker) paste(content string, v modelView) tea.Cmd {
+	before := p.filter.Value()
+	var cmd tea.Cmd
+	p.filter, cmd = p.filter.Update(tea.PasteMsg{Content: content})
+	if p.filter.Value() != before {
+		p.cursor, p.offset = 0, 0
+		p.apply(v)
+	}
+	return cmd
+}
+
 // applyModelsLoaded caches the daemon's answer and refreshes whatever is
 // showing it.
 //
