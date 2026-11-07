@@ -17,7 +17,7 @@ const agentSpawnDescription = "Spawn a subagent to do a piece of work in paralle
 	"with you. Returns immediately with the new agent's id — it does NOT wait for " +
 	"the work to finish. You will be notified when it settles (told why: done, hit " +
 	"a cost budget, or failed), and pinged periodically while it is still working on " +
-	"something long. Do not sleep, poll, or repeatedly call agent_list/agent_view to " +
+	"something long (unless you set notify to \"result\", which wakes you only for a result, question, error or exit). Do not sleep, poll, or repeatedly call agent_list/agent_view to " +
 	"check whether it is done — that costs you a turn each time and tells you nothing " +
 	"sooner than the notification will. If waiting is all that is left, end your turn: " +
 	"the notification starts a new one. Keep doing your own work if you have any; use " +
@@ -187,6 +187,8 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 						Description: "Maximum number of processes in the container. Omit for no explicit limit."},
 				},
 				Required: []string{"scope"}},
+			{Name: "notify", Type: "string", Enum: []string{"all", "result"},
+				Description: "When this agent's progress wakes you. \"all\" (default): every time it finishes a turn, plus a periodic heartbeat while it works. \"result\": only when a turn ends with a result recorded (agent_result), a pending question or an error, when its own budget cap is hit, or when it exits or fails. Use \"result\" for a coordinator or any long-running agent you will not babysit, and tell it in its prompt to end with agent_result."},
 		},
 		Required: []string{"prompt"},
 	}
@@ -233,6 +235,7 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		ForkFrom           *forkFromParam     `json:"fork_from,omitempty"`
 		FromTag            string             `json:"from_tag,omitempty"`
 		Sandbox            *spawnSandboxParam `json:"sandbox,omitempty"`
+		Notify             string             `json:"notify,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: invalid input: %w", err)
@@ -246,6 +249,10 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 	cwd := params.Cwd
 	if cwd == "" {
 		cwd = t.cwd
+	}
+
+	if _, ok := protocol.NormalizeNotify(params.Notify); !ok {
+		return ToolResult{}, fmt.Errorf("agent_spawn: notify must be %q or %q", protocol.NotifyAll, protocol.NotifyResult)
 	}
 
 	// An unknown workspace mode is refused at the tool, not silently defaulted.
@@ -298,6 +305,7 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		MaxCost:            params.MaxCost,
 		MaxChildren:        params.MaxChildren,
 		ExecutorSelector:   params.Executor,
+		Notify:             params.Notify,
 		WorkspaceMode:      params.Workspace,
 		Preset:             params.Preset,
 		Thinking:           params.Thinking,

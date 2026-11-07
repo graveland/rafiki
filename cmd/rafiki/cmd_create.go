@@ -175,6 +175,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	}
 	cmd.Flags().Float64("max-cost", -1, maxCostHelp)
 	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 10)")
+	cmd.Flags().String("notify", "", "when this agent's progress wakes its spawner: all (default) or result")
 	cmd.Flags().Bool("skip-derived-index", false, "Do not embed or summarise this agent's conversations (nor its descendants'); keyword search still works")
 	cmd.Flags().String("executor-selector", paths.Get(paths.ExecutorSelector),
 		"label selector choosing an executor from the daemon's pool to run this agent's filesystem and shell tools on (e.g. owner=brent,env=home); also see RAFIKI_EXECUTOR_SELECTOR")
@@ -497,6 +498,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 
 	recordRequests, _ := cmd.Flags().GetBool("record-requests")
 	skipDerivedIndex, _ := cmd.Flags().GetBool("skip-derived-index")
+	notify, _ := cmd.Flags().GetString("notify")
 	passthroughAuth, _ := cmd.Flags().GetString("passthrough-auth")
 	if passthroughAuth != "" {
 		if _, err := proxyenv.ParsePassthroughMode(passthroughAuth); err != nil {
@@ -529,6 +531,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		RecordRequests:     recordRequests,
 		PassthroughAuth:    passthroughAuth,
 		SkipDerivedIndex:   skipDerivedIndex,
+		Notify:             notify,
 		ForkFrom:           forkFrom,
 		FromTag:            fromTagFlag,
 		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;
@@ -624,6 +627,7 @@ func connectSpawnRequest(req protocol.SpawnRequest) *rafikiv1.SpawnRequest {
 		RecordRequests:     req.RecordRequests,
 		PassthroughAuth:    req.PassthroughAuth,
 		SkipDerivedIndex:   req.SkipDerivedIndex,
+		Notify:             req.Notify,
 	}
 	if req.MaxDepth != nil {
 		depth := int32(*req.MaxDepth)

@@ -528,7 +528,8 @@ const mcpNotificationNote = "A settlement notification may be pushed to your cli
 	"level (logging/setLevel), so never wait for one. This channel carries a TOP-LEVEL agent " +
 	"your client spawned; a worker's own children reach that worker as messages instead. " +
 	"When you need to know whether a top-level agent finished, check agent_list or task_list " +
-	"deliberately, not in a loop."
+	"deliberately, not in a loop. If you spawned it with notify=\"result\", you are notified " +
+	"only when it records a result, asks a question, errors, exceeds its own budget or exits."
 
 // mcpSpawnPrefix reframes agent_spawn for a client that has its own native
 // subagent tool. It asserts the preference the surface exists to create: an

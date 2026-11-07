@@ -213,3 +213,48 @@ func TestAgentSpawnModelDescribesTheRoutingBrackets(t *testing.T) {
 		c.StrContains(desc, want, "model description missing %q", want)
 	}
 }
+
+func TestAgentSpawnNotifyRejectsUnknownValue(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+
+	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"prompt":"x","notify":"none"}`))
+	c.Require().Error(err, "notify=none accepted")
+	c.StrContains(err.Error(), `notify must be "all" or "result"`, "error text")
+	c.Empty(sp.spawned, "a refused notify must not spawn")
+}
+
+func TestAgentSpawnNotifyForwardedToSpec(t *testing.T) {
+	for _, v := range []string{"", "all", "result"} {
+		c := assert.NewAborting(t)
+		sp := &fakeSpawner{}
+		reg, ctx := newAgentTools(t, sp)
+		in := `{"prompt":"x"}`
+		if v != "" {
+			in = `{"prompt":"x","notify":"` + v + `"}`
+		}
+		_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(in))
+		c.Require().NoError(err, "agent_spawn notify=%q", v)
+		c.Require().Len(sp.spawned, 1, "spawns")
+		c.Eq(v, sp.spawned[0].Notify, "SpawnSpec.Notify for %q", v)
+	}
+}
+
+func TestAgentSpawnSchemaHasNotifyEnum(t *testing.T) {
+	c := assert.NewCollecting(t)
+	var found bool
+	for _, p := range (AgentSpawnBlueprint{}).InputSchema().Properties {
+		if p.Name == "notify" {
+			found = true
+			c.EqDiff([]string{"all", "result"}, p.Enum, "notify enum")
+		}
+	}
+	c.True(found, "agent_spawn has no notify property")
+	c.StrContains(agentSpawnDescription, `unless you set notify to "result"`, "description qualifies the periodic ping")
+}
+
+func TestAgentResultDescriptionMentionsSilentTurnEnd(t *testing.T) {
+	assert.NewCollecting(t).StrContains(agentResultDescription,
+		"ending a turn without calling agent_result is silent", "agent_result description")
+}

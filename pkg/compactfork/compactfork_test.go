@@ -610,6 +610,7 @@ func TestRunCloneRequestKeepsEveryField(t *testing.T) {
 		RecordRequests:     true,
 		PassthroughAuth:    "on",
 		SkipDerivedIndex:   true,
+		Notify:             "result",
 		Sandbox:            &rafikiv1.SandboxSpec{},
 		ForkFrom:           &rafikiv1.SpawnRequest_ForkFrom{ChildId: sourceID, Cursor: "m:1"},
 		FromTag:            "tag",
@@ -630,4 +631,31 @@ func TestRunCloneRequestKeepsEveryField(t *testing.T) {
 	c.True(proto.Equal(req, clone), "cloneRequest must copy every field")
 	clone.Name = "changed"
 	c.Eq("name", req.GetName(), "the clone is not the caller's message")
+}
+
+// TestCompactForkKeepsNotify pins that the notify policy rides every spawn the
+// fork makes: the caller's request is cloned for the intermediate and then for
+// the fork itself.
+func TestCompactForkKeepsNotify(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeControl{
+		spawnIDs: []string{intermediateID, forkID},
+		history: func(call int) []*rafikiv1.Event {
+			events := []*rafikiv1.Event{userTextEvent(0, "the prompt"), assistantTextEvent(1, "the reply")}
+			if call > 1 {
+				events = append(events, boundaryEvent(2))
+			}
+			return events
+		},
+	}
+	opt := fastOptions()
+	opt.DestWindow = 200_000
+
+	request := baseRequest()
+	request.Notify = "result"
+	_, err := Run(context.Background(), f, request, opt)
+	c.Require().NoError(err, "run")
+	c.Require().Len(f.spawns, 2, "one intermediate and one fork")
+	c.Eq("result", f.spawns[0].GetNotify(), "intermediate notify")
+	c.Eq("result", f.spawns[1].GetNotify(), "fork notify")
 }

@@ -77,6 +77,8 @@ type SpawnSpec struct {
 	// can only ever narrow — a child cannot reach an executor its parent
 	// could not, whatever this says.
 	ExecutorSelector string
+	// Notify is when this agent's progress wakes the caller: "" or "all" (default) or "result".
+	Notify string
 	// WorkspaceMode is "ephemeral" or "pinned". It decides whether the child
 	// can be rescheduled when its machine goes away, which is the only reason
 	// the model is asked about it at all.

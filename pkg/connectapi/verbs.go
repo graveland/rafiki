@@ -342,7 +342,7 @@ func (s *Server) GetChild(
 }
 
 // childAllowedSpawnFields is the set of SpawnRequest field numbers a caller
-// with child provenance may set (fields 1-14, 30-33: the child-reachable
+// with child provenance may set (fields 1-14, 30-34: the child-reachable
 // shape of SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any
 // other set field — including one added in the future — is refused to a child
 // credential by default: firstOperatorOnlySet fails CLOSED on everything not
@@ -363,6 +363,9 @@ var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
 	// handler has no parent chain to walk.
 	32: true,
 	33: true,
+	// 34 (notify) is child-allowed: it only reduces what wakes the spawner and
+	// grants no authority.
+	34: true,
 }
 
 // firstOperatorOnlySet returns the wire name of the lowest-numbered field req
@@ -436,6 +439,10 @@ func (s *Server) Spawn(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("cwd is required"))
 	}
+	if _, ok := protocol.NormalizeNotify(req.Msg.GetNotify()); !ok {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("notify must be %q or %q", protocol.NotifyAll, protocol.NotifyResult))
+	}
 	p := s.lifecycle.Load()
 	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
@@ -503,6 +510,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		ParentChildID:    m.GetParentChildId(),
 		ExecutorSelector: m.GetExecutorSelector(),
 		SkipDerivedIndex: m.GetSkipDerivedIndex(),
+		Notify:           m.GetNotify(),
 		ExecutorRef:      m.GetExecutorRef(),
 		Labels:           m.GetLabels(),
 
