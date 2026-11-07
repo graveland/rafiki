@@ -66,8 +66,8 @@ hosts the child.
 Its only channel to the daemon is a per-child unix socket, reached through
 the `RAFIKI_CHILD_CONNECT` environment variable. The socket is the
 credential — the process never holds a token, and whatever it sends arrives
-at the daemon as itself, subtree-scoped on Connect like any other per-child
-credential. The socket proxies the daemon's WHOLE proxy face, request path
+at the daemon as itself, bounded on Connect like any other per-child
+credential — its subtree for acts, its owner for reads. The socket proxies the daemon's WHOLE proxy face, request path
 preserved — not just the Connect route — so the injected child credential
 authorizes Connect verbs AND LLM-face calls, every request attributed to the
 child and its owner; any inbound `Authorization`/`X-Rafiki-*` header is
@@ -141,8 +141,8 @@ tree:
 | Tool | Purpose |
 |---|---|
 | `agent_spawn` | start a subagent (`kind: fundi\|claude`); returns a handle immediately, does not block. `fork_from` or `from_tag` starts it from a point in another agent's history, by reference |
-| `agent_list` | your subtree — id, name, model, status, assigned task |
-| `agent_view` | a descendant's transcript: the newest entries, or a page (`before=`/`after=`), one entry in full (`entry=`), or a search (`find=`) by the cursors its markers print |
+| `agent_list` | your subtree — id, name, model, status, assigned task; `scope="owner"` also lists every other agent your owner owns, marked read-only |
+| `agent_view` | a readable agent's transcript — your subtree's, or another agent your owner owns: the newest entries, or a page (`before=`/`after=`), one entry in full (`entry=`), or a search (`find=`) by the cursors its markers print. Reads LIVE agents only; a closed agent's conversation is read with `conversation_export` instead |
 | `agent_send` | steer a descendant mid-flight, or give it more work |
 | `agent_route` | steer a descendant's provider routing — `prefer`/`sort`/`quant`; `only` is operator-only |
 | `agent_kill` | stop a descendant and everything below it |
@@ -151,10 +151,14 @@ tree:
 | `agent_untag` | tombstone a tag you created, or one of your descendants created |
 | `agent_tags` | the tags you can see, in resolution order (your own lineage, then your ancestors', then tree, then owner, then tags rooted at your descendants) |
 
-Every verb naming another agent is checked against stored lineage (an agent
-may only see/steer/kill its own descendants) — read from `childstore`, never
-from a tool argument, since arguments come from a model that can be
-prompt-injected. Completion is a **signal**: `agent_spawn` returns as soon as
+Reads widen to your owner while acts stay on your tree: `agent_list` and
+`agent_view` admit any agent your owner owns — your own subtree, or a sibling
+tree's — while `agent_send`, `agent_kill`, `agent_route` and
+`agent_set_budget` reach only your own descendants. Both checks read stored
+state from `childstore`, never a tool argument, since arguments come
+from a model that can be prompt-injected; a foreign owner, an unknown id and an
+agent with no owner all get the one identical refusal. Completion is a
+**signal**: `agent_spawn` returns as soon as
 the child is registered, and settlement lands as one coalesced digest per
 parent turn regardless of how many descendants finished together. Background
 jobs (`bash_start`, and a `bash` command promoted to a job at its timeout)
