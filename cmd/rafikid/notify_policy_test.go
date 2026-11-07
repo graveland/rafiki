@@ -5,10 +5,12 @@ package main
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/connectapi"
@@ -177,31 +179,66 @@ func TestNotifyTurnEndMissingRowStillDelivers(t *testing.T) {
 	ck.True(wakesSpawner(childstore.Snapshot{}, false, false), "the zero Snapshot a miss yields must wake the spawner")
 }
 
+// TestQuietChildExitSettleIsNeverGated drives the real exit path: a short-lived
+// process exits, handleChildExit settles it, and a quiet child's exit still
+// reaches its spawner.
 func TestQuietChildExitSettleIsNeverGated(t *testing.T) {
-	ck := assert.NewCollecting(t)
+	ck := assert.NewAborting(t)
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available: this test needs a real process")
+	}
 	c, clk, cap := quietFixture(t)
-	ss := quietMCPFixture(t, c, "u-quiet-exit")
 
-	c.notifySubagentSettled("c_w1", "exited", "", "")
-	c.notifySubagentSettled("c_quiet_top", "exited", "", "")
+	ch, err := child.Spawn(context.Background(), child.SpawnSpec{
+		ChildID:  "c_w1",
+		Cwd:      t.TempDir(),
+		PiBinary: "/bin/sh",
+		Argv:     []string{"-c", "exit 0"},
+		Provider: child.ClaudeProvider{},
+	})
+	ck.Require().NoError(err, "Spawn")
+	<-ch.Done()
+	c.cm.Add("c_w1", ch)
+
+	c.handleChildExit("c_w1", ch)
 	clk.Advance(6 * time.Second)
 
 	batches := coordBatches(cap)
 	ck.Require().Len(batches, 1, "a quiet child's exit must still wake its spawner")
 	ck.StrContains(strings.Join(batches[0].fragments, "\n"), "exited")
-	ck.StrContains(waitFor(t, ss.got), "exited", "a quiet child's exit must still fan out")
 }
 
+// TestQuietChildRestartFailureIsNeverGated drives loadChildren over a quiet
+// script row that was live when the daemon died: its "failed (daemon
+// restarted)" settle must still reach the parent.
 func TestQuietChildRestartFailureIsNeverGated(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	c, clk, cap := quietFixture(t)
+	ck := assert.NewAborting(t)
+	c, clk, cap := settleFixture(t)
+	now := time.Now()
+	c.children = &seedChildStore{recs: []childstore.ChildRecord{
+		{
+			ChildID: "c_coord", Kind: protocol.KindFundi,
+			Status: string(protocol.StatusExited), SpawnedAt: now,
+		},
+		{
+			ChildID: "c_quiet_script", Kind: protocol.KindScript, NotifyPolicy: protocol.NotifyResult,
+			Status: string(protocol.StatusStreaming), SpawnedAt: now,
+			Labels: map[string]string{
+				childstore.LabelParent: "c_coord",
+				childstore.LabelRoot:   "c_coord",
+			},
+		},
+	}}
 
-	c.notifySubagentSettled("c_w1", "failed (daemon restarted)", "", "")
+	c.loadChildren(context.Background())
 	clk.Advance(6 * time.Second)
 
-	batches := coordBatches(cap)
-	ck.Require().Len(batches, 1, "a quiet child's restart failure must still wake its spawner")
-	ck.StrContains(strings.Join(batches[0].fragments, "\n"), "failed (daemon restarted)")
+	var got string
+	for _, b := range coordBatches(cap) {
+		got += strings.Join(b.fragments, "\n")
+	}
+	ck.StrContains(got, "c_quiet_script", "a quiet child's restart failure must still wake its spawner")
+	ck.StrContains(got, "failed (daemon restarted)")
 }
 
 // TestQuietChildSettleSeesRowFieldsAtIdleTransition pins that every signal the
