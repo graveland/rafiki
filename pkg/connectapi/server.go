@@ -230,12 +230,14 @@ func (s *Server) GetHistory(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("limit must be positive"))
 	}
-	// childScoped: the subtree boundary runs BEFORE the conversation
-	// resolves, so a caller learns nothing about a child it may not read —
-	// not even whether one exists (Authorize refuses unknown ids with the
-	// same not-a-descendant answer).
+	// childScoped: the READ boundary runs BEFORE the conversation resolves, so
+	// a caller learns nothing about an agent it may not read — not even whether
+	// one exists (AuthorizeRead refuses unknown ids with the same
+	// not-readable answer). It is AuthorizeRead, not Authorize: reading another
+	// agent widens to the caller's owner, while acting on it stays on the spawn
+	// tree.
 	if sc := s.childScope(ctx); sc != nil {
-		if err := sc.Authorize(childID); err != nil {
+		if err := sc.AuthorizeRead(childID); err != nil {
 			return nil, err
 		}
 	}

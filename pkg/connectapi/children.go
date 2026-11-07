@@ -81,6 +81,10 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 	out.WaitingOn = string(c.WaitingOn)
 	out.DisplayMsg = c.DisplayMsg
 	out.ParentChildId = c.ParentChildID
+	// in_subtree is presence-typed on the wire because false is a CLAIM, not an
+	// absence: set only by a child caller's owner-scope list, nil everywhere
+	// else (an operator has no position in the tree for it to describe).
+	out.InSubtree = c.InSubtree
 	if elog != nil && ctx != nil {
 		if latest, err := elog.Latest(ctx, c.ChildID); err == nil {
 			out.LatestOrdinal = &latest

@@ -29,7 +29,14 @@ func (emptyChildScope) Authorize(target string) error {
 	return connect.NewError(connect.CodePermissionDenied, errTestNotDescendant(target))
 }
 
+// AuthorizeRead delegates to Authorize: this scope is the empty-id shape, where
+// "no child" means "nothing readable", so the read check must refuse exactly
+// what the act check refuses.
+func (s emptyChildScope) AuthorizeRead(target string) error { return s.Authorize(target) }
+
 func (emptyChildScope) Subtree([]string) []protocol.ChildSummary { return nil }
+
+func (emptyChildScope) OwnedChildren([]string) []protocol.ChildSummary { return nil }
 
 func (emptyChildScope) ConversationInScope(string) bool { return false }
 

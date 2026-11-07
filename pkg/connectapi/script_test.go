@@ -33,7 +33,11 @@ func (s scriptChildScope) Authorize(target string) error {
 	return connect.NewError(connect.CodePermissionDenied, errors.New("not a descendant: "+target))
 }
 
+func (s scriptChildScope) AuthorizeRead(target string) error { return s.Authorize(target) }
+
 func (s scriptChildScope) Subtree([]string) []protocol.ChildSummary { return nil }
+
+func (s scriptChildScope) OwnedChildren([]string) []protocol.ChildSummary { return nil }
 
 func (s scriptChildScope) ConversationInScope(string) bool { return false }
 

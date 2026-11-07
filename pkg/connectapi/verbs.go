@@ -233,14 +233,32 @@ func matchesChildFilter(c protocol.ChildSummary, f protocol.ListFilter) bool {
 // operator path, by name/name_contains/cwd_contains/since/labels/has_label —
 // the child-list filter set (protocol.ListFilter).
 //
-// childScoped: a per-child credential gets ONLY its own subtree, resolved by
-// the wired ChildScope (the same descendants controllerSpawner.List answers),
-// never the operator's fleet view. The subtree is narrowed further by the same
-// filter fields; it is never widened by them.
+// childScoped: a per-child credential gets ONLY its own subtree by default,
+// resolved by the wired ChildScope (the same descendants controllerSpawner.List
+// answers), never the operator's fleet view. scope=OWNER widens the LIST to
+// everything its owner owns — the subtree first, each row marked in_subtree,
+// then the owner's other agents — because reading another agent widens to the
+// owner while acting stays on the tree. Either list is narrowed further by the
+// same filter fields; it is never widened by them.
+//
+// scope is meaningful only on the childScoped path. A caller with no position
+// in the tree (an admin, a user credential, the unix socket) has its whole
+// visible set as its root, so SUBTREE and OWNER are both no-ops there: all
+// three values answer the same set and in_subtree stays unset.
 func (s *Server) ListChildren(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ListChildrenRequest],
 ) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
+	switch req.Msg.GetScope() {
+	case rafikiv1.ListScope_LIST_SCOPE_UNSPECIFIED,
+		rafikiv1.ListScope_LIST_SCOPE_SUBTREE,
+		rafikiv1.ListScope_LIST_SCOPE_OWNER:
+	default:
+		// Refused before anything else: an unrecognised value names no scope at
+		// all, and answering the default would silently serve a list the caller
+		// did not ask for.
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("unknown scope"))
+	}
 	if ts := req.Msg.GetSince(); ts != nil {
 		if err := ts.CheckValid(); err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
@@ -255,6 +273,9 @@ func (s *Server) ListChildren(
 	filter := listFilterFromWire(req.Msg)
 	if sc := s.childScope(ctx); sc != nil {
 		summaries := sc.Subtree(req.Msg.GetStatuses())
+		if req.Msg.GetScope() == rafikiv1.ListScope_LIST_SCOPE_OWNER {
+			summaries = sc.OwnedChildren(req.Msg.GetStatuses())
+		}
 		out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
 		for _, c := range summaries {
 			if !matchesChildFilter(c, filter) {
@@ -289,10 +310,12 @@ func (s *Server) GetChild(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
 	}
-	// childScoped: the subtree boundary runs before the lookup, so a caller
-	// cannot even confirm a sibling exists.
+	// childScoped: the READ boundary runs before the lookup, so a caller
+	// cannot even confirm an agent it may not read exists. AuthorizeRead — not
+	// Authorize — because reading another agent widens to the caller's owner
+	// while acting on it stays on the spawn tree.
 	if sc := s.childScope(ctx); sc != nil {
-		if err := sc.Authorize(childID); err != nil {
+		if err := sc.AuthorizeRead(childID); err != nil {
 			return nil, err
 		}
 	}

@@ -62,7 +62,45 @@ func (s childScope) Authorize(target string) error {
 // rollup and the SnapshotToSummary mapping shared with the operator list.
 // The caller itself is never in the answer — it knows its own row.
 func (s childScope) Subtree(statuses []string) []protocol.ChildSummary {
-	snaps := s.c.st.Descendants(s.childID)
+	return s.c.summariesFor(s.filterStatuses(s.c.st.Descendants(s.childID), statuses))
+}
+
+// AuthorizeRead is Authorize's read-side sibling: the same empty-id guard and
+// the same refusal shape, but the predicate is canReadChild — the caller's
+// subtree OR its owner's children — because reading another agent widens to the
+// owner while acting stays on the tree. A vanished caller refuses everything:
+// canReadChild resolves no owner for an id with no row, so only the (also
+// empty) subtree arm could ever admit, and IsDescendant demands a stored
+// ancestor.
+func (s childScope) AuthorizeRead(target string) error {
+	if target == "" {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("agent id is required"))
+	}
+	if !s.c.canReadChild(s.childID, target) {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf(notReadableText, target))
+	}
+	return nil
+}
+
+// OwnedChildren is ListChildren's owner-scope answer: the caller's subtree
+// first, marked in-subtree, then the rest of what its owner owns, marked not.
+// An ownerless (or vanished) caller has no owner scope at all, so it gets its
+// subtree alone — still marked in-subtree, because those rows ARE its subtree
+// and the flag says "spawned by me", not "you may read it".
+func (s childScope) OwnedChildren(statuses []string) []protocol.ChildSummary {
+	subtree, others, ok := s.c.ownedSnapshots(s.childID)
+	if !ok {
+		return markInSubtree(s.Subtree(statuses), true)
+	}
+	out := markInSubtree(s.c.summariesFor(s.filterStatuses(subtree, statuses)), true)
+	return append(out, markInSubtree(s.c.summariesFor(s.filterStatuses(others, statuses)), false)...)
+}
+
+// filterStatuses applies the child-list status filter to a snapshot slice, the
+// same nil-or-empty-means-no-filter rule Controller.ListChildren applies. Both
+// lists an owner-scope answer carries go through it, so a status filter never
+// applies to one half of the answer and not the other.
+func (s childScope) filterStatuses(snaps []childstore.Snapshot, statuses []string) []childstore.Snapshot {
 	kept := make([]childstore.Snapshot, 0, len(snaps))
 	for _, snap := range snaps {
 		if len(statuses) > 0 && !containsString(statuses, string(snap.Status)) {
@@ -70,7 +108,17 @@ func (s childScope) Subtree(statuses []string) []protocol.ChildSummary {
 		}
 		kept = append(kept, snap)
 	}
-	return s.c.summariesFor(kept)
+	return kept
+}
+
+// markInSubtree stamps the owner-scope flag onto every row of one half of the
+// answer. It mutates the summaries in place and returns them, because
+// summariesFor hands back a fresh slice the caller owns.
+func markInSubtree(summaries []protocol.ChildSummary, inSubtree bool) []protocol.ChildSummary {
+	for i := range summaries {
+		summaries[i].InSubtree = &inSubtree
+	}
+	return summaries
 }
 
 // ConversationInScope resolves the conversation ids of the caller's subtree —

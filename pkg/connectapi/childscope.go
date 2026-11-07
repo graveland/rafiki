@@ -22,6 +22,12 @@ import (
 // caller resolves to no child scope — a real user credential, or the unix
 // socket's anonymous local trust.
 //
+// Reading and acting are deliberately different authorities. The act verbs
+// (Send, Kill, Close, SetBudget, Spawn-into, ListTasks' ledger) stay on the
+// spawn tree: Authorize. The reads of OTHER agents widen to the caller's owner
+// — a child credential reads what its owner owns, wherever it sits in the tree
+// — through AuthorizeRead, and the owner-scope list is OwnedChildren.
+//
 // The daemon wires ONE implementation (cmd/rafikid connect_childscope.go),
 // which reads the stored parent chain via childstore.IsDescendant — the same
 // authority the fundi runtime's controllerSpawner applies — and never trusts a
@@ -38,6 +44,27 @@ type ChildScope interface {
 	// same text the fundi spawner's refusals use, so handlers forward it
 	// unchanged.
 	Authorize(target string) error
+
+	// AuthorizeRead refuses every target the caller may not READ: the empty id
+	// (InvalidArgument, the same rule as Authorize), and every id that is
+	// neither beneath the caller nor owned by the caller's owner. It answers the
+	// ONE notReadableText refusal for a foreign owner, an unknown id and a
+	// lineage with no owner alike, so a caller cannot learn which of the three
+	// it hit. The error is already a connect PermissionDenied, ready to forward.
+	//
+	// It sits BESIDE Authorize rather than replacing it: nothing an act verb
+	// checks may widen here. A caller with no owner of its own (launched over
+	// the unix socket) and a scope for a vanished child keep subtree-only reads.
+	AuthorizeRead(target string) error
+
+	// OwnedChildren lists what the caller may read across its owner: the
+	// caller's subtree first (Subtree's order), each row marked InSubtree, then
+	// every other readable row of the caller's owner — the caller itself
+	// excluded — each marked not-in-subtree. statuses filters both, nil or empty
+	// meaning no filter. A caller whose owner does not resolve gets its subtree
+	// alone, still marked InSubtree, so "I can see these" never becomes "I can
+	// see everything".
+	OwnedChildren(statuses []string) []protocol.ChildSummary
 
 	// Subtree lists the caller's descendants — never the caller itself, the
 	// same shape controllerSpawner.List answers — as summaries, filtered by

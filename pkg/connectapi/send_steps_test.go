@@ -51,7 +51,11 @@ func (s sendStepsChildScope) ChildID() string { return s.id }
 
 func (s sendStepsChildScope) Authorize(string) error { return nil }
 
+func (s sendStepsChildScope) AuthorizeRead(string) error { return nil }
+
 func (s sendStepsChildScope) Subtree([]string) []protocol.ChildSummary { return nil }
+
+func (s sendStepsChildScope) OwnedChildren([]string) []protocol.ChildSummary { return nil }
 
 func (s sendStepsChildScope) ConversationInScope(string) bool { return false }
 

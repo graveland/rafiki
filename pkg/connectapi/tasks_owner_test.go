@@ -49,7 +49,14 @@ func (s ownerScope) Authorize(target string) error {
 	return errTestNotDescendant(target)
 }
 
+// AuthorizeRead delegates to Authorize: ListTasks' ledger read is an ACT on the
+// spawn tree (a child's own ledger plus its descendants'), not one of the
+// owner-scoped reads, so this fake must not widen it.
+func (s ownerScope) AuthorizeRead(target string) error { return s.Authorize(target) }
+
 func (s ownerScope) Subtree([]string) []protocol.ChildSummary { return nil }
+
+func (s ownerScope) OwnedChildren([]string) []protocol.ChildSummary { return nil }
 
 func (s ownerScope) ConversationInScope(string) bool { return false }
 

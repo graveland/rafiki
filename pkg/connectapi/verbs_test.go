@@ -29,10 +29,12 @@ import (
 // refusal that runs AFTER this one in the handler.
 type namedChildScope struct{}
 
-func (namedChildScope) ChildID() string                          { return "c_caller" }
-func (namedChildScope) Authorize(string) error                   { return nil }
-func (namedChildScope) Subtree([]string) []protocol.ChildSummary { return nil }
-func (namedChildScope) ConversationInScope(string) bool          { return false }
+func (namedChildScope) ChildID() string                                { return "c_caller" }
+func (namedChildScope) Authorize(string) error                         { return nil }
+func (namedChildScope) AuthorizeRead(string) error                     { return nil }
+func (namedChildScope) Subtree([]string) []protocol.ChildSummary       { return nil }
+func (namedChildScope) OwnedChildren([]string) []protocol.ChildSummary { return nil }
+func (namedChildScope) ConversationInScope(string) bool                { return false }
 
 func childScopedServer(f connectapi.ChildLifecycle) *connectapi.Server {
 	s := connectapi.NewServer(nil)
@@ -290,10 +292,12 @@ func TestSpawnAdmitsAUserCallerWithEveryOperatorOnlyFieldSet(t *testing.T) {
 // matchesChildFilter doc comment).
 type subtreeChildScope struct{ all []protocol.ChildSummary }
 
-func (subtreeChildScope) ChildID() string                            { return "c_caller" }
-func (subtreeChildScope) Authorize(string) error                     { return nil }
-func (s subtreeChildScope) Subtree([]string) []protocol.ChildSummary { return s.all }
-func (subtreeChildScope) ConversationInScope(string) bool            { return false }
+func (subtreeChildScope) ChildID() string                                  { return "c_caller" }
+func (subtreeChildScope) Authorize(string) error                           { return nil }
+func (subtreeChildScope) AuthorizeRead(string) error                       { return nil }
+func (s subtreeChildScope) Subtree([]string) []protocol.ChildSummary       { return s.all }
+func (s subtreeChildScope) OwnedChildren([]string) []protocol.ChildSummary { return s.all }
+func (subtreeChildScope) ConversationInScope(string) bool                  { return false }
 
 func childIDsOf(cs []*rafikiv1.ChildSummary) map[string]bool {
 	out := make(map[string]bool, len(cs))
