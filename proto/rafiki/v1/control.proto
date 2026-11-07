@@ -351,6 +351,22 @@ message ChildSummary {
   string display_msg = 27;
   // parent_child_id is the child that spawned this one, empty for a top-level child.
   string parent_child_id = 28;
+  // in_subtree is set only on a child credential's LIST_SCOPE_OWNER list: true
+  // when the caller spawned this agent (directly or transitively), false when
+  // the caller may only read it. Optional because false would otherwise be a
+  // claim about callers it does not apply to.
+  optional bool in_subtree = 29;
+}
+
+// ListScope picks which agents a child credential's ListChildren returns.
+// UNSPECIFIED is "no preference" and resolves to what the caller got before
+// this field existed (a child credential: its own subtree). Every other
+// caller (unix socket, admin, user credential) has no position in the
+// tree, so every value returns the set it could already see.
+enum ListScope {
+  LIST_SCOPE_UNSPECIFIED = 0;
+  LIST_SCOPE_SUBTREE = 1;
+  LIST_SCOPE_OWNER = 2;
 }
 
 message ListChildrenRequest {
@@ -368,6 +384,10 @@ message ListChildrenRequest {
   google.protobuf.Timestamp since = 8;
   map<string, string> labels = 6;
   repeated string has_label = 7;
+  // scope picks which agents a child credential sees. UNSPECIFIED resolves to
+  // the caller's own subtree; every value is a no-op for a caller with no
+  // position in the tree (unix socket, admin, user credential).
+  ListScope scope = 9;
 
   reserved 5;
 }

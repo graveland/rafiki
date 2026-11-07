@@ -968,6 +968,12 @@ pub struct ChildSummary {
     /// parent_child_id is the child that spawned this one, empty for a top-level child.
     #[prost(string, tag = "28")]
     pub parent_child_id: ::prost::alloc::string::String,
+    /// in_subtree is set only on a child credential's LIST_SCOPE_OWNER list: true
+    /// when the caller spawned this agent (directly or transitively), false when
+    /// the caller may only read it. Optional because false would otherwise be a
+    /// claim about callers it does not apply to.
+    #[prost(bool, optional, tag = "29")]
+    pub in_subtree: ::core::option::Option<bool>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListChildrenRequest {
@@ -995,6 +1001,11 @@ pub struct ListChildrenRequest {
     >,
     #[prost(string, repeated, tag = "7")]
     pub has_label: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// scope picks which agents a child credential sees. UNSPECIFIED resolves to
+    /// the caller's own subtree; every value is a no-op for a caller with no
+    /// position in the tree (unix socket, admin, user credential).
+    #[prost(enumeration = "ListScope", tag = "9")]
+    pub scope: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListChildrenResponse {
@@ -4027,6 +4038,40 @@ impl StepSite {
             "STEP_SITE_UNSPECIFIED" => Some(Self::Unspecified),
             "STEP_SITE_CHILD" => Some(Self::Child),
             "STEP_SITE_SENDER" => Some(Self::Sender),
+            _ => None,
+        }
+    }
+}
+/// ListScope picks which agents a child credential's ListChildren returns.
+/// UNSPECIFIED is "no preference" and resolves to what the caller got before
+/// this field existed (a child credential: its own subtree). Every other
+/// caller (unix socket, admin, user credential) has no position in the
+/// tree, so every value returns the set it could already see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ListScope {
+    Unspecified = 0,
+    Subtree = 1,
+    Owner = 2,
+}
+impl ListScope {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "LIST_SCOPE_UNSPECIFIED",
+            Self::Subtree => "LIST_SCOPE_SUBTREE",
+            Self::Owner => "LIST_SCOPE_OWNER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "LIST_SCOPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "LIST_SCOPE_SUBTREE" => Some(Self::Subtree),
+            "LIST_SCOPE_OWNER" => Some(Self::Owner),
             _ => None,
         }
     }

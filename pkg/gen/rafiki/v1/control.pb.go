@@ -251,6 +251,60 @@ func (StepSite) EnumDescriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{3}
 }
 
+// ListScope picks which agents a child credential's ListChildren returns.
+// UNSPECIFIED is "no preference" and resolves to what the caller got before
+// this field existed (a child credential: its own subtree). Every other
+// caller (unix socket, admin, user credential) has no position in the
+// tree, so every value returns the set it could already see.
+type ListScope int32
+
+const (
+	ListScope_LIST_SCOPE_UNSPECIFIED ListScope = 0
+	ListScope_LIST_SCOPE_SUBTREE     ListScope = 1
+	ListScope_LIST_SCOPE_OWNER       ListScope = 2
+)
+
+// Enum value maps for ListScope.
+var (
+	ListScope_name = map[int32]string{
+		0: "LIST_SCOPE_UNSPECIFIED",
+		1: "LIST_SCOPE_SUBTREE",
+		2: "LIST_SCOPE_OWNER",
+	}
+	ListScope_value = map[string]int32{
+		"LIST_SCOPE_UNSPECIFIED": 0,
+		"LIST_SCOPE_SUBTREE":     1,
+		"LIST_SCOPE_OWNER":       2,
+	}
+)
+
+func (x ListScope) Enum() *ListScope {
+	p := new(ListScope)
+	*p = x
+	return p
+}
+
+func (x ListScope) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ListScope) Descriptor() protoreflect.EnumDescriptor {
+	return file_rafiki_v1_control_proto_enumTypes[4].Descriptor()
+}
+
+func (ListScope) Type() protoreflect.EnumType {
+	return &file_rafiki_v1_control_proto_enumTypes[4]
+}
+
+func (x ListScope) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ListScope.Descriptor instead.
+func (ListScope) EnumDescriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{4}
+}
+
 type ReviewStage int32
 
 const (
@@ -284,11 +338,11 @@ func (x ReviewStage) String() string {
 }
 
 func (ReviewStage) Descriptor() protoreflect.EnumDescriptor {
-	return file_rafiki_v1_control_proto_enumTypes[4].Descriptor()
+	return file_rafiki_v1_control_proto_enumTypes[5].Descriptor()
 }
 
 func (ReviewStage) Type() protoreflect.EnumType {
-	return &file_rafiki_v1_control_proto_enumTypes[4]
+	return &file_rafiki_v1_control_proto_enumTypes[5]
 }
 
 func (x ReviewStage) Number() protoreflect.EnumNumber {
@@ -297,7 +351,7 @@ func (x ReviewStage) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ReviewStage.Descriptor instead.
 func (ReviewStage) EnumDescriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{4}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{5}
 }
 
 type ReviewAcceptStatus int32
@@ -336,11 +390,11 @@ func (x ReviewAcceptStatus) String() string {
 }
 
 func (ReviewAcceptStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_rafiki_v1_control_proto_enumTypes[5].Descriptor()
+	return file_rafiki_v1_control_proto_enumTypes[6].Descriptor()
 }
 
 func (ReviewAcceptStatus) Type() protoreflect.EnumType {
-	return &file_rafiki_v1_control_proto_enumTypes[5]
+	return &file_rafiki_v1_control_proto_enumTypes[6]
 }
 
 func (x ReviewAcceptStatus) Number() protoreflect.EnumNumber {
@@ -349,7 +403,7 @@ func (x ReviewAcceptStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ReviewAcceptStatus.Descriptor instead.
 func (ReviewAcceptStatus) EnumDescriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{5}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{6}
 }
 
 // TagScope says who may see and fork from a tag. TAG_SCOPE_UNSPECIFIED means
@@ -390,11 +444,11 @@ func (x TagScope) String() string {
 }
 
 func (TagScope) Descriptor() protoreflect.EnumDescriptor {
-	return file_rafiki_v1_control_proto_enumTypes[6].Descriptor()
+	return file_rafiki_v1_control_proto_enumTypes[7].Descriptor()
 }
 
 func (TagScope) Type() protoreflect.EnumType {
-	return &file_rafiki_v1_control_proto_enumTypes[6]
+	return &file_rafiki_v1_control_proto_enumTypes[7]
 }
 
 func (x TagScope) Number() protoreflect.EnumNumber {
@@ -403,7 +457,7 @@ func (x TagScope) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TagScope.Descriptor instead.
 func (TagScope) EnumDescriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{6}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{7}
 }
 
 type GetHistoryRequest struct {
@@ -1712,6 +1766,11 @@ type ChildSummary struct {
 	DisplayMsg string `protobuf:"bytes,27,opt,name=display_msg,json=displayMsg,proto3" json:"display_msg,omitempty"`
 	// parent_child_id is the child that spawned this one, empty for a top-level child.
 	ParentChildId string `protobuf:"bytes,28,opt,name=parent_child_id,json=parentChildId,proto3" json:"parent_child_id,omitempty"`
+	// in_subtree is set only on a child credential's LIST_SCOPE_OWNER list: true
+	// when the caller spawned this agent (directly or transitively), false when
+	// the caller may only read it. Optional because false would otherwise be a
+	// claim about callers it does not apply to.
+	InSubtree     *bool `protobuf:"varint,29,opt,name=in_subtree,json=inSubtree,proto3,oneof" json:"in_subtree,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1928,6 +1987,13 @@ func (x *ChildSummary) GetParentChildId() string {
 	return ""
 }
 
+func (x *ChildSummary) GetInSubtree() bool {
+	if x != nil && x.InSubtree != nil {
+		return *x.InSubtree
+	}
+	return false
+}
+
 type ListChildrenRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Empty means every child. Otherwise only children whose status matches one
@@ -1941,9 +2007,13 @@ type ListChildrenRequest struct {
 	CwdContains  string `protobuf:"bytes,4,opt,name=cwd_contains,json=cwdContains,proto3" json:"cwd_contains,omitempty"`
 	// since is a time floor: a child that started before it is excluded. Unset
 	// means unbounded (the old since = 0).
-	Since         *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=since,proto3" json:"since,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,6,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	HasLabel      []string               `protobuf:"bytes,7,rep,name=has_label,json=hasLabel,proto3" json:"has_label,omitempty"`
+	Since    *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=since,proto3" json:"since,omitempty"`
+	Labels   map[string]string      `protobuf:"bytes,6,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	HasLabel []string               `protobuf:"bytes,7,rep,name=has_label,json=hasLabel,proto3" json:"has_label,omitempty"`
+	// scope picks which agents a child credential sees. UNSPECIFIED resolves to
+	// the caller's own subtree; every value is a no-op for a caller with no
+	// position in the tree (unix socket, admin, user credential).
+	Scope         ListScope `protobuf:"varint,9,opt,name=scope,proto3,enum=rafiki.v1.ListScope" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2025,6 +2095,13 @@ func (x *ListChildrenRequest) GetHasLabel() []string {
 		return x.HasLabel
 	}
 	return nil
+}
+
+func (x *ListChildrenRequest) GetScope() ListScope {
+	if x != nil {
+		return x.Scope
+	}
+	return ListScope_LIST_SCOPE_UNSPECIFIED
 }
 
 type ListChildrenResponse struct {
@@ -17271,7 +17348,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x10SetResultRequest\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\"\x13\n" +
-	"\x11SetResultResponse\"\x9d\b\n" +
+	"\x11SetResultResponse\"\xd0\b\n" +
 	"\fChildSummary\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -17304,7 +17381,9 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"waiting_on\x18\x1a \x01(\tR\twaitingOn\x12\x1f\n" +
 	"\vdisplay_msg\x18\x1b \x01(\tR\n" +
 	"displayMsg\x12&\n" +
-	"\x0fparent_child_id\x18\x1c \x01(\tR\rparentChildId\x1a9\n" +
+	"\x0fparent_child_id\x18\x1c \x01(\tR\rparentChildId\x12\"\n" +
+	"\n" +
+	"in_subtree\x18\x1d \x01(\bH\x05R\tinSubtree\x88\x01\x01\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x06\n" +
@@ -17313,8 +17392,9 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"_exit_codeB\x11\n" +
 	"\x0f_latest_ordinalB\v\n" +
 	"\t_cost_usdB\v\n" +
-	"\t_max_costJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
-	"\"\xe1\x02\n" +
+	"\t_max_costB\r\n" +
+	"\v_in_subtreeJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"\"\x8d\x03\n" +
 	"\x13ListChildrenRequest\x12\x1a\n" +
 	"\bstatuses\x18\x01 \x03(\tR\bstatuses\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12#\n" +
@@ -17322,7 +17402,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\fcwd_contains\x18\x04 \x01(\tR\vcwdContains\x120\n" +
 	"\x05since\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x12B\n" +
 	"\x06labels\x18\x06 \x03(\v2*.rafiki.v1.ListChildrenRequest.LabelsEntryR\x06labels\x12\x1b\n" +
-	"\thas_label\x18\a \x03(\tR\bhasLabel\x1a9\n" +
+	"\thas_label\x18\a \x03(\tR\bhasLabel\x12*\n" +
+	"\x05scope\x18\t \x01(\x0e2\x14.rafiki.v1.ListScopeR\x05scope\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x05\x10\x06\"K\n" +
@@ -18528,7 +18609,11 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\bStepSite\x12\x19\n" +
 	"\x15STEP_SITE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fSTEP_SITE_CHILD\x10\x01\x12\x14\n" +
-	"\x10STEP_SITE_SENDER\x10\x02*[\n" +
+	"\x10STEP_SITE_SENDER\x10\x02*U\n" +
+	"\tListScope\x12\x1a\n" +
+	"\x16LIST_SCOPE_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12LIST_SCOPE_SUBTREE\x10\x01\x12\x14\n" +
+	"\x10LIST_SCOPE_OWNER\x10\x02*[\n" +
 	"\vReviewStage\x12\x1c\n" +
 	"\x18REVIEW_STAGE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13REVIEW_STAGE_DETECT\x10\x01\x12\x15\n" +
@@ -18674,685 +18759,687 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 	return file_rafiki_v1_control_proto_rawDescData
 }
 
-var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
+var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
 var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 272)
 var file_rafiki_v1_control_proto_goTypes = []any{
 	(EventTier)(0),                            // 0: rafiki.v1.EventTier
 	(SendMode)(0),                             // 1: rafiki.v1.SendMode
 	(DescendantScope)(0),                      // 2: rafiki.v1.DescendantScope
 	(StepSite)(0),                             // 3: rafiki.v1.StepSite
-	(ReviewStage)(0),                          // 4: rafiki.v1.ReviewStage
-	(ReviewAcceptStatus)(0),                   // 5: rafiki.v1.ReviewAcceptStatus
-	(TagScope)(0),                             // 6: rafiki.v1.TagScope
-	(*GetHistoryRequest)(nil),                 // 7: rafiki.v1.GetHistoryRequest
-	(*GetHistoryResponse)(nil),                // 8: rafiki.v1.GetHistoryResponse
-	(*EventSubject)(nil),                      // 9: rafiki.v1.EventSubject
-	(*EventCursor)(nil),                       // 10: rafiki.v1.EventCursor
-	(*StreamEventsRequest)(nil),               // 11: rafiki.v1.StreamEventsRequest
-	(*ReadStep)(nil),                          // 12: rafiki.v1.ReadStep
-	(*BashStep)(nil),                          // 13: rafiki.v1.BashStep
-	(*PymoduleRunStep)(nil),                   // 14: rafiki.v1.PymoduleRunStep
-	(*SendStep)(nil),                          // 15: rafiki.v1.SendStep
-	(*StepSummary)(nil),                       // 16: rafiki.v1.StepSummary
-	(*SendRequest)(nil),                       // 17: rafiki.v1.SendRequest
-	(*SendResponse)(nil),                      // 18: rafiki.v1.SendResponse
-	(*ReportRequest)(nil),                     // 19: rafiki.v1.ReportRequest
-	(*ReportResponse)(nil),                    // 20: rafiki.v1.ReportResponse
-	(*ReceiveRequest)(nil),                    // 21: rafiki.v1.ReceiveRequest
-	(*ScriptMessage)(nil),                     // 22: rafiki.v1.ScriptMessage
-	(*SetResultRequest)(nil),                  // 23: rafiki.v1.SetResultRequest
-	(*SetResultResponse)(nil),                 // 24: rafiki.v1.SetResultResponse
-	(*ChildSummary)(nil),                      // 25: rafiki.v1.ChildSummary
-	(*ListChildrenRequest)(nil),               // 26: rafiki.v1.ListChildrenRequest
-	(*ListChildrenResponse)(nil),              // 27: rafiki.v1.ListChildrenResponse
-	(*GetChildRequest)(nil),                   // 28: rafiki.v1.GetChildRequest
-	(*GetChildResponse)(nil),                  // 29: rafiki.v1.GetChildResponse
-	(*PrefillRead)(nil),                       // 30: rafiki.v1.PrefillRead
-	(*SpawnRequest)(nil),                      // 31: rafiki.v1.SpawnRequest
-	(*SpawnResponse)(nil),                     // 32: rafiki.v1.SpawnResponse
-	(*KillRequest)(nil),                       // 33: rafiki.v1.KillRequest
-	(*KillResponse)(nil),                      // 34: rafiki.v1.KillResponse
-	(*CloseRequest)(nil),                      // 35: rafiki.v1.CloseRequest
-	(*CloseResponse)(nil),                     // 36: rafiki.v1.CloseResponse
-	(*SetBudgetRequest)(nil),                  // 37: rafiki.v1.SetBudgetRequest
-	(*SetBudgetResponse)(nil),                 // 38: rafiki.v1.SetBudgetResponse
-	(*RenameRequest)(nil),                     // 39: rafiki.v1.RenameRequest
-	(*RenameResponse)(nil),                    // 40: rafiki.v1.RenameResponse
-	(*NotifyRequest)(nil),                     // 41: rafiki.v1.NotifyRequest
-	(*NotifyResponse)(nil),                    // 42: rafiki.v1.NotifyResponse
-	(*SetRoutingRequest)(nil),                 // 43: rafiki.v1.SetRoutingRequest
-	(*SetRoutingResponse)(nil),                // 44: rafiki.v1.SetRoutingResponse
-	(*TaskRow)(nil),                           // 45: rafiki.v1.TaskRow
-	(*ListTasksRequest)(nil),                  // 46: rafiki.v1.ListTasksRequest
-	(*ListTasksResponse)(nil),                 // 47: rafiki.v1.ListTasksResponse
-	(*ModelRow)(nil),                          // 48: rafiki.v1.ModelRow
-	(*ListModelsRequest)(nil),                 // 49: rafiki.v1.ListModelsRequest
-	(*ListModelsResponse)(nil),                // 50: rafiki.v1.ListModelsResponse
-	(*ConversationSearchRequest)(nil),         // 51: rafiki.v1.ConversationSearchRequest
-	(*ConversationSummary)(nil),               // 52: rafiki.v1.ConversationSummary
-	(*ConversationSearchResponse)(nil),        // 53: rafiki.v1.ConversationSearchResponse
-	(*ConversationExportRequest)(nil),         // 54: rafiki.v1.ConversationExportRequest
-	(*TranscriptTurn)(nil),                    // 55: rafiki.v1.TranscriptTurn
-	(*ConversationExportResponse)(nil),        // 56: rafiki.v1.ConversationExportResponse
-	(*ConversationQueryRequest)(nil),          // 57: rafiki.v1.ConversationQueryRequest
-	(*QueryColumn)(nil),                       // 58: rafiki.v1.QueryColumn
-	(*QueryValue)(nil),                        // 59: rafiki.v1.QueryValue
-	(*QueryRow)(nil),                          // 60: rafiki.v1.QueryRow
-	(*ConversationQueryResponse)(nil),         // 61: rafiki.v1.ConversationQueryResponse
-	(*ConversationReviewRequest)(nil),         // 62: rafiki.v1.ConversationReviewRequest
-	(*ConversationReviewAccept)(nil),          // 63: rafiki.v1.ConversationReviewAccept
-	(*ConversationReviewResponse)(nil),        // 64: rafiki.v1.ConversationReviewResponse
-	(*ConversationFindingsRequest)(nil),       // 65: rafiki.v1.ConversationFindingsRequest
-	(*ReviewFinding)(nil),                     // 66: rafiki.v1.ReviewFinding
-	(*ReviewAnalysis)(nil),                    // 67: rafiki.v1.ReviewAnalysis
-	(*ConversationFindingsResponse)(nil),      // 68: rafiki.v1.ConversationFindingsResponse
-	(*ExecutorRow)(nil),                       // 69: rafiki.v1.ExecutorRow
-	(*ListExecutorsRequest)(nil),              // 70: rafiki.v1.ListExecutorsRequest
-	(*ListExecutorsResponse)(nil),             // 71: rafiki.v1.ListExecutorsResponse
-	(*DarajaLaunchRequest)(nil),               // 72: rafiki.v1.DarajaLaunchRequest
-	(*DarajaLaunchResponse)(nil),              // 73: rafiki.v1.DarajaLaunchResponse
-	(*DarajaSendRequest)(nil),                 // 74: rafiki.v1.DarajaSendRequest
-	(*DarajaSendResponse)(nil),                // 75: rafiki.v1.DarajaSendResponse
-	(*DarajaWatchRequest)(nil),                // 76: rafiki.v1.DarajaWatchRequest
-	(*DarajaWatchResponse)(nil),               // 77: rafiki.v1.DarajaWatchResponse
-	(*DarajaProcessRestarted)(nil),            // 78: rafiki.v1.DarajaProcessRestarted
-	(*DarajaProcessExited)(nil),               // 79: rafiki.v1.DarajaProcessExited
-	(*RateLimitWindow)(nil),                   // 80: rafiki.v1.RateLimitWindow
-	(*GetRateLimitStatusRequest)(nil),         // 81: rafiki.v1.GetRateLimitStatusRequest
-	(*GetRateLimitStatusResponse)(nil),        // 82: rafiki.v1.GetRateLimitStatusResponse
-	(*SandboxMount)(nil),                      // 83: rafiki.v1.SandboxMount
-	(*SandboxSpec)(nil),                       // 84: rafiki.v1.SandboxSpec
-	(*SandboxInfo)(nil),                       // 85: rafiki.v1.SandboxInfo
-	(*CreateSandboxRequest)(nil),              // 86: rafiki.v1.CreateSandboxRequest
-	(*CreateSandboxResponse)(nil),             // 87: rafiki.v1.CreateSandboxResponse
-	(*ListSandboxesRequest)(nil),              // 88: rafiki.v1.ListSandboxesRequest
-	(*ListSandboxesResponse)(nil),             // 89: rafiki.v1.ListSandboxesResponse
-	(*RemoveSandboxRequest)(nil),              // 90: rafiki.v1.RemoveSandboxRequest
-	(*RemoveSandboxResponse)(nil),             // 91: rafiki.v1.RemoveSandboxResponse
-	(*SyncEndpoint)(nil),                      // 92: rafiki.v1.SyncEndpoint
-	(*SyncPathRequest)(nil),                   // 93: rafiki.v1.SyncPathRequest
-	(*SyncPathResponse)(nil),                  // 94: rafiki.v1.SyncPathResponse
-	(*SyncRepoRequest)(nil),                   // 95: rafiki.v1.SyncRepoRequest
-	(*SyncRepoResponse)(nil),                  // 96: rafiki.v1.SyncRepoResponse
-	(*SkillFileInfo)(nil),                     // 97: rafiki.v1.SkillFileInfo
-	(*SkillRow)(nil),                          // 98: rafiki.v1.SkillRow
-	(*ListSkillsRequest)(nil),                 // 99: rafiki.v1.ListSkillsRequest
-	(*ListSkillsResponse)(nil),                // 100: rafiki.v1.ListSkillsResponse
-	(*GetSkillRequest)(nil),                   // 101: rafiki.v1.GetSkillRequest
-	(*GetSkillResponse)(nil),                  // 102: rafiki.v1.GetSkillResponse
-	(*DeleteSkillRequest)(nil),                // 103: rafiki.v1.DeleteSkillRequest
-	(*DeleteSkillResponse)(nil),               // 104: rafiki.v1.DeleteSkillResponse
-	(*SetSkillEnabledRequest)(nil),            // 105: rafiki.v1.SetSkillEnabledRequest
-	(*SetSkillEnabledResponse)(nil),           // 106: rafiki.v1.SetSkillEnabledResponse
-	(*PymoduleRow)(nil),                       // 107: rafiki.v1.PymoduleRow
-	(*ListPymodulesRequest)(nil),              // 108: rafiki.v1.ListPymodulesRequest
-	(*ListPymodulesResponse)(nil),             // 109: rafiki.v1.ListPymodulesResponse
-	(*GetPymoduleRequest)(nil),                // 110: rafiki.v1.GetPymoduleRequest
-	(*GetPymoduleResponse)(nil),               // 111: rafiki.v1.GetPymoduleResponse
-	(*PutPymoduleRequest)(nil),                // 112: rafiki.v1.PutPymoduleRequest
-	(*PutPymoduleResponse)(nil),               // 113: rafiki.v1.PutPymoduleResponse
-	(*DeletePymoduleRequest)(nil),             // 114: rafiki.v1.DeletePymoduleRequest
-	(*DeletePymoduleResponse)(nil),            // 115: rafiki.v1.DeletePymoduleResponse
-	(*RepoRow)(nil),                           // 116: rafiki.v1.RepoRow
-	(*AddRepoRequest)(nil),                    // 117: rafiki.v1.AddRepoRequest
-	(*AddRepoResponse)(nil),                   // 118: rafiki.v1.AddRepoResponse
-	(*ListReposRequest)(nil),                  // 119: rafiki.v1.ListReposRequest
-	(*ListReposResponse)(nil),                 // 120: rafiki.v1.ListReposResponse
-	(*RefreshRepoRequest)(nil),                // 121: rafiki.v1.RefreshRepoRequest
-	(*SetRepoRequest)(nil),                    // 122: rafiki.v1.SetRepoRequest
-	(*SetRepoResponse)(nil),                   // 123: rafiki.v1.SetRepoResponse
-	(*RepoScript)(nil),                        // 124: rafiki.v1.RepoScript
-	(*RepoPackage)(nil),                       // 125: rafiki.v1.RepoPackage
-	(*RefreshRepoResponse)(nil),               // 126: rafiki.v1.RefreshRepoResponse
-	(*RemoveRepoRequest)(nil),                 // 127: rafiki.v1.RemoveRepoRequest
-	(*RemoveRepoResponse)(nil),                // 128: rafiki.v1.RemoveRepoResponse
-	(*StringList)(nil),                        // 129: rafiki.v1.StringList
-	(*PresetRow)(nil),                         // 130: rafiki.v1.PresetRow
-	(*ListPresetsRequest)(nil),                // 131: rafiki.v1.ListPresetsRequest
-	(*ListPresetsResponse)(nil),               // 132: rafiki.v1.ListPresetsResponse
-	(*GetPresetRequest)(nil),                  // 133: rafiki.v1.GetPresetRequest
-	(*GetPresetResponse)(nil),                 // 134: rafiki.v1.GetPresetResponse
-	(*PutPresetRequest)(nil),                  // 135: rafiki.v1.PutPresetRequest
-	(*PutPresetResponse)(nil),                 // 136: rafiki.v1.PutPresetResponse
-	(*DeletePresetRequest)(nil),               // 137: rafiki.v1.DeletePresetRequest
-	(*DeletePresetResponse)(nil),              // 138: rafiki.v1.DeletePresetResponse
-	(*RecallHit)(nil),                         // 139: rafiki.v1.RecallHit
-	(*RecallRequest)(nil),                     // 140: rafiki.v1.RecallRequest
-	(*RecallResponse)(nil),                    // 141: rafiki.v1.RecallResponse
-	(*RecallContextRequest)(nil),              // 142: rafiki.v1.RecallContextRequest
-	(*RecallContextResponse)(nil),             // 143: rafiki.v1.RecallContextResponse
-	(*MemoryRow)(nil),                         // 144: rafiki.v1.MemoryRow
-	(*GetMemoryRequest)(nil),                  // 145: rafiki.v1.GetMemoryRequest
-	(*GetMemoryResponse)(nil),                 // 146: rafiki.v1.GetMemoryResponse
-	(*MemoryTreeRequest)(nil),                 // 147: rafiki.v1.MemoryTreeRequest
-	(*MemoryTreeResponse)(nil),                // 148: rafiki.v1.MemoryTreeResponse
-	(*PutMemoryRequest)(nil),                  // 149: rafiki.v1.PutMemoryRequest
-	(*PutMemoryResponse)(nil),                 // 150: rafiki.v1.PutMemoryResponse
-	(*DeleteMemoryRequest)(nil),               // 151: rafiki.v1.DeleteMemoryRequest
-	(*DeleteMemoryResponse)(nil),              // 152: rafiki.v1.DeleteMemoryResponse
-	(*RecallBackfillRequest)(nil),             // 153: rafiki.v1.RecallBackfillRequest
-	(*RecallBackfillResponse)(nil),            // 154: rafiki.v1.RecallBackfillResponse
-	(*RecallStatusRequest)(nil),               // 155: rafiki.v1.RecallStatusRequest
-	(*RecallStatusResponse)(nil),              // 156: rafiki.v1.RecallStatusResponse
-	(*ProviderBan)(nil),                       // 157: rafiki.v1.ProviderBan
-	(*ListProviderBansRequest)(nil),           // 158: rafiki.v1.ListProviderBansRequest
-	(*ListProviderBansResponse)(nil),          // 159: rafiki.v1.ListProviderBansResponse
-	(*BanProviderRequest)(nil),                // 160: rafiki.v1.BanProviderRequest
-	(*BanProviderResponse)(nil),               // 161: rafiki.v1.BanProviderResponse
-	(*UnbanProviderRequest)(nil),              // 162: rafiki.v1.UnbanProviderRequest
-	(*UnbanProviderResponse)(nil),             // 163: rafiki.v1.UnbanProviderResponse
-	(*RouteRow)(nil),                          // 164: rafiki.v1.RouteRow
-	(*ListRoutesRequest)(nil),                 // 165: rafiki.v1.ListRoutesRequest
-	(*ListRoutesResponse)(nil),                // 166: rafiki.v1.ListRoutesResponse
-	(*SetRouteRequest)(nil),                   // 167: rafiki.v1.SetRouteRequest
-	(*SetRouteResponse)(nil),                  // 168: rafiki.v1.SetRouteResponse
-	(*DeleteRouteRequest)(nil),                // 169: rafiki.v1.DeleteRouteRequest
-	(*DeleteRouteResponse)(nil),               // 170: rafiki.v1.DeleteRouteResponse
-	(*ModelAliasRow)(nil),                     // 171: rafiki.v1.ModelAliasRow
-	(*ListModelAliasesRequest)(nil),           // 172: rafiki.v1.ListModelAliasesRequest
-	(*ListModelAliasesResponse)(nil),          // 173: rafiki.v1.ListModelAliasesResponse
-	(*PutModelAliasRequest)(nil),              // 174: rafiki.v1.PutModelAliasRequest
-	(*PutModelAliasResponse)(nil),             // 175: rafiki.v1.PutModelAliasResponse
-	(*DeleteModelAliasRequest)(nil),           // 176: rafiki.v1.DeleteModelAliasRequest
-	(*DeleteModelAliasResponse)(nil),          // 177: rafiki.v1.DeleteModelAliasResponse
-	(*ResumeRequest)(nil),                     // 178: rafiki.v1.ResumeRequest
-	(*ResumeResponse)(nil),                    // 179: rafiki.v1.ResumeResponse
-	(*CloseAllExitedRequest)(nil),             // 180: rafiki.v1.CloseAllExitedRequest
-	(*CloseAllExitedResponse)(nil),            // 181: rafiki.v1.CloseAllExitedResponse
-	(*SetLabelsRequest)(nil),                  // 182: rafiki.v1.SetLabelsRequest
-	(*SetLabelsResponse)(nil),                 // 183: rafiki.v1.SetLabelsResponse
-	(*StatusRequest)(nil),                     // 184: rafiki.v1.StatusRequest
-	(*StatusResponse)(nil),                    // 185: rafiki.v1.StatusResponse
-	(*SearchRequest)(nil),                     // 186: rafiki.v1.SearchRequest
-	(*SearchResponse)(nil),                    // 187: rafiki.v1.SearchResponse
-	(*ShutdownDaemonRequest)(nil),             // 188: rafiki.v1.ShutdownDaemonRequest
-	(*ShutdownDaemonResponse)(nil),            // 189: rafiki.v1.ShutdownDaemonResponse
-	(*ModelInfoRequest)(nil),                  // 190: rafiki.v1.ModelInfoRequest
-	(*ModelInfoResponse)(nil),                 // 191: rafiki.v1.ModelInfoResponse
-	(*ModelRoutesRequest)(nil),                // 192: rafiki.v1.ModelRoutesRequest
-	(*RouteEndpoint)(nil),                     // 193: rafiki.v1.RouteEndpoint
-	(*ModelRoutesResponse)(nil),               // 194: rafiki.v1.ModelRoutesResponse
-	(*ConversationStatsRequest)(nil),          // 195: rafiki.v1.ConversationStatsRequest
-	(*ConversationStatsResponse)(nil),         // 196: rafiki.v1.ConversationStatsResponse
-	(*EnrollExecutorRequest)(nil),             // 197: rafiki.v1.EnrollExecutorRequest
-	(*EnrollExecutorResponse)(nil),            // 198: rafiki.v1.EnrollExecutorResponse
-	(*CreateExecutorRequest)(nil),             // 199: rafiki.v1.CreateExecutorRequest
-	(*CreateExecutorResponse)(nil),            // 200: rafiki.v1.CreateExecutorResponse
-	(*LabelExecutorRequest)(nil),              // 201: rafiki.v1.LabelExecutorRequest
-	(*LabelExecutorResponse)(nil),             // 202: rafiki.v1.LabelExecutorResponse
-	(*DisableExecutorRequest)(nil),            // 203: rafiki.v1.DisableExecutorRequest
-	(*DisableExecutorResponse)(nil),           // 204: rafiki.v1.DisableExecutorResponse
-	(*EnableExecutorRequest)(nil),             // 205: rafiki.v1.EnableExecutorRequest
-	(*EnableExecutorResponse)(nil),            // 206: rafiki.v1.EnableExecutorResponse
-	(*DeleteExecutorRequest)(nil),             // 207: rafiki.v1.DeleteExecutorRequest
-	(*DeleteExecutorResponse)(nil),            // 208: rafiki.v1.DeleteExecutorResponse
-	(*ExecutorSessionRequest)(nil),            // 209: rafiki.v1.ExecutorSessionRequest
-	(*ExecutorSessionEvent)(nil),              // 210: rafiki.v1.ExecutorSessionEvent
-	(*ExecutorSessionReady)(nil),              // 211: rafiki.v1.ExecutorSessionReady
-	(*CreateUserRequest)(nil),                 // 212: rafiki.v1.CreateUserRequest
-	(*CreateUserResponse)(nil),                // 213: rafiki.v1.CreateUserResponse
-	(*ListUsersRequest)(nil),                  // 214: rafiki.v1.ListUsersRequest
-	(*ListUsersResponse)(nil),                 // 215: rafiki.v1.ListUsersResponse
-	(*UserRow)(nil),                           // 216: rafiki.v1.UserRow
-	(*RemoveUserRequest)(nil),                 // 217: rafiki.v1.RemoveUserRequest
-	(*RemoveUserResponse)(nil),                // 218: rafiki.v1.RemoveUserResponse
-	(*UpdateUserRequest)(nil),                 // 219: rafiki.v1.UpdateUserRequest
-	(*UpdateUserResponse)(nil),                // 220: rafiki.v1.UpdateUserResponse
-	(*TokenRow)(nil),                          // 221: rafiki.v1.TokenRow
-	(*MintTokenRequest)(nil),                  // 222: rafiki.v1.MintTokenRequest
-	(*MintTokenResponse)(nil),                 // 223: rafiki.v1.MintTokenResponse
-	(*ListTokensRequest)(nil),                 // 224: rafiki.v1.ListTokensRequest
-	(*ListTokensResponse)(nil),                // 225: rafiki.v1.ListTokensResponse
-	(*RevokeTokenRequest)(nil),                // 226: rafiki.v1.RevokeTokenRequest
-	(*RevokeTokenResponse)(nil),               // 227: rafiki.v1.RevokeTokenResponse
-	(*BeginProviderLoginRequest)(nil),         // 228: rafiki.v1.BeginProviderLoginRequest
-	(*BeginProviderLoginResponse)(nil),        // 229: rafiki.v1.BeginProviderLoginResponse
-	(*CompleteProviderLoginRequest)(nil),      // 230: rafiki.v1.CompleteProviderLoginRequest
-	(*CompleteProviderLoginResponse)(nil),     // 231: rafiki.v1.CompleteProviderLoginResponse
-	(*DeleteProviderCredentialRequest)(nil),   // 232: rafiki.v1.DeleteProviderCredentialRequest
-	(*DeleteProviderCredentialResponse)(nil),  // 233: rafiki.v1.DeleteProviderCredentialResponse
-	(*BeginMcpLoginRequest)(nil),              // 234: rafiki.v1.BeginMcpLoginRequest
-	(*BeginMcpLoginResponse)(nil),             // 235: rafiki.v1.BeginMcpLoginResponse
-	(*CompleteMcpLoginRequest)(nil),           // 236: rafiki.v1.CompleteMcpLoginRequest
-	(*CompleteMcpLoginResponse)(nil),          // 237: rafiki.v1.CompleteMcpLoginResponse
-	(*DeleteMcpCredentialRequest)(nil),        // 238: rafiki.v1.DeleteMcpCredentialRequest
-	(*DeleteMcpCredentialResponse)(nil),       // 239: rafiki.v1.DeleteMcpCredentialResponse
-	(*BeginLoginRequest)(nil),                 // 240: rafiki.v1.BeginLoginRequest
-	(*BeginLoginResponse)(nil),                // 241: rafiki.v1.BeginLoginResponse
-	(*CompleteLoginRequest)(nil),              // 242: rafiki.v1.CompleteLoginRequest
-	(*CompleteLoginResponse)(nil),             // 243: rafiki.v1.CompleteLoginResponse
-	(*GetStreamsRequest)(nil),                 // 244: rafiki.v1.GetStreamsRequest
-	(*GetStreamsResponse)(nil),                // 245: rafiki.v1.GetStreamsResponse
-	(*SendFrameRequest)(nil),                  // 246: rafiki.v1.SendFrameRequest
-	(*SendFrameResponse)(nil),                 // 247: rafiki.v1.SendFrameResponse
-	(*TagRow)(nil),                            // 248: rafiki.v1.TagRow
-	(*TagRequest)(nil),                        // 249: rafiki.v1.TagRequest
-	(*TagResponse)(nil),                       // 250: rafiki.v1.TagResponse
-	(*UntagRequest)(nil),                      // 251: rafiki.v1.UntagRequest
-	(*UntagResponse)(nil),                     // 252: rafiki.v1.UntagResponse
-	(*ListTagsRequest)(nil),                   // 253: rafiki.v1.ListTagsRequest
-	(*ListTagsResponse)(nil),                  // 254: rafiki.v1.ListTagsResponse
-	nil,                                       // 255: rafiki.v1.EventCursor.OrdinalsEntry
-	(*ScriptMessage_Text)(nil),                // 256: rafiki.v1.ScriptMessage.Text
-	(*ScriptMessage_Stop)(nil),                // 257: rafiki.v1.ScriptMessage.Stop
-	nil,                                       // 258: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                                       // 259: rafiki.v1.ListChildrenRequest.LabelsEntry
-	nil,                                       // 260: rafiki.v1.SpawnRequest.LabelsEntry
-	(*SpawnRequest_ScriptSpec)(nil),           // 261: rafiki.v1.SpawnRequest.ScriptSpec
-	nil,                                       // 262: rafiki.v1.SpawnRequest.EnvEntry
-	(*SpawnRequest_ForkFrom)(nil),             // 263: rafiki.v1.SpawnRequest.ForkFrom
-	nil,                                       // 264: rafiki.v1.NotifyRequest.FieldsEntry
-	nil,                                       // 265: rafiki.v1.ExecutorRow.LabelsEntry
-	nil,                                       // 266: rafiki.v1.SandboxSpec.EnvEntry
-	nil,                                       // 267: rafiki.v1.SandboxSpec.LabelsEntry
-	nil,                                       // 268: rafiki.v1.SandboxInfo.LabelsEntry
-	nil,                                       // 269: rafiki.v1.PresetRow.LabelsEntry
-	nil,                                       // 270: rafiki.v1.SetLabelsRequest.SetEntry
-	nil,                                       // 271: rafiki.v1.SetLabelsResponse.LabelsEntry
-	(*StatusResponse_ChildCounts)(nil),        // 272: rafiki.v1.StatusResponse.ChildCounts
-	(*SearchRequest_SearchSessionFilter)(nil), // 273: rafiki.v1.SearchRequest.SearchSessionFilter
-	nil,                              // 274: rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
-	(*SearchResponse_SearchHit)(nil), // 275: rafiki.v1.SearchResponse.SearchHit
-	nil,                              // 276: rafiki.v1.EnrollExecutorRequest.LabelsEntry
-	nil,                              // 277: rafiki.v1.CreateExecutorRequest.LabelsEntry
-	nil,                              // 278: rafiki.v1.LabelExecutorRequest.SetEntry
-	(*timestamppb.Timestamp)(nil),    // 279: google.protobuf.Timestamp
-	(*Event)(nil),                    // 280: rafiki.v1.Event
-	(*durationpb.Duration)(nil),      // 281: google.protobuf.Duration
-	(*ContentBlock)(nil),             // 282: rafiki.v1.ContentBlock
-	(*darajapb.ChildSpec)(nil),       // 283: rafiki.daraja.v1.ChildSpec
-	(*ImageBlock)(nil),               // 284: rafiki.v1.ImageBlock
+	(ListScope)(0),                            // 4: rafiki.v1.ListScope
+	(ReviewStage)(0),                          // 5: rafiki.v1.ReviewStage
+	(ReviewAcceptStatus)(0),                   // 6: rafiki.v1.ReviewAcceptStatus
+	(TagScope)(0),                             // 7: rafiki.v1.TagScope
+	(*GetHistoryRequest)(nil),                 // 8: rafiki.v1.GetHistoryRequest
+	(*GetHistoryResponse)(nil),                // 9: rafiki.v1.GetHistoryResponse
+	(*EventSubject)(nil),                      // 10: rafiki.v1.EventSubject
+	(*EventCursor)(nil),                       // 11: rafiki.v1.EventCursor
+	(*StreamEventsRequest)(nil),               // 12: rafiki.v1.StreamEventsRequest
+	(*ReadStep)(nil),                          // 13: rafiki.v1.ReadStep
+	(*BashStep)(nil),                          // 14: rafiki.v1.BashStep
+	(*PymoduleRunStep)(nil),                   // 15: rafiki.v1.PymoduleRunStep
+	(*SendStep)(nil),                          // 16: rafiki.v1.SendStep
+	(*StepSummary)(nil),                       // 17: rafiki.v1.StepSummary
+	(*SendRequest)(nil),                       // 18: rafiki.v1.SendRequest
+	(*SendResponse)(nil),                      // 19: rafiki.v1.SendResponse
+	(*ReportRequest)(nil),                     // 20: rafiki.v1.ReportRequest
+	(*ReportResponse)(nil),                    // 21: rafiki.v1.ReportResponse
+	(*ReceiveRequest)(nil),                    // 22: rafiki.v1.ReceiveRequest
+	(*ScriptMessage)(nil),                     // 23: rafiki.v1.ScriptMessage
+	(*SetResultRequest)(nil),                  // 24: rafiki.v1.SetResultRequest
+	(*SetResultResponse)(nil),                 // 25: rafiki.v1.SetResultResponse
+	(*ChildSummary)(nil),                      // 26: rafiki.v1.ChildSummary
+	(*ListChildrenRequest)(nil),               // 27: rafiki.v1.ListChildrenRequest
+	(*ListChildrenResponse)(nil),              // 28: rafiki.v1.ListChildrenResponse
+	(*GetChildRequest)(nil),                   // 29: rafiki.v1.GetChildRequest
+	(*GetChildResponse)(nil),                  // 30: rafiki.v1.GetChildResponse
+	(*PrefillRead)(nil),                       // 31: rafiki.v1.PrefillRead
+	(*SpawnRequest)(nil),                      // 32: rafiki.v1.SpawnRequest
+	(*SpawnResponse)(nil),                     // 33: rafiki.v1.SpawnResponse
+	(*KillRequest)(nil),                       // 34: rafiki.v1.KillRequest
+	(*KillResponse)(nil),                      // 35: rafiki.v1.KillResponse
+	(*CloseRequest)(nil),                      // 36: rafiki.v1.CloseRequest
+	(*CloseResponse)(nil),                     // 37: rafiki.v1.CloseResponse
+	(*SetBudgetRequest)(nil),                  // 38: rafiki.v1.SetBudgetRequest
+	(*SetBudgetResponse)(nil),                 // 39: rafiki.v1.SetBudgetResponse
+	(*RenameRequest)(nil),                     // 40: rafiki.v1.RenameRequest
+	(*RenameResponse)(nil),                    // 41: rafiki.v1.RenameResponse
+	(*NotifyRequest)(nil),                     // 42: rafiki.v1.NotifyRequest
+	(*NotifyResponse)(nil),                    // 43: rafiki.v1.NotifyResponse
+	(*SetRoutingRequest)(nil),                 // 44: rafiki.v1.SetRoutingRequest
+	(*SetRoutingResponse)(nil),                // 45: rafiki.v1.SetRoutingResponse
+	(*TaskRow)(nil),                           // 46: rafiki.v1.TaskRow
+	(*ListTasksRequest)(nil),                  // 47: rafiki.v1.ListTasksRequest
+	(*ListTasksResponse)(nil),                 // 48: rafiki.v1.ListTasksResponse
+	(*ModelRow)(nil),                          // 49: rafiki.v1.ModelRow
+	(*ListModelsRequest)(nil),                 // 50: rafiki.v1.ListModelsRequest
+	(*ListModelsResponse)(nil),                // 51: rafiki.v1.ListModelsResponse
+	(*ConversationSearchRequest)(nil),         // 52: rafiki.v1.ConversationSearchRequest
+	(*ConversationSummary)(nil),               // 53: rafiki.v1.ConversationSummary
+	(*ConversationSearchResponse)(nil),        // 54: rafiki.v1.ConversationSearchResponse
+	(*ConversationExportRequest)(nil),         // 55: rafiki.v1.ConversationExportRequest
+	(*TranscriptTurn)(nil),                    // 56: rafiki.v1.TranscriptTurn
+	(*ConversationExportResponse)(nil),        // 57: rafiki.v1.ConversationExportResponse
+	(*ConversationQueryRequest)(nil),          // 58: rafiki.v1.ConversationQueryRequest
+	(*QueryColumn)(nil),                       // 59: rafiki.v1.QueryColumn
+	(*QueryValue)(nil),                        // 60: rafiki.v1.QueryValue
+	(*QueryRow)(nil),                          // 61: rafiki.v1.QueryRow
+	(*ConversationQueryResponse)(nil),         // 62: rafiki.v1.ConversationQueryResponse
+	(*ConversationReviewRequest)(nil),         // 63: rafiki.v1.ConversationReviewRequest
+	(*ConversationReviewAccept)(nil),          // 64: rafiki.v1.ConversationReviewAccept
+	(*ConversationReviewResponse)(nil),        // 65: rafiki.v1.ConversationReviewResponse
+	(*ConversationFindingsRequest)(nil),       // 66: rafiki.v1.ConversationFindingsRequest
+	(*ReviewFinding)(nil),                     // 67: rafiki.v1.ReviewFinding
+	(*ReviewAnalysis)(nil),                    // 68: rafiki.v1.ReviewAnalysis
+	(*ConversationFindingsResponse)(nil),      // 69: rafiki.v1.ConversationFindingsResponse
+	(*ExecutorRow)(nil),                       // 70: rafiki.v1.ExecutorRow
+	(*ListExecutorsRequest)(nil),              // 71: rafiki.v1.ListExecutorsRequest
+	(*ListExecutorsResponse)(nil),             // 72: rafiki.v1.ListExecutorsResponse
+	(*DarajaLaunchRequest)(nil),               // 73: rafiki.v1.DarajaLaunchRequest
+	(*DarajaLaunchResponse)(nil),              // 74: rafiki.v1.DarajaLaunchResponse
+	(*DarajaSendRequest)(nil),                 // 75: rafiki.v1.DarajaSendRequest
+	(*DarajaSendResponse)(nil),                // 76: rafiki.v1.DarajaSendResponse
+	(*DarajaWatchRequest)(nil),                // 77: rafiki.v1.DarajaWatchRequest
+	(*DarajaWatchResponse)(nil),               // 78: rafiki.v1.DarajaWatchResponse
+	(*DarajaProcessRestarted)(nil),            // 79: rafiki.v1.DarajaProcessRestarted
+	(*DarajaProcessExited)(nil),               // 80: rafiki.v1.DarajaProcessExited
+	(*RateLimitWindow)(nil),                   // 81: rafiki.v1.RateLimitWindow
+	(*GetRateLimitStatusRequest)(nil),         // 82: rafiki.v1.GetRateLimitStatusRequest
+	(*GetRateLimitStatusResponse)(nil),        // 83: rafiki.v1.GetRateLimitStatusResponse
+	(*SandboxMount)(nil),                      // 84: rafiki.v1.SandboxMount
+	(*SandboxSpec)(nil),                       // 85: rafiki.v1.SandboxSpec
+	(*SandboxInfo)(nil),                       // 86: rafiki.v1.SandboxInfo
+	(*CreateSandboxRequest)(nil),              // 87: rafiki.v1.CreateSandboxRequest
+	(*CreateSandboxResponse)(nil),             // 88: rafiki.v1.CreateSandboxResponse
+	(*ListSandboxesRequest)(nil),              // 89: rafiki.v1.ListSandboxesRequest
+	(*ListSandboxesResponse)(nil),             // 90: rafiki.v1.ListSandboxesResponse
+	(*RemoveSandboxRequest)(nil),              // 91: rafiki.v1.RemoveSandboxRequest
+	(*RemoveSandboxResponse)(nil),             // 92: rafiki.v1.RemoveSandboxResponse
+	(*SyncEndpoint)(nil),                      // 93: rafiki.v1.SyncEndpoint
+	(*SyncPathRequest)(nil),                   // 94: rafiki.v1.SyncPathRequest
+	(*SyncPathResponse)(nil),                  // 95: rafiki.v1.SyncPathResponse
+	(*SyncRepoRequest)(nil),                   // 96: rafiki.v1.SyncRepoRequest
+	(*SyncRepoResponse)(nil),                  // 97: rafiki.v1.SyncRepoResponse
+	(*SkillFileInfo)(nil),                     // 98: rafiki.v1.SkillFileInfo
+	(*SkillRow)(nil),                          // 99: rafiki.v1.SkillRow
+	(*ListSkillsRequest)(nil),                 // 100: rafiki.v1.ListSkillsRequest
+	(*ListSkillsResponse)(nil),                // 101: rafiki.v1.ListSkillsResponse
+	(*GetSkillRequest)(nil),                   // 102: rafiki.v1.GetSkillRequest
+	(*GetSkillResponse)(nil),                  // 103: rafiki.v1.GetSkillResponse
+	(*DeleteSkillRequest)(nil),                // 104: rafiki.v1.DeleteSkillRequest
+	(*DeleteSkillResponse)(nil),               // 105: rafiki.v1.DeleteSkillResponse
+	(*SetSkillEnabledRequest)(nil),            // 106: rafiki.v1.SetSkillEnabledRequest
+	(*SetSkillEnabledResponse)(nil),           // 107: rafiki.v1.SetSkillEnabledResponse
+	(*PymoduleRow)(nil),                       // 108: rafiki.v1.PymoduleRow
+	(*ListPymodulesRequest)(nil),              // 109: rafiki.v1.ListPymodulesRequest
+	(*ListPymodulesResponse)(nil),             // 110: rafiki.v1.ListPymodulesResponse
+	(*GetPymoduleRequest)(nil),                // 111: rafiki.v1.GetPymoduleRequest
+	(*GetPymoduleResponse)(nil),               // 112: rafiki.v1.GetPymoduleResponse
+	(*PutPymoduleRequest)(nil),                // 113: rafiki.v1.PutPymoduleRequest
+	(*PutPymoduleResponse)(nil),               // 114: rafiki.v1.PutPymoduleResponse
+	(*DeletePymoduleRequest)(nil),             // 115: rafiki.v1.DeletePymoduleRequest
+	(*DeletePymoduleResponse)(nil),            // 116: rafiki.v1.DeletePymoduleResponse
+	(*RepoRow)(nil),                           // 117: rafiki.v1.RepoRow
+	(*AddRepoRequest)(nil),                    // 118: rafiki.v1.AddRepoRequest
+	(*AddRepoResponse)(nil),                   // 119: rafiki.v1.AddRepoResponse
+	(*ListReposRequest)(nil),                  // 120: rafiki.v1.ListReposRequest
+	(*ListReposResponse)(nil),                 // 121: rafiki.v1.ListReposResponse
+	(*RefreshRepoRequest)(nil),                // 122: rafiki.v1.RefreshRepoRequest
+	(*SetRepoRequest)(nil),                    // 123: rafiki.v1.SetRepoRequest
+	(*SetRepoResponse)(nil),                   // 124: rafiki.v1.SetRepoResponse
+	(*RepoScript)(nil),                        // 125: rafiki.v1.RepoScript
+	(*RepoPackage)(nil),                       // 126: rafiki.v1.RepoPackage
+	(*RefreshRepoResponse)(nil),               // 127: rafiki.v1.RefreshRepoResponse
+	(*RemoveRepoRequest)(nil),                 // 128: rafiki.v1.RemoveRepoRequest
+	(*RemoveRepoResponse)(nil),                // 129: rafiki.v1.RemoveRepoResponse
+	(*StringList)(nil),                        // 130: rafiki.v1.StringList
+	(*PresetRow)(nil),                         // 131: rafiki.v1.PresetRow
+	(*ListPresetsRequest)(nil),                // 132: rafiki.v1.ListPresetsRequest
+	(*ListPresetsResponse)(nil),               // 133: rafiki.v1.ListPresetsResponse
+	(*GetPresetRequest)(nil),                  // 134: rafiki.v1.GetPresetRequest
+	(*GetPresetResponse)(nil),                 // 135: rafiki.v1.GetPresetResponse
+	(*PutPresetRequest)(nil),                  // 136: rafiki.v1.PutPresetRequest
+	(*PutPresetResponse)(nil),                 // 137: rafiki.v1.PutPresetResponse
+	(*DeletePresetRequest)(nil),               // 138: rafiki.v1.DeletePresetRequest
+	(*DeletePresetResponse)(nil),              // 139: rafiki.v1.DeletePresetResponse
+	(*RecallHit)(nil),                         // 140: rafiki.v1.RecallHit
+	(*RecallRequest)(nil),                     // 141: rafiki.v1.RecallRequest
+	(*RecallResponse)(nil),                    // 142: rafiki.v1.RecallResponse
+	(*RecallContextRequest)(nil),              // 143: rafiki.v1.RecallContextRequest
+	(*RecallContextResponse)(nil),             // 144: rafiki.v1.RecallContextResponse
+	(*MemoryRow)(nil),                         // 145: rafiki.v1.MemoryRow
+	(*GetMemoryRequest)(nil),                  // 146: rafiki.v1.GetMemoryRequest
+	(*GetMemoryResponse)(nil),                 // 147: rafiki.v1.GetMemoryResponse
+	(*MemoryTreeRequest)(nil),                 // 148: rafiki.v1.MemoryTreeRequest
+	(*MemoryTreeResponse)(nil),                // 149: rafiki.v1.MemoryTreeResponse
+	(*PutMemoryRequest)(nil),                  // 150: rafiki.v1.PutMemoryRequest
+	(*PutMemoryResponse)(nil),                 // 151: rafiki.v1.PutMemoryResponse
+	(*DeleteMemoryRequest)(nil),               // 152: rafiki.v1.DeleteMemoryRequest
+	(*DeleteMemoryResponse)(nil),              // 153: rafiki.v1.DeleteMemoryResponse
+	(*RecallBackfillRequest)(nil),             // 154: rafiki.v1.RecallBackfillRequest
+	(*RecallBackfillResponse)(nil),            // 155: rafiki.v1.RecallBackfillResponse
+	(*RecallStatusRequest)(nil),               // 156: rafiki.v1.RecallStatusRequest
+	(*RecallStatusResponse)(nil),              // 157: rafiki.v1.RecallStatusResponse
+	(*ProviderBan)(nil),                       // 158: rafiki.v1.ProviderBan
+	(*ListProviderBansRequest)(nil),           // 159: rafiki.v1.ListProviderBansRequest
+	(*ListProviderBansResponse)(nil),          // 160: rafiki.v1.ListProviderBansResponse
+	(*BanProviderRequest)(nil),                // 161: rafiki.v1.BanProviderRequest
+	(*BanProviderResponse)(nil),               // 162: rafiki.v1.BanProviderResponse
+	(*UnbanProviderRequest)(nil),              // 163: rafiki.v1.UnbanProviderRequest
+	(*UnbanProviderResponse)(nil),             // 164: rafiki.v1.UnbanProviderResponse
+	(*RouteRow)(nil),                          // 165: rafiki.v1.RouteRow
+	(*ListRoutesRequest)(nil),                 // 166: rafiki.v1.ListRoutesRequest
+	(*ListRoutesResponse)(nil),                // 167: rafiki.v1.ListRoutesResponse
+	(*SetRouteRequest)(nil),                   // 168: rafiki.v1.SetRouteRequest
+	(*SetRouteResponse)(nil),                  // 169: rafiki.v1.SetRouteResponse
+	(*DeleteRouteRequest)(nil),                // 170: rafiki.v1.DeleteRouteRequest
+	(*DeleteRouteResponse)(nil),               // 171: rafiki.v1.DeleteRouteResponse
+	(*ModelAliasRow)(nil),                     // 172: rafiki.v1.ModelAliasRow
+	(*ListModelAliasesRequest)(nil),           // 173: rafiki.v1.ListModelAliasesRequest
+	(*ListModelAliasesResponse)(nil),          // 174: rafiki.v1.ListModelAliasesResponse
+	(*PutModelAliasRequest)(nil),              // 175: rafiki.v1.PutModelAliasRequest
+	(*PutModelAliasResponse)(nil),             // 176: rafiki.v1.PutModelAliasResponse
+	(*DeleteModelAliasRequest)(nil),           // 177: rafiki.v1.DeleteModelAliasRequest
+	(*DeleteModelAliasResponse)(nil),          // 178: rafiki.v1.DeleteModelAliasResponse
+	(*ResumeRequest)(nil),                     // 179: rafiki.v1.ResumeRequest
+	(*ResumeResponse)(nil),                    // 180: rafiki.v1.ResumeResponse
+	(*CloseAllExitedRequest)(nil),             // 181: rafiki.v1.CloseAllExitedRequest
+	(*CloseAllExitedResponse)(nil),            // 182: rafiki.v1.CloseAllExitedResponse
+	(*SetLabelsRequest)(nil),                  // 183: rafiki.v1.SetLabelsRequest
+	(*SetLabelsResponse)(nil),                 // 184: rafiki.v1.SetLabelsResponse
+	(*StatusRequest)(nil),                     // 185: rafiki.v1.StatusRequest
+	(*StatusResponse)(nil),                    // 186: rafiki.v1.StatusResponse
+	(*SearchRequest)(nil),                     // 187: rafiki.v1.SearchRequest
+	(*SearchResponse)(nil),                    // 188: rafiki.v1.SearchResponse
+	(*ShutdownDaemonRequest)(nil),             // 189: rafiki.v1.ShutdownDaemonRequest
+	(*ShutdownDaemonResponse)(nil),            // 190: rafiki.v1.ShutdownDaemonResponse
+	(*ModelInfoRequest)(nil),                  // 191: rafiki.v1.ModelInfoRequest
+	(*ModelInfoResponse)(nil),                 // 192: rafiki.v1.ModelInfoResponse
+	(*ModelRoutesRequest)(nil),                // 193: rafiki.v1.ModelRoutesRequest
+	(*RouteEndpoint)(nil),                     // 194: rafiki.v1.RouteEndpoint
+	(*ModelRoutesResponse)(nil),               // 195: rafiki.v1.ModelRoutesResponse
+	(*ConversationStatsRequest)(nil),          // 196: rafiki.v1.ConversationStatsRequest
+	(*ConversationStatsResponse)(nil),         // 197: rafiki.v1.ConversationStatsResponse
+	(*EnrollExecutorRequest)(nil),             // 198: rafiki.v1.EnrollExecutorRequest
+	(*EnrollExecutorResponse)(nil),            // 199: rafiki.v1.EnrollExecutorResponse
+	(*CreateExecutorRequest)(nil),             // 200: rafiki.v1.CreateExecutorRequest
+	(*CreateExecutorResponse)(nil),            // 201: rafiki.v1.CreateExecutorResponse
+	(*LabelExecutorRequest)(nil),              // 202: rafiki.v1.LabelExecutorRequest
+	(*LabelExecutorResponse)(nil),             // 203: rafiki.v1.LabelExecutorResponse
+	(*DisableExecutorRequest)(nil),            // 204: rafiki.v1.DisableExecutorRequest
+	(*DisableExecutorResponse)(nil),           // 205: rafiki.v1.DisableExecutorResponse
+	(*EnableExecutorRequest)(nil),             // 206: rafiki.v1.EnableExecutorRequest
+	(*EnableExecutorResponse)(nil),            // 207: rafiki.v1.EnableExecutorResponse
+	(*DeleteExecutorRequest)(nil),             // 208: rafiki.v1.DeleteExecutorRequest
+	(*DeleteExecutorResponse)(nil),            // 209: rafiki.v1.DeleteExecutorResponse
+	(*ExecutorSessionRequest)(nil),            // 210: rafiki.v1.ExecutorSessionRequest
+	(*ExecutorSessionEvent)(nil),              // 211: rafiki.v1.ExecutorSessionEvent
+	(*ExecutorSessionReady)(nil),              // 212: rafiki.v1.ExecutorSessionReady
+	(*CreateUserRequest)(nil),                 // 213: rafiki.v1.CreateUserRequest
+	(*CreateUserResponse)(nil),                // 214: rafiki.v1.CreateUserResponse
+	(*ListUsersRequest)(nil),                  // 215: rafiki.v1.ListUsersRequest
+	(*ListUsersResponse)(nil),                 // 216: rafiki.v1.ListUsersResponse
+	(*UserRow)(nil),                           // 217: rafiki.v1.UserRow
+	(*RemoveUserRequest)(nil),                 // 218: rafiki.v1.RemoveUserRequest
+	(*RemoveUserResponse)(nil),                // 219: rafiki.v1.RemoveUserResponse
+	(*UpdateUserRequest)(nil),                 // 220: rafiki.v1.UpdateUserRequest
+	(*UpdateUserResponse)(nil),                // 221: rafiki.v1.UpdateUserResponse
+	(*TokenRow)(nil),                          // 222: rafiki.v1.TokenRow
+	(*MintTokenRequest)(nil),                  // 223: rafiki.v1.MintTokenRequest
+	(*MintTokenResponse)(nil),                 // 224: rafiki.v1.MintTokenResponse
+	(*ListTokensRequest)(nil),                 // 225: rafiki.v1.ListTokensRequest
+	(*ListTokensResponse)(nil),                // 226: rafiki.v1.ListTokensResponse
+	(*RevokeTokenRequest)(nil),                // 227: rafiki.v1.RevokeTokenRequest
+	(*RevokeTokenResponse)(nil),               // 228: rafiki.v1.RevokeTokenResponse
+	(*BeginProviderLoginRequest)(nil),         // 229: rafiki.v1.BeginProviderLoginRequest
+	(*BeginProviderLoginResponse)(nil),        // 230: rafiki.v1.BeginProviderLoginResponse
+	(*CompleteProviderLoginRequest)(nil),      // 231: rafiki.v1.CompleteProviderLoginRequest
+	(*CompleteProviderLoginResponse)(nil),     // 232: rafiki.v1.CompleteProviderLoginResponse
+	(*DeleteProviderCredentialRequest)(nil),   // 233: rafiki.v1.DeleteProviderCredentialRequest
+	(*DeleteProviderCredentialResponse)(nil),  // 234: rafiki.v1.DeleteProviderCredentialResponse
+	(*BeginMcpLoginRequest)(nil),              // 235: rafiki.v1.BeginMcpLoginRequest
+	(*BeginMcpLoginResponse)(nil),             // 236: rafiki.v1.BeginMcpLoginResponse
+	(*CompleteMcpLoginRequest)(nil),           // 237: rafiki.v1.CompleteMcpLoginRequest
+	(*CompleteMcpLoginResponse)(nil),          // 238: rafiki.v1.CompleteMcpLoginResponse
+	(*DeleteMcpCredentialRequest)(nil),        // 239: rafiki.v1.DeleteMcpCredentialRequest
+	(*DeleteMcpCredentialResponse)(nil),       // 240: rafiki.v1.DeleteMcpCredentialResponse
+	(*BeginLoginRequest)(nil),                 // 241: rafiki.v1.BeginLoginRequest
+	(*BeginLoginResponse)(nil),                // 242: rafiki.v1.BeginLoginResponse
+	(*CompleteLoginRequest)(nil),              // 243: rafiki.v1.CompleteLoginRequest
+	(*CompleteLoginResponse)(nil),             // 244: rafiki.v1.CompleteLoginResponse
+	(*GetStreamsRequest)(nil),                 // 245: rafiki.v1.GetStreamsRequest
+	(*GetStreamsResponse)(nil),                // 246: rafiki.v1.GetStreamsResponse
+	(*SendFrameRequest)(nil),                  // 247: rafiki.v1.SendFrameRequest
+	(*SendFrameResponse)(nil),                 // 248: rafiki.v1.SendFrameResponse
+	(*TagRow)(nil),                            // 249: rafiki.v1.TagRow
+	(*TagRequest)(nil),                        // 250: rafiki.v1.TagRequest
+	(*TagResponse)(nil),                       // 251: rafiki.v1.TagResponse
+	(*UntagRequest)(nil),                      // 252: rafiki.v1.UntagRequest
+	(*UntagResponse)(nil),                     // 253: rafiki.v1.UntagResponse
+	(*ListTagsRequest)(nil),                   // 254: rafiki.v1.ListTagsRequest
+	(*ListTagsResponse)(nil),                  // 255: rafiki.v1.ListTagsResponse
+	nil,                                       // 256: rafiki.v1.EventCursor.OrdinalsEntry
+	(*ScriptMessage_Text)(nil),                // 257: rafiki.v1.ScriptMessage.Text
+	(*ScriptMessage_Stop)(nil),                // 258: rafiki.v1.ScriptMessage.Stop
+	nil,                                       // 259: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                                       // 260: rafiki.v1.ListChildrenRequest.LabelsEntry
+	nil,                                       // 261: rafiki.v1.SpawnRequest.LabelsEntry
+	(*SpawnRequest_ScriptSpec)(nil),           // 262: rafiki.v1.SpawnRequest.ScriptSpec
+	nil,                                       // 263: rafiki.v1.SpawnRequest.EnvEntry
+	(*SpawnRequest_ForkFrom)(nil),             // 264: rafiki.v1.SpawnRequest.ForkFrom
+	nil,                                       // 265: rafiki.v1.NotifyRequest.FieldsEntry
+	nil,                                       // 266: rafiki.v1.ExecutorRow.LabelsEntry
+	nil,                                       // 267: rafiki.v1.SandboxSpec.EnvEntry
+	nil,                                       // 268: rafiki.v1.SandboxSpec.LabelsEntry
+	nil,                                       // 269: rafiki.v1.SandboxInfo.LabelsEntry
+	nil,                                       // 270: rafiki.v1.PresetRow.LabelsEntry
+	nil,                                       // 271: rafiki.v1.SetLabelsRequest.SetEntry
+	nil,                                       // 272: rafiki.v1.SetLabelsResponse.LabelsEntry
+	(*StatusResponse_ChildCounts)(nil),        // 273: rafiki.v1.StatusResponse.ChildCounts
+	(*SearchRequest_SearchSessionFilter)(nil), // 274: rafiki.v1.SearchRequest.SearchSessionFilter
+	nil,                              // 275: rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
+	(*SearchResponse_SearchHit)(nil), // 276: rafiki.v1.SearchResponse.SearchHit
+	nil,                              // 277: rafiki.v1.EnrollExecutorRequest.LabelsEntry
+	nil,                              // 278: rafiki.v1.CreateExecutorRequest.LabelsEntry
+	nil,                              // 279: rafiki.v1.LabelExecutorRequest.SetEntry
+	(*timestamppb.Timestamp)(nil),    // 280: google.protobuf.Timestamp
+	(*Event)(nil),                    // 281: rafiki.v1.Event
+	(*durationpb.Duration)(nil),      // 282: google.protobuf.Duration
+	(*ContentBlock)(nil),             // 283: rafiki.v1.ContentBlock
+	(*darajapb.ChildSpec)(nil),       // 284: rafiki.daraja.v1.ChildSpec
+	(*ImageBlock)(nil),               // 285: rafiki.v1.ImageBlock
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	279, // 0: rafiki.v1.GetHistoryRequest.before:type_name -> google.protobuf.Timestamp
-	280, // 1: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	255, // 2: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
-	279, // 3: rafiki.v1.EventCursor.floor:type_name -> google.protobuf.Timestamp
-	9,   // 4: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
+	280, // 0: rafiki.v1.GetHistoryRequest.before:type_name -> google.protobuf.Timestamp
+	281, // 1: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	256, // 2: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	280, // 3: rafiki.v1.EventCursor.floor:type_name -> google.protobuf.Timestamp
+	10,  // 4: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
 	0,   // 5: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
-	10,  // 6: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
-	281, // 7: rafiki.v1.BashStep.timeout:type_name -> google.protobuf.Duration
+	11,  // 6: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
+	282, // 7: rafiki.v1.BashStep.timeout:type_name -> google.protobuf.Duration
 	3,   // 8: rafiki.v1.SendStep.where:type_name -> rafiki.v1.StepSite
-	12,  // 9: rafiki.v1.SendStep.read:type_name -> rafiki.v1.ReadStep
-	13,  // 10: rafiki.v1.SendStep.bash:type_name -> rafiki.v1.BashStep
-	14,  // 11: rafiki.v1.SendStep.pymodule_run:type_name -> rafiki.v1.PymoduleRunStep
+	13,  // 9: rafiki.v1.SendStep.read:type_name -> rafiki.v1.ReadStep
+	14,  // 10: rafiki.v1.SendStep.bash:type_name -> rafiki.v1.BashStep
+	15,  // 11: rafiki.v1.SendStep.pymodule_run:type_name -> rafiki.v1.PymoduleRunStep
 	3,   // 12: rafiki.v1.StepSummary.where:type_name -> rafiki.v1.StepSite
 	1,   // 13: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	282, // 14: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	15,  // 15: rafiki.v1.SendRequest.steps:type_name -> rafiki.v1.SendStep
-	16,  // 16: rafiki.v1.SendResponse.steps:type_name -> rafiki.v1.StepSummary
-	256, // 17: rafiki.v1.ScriptMessage.text:type_name -> rafiki.v1.ScriptMessage.Text
-	257, // 18: rafiki.v1.ScriptMessage.stop:type_name -> rafiki.v1.ScriptMessage.Stop
-	279, // 19: rafiki.v1.ChildSummary.started_at:type_name -> google.protobuf.Timestamp
-	279, // 20: rafiki.v1.ChildSummary.last_activity:type_name -> google.protobuf.Timestamp
-	258, // 21: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
-	279, // 22: rafiki.v1.ListChildrenRequest.since:type_name -> google.protobuf.Timestamp
-	259, // 23: rafiki.v1.ListChildrenRequest.labels:type_name -> rafiki.v1.ListChildrenRequest.LabelsEntry
-	25,  // 24: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
-	25,  // 25: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	260, // 26: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
-	30,  // 27: rafiki.v1.SpawnRequest.prefill:type_name -> rafiki.v1.PrefillRead
-	261, // 28: rafiki.v1.SpawnRequest.script:type_name -> rafiki.v1.SpawnRequest.ScriptSpec
-	262, // 29: rafiki.v1.SpawnRequest.env:type_name -> rafiki.v1.SpawnRequest.EnvEntry
-	84,  // 30: rafiki.v1.SpawnRequest.sandbox:type_name -> rafiki.v1.SandboxSpec
-	263, // 31: rafiki.v1.SpawnRequest.fork_from:type_name -> rafiki.v1.SpawnRequest.ForkFrom
-	281, // 32: rafiki.v1.KillRequest.shutdown_timeout:type_name -> google.protobuf.Duration
-	281, // 33: rafiki.v1.KillRequest.kill_timeout:type_name -> google.protobuf.Duration
-	2,   // 34: rafiki.v1.KillRequest.scope:type_name -> rafiki.v1.DescendantScope
-	281, // 35: rafiki.v1.KillResponse.duration:type_name -> google.protobuf.Duration
-	2,   // 36: rafiki.v1.CloseRequest.scope:type_name -> rafiki.v1.DescendantScope
-	264, // 37: rafiki.v1.NotifyRequest.fields:type_name -> rafiki.v1.NotifyRequest.FieldsEntry
-	45,  // 38: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
-	279, // 39: rafiki.v1.ModelRow.created:type_name -> google.protobuf.Timestamp
-	279, // 40: rafiki.v1.ModelRow.expires_at:type_name -> google.protobuf.Timestamp
-	48,  // 41: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
-	279, // 42: rafiki.v1.ConversationSearchRequest.since:type_name -> google.protobuf.Timestamp
-	279, // 43: rafiki.v1.ConversationSearchRequest.until:type_name -> google.protobuf.Timestamp
-	279, // 44: rafiki.v1.ConversationSummary.created_at:type_name -> google.protobuf.Timestamp
-	279, // 45: rafiki.v1.ConversationSummary.closed_at:type_name -> google.protobuf.Timestamp
-	52,  // 46: rafiki.v1.ConversationSearchResponse.rows:type_name -> rafiki.v1.ConversationSummary
-	281, // 47: rafiki.v1.TranscriptTurn.latency:type_name -> google.protobuf.Duration
-	55,  // 48: rafiki.v1.ConversationExportResponse.turns:type_name -> rafiki.v1.TranscriptTurn
-	279, // 49: rafiki.v1.ConversationQueryRequest.since:type_name -> google.protobuf.Timestamp
-	279, // 50: rafiki.v1.ConversationQueryRequest.until:type_name -> google.protobuf.Timestamp
-	59,  // 51: rafiki.v1.QueryRow.cells:type_name -> rafiki.v1.QueryValue
-	58,  // 52: rafiki.v1.ConversationQueryResponse.columns:type_name -> rafiki.v1.QueryColumn
-	60,  // 53: rafiki.v1.ConversationQueryResponse.rows:type_name -> rafiki.v1.QueryRow
-	4,   // 54: rafiki.v1.ConversationReviewRequest.stage:type_name -> rafiki.v1.ReviewStage
-	5,   // 55: rafiki.v1.ConversationReviewAccept.status:type_name -> rafiki.v1.ReviewAcceptStatus
-	63,  // 56: rafiki.v1.ConversationReviewResponse.accepted:type_name -> rafiki.v1.ConversationReviewAccept
-	279, // 57: rafiki.v1.ReviewAnalysis.created_at:type_name -> google.protobuf.Timestamp
-	66,  // 58: rafiki.v1.ConversationFindingsResponse.findings:type_name -> rafiki.v1.ReviewFinding
-	67,  // 59: rafiki.v1.ConversationFindingsResponse.analyses:type_name -> rafiki.v1.ReviewAnalysis
-	265, // 60: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
-	279, // 61: rafiki.v1.ExecutorRow.connected_at:type_name -> google.protobuf.Timestamp
-	279, // 62: rafiki.v1.ExecutorRow.last_seen:type_name -> google.protobuf.Timestamp
-	69,  // 63: rafiki.v1.ListExecutorsResponse.rows:type_name -> rafiki.v1.ExecutorRow
-	283, // 64: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
-	279, // 65: rafiki.v1.DarajaLaunchResponse.connected_at:type_name -> google.protobuf.Timestamp
-	78,  // 66: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
-	79,  // 67: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
-	279, // 68: rafiki.v1.RateLimitWindow.reset_at:type_name -> google.protobuf.Timestamp
-	80,  // 69: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
-	80,  // 70: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
-	279, // 71: rafiki.v1.GetRateLimitStatusResponse.updated_at:type_name -> google.protobuf.Timestamp
-	83,  // 72: rafiki.v1.SandboxSpec.mounts:type_name -> rafiki.v1.SandboxMount
-	266, // 73: rafiki.v1.SandboxSpec.env:type_name -> rafiki.v1.SandboxSpec.EnvEntry
-	267, // 74: rafiki.v1.SandboxSpec.labels:type_name -> rafiki.v1.SandboxSpec.LabelsEntry
-	281, // 75: rafiki.v1.SandboxSpec.ttl:type_name -> google.protobuf.Duration
-	268, // 76: rafiki.v1.SandboxInfo.labels:type_name -> rafiki.v1.SandboxInfo.LabelsEntry
-	279, // 77: rafiki.v1.SandboxInfo.created_at:type_name -> google.protobuf.Timestamp
-	279, // 78: rafiki.v1.SandboxInfo.expires_at:type_name -> google.protobuf.Timestamp
-	84,  // 79: rafiki.v1.CreateSandboxRequest.spec:type_name -> rafiki.v1.SandboxSpec
-	85,  // 80: rafiki.v1.CreateSandboxResponse.sandbox:type_name -> rafiki.v1.SandboxInfo
-	85,  // 81: rafiki.v1.ListSandboxesResponse.sandboxes:type_name -> rafiki.v1.SandboxInfo
-	92,  // 82: rafiki.v1.SyncPathRequest.src:type_name -> rafiki.v1.SyncEndpoint
-	92,  // 83: rafiki.v1.SyncPathRequest.dst:type_name -> rafiki.v1.SyncEndpoint
-	92,  // 84: rafiki.v1.SyncRepoRequest.src:type_name -> rafiki.v1.SyncEndpoint
-	92,  // 85: rafiki.v1.SyncRepoRequest.dst:type_name -> rafiki.v1.SyncEndpoint
-	279, // 86: rafiki.v1.SkillRow.updated_at:type_name -> google.protobuf.Timestamp
-	97,  // 87: rafiki.v1.SkillRow.files:type_name -> rafiki.v1.SkillFileInfo
-	98,  // 88: rafiki.v1.ListSkillsResponse.rows:type_name -> rafiki.v1.SkillRow
-	98,  // 89: rafiki.v1.GetSkillResponse.row:type_name -> rafiki.v1.SkillRow
-	279, // 90: rafiki.v1.PymoduleRow.created_at:type_name -> google.protobuf.Timestamp
-	107, // 91: rafiki.v1.ListPymodulesResponse.rows:type_name -> rafiki.v1.PymoduleRow
-	107, // 92: rafiki.v1.GetPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
-	107, // 93: rafiki.v1.PutPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
-	281, // 94: rafiki.v1.RepoRow.refresh_interval:type_name -> google.protobuf.Duration
-	279, // 95: rafiki.v1.RepoRow.resolved_at:type_name -> google.protobuf.Timestamp
-	281, // 96: rafiki.v1.AddRepoRequest.refresh_interval:type_name -> google.protobuf.Duration
-	116, // 97: rafiki.v1.AddRepoResponse.row:type_name -> rafiki.v1.RepoRow
-	116, // 98: rafiki.v1.ListReposResponse.rows:type_name -> rafiki.v1.RepoRow
-	281, // 99: rafiki.v1.SetRepoRequest.refresh_interval:type_name -> google.protobuf.Duration
-	116, // 100: rafiki.v1.SetRepoResponse.row:type_name -> rafiki.v1.RepoRow
-	124, // 101: rafiki.v1.RefreshRepoResponse.scripts:type_name -> rafiki.v1.RepoScript
-	125, // 102: rafiki.v1.RefreshRepoResponse.packages:type_name -> rafiki.v1.RepoPackage
-	269, // 103: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
-	129, // 104: rafiki.v1.PresetRow.tools:type_name -> rafiki.v1.StringList
-	129, // 105: rafiki.v1.PresetRow.skills:type_name -> rafiki.v1.StringList
-	129, // 106: rafiki.v1.PresetRow.mcp_servers:type_name -> rafiki.v1.StringList
-	279, // 107: rafiki.v1.PresetRow.created_at:type_name -> google.protobuf.Timestamp
-	279, // 108: rafiki.v1.PresetRow.deleted_at:type_name -> google.protobuf.Timestamp
-	130, // 109: rafiki.v1.ListPresetsResponse.rows:type_name -> rafiki.v1.PresetRow
-	130, // 110: rafiki.v1.GetPresetResponse.rows:type_name -> rafiki.v1.PresetRow
-	130, // 111: rafiki.v1.PutPresetRequest.preset:type_name -> rafiki.v1.PresetRow
-	130, // 112: rafiki.v1.PutPresetResponse.preset:type_name -> rafiki.v1.PresetRow
-	279, // 113: rafiki.v1.RecallHit.when:type_name -> google.protobuf.Timestamp
-	279, // 114: rafiki.v1.RecallRequest.since:type_name -> google.protobuf.Timestamp
-	279, // 115: rafiki.v1.RecallRequest.until:type_name -> google.protobuf.Timestamp
-	139, // 116: rafiki.v1.RecallResponse.hits:type_name -> rafiki.v1.RecallHit
-	279, // 117: rafiki.v1.MemoryRow.created_at:type_name -> google.protobuf.Timestamp
-	279, // 118: rafiki.v1.MemoryRow.updated_at:type_name -> google.protobuf.Timestamp
-	144, // 119: rafiki.v1.GetMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
-	144, // 120: rafiki.v1.MemoryTreeResponse.memories:type_name -> rafiki.v1.MemoryRow
-	144, // 121: rafiki.v1.PutMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
-	279, // 122: rafiki.v1.RecallBackfillRequest.since:type_name -> google.protobuf.Timestamp
-	279, // 123: rafiki.v1.RecallStatusResponse.backfill_since:type_name -> google.protobuf.Timestamp
-	279, // 124: rafiki.v1.ProviderBan.created_at:type_name -> google.protobuf.Timestamp
-	279, // 125: rafiki.v1.ProviderBan.expires_at:type_name -> google.protobuf.Timestamp
-	157, // 126: rafiki.v1.ListProviderBansResponse.bans:type_name -> rafiki.v1.ProviderBan
-	281, // 127: rafiki.v1.BanProviderRequest.duration:type_name -> google.protobuf.Duration
-	157, // 128: rafiki.v1.BanProviderResponse.ban:type_name -> rafiki.v1.ProviderBan
-	279, // 129: rafiki.v1.RouteRow.created_at:type_name -> google.protobuf.Timestamp
-	164, // 130: rafiki.v1.ListRoutesResponse.rows:type_name -> rafiki.v1.RouteRow
-	164, // 131: rafiki.v1.SetRouteResponse.row:type_name -> rafiki.v1.RouteRow
-	279, // 132: rafiki.v1.ModelAliasRow.created_at:type_name -> google.protobuf.Timestamp
-	279, // 133: rafiki.v1.ModelAliasRow.updated_at:type_name -> google.protobuf.Timestamp
-	171, // 134: rafiki.v1.ListModelAliasesResponse.rows:type_name -> rafiki.v1.ModelAliasRow
-	171, // 135: rafiki.v1.PutModelAliasResponse.row:type_name -> rafiki.v1.ModelAliasRow
-	281, // 136: rafiki.v1.CloseAllExitedRequest.older_than:type_name -> google.protobuf.Duration
-	270, // 137: rafiki.v1.SetLabelsRequest.set:type_name -> rafiki.v1.SetLabelsRequest.SetEntry
-	271, // 138: rafiki.v1.SetLabelsResponse.labels:type_name -> rafiki.v1.SetLabelsResponse.LabelsEntry
-	279, // 139: rafiki.v1.StatusResponse.started_at:type_name -> google.protobuf.Timestamp
-	272, // 140: rafiki.v1.StatusResponse.children:type_name -> rafiki.v1.StatusResponse.ChildCounts
-	273, // 141: rafiki.v1.SearchRequest.session_filter:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter
-	275, // 142: rafiki.v1.SearchResponse.hits:type_name -> rafiki.v1.SearchResponse.SearchHit
-	281, // 143: rafiki.v1.SearchResponse.elapsed:type_name -> google.protobuf.Duration
-	281, // 144: rafiki.v1.RouteEndpoint.p50_latency:type_name -> google.protobuf.Duration
-	193, // 145: rafiki.v1.ModelRoutesResponse.endpoints:type_name -> rafiki.v1.RouteEndpoint
-	279, // 146: rafiki.v1.ConversationStatsRequest.since:type_name -> google.protobuf.Timestamp
-	279, // 147: rafiki.v1.ConversationStatsRequest.until:type_name -> google.protobuf.Timestamp
-	276, // 148: rafiki.v1.EnrollExecutorRequest.labels:type_name -> rafiki.v1.EnrollExecutorRequest.LabelsEntry
-	281, // 149: rafiki.v1.EnrollExecutorRequest.ttl:type_name -> google.protobuf.Duration
-	277, // 150: rafiki.v1.CreateExecutorRequest.labels:type_name -> rafiki.v1.CreateExecutorRequest.LabelsEntry
-	278, // 151: rafiki.v1.LabelExecutorRequest.set:type_name -> rafiki.v1.LabelExecutorRequest.SetEntry
-	69,  // 152: rafiki.v1.LabelExecutorResponse.executor:type_name -> rafiki.v1.ExecutorRow
-	211, // 153: rafiki.v1.ExecutorSessionEvent.ready:type_name -> rafiki.v1.ExecutorSessionReady
-	279, // 154: rafiki.v1.CreateUserResponse.created_at:type_name -> google.protobuf.Timestamp
-	216, // 155: rafiki.v1.ListUsersResponse.users:type_name -> rafiki.v1.UserRow
-	279, // 156: rafiki.v1.UserRow.created_at:type_name -> google.protobuf.Timestamp
-	279, // 157: rafiki.v1.UserRow.deleted_at:type_name -> google.protobuf.Timestamp
-	216, // 158: rafiki.v1.UpdateUserResponse.user:type_name -> rafiki.v1.UserRow
-	279, // 159: rafiki.v1.TokenRow.created_at:type_name -> google.protobuf.Timestamp
-	279, // 160: rafiki.v1.TokenRow.expires_at:type_name -> google.protobuf.Timestamp
-	279, // 161: rafiki.v1.TokenRow.revoked_at:type_name -> google.protobuf.Timestamp
-	281, // 162: rafiki.v1.MintTokenRequest.ttl:type_name -> google.protobuf.Duration
-	221, // 163: rafiki.v1.MintTokenResponse.info:type_name -> rafiki.v1.TokenRow
-	221, // 164: rafiki.v1.ListTokensResponse.tokens:type_name -> rafiki.v1.TokenRow
-	221, // 165: rafiki.v1.RevokeTokenResponse.info:type_name -> rafiki.v1.TokenRow
-	235, // 166: rafiki.v1.CompleteMcpLoginResponse.continuation:type_name -> rafiki.v1.BeginMcpLoginResponse
-	279, // 167: rafiki.v1.CompleteLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
-	6,   // 168: rafiki.v1.TagRow.scope:type_name -> rafiki.v1.TagScope
-	279, // 169: rafiki.v1.TagRow.created_at:type_name -> google.protobuf.Timestamp
-	279, // 170: rafiki.v1.TagRow.superseded_at:type_name -> google.protobuf.Timestamp
-	279, // 171: rafiki.v1.TagRow.deleted_at:type_name -> google.protobuf.Timestamp
-	6,   // 172: rafiki.v1.TagRequest.scope:type_name -> rafiki.v1.TagScope
-	248, // 173: rafiki.v1.TagResponse.tag:type_name -> rafiki.v1.TagRow
-	248, // 174: rafiki.v1.ListTagsResponse.rows:type_name -> rafiki.v1.TagRow
-	1,   // 175: rafiki.v1.ScriptMessage.Text.mode:type_name -> rafiki.v1.SendMode
-	284, // 176: rafiki.v1.ScriptMessage.Text.attachments:type_name -> rafiki.v1.ImageBlock
-	279, // 177: rafiki.v1.SearchRequest.SearchSessionFilter.since:type_name -> google.protobuf.Timestamp
-	274, // 178: rafiki.v1.SearchRequest.SearchSessionFilter.labels:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
-	279, // 179: rafiki.v1.SearchResponse.SearchHit.timestamp:type_name -> google.protobuf.Timestamp
-	7,   // 180: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	11,  // 181: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	17,  // 182: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	26,  // 183: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	28,  // 184: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	31,  // 185: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	33,  // 186: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	35,  // 187: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
-	37,  // 188: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
-	39,  // 189: rafiki.v1.Control.Rename:input_type -> rafiki.v1.RenameRequest
-	41,  // 190: rafiki.v1.Control.Notify:input_type -> rafiki.v1.NotifyRequest
-	43,  // 191: rafiki.v1.Control.SetRouting:input_type -> rafiki.v1.SetRoutingRequest
-	46,  // 192: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	49,  // 193: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
-	70,  // 194: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
-	81,  // 195: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
-	99,  // 196: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
-	101, // 197: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
-	103, // 198: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
-	105, // 199: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
-	108, // 200: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
-	110, // 201: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
-	112, // 202: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
-	114, // 203: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
-	117, // 204: rafiki.v1.Control.AddRepo:input_type -> rafiki.v1.AddRepoRequest
-	119, // 205: rafiki.v1.Control.ListRepos:input_type -> rafiki.v1.ListReposRequest
-	121, // 206: rafiki.v1.Control.RefreshRepo:input_type -> rafiki.v1.RefreshRepoRequest
-	122, // 207: rafiki.v1.Control.SetRepo:input_type -> rafiki.v1.SetRepoRequest
-	127, // 208: rafiki.v1.Control.RemoveRepo:input_type -> rafiki.v1.RemoveRepoRequest
-	131, // 209: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
-	133, // 210: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
-	135, // 211: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
-	137, // 212: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
-	140, // 213: rafiki.v1.Control.Recall:input_type -> rafiki.v1.RecallRequest
-	142, // 214: rafiki.v1.Control.RecallContext:input_type -> rafiki.v1.RecallContextRequest
-	145, // 215: rafiki.v1.Control.GetMemory:input_type -> rafiki.v1.GetMemoryRequest
-	147, // 216: rafiki.v1.Control.MemoryTree:input_type -> rafiki.v1.MemoryTreeRequest
-	149, // 217: rafiki.v1.Control.PutMemory:input_type -> rafiki.v1.PutMemoryRequest
-	151, // 218: rafiki.v1.Control.DeleteMemory:input_type -> rafiki.v1.DeleteMemoryRequest
-	153, // 219: rafiki.v1.Control.RecallBackfill:input_type -> rafiki.v1.RecallBackfillRequest
-	155, // 220: rafiki.v1.Control.RecallStatus:input_type -> rafiki.v1.RecallStatusRequest
-	51,  // 221: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
-	54,  // 222: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
-	57,  // 223: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
-	62,  // 224: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
-	65,  // 225: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
-	72,  // 226: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
-	74,  // 227: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
-	76,  // 228: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
-	158, // 229: rafiki.v1.Control.ListProviderBans:input_type -> rafiki.v1.ListProviderBansRequest
-	160, // 230: rafiki.v1.Control.BanProvider:input_type -> rafiki.v1.BanProviderRequest
-	162, // 231: rafiki.v1.Control.UnbanProvider:input_type -> rafiki.v1.UnbanProviderRequest
-	165, // 232: rafiki.v1.Control.ListRoutes:input_type -> rafiki.v1.ListRoutesRequest
-	167, // 233: rafiki.v1.Control.SetRoute:input_type -> rafiki.v1.SetRouteRequest
-	169, // 234: rafiki.v1.Control.DeleteRoute:input_type -> rafiki.v1.DeleteRouteRequest
-	172, // 235: rafiki.v1.Control.ListModelAliases:input_type -> rafiki.v1.ListModelAliasesRequest
-	174, // 236: rafiki.v1.Control.PutModelAlias:input_type -> rafiki.v1.PutModelAliasRequest
-	176, // 237: rafiki.v1.Control.DeleteModelAlias:input_type -> rafiki.v1.DeleteModelAliasRequest
-	19,  // 238: rafiki.v1.Control.Report:input_type -> rafiki.v1.ReportRequest
-	21,  // 239: rafiki.v1.Control.Receive:input_type -> rafiki.v1.ReceiveRequest
-	23,  // 240: rafiki.v1.Control.SetResult:input_type -> rafiki.v1.SetResultRequest
-	178, // 241: rafiki.v1.Control.Resume:input_type -> rafiki.v1.ResumeRequest
-	180, // 242: rafiki.v1.Control.CloseAllExited:input_type -> rafiki.v1.CloseAllExitedRequest
-	182, // 243: rafiki.v1.Control.SetLabels:input_type -> rafiki.v1.SetLabelsRequest
-	184, // 244: rafiki.v1.Control.Status:input_type -> rafiki.v1.StatusRequest
-	186, // 245: rafiki.v1.Control.Search:input_type -> rafiki.v1.SearchRequest
-	188, // 246: rafiki.v1.Control.ShutdownDaemon:input_type -> rafiki.v1.ShutdownDaemonRequest
-	190, // 247: rafiki.v1.Control.ModelInfo:input_type -> rafiki.v1.ModelInfoRequest
-	86,  // 248: rafiki.v1.Control.CreateSandbox:input_type -> rafiki.v1.CreateSandboxRequest
-	93,  // 249: rafiki.v1.Control.SyncPath:input_type -> rafiki.v1.SyncPathRequest
-	95,  // 250: rafiki.v1.Control.SyncRepo:input_type -> rafiki.v1.SyncRepoRequest
-	88,  // 251: rafiki.v1.Control.ListSandboxes:input_type -> rafiki.v1.ListSandboxesRequest
-	90,  // 252: rafiki.v1.Control.RemoveSandbox:input_type -> rafiki.v1.RemoveSandboxRequest
-	192, // 253: rafiki.v1.Control.ModelRoutes:input_type -> rafiki.v1.ModelRoutesRequest
-	195, // 254: rafiki.v1.Control.ConversationStats:input_type -> rafiki.v1.ConversationStatsRequest
-	197, // 255: rafiki.v1.Control.EnrollExecutor:input_type -> rafiki.v1.EnrollExecutorRequest
-	199, // 256: rafiki.v1.Control.CreateExecutor:input_type -> rafiki.v1.CreateExecutorRequest
-	201, // 257: rafiki.v1.Control.LabelExecutor:input_type -> rafiki.v1.LabelExecutorRequest
-	203, // 258: rafiki.v1.Control.DisableExecutor:input_type -> rafiki.v1.DisableExecutorRequest
-	205, // 259: rafiki.v1.Control.EnableExecutor:input_type -> rafiki.v1.EnableExecutorRequest
-	207, // 260: rafiki.v1.Control.DeleteExecutor:input_type -> rafiki.v1.DeleteExecutorRequest
-	209, // 261: rafiki.v1.Control.ExecutorSession:input_type -> rafiki.v1.ExecutorSessionRequest
-	212, // 262: rafiki.v1.Control.CreateUser:input_type -> rafiki.v1.CreateUserRequest
-	214, // 263: rafiki.v1.Control.ListUsers:input_type -> rafiki.v1.ListUsersRequest
-	217, // 264: rafiki.v1.Control.RemoveUser:input_type -> rafiki.v1.RemoveUserRequest
-	219, // 265: rafiki.v1.Control.UpdateUser:input_type -> rafiki.v1.UpdateUserRequest
-	222, // 266: rafiki.v1.Control.MintToken:input_type -> rafiki.v1.MintTokenRequest
-	224, // 267: rafiki.v1.Control.ListTokens:input_type -> rafiki.v1.ListTokensRequest
-	226, // 268: rafiki.v1.Control.RevokeToken:input_type -> rafiki.v1.RevokeTokenRequest
-	228, // 269: rafiki.v1.Control.BeginProviderLogin:input_type -> rafiki.v1.BeginProviderLoginRequest
-	230, // 270: rafiki.v1.Control.CompleteProviderLogin:input_type -> rafiki.v1.CompleteProviderLoginRequest
-	232, // 271: rafiki.v1.Control.DeleteProviderCredential:input_type -> rafiki.v1.DeleteProviderCredentialRequest
-	234, // 272: rafiki.v1.Control.BeginMcpLogin:input_type -> rafiki.v1.BeginMcpLoginRequest
-	236, // 273: rafiki.v1.Control.CompleteMcpLogin:input_type -> rafiki.v1.CompleteMcpLoginRequest
-	238, // 274: rafiki.v1.Control.DeleteMcpCredential:input_type -> rafiki.v1.DeleteMcpCredentialRequest
-	244, // 275: rafiki.v1.Control.GetStreams:input_type -> rafiki.v1.GetStreamsRequest
-	246, // 276: rafiki.v1.Control.SendFrame:input_type -> rafiki.v1.SendFrameRequest
-	249, // 277: rafiki.v1.Control.Tag:input_type -> rafiki.v1.TagRequest
-	251, // 278: rafiki.v1.Control.Untag:input_type -> rafiki.v1.UntagRequest
-	253, // 279: rafiki.v1.Control.ListTags:input_type -> rafiki.v1.ListTagsRequest
-	240, // 280: rafiki.v1.Login.BeginLogin:input_type -> rafiki.v1.BeginLoginRequest
-	242, // 281: rafiki.v1.Login.CompleteLogin:input_type -> rafiki.v1.CompleteLoginRequest
-	8,   // 282: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	280, // 283: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	18,  // 284: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	27,  // 285: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	29,  // 286: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	32,  // 287: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	34,  // 288: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	36,  // 289: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
-	38,  // 290: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
-	40,  // 291: rafiki.v1.Control.Rename:output_type -> rafiki.v1.RenameResponse
-	42,  // 292: rafiki.v1.Control.Notify:output_type -> rafiki.v1.NotifyResponse
-	44,  // 293: rafiki.v1.Control.SetRouting:output_type -> rafiki.v1.SetRoutingResponse
-	47,  // 294: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	50,  // 295: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
-	71,  // 296: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
-	82,  // 297: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
-	100, // 298: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
-	102, // 299: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
-	104, // 300: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
-	106, // 301: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
-	109, // 302: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
-	111, // 303: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
-	113, // 304: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
-	115, // 305: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
-	118, // 306: rafiki.v1.Control.AddRepo:output_type -> rafiki.v1.AddRepoResponse
-	120, // 307: rafiki.v1.Control.ListRepos:output_type -> rafiki.v1.ListReposResponse
-	126, // 308: rafiki.v1.Control.RefreshRepo:output_type -> rafiki.v1.RefreshRepoResponse
-	123, // 309: rafiki.v1.Control.SetRepo:output_type -> rafiki.v1.SetRepoResponse
-	128, // 310: rafiki.v1.Control.RemoveRepo:output_type -> rafiki.v1.RemoveRepoResponse
-	132, // 311: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
-	134, // 312: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
-	136, // 313: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
-	138, // 314: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
-	141, // 315: rafiki.v1.Control.Recall:output_type -> rafiki.v1.RecallResponse
-	143, // 316: rafiki.v1.Control.RecallContext:output_type -> rafiki.v1.RecallContextResponse
-	146, // 317: rafiki.v1.Control.GetMemory:output_type -> rafiki.v1.GetMemoryResponse
-	148, // 318: rafiki.v1.Control.MemoryTree:output_type -> rafiki.v1.MemoryTreeResponse
-	150, // 319: rafiki.v1.Control.PutMemory:output_type -> rafiki.v1.PutMemoryResponse
-	152, // 320: rafiki.v1.Control.DeleteMemory:output_type -> rafiki.v1.DeleteMemoryResponse
-	154, // 321: rafiki.v1.Control.RecallBackfill:output_type -> rafiki.v1.RecallBackfillResponse
-	156, // 322: rafiki.v1.Control.RecallStatus:output_type -> rafiki.v1.RecallStatusResponse
-	53,  // 323: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
-	56,  // 324: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
-	61,  // 325: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
-	64,  // 326: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
-	68,  // 327: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
-	73,  // 328: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
-	75,  // 329: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
-	77,  // 330: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
-	159, // 331: rafiki.v1.Control.ListProviderBans:output_type -> rafiki.v1.ListProviderBansResponse
-	161, // 332: rafiki.v1.Control.BanProvider:output_type -> rafiki.v1.BanProviderResponse
-	163, // 333: rafiki.v1.Control.UnbanProvider:output_type -> rafiki.v1.UnbanProviderResponse
-	166, // 334: rafiki.v1.Control.ListRoutes:output_type -> rafiki.v1.ListRoutesResponse
-	168, // 335: rafiki.v1.Control.SetRoute:output_type -> rafiki.v1.SetRouteResponse
-	170, // 336: rafiki.v1.Control.DeleteRoute:output_type -> rafiki.v1.DeleteRouteResponse
-	173, // 337: rafiki.v1.Control.ListModelAliases:output_type -> rafiki.v1.ListModelAliasesResponse
-	175, // 338: rafiki.v1.Control.PutModelAlias:output_type -> rafiki.v1.PutModelAliasResponse
-	177, // 339: rafiki.v1.Control.DeleteModelAlias:output_type -> rafiki.v1.DeleteModelAliasResponse
-	20,  // 340: rafiki.v1.Control.Report:output_type -> rafiki.v1.ReportResponse
-	22,  // 341: rafiki.v1.Control.Receive:output_type -> rafiki.v1.ScriptMessage
-	24,  // 342: rafiki.v1.Control.SetResult:output_type -> rafiki.v1.SetResultResponse
-	179, // 343: rafiki.v1.Control.Resume:output_type -> rafiki.v1.ResumeResponse
-	181, // 344: rafiki.v1.Control.CloseAllExited:output_type -> rafiki.v1.CloseAllExitedResponse
-	183, // 345: rafiki.v1.Control.SetLabels:output_type -> rafiki.v1.SetLabelsResponse
-	185, // 346: rafiki.v1.Control.Status:output_type -> rafiki.v1.StatusResponse
-	187, // 347: rafiki.v1.Control.Search:output_type -> rafiki.v1.SearchResponse
-	189, // 348: rafiki.v1.Control.ShutdownDaemon:output_type -> rafiki.v1.ShutdownDaemonResponse
-	191, // 349: rafiki.v1.Control.ModelInfo:output_type -> rafiki.v1.ModelInfoResponse
-	87,  // 350: rafiki.v1.Control.CreateSandbox:output_type -> rafiki.v1.CreateSandboxResponse
-	94,  // 351: rafiki.v1.Control.SyncPath:output_type -> rafiki.v1.SyncPathResponse
-	96,  // 352: rafiki.v1.Control.SyncRepo:output_type -> rafiki.v1.SyncRepoResponse
-	89,  // 353: rafiki.v1.Control.ListSandboxes:output_type -> rafiki.v1.ListSandboxesResponse
-	91,  // 354: rafiki.v1.Control.RemoveSandbox:output_type -> rafiki.v1.RemoveSandboxResponse
-	194, // 355: rafiki.v1.Control.ModelRoutes:output_type -> rafiki.v1.ModelRoutesResponse
-	196, // 356: rafiki.v1.Control.ConversationStats:output_type -> rafiki.v1.ConversationStatsResponse
-	198, // 357: rafiki.v1.Control.EnrollExecutor:output_type -> rafiki.v1.EnrollExecutorResponse
-	200, // 358: rafiki.v1.Control.CreateExecutor:output_type -> rafiki.v1.CreateExecutorResponse
-	202, // 359: rafiki.v1.Control.LabelExecutor:output_type -> rafiki.v1.LabelExecutorResponse
-	204, // 360: rafiki.v1.Control.DisableExecutor:output_type -> rafiki.v1.DisableExecutorResponse
-	206, // 361: rafiki.v1.Control.EnableExecutor:output_type -> rafiki.v1.EnableExecutorResponse
-	208, // 362: rafiki.v1.Control.DeleteExecutor:output_type -> rafiki.v1.DeleteExecutorResponse
-	210, // 363: rafiki.v1.Control.ExecutorSession:output_type -> rafiki.v1.ExecutorSessionEvent
-	213, // 364: rafiki.v1.Control.CreateUser:output_type -> rafiki.v1.CreateUserResponse
-	215, // 365: rafiki.v1.Control.ListUsers:output_type -> rafiki.v1.ListUsersResponse
-	218, // 366: rafiki.v1.Control.RemoveUser:output_type -> rafiki.v1.RemoveUserResponse
-	220, // 367: rafiki.v1.Control.UpdateUser:output_type -> rafiki.v1.UpdateUserResponse
-	223, // 368: rafiki.v1.Control.MintToken:output_type -> rafiki.v1.MintTokenResponse
-	225, // 369: rafiki.v1.Control.ListTokens:output_type -> rafiki.v1.ListTokensResponse
-	227, // 370: rafiki.v1.Control.RevokeToken:output_type -> rafiki.v1.RevokeTokenResponse
-	229, // 371: rafiki.v1.Control.BeginProviderLogin:output_type -> rafiki.v1.BeginProviderLoginResponse
-	231, // 372: rafiki.v1.Control.CompleteProviderLogin:output_type -> rafiki.v1.CompleteProviderLoginResponse
-	233, // 373: rafiki.v1.Control.DeleteProviderCredential:output_type -> rafiki.v1.DeleteProviderCredentialResponse
-	235, // 374: rafiki.v1.Control.BeginMcpLogin:output_type -> rafiki.v1.BeginMcpLoginResponse
-	237, // 375: rafiki.v1.Control.CompleteMcpLogin:output_type -> rafiki.v1.CompleteMcpLoginResponse
-	239, // 376: rafiki.v1.Control.DeleteMcpCredential:output_type -> rafiki.v1.DeleteMcpCredentialResponse
-	245, // 377: rafiki.v1.Control.GetStreams:output_type -> rafiki.v1.GetStreamsResponse
-	247, // 378: rafiki.v1.Control.SendFrame:output_type -> rafiki.v1.SendFrameResponse
-	250, // 379: rafiki.v1.Control.Tag:output_type -> rafiki.v1.TagResponse
-	252, // 380: rafiki.v1.Control.Untag:output_type -> rafiki.v1.UntagResponse
-	254, // 381: rafiki.v1.Control.ListTags:output_type -> rafiki.v1.ListTagsResponse
-	241, // 382: rafiki.v1.Login.BeginLogin:output_type -> rafiki.v1.BeginLoginResponse
-	243, // 383: rafiki.v1.Login.CompleteLogin:output_type -> rafiki.v1.CompleteLoginResponse
-	282, // [282:384] is the sub-list for method output_type
-	180, // [180:282] is the sub-list for method input_type
-	180, // [180:180] is the sub-list for extension type_name
-	180, // [180:180] is the sub-list for extension extendee
-	0,   // [0:180] is the sub-list for field type_name
+	283, // 14: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	16,  // 15: rafiki.v1.SendRequest.steps:type_name -> rafiki.v1.SendStep
+	17,  // 16: rafiki.v1.SendResponse.steps:type_name -> rafiki.v1.StepSummary
+	257, // 17: rafiki.v1.ScriptMessage.text:type_name -> rafiki.v1.ScriptMessage.Text
+	258, // 18: rafiki.v1.ScriptMessage.stop:type_name -> rafiki.v1.ScriptMessage.Stop
+	280, // 19: rafiki.v1.ChildSummary.started_at:type_name -> google.protobuf.Timestamp
+	280, // 20: rafiki.v1.ChildSummary.last_activity:type_name -> google.protobuf.Timestamp
+	259, // 21: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	280, // 22: rafiki.v1.ListChildrenRequest.since:type_name -> google.protobuf.Timestamp
+	260, // 23: rafiki.v1.ListChildrenRequest.labels:type_name -> rafiki.v1.ListChildrenRequest.LabelsEntry
+	4,   // 24: rafiki.v1.ListChildrenRequest.scope:type_name -> rafiki.v1.ListScope
+	26,  // 25: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
+	26,  // 26: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
+	261, // 27: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	31,  // 28: rafiki.v1.SpawnRequest.prefill:type_name -> rafiki.v1.PrefillRead
+	262, // 29: rafiki.v1.SpawnRequest.script:type_name -> rafiki.v1.SpawnRequest.ScriptSpec
+	263, // 30: rafiki.v1.SpawnRequest.env:type_name -> rafiki.v1.SpawnRequest.EnvEntry
+	85,  // 31: rafiki.v1.SpawnRequest.sandbox:type_name -> rafiki.v1.SandboxSpec
+	264, // 32: rafiki.v1.SpawnRequest.fork_from:type_name -> rafiki.v1.SpawnRequest.ForkFrom
+	282, // 33: rafiki.v1.KillRequest.shutdown_timeout:type_name -> google.protobuf.Duration
+	282, // 34: rafiki.v1.KillRequest.kill_timeout:type_name -> google.protobuf.Duration
+	2,   // 35: rafiki.v1.KillRequest.scope:type_name -> rafiki.v1.DescendantScope
+	282, // 36: rafiki.v1.KillResponse.duration:type_name -> google.protobuf.Duration
+	2,   // 37: rafiki.v1.CloseRequest.scope:type_name -> rafiki.v1.DescendantScope
+	265, // 38: rafiki.v1.NotifyRequest.fields:type_name -> rafiki.v1.NotifyRequest.FieldsEntry
+	46,  // 39: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
+	280, // 40: rafiki.v1.ModelRow.created:type_name -> google.protobuf.Timestamp
+	280, // 41: rafiki.v1.ModelRow.expires_at:type_name -> google.protobuf.Timestamp
+	49,  // 42: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
+	280, // 43: rafiki.v1.ConversationSearchRequest.since:type_name -> google.protobuf.Timestamp
+	280, // 44: rafiki.v1.ConversationSearchRequest.until:type_name -> google.protobuf.Timestamp
+	280, // 45: rafiki.v1.ConversationSummary.created_at:type_name -> google.protobuf.Timestamp
+	280, // 46: rafiki.v1.ConversationSummary.closed_at:type_name -> google.protobuf.Timestamp
+	53,  // 47: rafiki.v1.ConversationSearchResponse.rows:type_name -> rafiki.v1.ConversationSummary
+	282, // 48: rafiki.v1.TranscriptTurn.latency:type_name -> google.protobuf.Duration
+	56,  // 49: rafiki.v1.ConversationExportResponse.turns:type_name -> rafiki.v1.TranscriptTurn
+	280, // 50: rafiki.v1.ConversationQueryRequest.since:type_name -> google.protobuf.Timestamp
+	280, // 51: rafiki.v1.ConversationQueryRequest.until:type_name -> google.protobuf.Timestamp
+	60,  // 52: rafiki.v1.QueryRow.cells:type_name -> rafiki.v1.QueryValue
+	59,  // 53: rafiki.v1.ConversationQueryResponse.columns:type_name -> rafiki.v1.QueryColumn
+	61,  // 54: rafiki.v1.ConversationQueryResponse.rows:type_name -> rafiki.v1.QueryRow
+	5,   // 55: rafiki.v1.ConversationReviewRequest.stage:type_name -> rafiki.v1.ReviewStage
+	6,   // 56: rafiki.v1.ConversationReviewAccept.status:type_name -> rafiki.v1.ReviewAcceptStatus
+	64,  // 57: rafiki.v1.ConversationReviewResponse.accepted:type_name -> rafiki.v1.ConversationReviewAccept
+	280, // 58: rafiki.v1.ReviewAnalysis.created_at:type_name -> google.protobuf.Timestamp
+	67,  // 59: rafiki.v1.ConversationFindingsResponse.findings:type_name -> rafiki.v1.ReviewFinding
+	68,  // 60: rafiki.v1.ConversationFindingsResponse.analyses:type_name -> rafiki.v1.ReviewAnalysis
+	266, // 61: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
+	280, // 62: rafiki.v1.ExecutorRow.connected_at:type_name -> google.protobuf.Timestamp
+	280, // 63: rafiki.v1.ExecutorRow.last_seen:type_name -> google.protobuf.Timestamp
+	70,  // 64: rafiki.v1.ListExecutorsResponse.rows:type_name -> rafiki.v1.ExecutorRow
+	284, // 65: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
+	280, // 66: rafiki.v1.DarajaLaunchResponse.connected_at:type_name -> google.protobuf.Timestamp
+	79,  // 67: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
+	80,  // 68: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
+	280, // 69: rafiki.v1.RateLimitWindow.reset_at:type_name -> google.protobuf.Timestamp
+	81,  // 70: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
+	81,  // 71: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
+	280, // 72: rafiki.v1.GetRateLimitStatusResponse.updated_at:type_name -> google.protobuf.Timestamp
+	84,  // 73: rafiki.v1.SandboxSpec.mounts:type_name -> rafiki.v1.SandboxMount
+	267, // 74: rafiki.v1.SandboxSpec.env:type_name -> rafiki.v1.SandboxSpec.EnvEntry
+	268, // 75: rafiki.v1.SandboxSpec.labels:type_name -> rafiki.v1.SandboxSpec.LabelsEntry
+	282, // 76: rafiki.v1.SandboxSpec.ttl:type_name -> google.protobuf.Duration
+	269, // 77: rafiki.v1.SandboxInfo.labels:type_name -> rafiki.v1.SandboxInfo.LabelsEntry
+	280, // 78: rafiki.v1.SandboxInfo.created_at:type_name -> google.protobuf.Timestamp
+	280, // 79: rafiki.v1.SandboxInfo.expires_at:type_name -> google.protobuf.Timestamp
+	85,  // 80: rafiki.v1.CreateSandboxRequest.spec:type_name -> rafiki.v1.SandboxSpec
+	86,  // 81: rafiki.v1.CreateSandboxResponse.sandbox:type_name -> rafiki.v1.SandboxInfo
+	86,  // 82: rafiki.v1.ListSandboxesResponse.sandboxes:type_name -> rafiki.v1.SandboxInfo
+	93,  // 83: rafiki.v1.SyncPathRequest.src:type_name -> rafiki.v1.SyncEndpoint
+	93,  // 84: rafiki.v1.SyncPathRequest.dst:type_name -> rafiki.v1.SyncEndpoint
+	93,  // 85: rafiki.v1.SyncRepoRequest.src:type_name -> rafiki.v1.SyncEndpoint
+	93,  // 86: rafiki.v1.SyncRepoRequest.dst:type_name -> rafiki.v1.SyncEndpoint
+	280, // 87: rafiki.v1.SkillRow.updated_at:type_name -> google.protobuf.Timestamp
+	98,  // 88: rafiki.v1.SkillRow.files:type_name -> rafiki.v1.SkillFileInfo
+	99,  // 89: rafiki.v1.ListSkillsResponse.rows:type_name -> rafiki.v1.SkillRow
+	99,  // 90: rafiki.v1.GetSkillResponse.row:type_name -> rafiki.v1.SkillRow
+	280, // 91: rafiki.v1.PymoduleRow.created_at:type_name -> google.protobuf.Timestamp
+	108, // 92: rafiki.v1.ListPymodulesResponse.rows:type_name -> rafiki.v1.PymoduleRow
+	108, // 93: rafiki.v1.GetPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
+	108, // 94: rafiki.v1.PutPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
+	282, // 95: rafiki.v1.RepoRow.refresh_interval:type_name -> google.protobuf.Duration
+	280, // 96: rafiki.v1.RepoRow.resolved_at:type_name -> google.protobuf.Timestamp
+	282, // 97: rafiki.v1.AddRepoRequest.refresh_interval:type_name -> google.protobuf.Duration
+	117, // 98: rafiki.v1.AddRepoResponse.row:type_name -> rafiki.v1.RepoRow
+	117, // 99: rafiki.v1.ListReposResponse.rows:type_name -> rafiki.v1.RepoRow
+	282, // 100: rafiki.v1.SetRepoRequest.refresh_interval:type_name -> google.protobuf.Duration
+	117, // 101: rafiki.v1.SetRepoResponse.row:type_name -> rafiki.v1.RepoRow
+	125, // 102: rafiki.v1.RefreshRepoResponse.scripts:type_name -> rafiki.v1.RepoScript
+	126, // 103: rafiki.v1.RefreshRepoResponse.packages:type_name -> rafiki.v1.RepoPackage
+	270, // 104: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
+	130, // 105: rafiki.v1.PresetRow.tools:type_name -> rafiki.v1.StringList
+	130, // 106: rafiki.v1.PresetRow.skills:type_name -> rafiki.v1.StringList
+	130, // 107: rafiki.v1.PresetRow.mcp_servers:type_name -> rafiki.v1.StringList
+	280, // 108: rafiki.v1.PresetRow.created_at:type_name -> google.protobuf.Timestamp
+	280, // 109: rafiki.v1.PresetRow.deleted_at:type_name -> google.protobuf.Timestamp
+	131, // 110: rafiki.v1.ListPresetsResponse.rows:type_name -> rafiki.v1.PresetRow
+	131, // 111: rafiki.v1.GetPresetResponse.rows:type_name -> rafiki.v1.PresetRow
+	131, // 112: rafiki.v1.PutPresetRequest.preset:type_name -> rafiki.v1.PresetRow
+	131, // 113: rafiki.v1.PutPresetResponse.preset:type_name -> rafiki.v1.PresetRow
+	280, // 114: rafiki.v1.RecallHit.when:type_name -> google.protobuf.Timestamp
+	280, // 115: rafiki.v1.RecallRequest.since:type_name -> google.protobuf.Timestamp
+	280, // 116: rafiki.v1.RecallRequest.until:type_name -> google.protobuf.Timestamp
+	140, // 117: rafiki.v1.RecallResponse.hits:type_name -> rafiki.v1.RecallHit
+	280, // 118: rafiki.v1.MemoryRow.created_at:type_name -> google.protobuf.Timestamp
+	280, // 119: rafiki.v1.MemoryRow.updated_at:type_name -> google.protobuf.Timestamp
+	145, // 120: rafiki.v1.GetMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
+	145, // 121: rafiki.v1.MemoryTreeResponse.memories:type_name -> rafiki.v1.MemoryRow
+	145, // 122: rafiki.v1.PutMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
+	280, // 123: rafiki.v1.RecallBackfillRequest.since:type_name -> google.protobuf.Timestamp
+	280, // 124: rafiki.v1.RecallStatusResponse.backfill_since:type_name -> google.protobuf.Timestamp
+	280, // 125: rafiki.v1.ProviderBan.created_at:type_name -> google.protobuf.Timestamp
+	280, // 126: rafiki.v1.ProviderBan.expires_at:type_name -> google.protobuf.Timestamp
+	158, // 127: rafiki.v1.ListProviderBansResponse.bans:type_name -> rafiki.v1.ProviderBan
+	282, // 128: rafiki.v1.BanProviderRequest.duration:type_name -> google.protobuf.Duration
+	158, // 129: rafiki.v1.BanProviderResponse.ban:type_name -> rafiki.v1.ProviderBan
+	280, // 130: rafiki.v1.RouteRow.created_at:type_name -> google.protobuf.Timestamp
+	165, // 131: rafiki.v1.ListRoutesResponse.rows:type_name -> rafiki.v1.RouteRow
+	165, // 132: rafiki.v1.SetRouteResponse.row:type_name -> rafiki.v1.RouteRow
+	280, // 133: rafiki.v1.ModelAliasRow.created_at:type_name -> google.protobuf.Timestamp
+	280, // 134: rafiki.v1.ModelAliasRow.updated_at:type_name -> google.protobuf.Timestamp
+	172, // 135: rafiki.v1.ListModelAliasesResponse.rows:type_name -> rafiki.v1.ModelAliasRow
+	172, // 136: rafiki.v1.PutModelAliasResponse.row:type_name -> rafiki.v1.ModelAliasRow
+	282, // 137: rafiki.v1.CloseAllExitedRequest.older_than:type_name -> google.protobuf.Duration
+	271, // 138: rafiki.v1.SetLabelsRequest.set:type_name -> rafiki.v1.SetLabelsRequest.SetEntry
+	272, // 139: rafiki.v1.SetLabelsResponse.labels:type_name -> rafiki.v1.SetLabelsResponse.LabelsEntry
+	280, // 140: rafiki.v1.StatusResponse.started_at:type_name -> google.protobuf.Timestamp
+	273, // 141: rafiki.v1.StatusResponse.children:type_name -> rafiki.v1.StatusResponse.ChildCounts
+	274, // 142: rafiki.v1.SearchRequest.session_filter:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter
+	276, // 143: rafiki.v1.SearchResponse.hits:type_name -> rafiki.v1.SearchResponse.SearchHit
+	282, // 144: rafiki.v1.SearchResponse.elapsed:type_name -> google.protobuf.Duration
+	282, // 145: rafiki.v1.RouteEndpoint.p50_latency:type_name -> google.protobuf.Duration
+	194, // 146: rafiki.v1.ModelRoutesResponse.endpoints:type_name -> rafiki.v1.RouteEndpoint
+	280, // 147: rafiki.v1.ConversationStatsRequest.since:type_name -> google.protobuf.Timestamp
+	280, // 148: rafiki.v1.ConversationStatsRequest.until:type_name -> google.protobuf.Timestamp
+	277, // 149: rafiki.v1.EnrollExecutorRequest.labels:type_name -> rafiki.v1.EnrollExecutorRequest.LabelsEntry
+	282, // 150: rafiki.v1.EnrollExecutorRequest.ttl:type_name -> google.protobuf.Duration
+	278, // 151: rafiki.v1.CreateExecutorRequest.labels:type_name -> rafiki.v1.CreateExecutorRequest.LabelsEntry
+	279, // 152: rafiki.v1.LabelExecutorRequest.set:type_name -> rafiki.v1.LabelExecutorRequest.SetEntry
+	70,  // 153: rafiki.v1.LabelExecutorResponse.executor:type_name -> rafiki.v1.ExecutorRow
+	212, // 154: rafiki.v1.ExecutorSessionEvent.ready:type_name -> rafiki.v1.ExecutorSessionReady
+	280, // 155: rafiki.v1.CreateUserResponse.created_at:type_name -> google.protobuf.Timestamp
+	217, // 156: rafiki.v1.ListUsersResponse.users:type_name -> rafiki.v1.UserRow
+	280, // 157: rafiki.v1.UserRow.created_at:type_name -> google.protobuf.Timestamp
+	280, // 158: rafiki.v1.UserRow.deleted_at:type_name -> google.protobuf.Timestamp
+	217, // 159: rafiki.v1.UpdateUserResponse.user:type_name -> rafiki.v1.UserRow
+	280, // 160: rafiki.v1.TokenRow.created_at:type_name -> google.protobuf.Timestamp
+	280, // 161: rafiki.v1.TokenRow.expires_at:type_name -> google.protobuf.Timestamp
+	280, // 162: rafiki.v1.TokenRow.revoked_at:type_name -> google.protobuf.Timestamp
+	282, // 163: rafiki.v1.MintTokenRequest.ttl:type_name -> google.protobuf.Duration
+	222, // 164: rafiki.v1.MintTokenResponse.info:type_name -> rafiki.v1.TokenRow
+	222, // 165: rafiki.v1.ListTokensResponse.tokens:type_name -> rafiki.v1.TokenRow
+	222, // 166: rafiki.v1.RevokeTokenResponse.info:type_name -> rafiki.v1.TokenRow
+	236, // 167: rafiki.v1.CompleteMcpLoginResponse.continuation:type_name -> rafiki.v1.BeginMcpLoginResponse
+	280, // 168: rafiki.v1.CompleteLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
+	7,   // 169: rafiki.v1.TagRow.scope:type_name -> rafiki.v1.TagScope
+	280, // 170: rafiki.v1.TagRow.created_at:type_name -> google.protobuf.Timestamp
+	280, // 171: rafiki.v1.TagRow.superseded_at:type_name -> google.protobuf.Timestamp
+	280, // 172: rafiki.v1.TagRow.deleted_at:type_name -> google.protobuf.Timestamp
+	7,   // 173: rafiki.v1.TagRequest.scope:type_name -> rafiki.v1.TagScope
+	249, // 174: rafiki.v1.TagResponse.tag:type_name -> rafiki.v1.TagRow
+	249, // 175: rafiki.v1.ListTagsResponse.rows:type_name -> rafiki.v1.TagRow
+	1,   // 176: rafiki.v1.ScriptMessage.Text.mode:type_name -> rafiki.v1.SendMode
+	285, // 177: rafiki.v1.ScriptMessage.Text.attachments:type_name -> rafiki.v1.ImageBlock
+	280, // 178: rafiki.v1.SearchRequest.SearchSessionFilter.since:type_name -> google.protobuf.Timestamp
+	275, // 179: rafiki.v1.SearchRequest.SearchSessionFilter.labels:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
+	280, // 180: rafiki.v1.SearchResponse.SearchHit.timestamp:type_name -> google.protobuf.Timestamp
+	8,   // 181: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	12,  // 182: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	18,  // 183: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	27,  // 184: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	29,  // 185: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	32,  // 186: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	34,  // 187: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	36,  // 188: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
+	38,  // 189: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
+	40,  // 190: rafiki.v1.Control.Rename:input_type -> rafiki.v1.RenameRequest
+	42,  // 191: rafiki.v1.Control.Notify:input_type -> rafiki.v1.NotifyRequest
+	44,  // 192: rafiki.v1.Control.SetRouting:input_type -> rafiki.v1.SetRoutingRequest
+	47,  // 193: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	50,  // 194: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	71,  // 195: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
+	82,  // 196: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
+	100, // 197: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
+	102, // 198: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
+	104, // 199: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
+	106, // 200: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
+	109, // 201: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
+	111, // 202: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
+	113, // 203: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
+	115, // 204: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
+	118, // 205: rafiki.v1.Control.AddRepo:input_type -> rafiki.v1.AddRepoRequest
+	120, // 206: rafiki.v1.Control.ListRepos:input_type -> rafiki.v1.ListReposRequest
+	122, // 207: rafiki.v1.Control.RefreshRepo:input_type -> rafiki.v1.RefreshRepoRequest
+	123, // 208: rafiki.v1.Control.SetRepo:input_type -> rafiki.v1.SetRepoRequest
+	128, // 209: rafiki.v1.Control.RemoveRepo:input_type -> rafiki.v1.RemoveRepoRequest
+	132, // 210: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
+	134, // 211: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
+	136, // 212: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
+	138, // 213: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
+	141, // 214: rafiki.v1.Control.Recall:input_type -> rafiki.v1.RecallRequest
+	143, // 215: rafiki.v1.Control.RecallContext:input_type -> rafiki.v1.RecallContextRequest
+	146, // 216: rafiki.v1.Control.GetMemory:input_type -> rafiki.v1.GetMemoryRequest
+	148, // 217: rafiki.v1.Control.MemoryTree:input_type -> rafiki.v1.MemoryTreeRequest
+	150, // 218: rafiki.v1.Control.PutMemory:input_type -> rafiki.v1.PutMemoryRequest
+	152, // 219: rafiki.v1.Control.DeleteMemory:input_type -> rafiki.v1.DeleteMemoryRequest
+	154, // 220: rafiki.v1.Control.RecallBackfill:input_type -> rafiki.v1.RecallBackfillRequest
+	156, // 221: rafiki.v1.Control.RecallStatus:input_type -> rafiki.v1.RecallStatusRequest
+	52,  // 222: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
+	55,  // 223: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
+	58,  // 224: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
+	63,  // 225: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
+	66,  // 226: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
+	73,  // 227: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
+	75,  // 228: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
+	77,  // 229: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
+	159, // 230: rafiki.v1.Control.ListProviderBans:input_type -> rafiki.v1.ListProviderBansRequest
+	161, // 231: rafiki.v1.Control.BanProvider:input_type -> rafiki.v1.BanProviderRequest
+	163, // 232: rafiki.v1.Control.UnbanProvider:input_type -> rafiki.v1.UnbanProviderRequest
+	166, // 233: rafiki.v1.Control.ListRoutes:input_type -> rafiki.v1.ListRoutesRequest
+	168, // 234: rafiki.v1.Control.SetRoute:input_type -> rafiki.v1.SetRouteRequest
+	170, // 235: rafiki.v1.Control.DeleteRoute:input_type -> rafiki.v1.DeleteRouteRequest
+	173, // 236: rafiki.v1.Control.ListModelAliases:input_type -> rafiki.v1.ListModelAliasesRequest
+	175, // 237: rafiki.v1.Control.PutModelAlias:input_type -> rafiki.v1.PutModelAliasRequest
+	177, // 238: rafiki.v1.Control.DeleteModelAlias:input_type -> rafiki.v1.DeleteModelAliasRequest
+	20,  // 239: rafiki.v1.Control.Report:input_type -> rafiki.v1.ReportRequest
+	22,  // 240: rafiki.v1.Control.Receive:input_type -> rafiki.v1.ReceiveRequest
+	24,  // 241: rafiki.v1.Control.SetResult:input_type -> rafiki.v1.SetResultRequest
+	179, // 242: rafiki.v1.Control.Resume:input_type -> rafiki.v1.ResumeRequest
+	181, // 243: rafiki.v1.Control.CloseAllExited:input_type -> rafiki.v1.CloseAllExitedRequest
+	183, // 244: rafiki.v1.Control.SetLabels:input_type -> rafiki.v1.SetLabelsRequest
+	185, // 245: rafiki.v1.Control.Status:input_type -> rafiki.v1.StatusRequest
+	187, // 246: rafiki.v1.Control.Search:input_type -> rafiki.v1.SearchRequest
+	189, // 247: rafiki.v1.Control.ShutdownDaemon:input_type -> rafiki.v1.ShutdownDaemonRequest
+	191, // 248: rafiki.v1.Control.ModelInfo:input_type -> rafiki.v1.ModelInfoRequest
+	87,  // 249: rafiki.v1.Control.CreateSandbox:input_type -> rafiki.v1.CreateSandboxRequest
+	94,  // 250: rafiki.v1.Control.SyncPath:input_type -> rafiki.v1.SyncPathRequest
+	96,  // 251: rafiki.v1.Control.SyncRepo:input_type -> rafiki.v1.SyncRepoRequest
+	89,  // 252: rafiki.v1.Control.ListSandboxes:input_type -> rafiki.v1.ListSandboxesRequest
+	91,  // 253: rafiki.v1.Control.RemoveSandbox:input_type -> rafiki.v1.RemoveSandboxRequest
+	193, // 254: rafiki.v1.Control.ModelRoutes:input_type -> rafiki.v1.ModelRoutesRequest
+	196, // 255: rafiki.v1.Control.ConversationStats:input_type -> rafiki.v1.ConversationStatsRequest
+	198, // 256: rafiki.v1.Control.EnrollExecutor:input_type -> rafiki.v1.EnrollExecutorRequest
+	200, // 257: rafiki.v1.Control.CreateExecutor:input_type -> rafiki.v1.CreateExecutorRequest
+	202, // 258: rafiki.v1.Control.LabelExecutor:input_type -> rafiki.v1.LabelExecutorRequest
+	204, // 259: rafiki.v1.Control.DisableExecutor:input_type -> rafiki.v1.DisableExecutorRequest
+	206, // 260: rafiki.v1.Control.EnableExecutor:input_type -> rafiki.v1.EnableExecutorRequest
+	208, // 261: rafiki.v1.Control.DeleteExecutor:input_type -> rafiki.v1.DeleteExecutorRequest
+	210, // 262: rafiki.v1.Control.ExecutorSession:input_type -> rafiki.v1.ExecutorSessionRequest
+	213, // 263: rafiki.v1.Control.CreateUser:input_type -> rafiki.v1.CreateUserRequest
+	215, // 264: rafiki.v1.Control.ListUsers:input_type -> rafiki.v1.ListUsersRequest
+	218, // 265: rafiki.v1.Control.RemoveUser:input_type -> rafiki.v1.RemoveUserRequest
+	220, // 266: rafiki.v1.Control.UpdateUser:input_type -> rafiki.v1.UpdateUserRequest
+	223, // 267: rafiki.v1.Control.MintToken:input_type -> rafiki.v1.MintTokenRequest
+	225, // 268: rafiki.v1.Control.ListTokens:input_type -> rafiki.v1.ListTokensRequest
+	227, // 269: rafiki.v1.Control.RevokeToken:input_type -> rafiki.v1.RevokeTokenRequest
+	229, // 270: rafiki.v1.Control.BeginProviderLogin:input_type -> rafiki.v1.BeginProviderLoginRequest
+	231, // 271: rafiki.v1.Control.CompleteProviderLogin:input_type -> rafiki.v1.CompleteProviderLoginRequest
+	233, // 272: rafiki.v1.Control.DeleteProviderCredential:input_type -> rafiki.v1.DeleteProviderCredentialRequest
+	235, // 273: rafiki.v1.Control.BeginMcpLogin:input_type -> rafiki.v1.BeginMcpLoginRequest
+	237, // 274: rafiki.v1.Control.CompleteMcpLogin:input_type -> rafiki.v1.CompleteMcpLoginRequest
+	239, // 275: rafiki.v1.Control.DeleteMcpCredential:input_type -> rafiki.v1.DeleteMcpCredentialRequest
+	245, // 276: rafiki.v1.Control.GetStreams:input_type -> rafiki.v1.GetStreamsRequest
+	247, // 277: rafiki.v1.Control.SendFrame:input_type -> rafiki.v1.SendFrameRequest
+	250, // 278: rafiki.v1.Control.Tag:input_type -> rafiki.v1.TagRequest
+	252, // 279: rafiki.v1.Control.Untag:input_type -> rafiki.v1.UntagRequest
+	254, // 280: rafiki.v1.Control.ListTags:input_type -> rafiki.v1.ListTagsRequest
+	241, // 281: rafiki.v1.Login.BeginLogin:input_type -> rafiki.v1.BeginLoginRequest
+	243, // 282: rafiki.v1.Login.CompleteLogin:input_type -> rafiki.v1.CompleteLoginRequest
+	9,   // 283: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	281, // 284: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	19,  // 285: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	28,  // 286: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	30,  // 287: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	33,  // 288: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	35,  // 289: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	37,  // 290: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
+	39,  // 291: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
+	41,  // 292: rafiki.v1.Control.Rename:output_type -> rafiki.v1.RenameResponse
+	43,  // 293: rafiki.v1.Control.Notify:output_type -> rafiki.v1.NotifyResponse
+	45,  // 294: rafiki.v1.Control.SetRouting:output_type -> rafiki.v1.SetRoutingResponse
+	48,  // 295: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	51,  // 296: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	72,  // 297: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
+	83,  // 298: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
+	101, // 299: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
+	103, // 300: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
+	105, // 301: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
+	107, // 302: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
+	110, // 303: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
+	112, // 304: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
+	114, // 305: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
+	116, // 306: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
+	119, // 307: rafiki.v1.Control.AddRepo:output_type -> rafiki.v1.AddRepoResponse
+	121, // 308: rafiki.v1.Control.ListRepos:output_type -> rafiki.v1.ListReposResponse
+	127, // 309: rafiki.v1.Control.RefreshRepo:output_type -> rafiki.v1.RefreshRepoResponse
+	124, // 310: rafiki.v1.Control.SetRepo:output_type -> rafiki.v1.SetRepoResponse
+	129, // 311: rafiki.v1.Control.RemoveRepo:output_type -> rafiki.v1.RemoveRepoResponse
+	133, // 312: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
+	135, // 313: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
+	137, // 314: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
+	139, // 315: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
+	142, // 316: rafiki.v1.Control.Recall:output_type -> rafiki.v1.RecallResponse
+	144, // 317: rafiki.v1.Control.RecallContext:output_type -> rafiki.v1.RecallContextResponse
+	147, // 318: rafiki.v1.Control.GetMemory:output_type -> rafiki.v1.GetMemoryResponse
+	149, // 319: rafiki.v1.Control.MemoryTree:output_type -> rafiki.v1.MemoryTreeResponse
+	151, // 320: rafiki.v1.Control.PutMemory:output_type -> rafiki.v1.PutMemoryResponse
+	153, // 321: rafiki.v1.Control.DeleteMemory:output_type -> rafiki.v1.DeleteMemoryResponse
+	155, // 322: rafiki.v1.Control.RecallBackfill:output_type -> rafiki.v1.RecallBackfillResponse
+	157, // 323: rafiki.v1.Control.RecallStatus:output_type -> rafiki.v1.RecallStatusResponse
+	54,  // 324: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
+	57,  // 325: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
+	62,  // 326: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
+	65,  // 327: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
+	69,  // 328: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
+	74,  // 329: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
+	76,  // 330: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
+	78,  // 331: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
+	160, // 332: rafiki.v1.Control.ListProviderBans:output_type -> rafiki.v1.ListProviderBansResponse
+	162, // 333: rafiki.v1.Control.BanProvider:output_type -> rafiki.v1.BanProviderResponse
+	164, // 334: rafiki.v1.Control.UnbanProvider:output_type -> rafiki.v1.UnbanProviderResponse
+	167, // 335: rafiki.v1.Control.ListRoutes:output_type -> rafiki.v1.ListRoutesResponse
+	169, // 336: rafiki.v1.Control.SetRoute:output_type -> rafiki.v1.SetRouteResponse
+	171, // 337: rafiki.v1.Control.DeleteRoute:output_type -> rafiki.v1.DeleteRouteResponse
+	174, // 338: rafiki.v1.Control.ListModelAliases:output_type -> rafiki.v1.ListModelAliasesResponse
+	176, // 339: rafiki.v1.Control.PutModelAlias:output_type -> rafiki.v1.PutModelAliasResponse
+	178, // 340: rafiki.v1.Control.DeleteModelAlias:output_type -> rafiki.v1.DeleteModelAliasResponse
+	21,  // 341: rafiki.v1.Control.Report:output_type -> rafiki.v1.ReportResponse
+	23,  // 342: rafiki.v1.Control.Receive:output_type -> rafiki.v1.ScriptMessage
+	25,  // 343: rafiki.v1.Control.SetResult:output_type -> rafiki.v1.SetResultResponse
+	180, // 344: rafiki.v1.Control.Resume:output_type -> rafiki.v1.ResumeResponse
+	182, // 345: rafiki.v1.Control.CloseAllExited:output_type -> rafiki.v1.CloseAllExitedResponse
+	184, // 346: rafiki.v1.Control.SetLabels:output_type -> rafiki.v1.SetLabelsResponse
+	186, // 347: rafiki.v1.Control.Status:output_type -> rafiki.v1.StatusResponse
+	188, // 348: rafiki.v1.Control.Search:output_type -> rafiki.v1.SearchResponse
+	190, // 349: rafiki.v1.Control.ShutdownDaemon:output_type -> rafiki.v1.ShutdownDaemonResponse
+	192, // 350: rafiki.v1.Control.ModelInfo:output_type -> rafiki.v1.ModelInfoResponse
+	88,  // 351: rafiki.v1.Control.CreateSandbox:output_type -> rafiki.v1.CreateSandboxResponse
+	95,  // 352: rafiki.v1.Control.SyncPath:output_type -> rafiki.v1.SyncPathResponse
+	97,  // 353: rafiki.v1.Control.SyncRepo:output_type -> rafiki.v1.SyncRepoResponse
+	90,  // 354: rafiki.v1.Control.ListSandboxes:output_type -> rafiki.v1.ListSandboxesResponse
+	92,  // 355: rafiki.v1.Control.RemoveSandbox:output_type -> rafiki.v1.RemoveSandboxResponse
+	195, // 356: rafiki.v1.Control.ModelRoutes:output_type -> rafiki.v1.ModelRoutesResponse
+	197, // 357: rafiki.v1.Control.ConversationStats:output_type -> rafiki.v1.ConversationStatsResponse
+	199, // 358: rafiki.v1.Control.EnrollExecutor:output_type -> rafiki.v1.EnrollExecutorResponse
+	201, // 359: rafiki.v1.Control.CreateExecutor:output_type -> rafiki.v1.CreateExecutorResponse
+	203, // 360: rafiki.v1.Control.LabelExecutor:output_type -> rafiki.v1.LabelExecutorResponse
+	205, // 361: rafiki.v1.Control.DisableExecutor:output_type -> rafiki.v1.DisableExecutorResponse
+	207, // 362: rafiki.v1.Control.EnableExecutor:output_type -> rafiki.v1.EnableExecutorResponse
+	209, // 363: rafiki.v1.Control.DeleteExecutor:output_type -> rafiki.v1.DeleteExecutorResponse
+	211, // 364: rafiki.v1.Control.ExecutorSession:output_type -> rafiki.v1.ExecutorSessionEvent
+	214, // 365: rafiki.v1.Control.CreateUser:output_type -> rafiki.v1.CreateUserResponse
+	216, // 366: rafiki.v1.Control.ListUsers:output_type -> rafiki.v1.ListUsersResponse
+	219, // 367: rafiki.v1.Control.RemoveUser:output_type -> rafiki.v1.RemoveUserResponse
+	221, // 368: rafiki.v1.Control.UpdateUser:output_type -> rafiki.v1.UpdateUserResponse
+	224, // 369: rafiki.v1.Control.MintToken:output_type -> rafiki.v1.MintTokenResponse
+	226, // 370: rafiki.v1.Control.ListTokens:output_type -> rafiki.v1.ListTokensResponse
+	228, // 371: rafiki.v1.Control.RevokeToken:output_type -> rafiki.v1.RevokeTokenResponse
+	230, // 372: rafiki.v1.Control.BeginProviderLogin:output_type -> rafiki.v1.BeginProviderLoginResponse
+	232, // 373: rafiki.v1.Control.CompleteProviderLogin:output_type -> rafiki.v1.CompleteProviderLoginResponse
+	234, // 374: rafiki.v1.Control.DeleteProviderCredential:output_type -> rafiki.v1.DeleteProviderCredentialResponse
+	236, // 375: rafiki.v1.Control.BeginMcpLogin:output_type -> rafiki.v1.BeginMcpLoginResponse
+	238, // 376: rafiki.v1.Control.CompleteMcpLogin:output_type -> rafiki.v1.CompleteMcpLoginResponse
+	240, // 377: rafiki.v1.Control.DeleteMcpCredential:output_type -> rafiki.v1.DeleteMcpCredentialResponse
+	246, // 378: rafiki.v1.Control.GetStreams:output_type -> rafiki.v1.GetStreamsResponse
+	248, // 379: rafiki.v1.Control.SendFrame:output_type -> rafiki.v1.SendFrameResponse
+	251, // 380: rafiki.v1.Control.Tag:output_type -> rafiki.v1.TagResponse
+	253, // 381: rafiki.v1.Control.Untag:output_type -> rafiki.v1.UntagResponse
+	255, // 382: rafiki.v1.Control.ListTags:output_type -> rafiki.v1.ListTagsResponse
+	242, // 383: rafiki.v1.Login.BeginLogin:output_type -> rafiki.v1.BeginLoginResponse
+	244, // 384: rafiki.v1.Login.CompleteLogin:output_type -> rafiki.v1.CompleteLoginResponse
+	283, // [283:385] is the sub-list for method output_type
+	181, // [181:283] is the sub-list for method input_type
+	181, // [181:181] is the sub-list for extension type_name
+	181, // [181:181] is the sub-list for extension extendee
+	0,   // [0:181] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -19410,7 +19497,7 @@ func file_rafiki_v1_control_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
-			NumEnums:      7,
+			NumEnums:      8,
 			NumMessages:   272,
 			NumExtensions: 0,
 			NumServices:   2,

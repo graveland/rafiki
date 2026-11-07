@@ -545,6 +545,10 @@ type ChildSummary struct {
 	// ParentChildID is the child that spawned this one, empty for a top-level
 	// child.
 	ParentChildID string `json:"parentChildId,omitempty"`
+	// InSubtree is set only on a child credential's owner-scope list: true when
+	// the caller spawned this agent, false when it may only read it. Nil
+	// everywhere else.
+	InSubtree *bool `json:"in_subtree,omitempty"`
 }
 
 // SpawnResponseData is the data payload of a Spawn/Resume answer (§6.3).

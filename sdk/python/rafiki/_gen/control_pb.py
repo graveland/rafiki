@@ -43,6 +43,11 @@ class StepSite:
     STEP_SITE_CHILD = "STEP_SITE_CHILD"
     STEP_SITE_SENDER = "STEP_SITE_SENDER"
 
+class ListScope:
+    LIST_SCOPE_UNSPECIFIED = "LIST_SCOPE_UNSPECIFIED"
+    LIST_SCOPE_SUBTREE = "LIST_SCOPE_SUBTREE"
+    LIST_SCOPE_OWNER = "LIST_SCOPE_OWNER"
+
 class ReviewStage:
     REVIEW_STAGE_UNSPECIFIED = "REVIEW_STAGE_UNSPECIFIED"
     REVIEW_STAGE_DETECT = "REVIEW_STAGE_DETECT"
@@ -655,6 +660,7 @@ class ChildSummary:
     waiting_on: str = ""
     display_msg: str = ""
     parent_child_id: str = ""
+    in_subtree: Optional[bool] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -710,6 +716,8 @@ class ChildSummary:
             out["displayMsg"] = self.display_msg
         if self.parent_child_id != "":
             out["parentChildId"] = self.parent_child_id
+        if self.in_subtree is not None:
+            out["inSubtree"] = self.in_subtree
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ChildSummary":
@@ -792,6 +800,9 @@ class ChildSummary:
         _v = _d.get("parentChildId")
         if _v is not None:
             obj.parent_child_id = _v
+        _v = _d.get("inSubtree")
+        if _v is not None:
+            obj.in_subtree = _v
         return obj
 
 @dataclasses.dataclass
@@ -803,6 +814,7 @@ class ListChildrenRequest:
     since: Optional[datetime.datetime] = None
     labels: dict[str, str] = dataclasses.field(default_factory=dict)
     has_label: list[str] = dataclasses.field(default_factory=list)
+    scope: str = "LIST_SCOPE_UNSPECIFIED"
 
     def to_dict(self) -> dict:
         out = {}
@@ -820,6 +832,8 @@ class ListChildrenRequest:
             out["labels"] = dict((k, v) for k, v in self.labels.items())
         if self.has_label:
             out["hasLabel"] = [x for x in self.has_label]
+        if self.scope != "LIST_SCOPE_UNSPECIFIED":
+            out["scope"] = self.scope
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ListChildrenRequest":
@@ -845,6 +859,9 @@ class ListChildrenRequest:
         _v = _d.get("hasLabel")
         if _v is not None:
             obj.has_label = [x for x in _v]
+        _v = _d.get("scope")
+        if _v is not None:
+            obj.scope = _v
         return obj
 
 @dataclasses.dataclass
