@@ -197,7 +197,9 @@ not being watched pays a turn for each one. Spawn it with `notify: "result"`
 woken only when something needs it:
 
 - the turn ended with a result recorded (`agent_result`);
-- the agent has a pending question (`agent_report kind=question`);
+- the agent has a pending question (a top-level agent's stored question; a child
+  with a parent sends `agent_report kind=question` as its own report, not through
+  the settle);
 - the turn failed;
 - the child's own budget cap is breached;
 - the child exited or failed, including after a daemon restart.
