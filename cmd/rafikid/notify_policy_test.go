@@ -342,3 +342,21 @@ func TestSpawnNotifyUnknownValueRefused(t *testing.T) {
 	ck.Require().True(errors.As(err, &ce), "err = %v, want a *connectapi.ControllerError", err)
 	ck.Eq(protocol.ErrInvalidArgs, ce.Code)
 }
+
+// TestNotifyTurnEndQuietBreachMarkedAfterIdleWakesOnNextSettle pins the
+// sequence the budget sweep can produce: a turn ends quiet and is dropped, the
+// sweep marks the child's breach afterwards (and steers it), and the settle of
+// the turn that steer causes reads the breach and wakes the spawner.
+func TestNotifyTurnEndQuietBreachMarkedAfterIdleWakesOnNextSettle(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c, clk, cap := quietFixture(t)
+
+	c.notifyTurnEnd("c_w1")
+	clk.Advance(6 * time.Second)
+	ck.Empty(coordBatches(cap), "the plain turn end must be dropped")
+
+	c.breaches.mark("c_w1")
+	c.notifyTurnEnd("c_w1")
+	clk.Advance(6 * time.Second)
+	ck.Len(coordBatches(cap), 1, "the settle after the breach was marked must wake the spawner")
+}
