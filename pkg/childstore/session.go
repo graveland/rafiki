@@ -137,6 +137,9 @@ type Session struct {
 	// request and the parent) and never re-resolved on resume.
 	SkipDerivedIndex bool
 
+	// NotifyPolicy is protocol.NotifyResult for a quiet child and empty for the default (all); it is resolved once at spawn and never changes.
+	NotifyPolicy string
+
 	// WorkspaceMode is "ephemeral" or "pinned" as requested at spawn.
 	// Empty means the default (pinned). Persisted for the same reason.
 	WorkspaceMode string
@@ -269,6 +272,9 @@ type Snapshot struct {
 	// SkipDerivedIndex mirrors Session.SkipDerivedIndex — see its doc comment.
 	SkipDerivedIndex bool
 
+	// NotifyPolicy is protocol.NotifyResult for a quiet child and empty for the default (all); it is resolved once at spawn and never changes.
+	NotifyPolicy string
+
 	// WorkspaceMode is "ephemeral" or "pinned".
 	WorkspaceMode string
 
@@ -359,6 +365,7 @@ func (s *Session) Snapshot() Snapshot {
 
 		ExecutorSelector: s.ExecutorSelector,
 		SkipDerivedIndex: s.SkipDerivedIndex,
+		NotifyPolicy:     s.NotifyPolicy,
 		WorkspaceMode:    s.WorkspaceMode,
 
 		MaxDepth: s.MaxDepth, MaxCost: s.MaxCost, MaxChildren: s.MaxChildren,

@@ -1146,6 +1146,14 @@ pub struct SpawnRequest {
     /// (lineage, then tree, then owner), once, at spawn. Exclusive with fork_from.
     #[prost(string, tag = "33")]
     pub from_tag: ::prost::alloc::string::String,
+    /// notify says when this child's settles and heartbeats wake its spawner.
+    /// Empty and "all" are today's behaviour. "result" wakes the spawner only
+    /// when a turn ends with a recorded result, a pending question or a turn
+    /// error, when the child's own budget cap is breached, or when the child
+    /// exits or fails; plain turn ends and heartbeats are dropped. Any other
+    /// value is InvalidArgument. Child-allowed: it only reduces notifications.
+    #[prost(string, tag = "34")]
+    pub notify: ::prost::alloc::string::String,
     /// The three budgets are optional because zero and unset differ, in OPPOSITE
     /// directions per field: unset max_depth means 1 and zero means "may not
     /// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";

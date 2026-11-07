@@ -439,6 +439,14 @@ type SpawnRequest struct {
 	// Child-allowed: it only reduces spend.
 	SkipDerivedIndex bool `json:"skipDerivedIndex,omitempty"`
 
+	// Notify says when this child's settles and heartbeats wake its spawner.
+	// Empty and "all" are today's behaviour. "result" wakes the spawner only
+	// when a turn ends with a recorded result, a pending question or a turn
+	// error, when the child's own budget cap is breached, or when the child
+	// exits or fails; plain turn ends and heartbeats are dropped. Any other
+	// value is InvalidArgument. Child-allowed: it only reduces notifications.
+	Notify string `json:"notify,omitempty"`
+
 	// ─── Resource grants (phase 05) ───
 	//
 	// All three are POINTERS so "unset" is distinguishable from "zero". The
@@ -468,6 +476,24 @@ type SpawnRequest struct {
 	// recursion of cheap spawns exhausts the machine long before it exhausts
 	// a dollar budget.
 	MaxChildren *int `json:"maxChildren,omitempty"`
+}
+
+const (
+	NotifyAll    = "all"
+	NotifyResult = "result"
+)
+
+// NormalizeNotify resolves a spawn's notify value: "" and "all" are NotifyAll,
+// NotifyResult is itself, and any other value reports ok=false. This is the one
+// place the empty string is read as "all".
+func NormalizeNotify(s string) (normalized string, ok bool) {
+	switch s {
+	case "", NotifyAll:
+		return NotifyAll, true
+	case NotifyResult:
+		return NotifyResult, true
+	}
+	return "", false
 }
 
 // TaskListRequest queries the task ledger (§ TaskList).

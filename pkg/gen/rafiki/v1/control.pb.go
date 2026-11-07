@@ -2375,6 +2375,13 @@ type SpawnRequest struct {
 	// from_tag (33) forks from the node a tag names, resolved nearest scope first
 	// (lineage, then tree, then owner), once, at spawn. Exclusive with fork_from.
 	FromTag string `protobuf:"bytes,33,opt,name=from_tag,json=fromTag,proto3" json:"from_tag,omitempty"`
+	// notify says when this child's settles and heartbeats wake its spawner.
+	// Empty and "all" are today's behaviour. "result" wakes the spawner only
+	// when a turn ends with a recorded result, a pending question or a turn
+	// error, when the child's own budget cap is breached, or when the child
+	// exits or fails; plain turn ends and heartbeats are dropped. Any other
+	// value is InvalidArgument. Child-allowed: it only reduces notifications.
+	Notify string `protobuf:"bytes,34,opt,name=notify,proto3" json:"notify,omitempty"`
 	// The three budgets are optional because zero and unset differ, in OPPOSITE
 	// directions per field: unset max_depth means 1 and zero means "may not
 	// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
@@ -2623,6 +2630,13 @@ func (x *SpawnRequest) GetForkFrom() *SpawnRequest_ForkFrom {
 func (x *SpawnRequest) GetFromTag() string {
 	if x != nil {
 		return x.FromTag
+	}
+	return ""
+}
+
+func (x *SpawnRequest) GetNotify() string {
+	if x != nil {
+		return x.Notify
 	}
 	return ""
 }
@@ -17416,7 +17430,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\vPrefillRead\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
 	"\x05start\x18\x02 \x01(\x05R\x05start\x12\x10\n" +
-	"\x03end\x18\x03 \x01(\x05R\x03end\"\x9f\f\n" +
+	"\x03end\x18\x03 \x01(\x05R\x03end\"\xb7\f\n" +
 	"\fSpawnRequest\x12\x10\n" +
 	"\x03cwd\x18\x01 \x01(\tR\x03cwd\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
@@ -17454,7 +17468,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x12skip_derived_index\x18\x1e \x01(\bR\x10skipDerivedIndex\x120\n" +
 	"\asandbox\x18\x1f \x01(\v2\x16.rafiki.v1.SandboxSpecR\asandbox\x12=\n" +
 	"\tfork_from\x18  \x01(\v2 .rafiki.v1.SpawnRequest.ForkFromR\bforkFrom\x12\x19\n" +
-	"\bfrom_tag\x18! \x01(\tR\afromTag\x12 \n" +
+	"\bfrom_tag\x18! \x01(\tR\afromTag\x12\x16\n" +
+	"\x06notify\x18\" \x01(\tR\x06notify\x12 \n" +
 	"\tmax_depth\x18\b \x01(\x05H\x00R\bmaxDepth\x88\x01\x01\x12\x1e\n" +
 	"\bmax_cost\x18\t \x01(\x01H\x01R\amaxCost\x88\x01\x01\x12&\n" +
 	"\fmax_children\x18\n" +

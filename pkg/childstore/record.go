@@ -66,6 +66,9 @@ type ChildRecord struct {
 	// child's conversations. See childstore.Session.SkipDerivedIndex.
 	SkipDerivedIndex bool
 
+	// NotifyPolicy is protocol.NotifyResult for a quiet child and empty for the default (all); it is resolved once at spawn and never changes.
+	NotifyPolicy string
+
 	MaxDepth    int
 	MaxCost     float64
 	MaxChildren int
@@ -189,6 +192,7 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 
 		ExecutorSelector: snap.ExecutorSelector,
 		SkipDerivedIndex: snap.SkipDerivedIndex,
+		NotifyPolicy:     snap.NotifyPolicy,
 		WorkspaceMode:    snap.WorkspaceMode,
 
 		MaxDepth:    snap.MaxDepth,
@@ -265,6 +269,7 @@ func SessionFromRecord(rec ChildRecord) *Session {
 
 		ExecutorSelector: rec.ExecutorSelector,
 		SkipDerivedIndex: rec.SkipDerivedIndex,
+		NotifyPolicy:     rec.NotifyPolicy,
 		WorkspaceMode:    rec.WorkspaceMode,
 
 		MaxDepth:    rec.MaxDepth,

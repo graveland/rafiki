@@ -119,8 +119,10 @@ type SpawnParams struct {
 	ExecutorSelector string
 	// SkipDerivedIndex: see SpawnRequest.skip_derived_index; child-allowed.
 	SkipDerivedIndex bool
-	ExecutorRef      string
-	Labels           map[string]string
+	// Notify: see SpawnRequest.notify; child-allowed.
+	Notify      string
+	ExecutorRef string
+	Labels      map[string]string
 
 	// Prefill is the pre-fill list: files (or globs) the child reads through
 	// its own Read tool before its first turn. Nil = none. Validated by the

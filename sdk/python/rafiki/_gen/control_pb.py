@@ -976,6 +976,7 @@ class SpawnRequest:
     sandbox: Optional[SandboxSpec] = None
     fork_from: Optional[SpawnRequest.ForkFrom] = None
     from_tag: str = ""
+    notify: str = ""
     max_depth: Optional[int] = None
     max_cost: Optional[float] = None
     max_children: Optional[int] = None
@@ -1042,6 +1043,8 @@ class SpawnRequest:
             out["forkFrom"] = self.fork_from.to_dict()
         if self.from_tag != "":
             out["fromTag"] = self.from_tag
+        if self.notify != "":
+            out["notify"] = self.notify
         if self.max_depth is not None:
             out["maxDepth"] = self.max_depth
         if self.max_cost is not None:
@@ -1142,6 +1145,9 @@ class SpawnRequest:
         _v = _d.get("fromTag")
         if _v is not None:
             obj.from_tag = _v
+        _v = _d.get("notify")
+        if _v is not None:
+            obj.notify = _v
         _v = _d.get("maxDepth")
         if _v is not None:
             obj.max_depth = _int_in(_v)
