@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -230,6 +231,12 @@ func gateRefusedCredentials() []struct {
 // mechanics), its grand-descendant (same), itself, a sibling, its parent, a
 // stranger tree, and an unknown id (all PermissionDenied, mechanics
 // untouched).
+//
+// Every child in this tree is OWNERLESS, so the read verbs' sibling and parent
+// refusals here are the ownerless-caller rule: a caller with no owner of its own
+// keeps subtree-only reads. A caller that DOES have an owner reads its owner's
+// agents — TestChildScopeReadAdmitsSameOwnerSibling and
+// TestGetHistoryReadScopeAdmitsSibling pin that half.
 func TestConnectChildScopedVerbs(t *testing.T) {
 	fx := mountChildScope(t)
 	ctx := context.Background()
@@ -665,4 +672,167 @@ func TestChildScopeFor(t *testing.T) {
 	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "vanished child Authorize = %v, want", err)
 	c.Empty(sc.Subtree(nil), "vanished child Subtree")
 	c.False(sc.ConversationInScope("conv-c_mine"), "vanished child admitted a conversation")
+}
+
+// readTree is the tree the READ-boundary tests address, with the owners that
+// make the read check differ from the act check:
+//
+//	c_a           (owner u1)          the caller's parent
+//	 └── c_a1     (inherits u1)       the caller
+//	      └── c_a2
+//	c_b           (owner u1)          a same-owner sibling tree
+//	c_c           (owner u2)          a foreign owner
+//	c_d                               an ownerless tree
+//	 └── c_d1
+//
+// StartedAt is explicit so the owner list's order is a fixture fact rather than
+// a clock race; c_a2 and c_b share a status so the filter can be shown to reach
+// both halves of the answer.
+func readTree(t *testing.T) *Controller {
+	t.Helper()
+	t0 := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	return ownerReadFixture(t,
+		ownerReadChild{id: "c_a", owner: "u1", started: t0},
+		ownerReadChild{id: "c_a1", parent: "c_a", started: t0.Add(1 * time.Minute)},
+		ownerReadChild{id: "c_a2", parent: "c_a1", started: t0.Add(2 * time.Minute)},
+		ownerReadChild{id: "c_b", owner: "u1", started: t0.Add(3 * time.Minute)},
+		ownerReadChild{id: "c_c", owner: "u2", started: t0.Add(4 * time.Minute)},
+		ownerReadChild{id: "c_d", started: t0.Add(5 * time.Minute)},
+		ownerReadChild{id: "c_d1", parent: "c_d", started: t0.Add(6 * time.Minute)},
+	)
+}
+
+// TestChildScopeReadAdmitsSameOwnerSibling pins the widening itself: a
+// same-owner agent in ANOTHER tree is readable — including the caller's parent
+// — while the act check still refuses it. Both halves matter: dropping the
+// owner arm refuses a legitimate read, and pointing Authorize at the read check
+// widens the act verbs.
+func TestChildScopeReadAdmitsSameOwnerSibling(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sc := childScope{c: readTree(t), childID: "c_a1"}
+
+	for _, target := range []string{"c_b", "c_a", "c_a2"} {
+		c.NoError(sc.AuthorizeRead(target), "AuthorizeRead(%s)", target)
+	}
+	c.NoError(sc.Authorize("c_a2"), "Authorize(descendant)")
+	if err := sc.Authorize("c_b"); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("Authorize(same-owner sibling) = %v, want %v — the act check must not widen", err, connect.CodePermissionDenied)
+	}
+}
+
+// TestChildScopeReadRefusesForeignOwner pins the fail-closed half: another
+// user's agent is not readable.
+func TestChildScopeReadRefusesForeignOwner(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sc := childScope{c: readTree(t), childID: "c_a1"}
+
+	err := sc.AuthorizeRead("c_c")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "AuthorizeRead(foreign owner) = %v, want", err)
+}
+
+// TestChildScopeReadRefusesUnknownIdIdenticallyToForeign pins the anti-probe
+// rule: an unknown id and a foreign owner's id answer byte-identical text, so a
+// caller cannot tell "not yours" from "does not exist".
+func TestChildScopeReadRefusesUnknownIdIdenticallyToForeign(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sc := childScope{c: readTree(t), childID: "c_a1"}
+
+	foreign := sc.AuthorizeRead("c_c")
+	unknown := sc.AuthorizeRead("c_nope")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(foreign), "foreign = %v, want", foreign)
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(unknown), "unknown = %v, want", unknown)
+	c.Eq(strings.ReplaceAll(foreign.Error(), "c_c", "c_nope"), unknown.Error(),
+		"a foreign id and an unknown id must be indistinguishable")
+}
+
+// TestChildScopeReadRefusesUnownedLineage pins the admin/UDS-only rule: a
+// target whose lineage names no owner is refused to an ownerful caller, and so
+// is anything beneath it.
+func TestChildScopeReadRefusesUnownedLineage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sc := childScope{c: readTree(t), childID: "c_a1"}
+
+	for _, target := range []string{"c_d", "c_d1"} {
+		err := sc.AuthorizeRead(target)
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "AuthorizeRead(%s) = %v, want", target, err)
+	}
+}
+
+// TestChildScopeReadEmptyIdIsInvalidArgument pins the one shape that is not a
+// PermissionDenied: a missing id names nothing to read, and it is the same
+// answer Authorize gives.
+func TestChildScopeReadEmptyIdIsInvalidArgument(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sc := childScope{c: readTree(t), childID: "c_a1"}
+
+	err := sc.AuthorizeRead("")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "AuthorizeRead(\"\") = %v, want", err)
+	c.True(strings.Contains(err.Error(), "agent id is required"), "empty-id text = %q", err.Error())
+}
+
+// TestChildScopeReadVanishedCallerRefusesEverything pins the fail-closed shape
+// CLAUDE.md's ChildScopeSource rule demands: a credential whose childstore row
+// has left resolves a scope that reads NOTHING — never nil (the operator path),
+// and never "everything with no owner". It lists nothing either.
+func TestChildScopeReadVanishedCallerRefusesEverything(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sc := childScope{c: readTree(t), childID: "c_gone"}
+
+	for _, target := range []string{"c_a1", "c_b", "c_c", "c_d", "c_d1", "c_gone"} {
+		err := sc.AuthorizeRead(target)
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "vanished caller reading %s = %v, want", target, err)
+	}
+	c.Empty(sc.OwnedChildren(nil), "a vanished caller's owner list")
+	c.Empty(sc.Subtree(nil), "a vanished caller's subtree")
+}
+
+// TestChildScopeOwnedChildrenOrderAndInSubtree pins the owner list's shape:
+// subtree rows first and marked in_subtree, the caller's other agents after and
+// marked not, the caller itself in neither, the status filter reaching BOTH
+// halves, and an ownerless caller falling back to its subtree alone (still
+// marked in_subtree, because those rows really are its own).
+func TestChildScopeOwnedChildrenOrderAndInSubtree(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctrl := readTree(t)
+	// c_a2 (subtree half) and c_b (others half) share a status, so one filter
+	// value proves both halves are filtered rather than just the first.
+	c.Require().NoError(ctrl.st.Update("c_a2", func(s *childstore.Session) { s.Status = protocol.StatusRunning }), "c_a2 status")
+	c.Require().NoError(ctrl.st.Update("c_b", func(s *childstore.Session) { s.Status = protocol.StatusRunning }), "c_b status")
+
+	sc := childScope{c: ctrl, childID: "c_a1"}
+
+	type row struct {
+		id        string
+		inSubtree bool
+	}
+	flags := func(summaries []protocol.ChildSummary) []row {
+		out := make([]row, 0, len(summaries))
+		for _, s := range summaries {
+			if s.InSubtree == nil {
+				t.Fatalf("%s carries no in_subtree flag on an owner-scope list", s.ChildID)
+			}
+			out = append(out, row{id: s.ChildID, inSubtree: *s.InSubtree})
+		}
+		return out
+	}
+
+	all := flags(sc.OwnedChildren(nil))
+	// Subtree first (Descendants order), then the owner's other agents
+	// newest-first. The caller and the foreign and ownerless trees are absent.
+	c.EqDeep([]row{{"c_a2", true}, {"c_b", false}, {"c_a", false}}, all, "the owner list")
+
+	filtered := flags(sc.OwnedChildren([]string{string(protocol.StatusRunning)}))
+	c.EqDeep([]row{{"c_a2", true}, {"c_b", false}}, filtered,
+		"the status filter must reach both halves of the owner list")
+
+	// An ownerless caller has no owner scope: its subtree alone, still flagged.
+	ownerless := flags(childScope{c: ctrl, childID: "c_d"}.OwnedChildren(nil))
+	c.EqDeep([]row{{"c_d1", true}}, ownerless, "an ownerless caller gets its subtree alone")
+}
+
+// TestChildScopeReadOwnedChildrenOrderAndInSubtree is the pattern-prefixed
+// entry point the task's verify command runs; the pinned body is the sibling
+// name above.
+func TestChildScopeReadOwnedChildrenOrderAndInSubtree(t *testing.T) {
+	t.Run("owned children order and in_subtree", TestChildScopeOwnedChildrenOrderAndInSubtree)
 }
