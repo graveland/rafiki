@@ -104,7 +104,7 @@ func TestTurnEndedPrecedesAgentEndOnTheStartupResumePath(t *testing.T) {
 			_, err = conv1.AppendUser(ctx, llm.UserText("interrupted work"))
 			ck.NoError(err)
 
-			var sender llm.Sender = scriptedSender(t, sampleEndTurn)
+			sender := scriptedSender(t, sampleEndTurn)
 			if tc.fail {
 				sender = &failFirstSender{inner: sender, err: errors.New("agent: scripted turns exhausted")}
 			}
