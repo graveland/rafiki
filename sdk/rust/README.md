@@ -168,6 +168,22 @@ client.untag(&pb::UntagRequest { tag_id: tag.tag_id }).await?; // tombstone
 `get_child` and `list_children` return `ChildSummary`; its `parent_child_id` names the
 child that spawned it and is empty for a top-level child.
 
+`list_children` takes the raw `ListChildrenRequest`, so `scope` is whatever the
+caller sets on it: `ListScope::Subtree` (a child credential's own subtree, the
+default for `Unspecified`), or `ListScope::Owner` (every agent its owner owns —
+siblings and its owner's other trees included). Both are no-ops for a user,
+admin or unix-socket caller, who has no position in the tree. `ChildSummary.in_subtree`
+is `Some` only on a child credential's `Owner` list, where it says whether the
+row is inside the caller's own subtree.
+
+A child credential READS any agent its owner owns — its subtree, its siblings
+and its owner's other trees alike — so `get_child`, `get_history` and the
+conversation reads answer for them, while acting (`send`, `kill`, `close`,
+`set_budget`) stays on the tree: a target outside the caller's own subtree is
+refused even when it may read it. A foreign owner, an unknown id and an agent
+whose lineage has no owner all answer the one identical `permission_denied`; a
+caller with no owner of its own keeps subtree-only reads.
+
 `get_history` pages backwards: ask with `limit` for the newest N, then again
 with `before` set to the oldest `ts` you hold. A page never splits events that
 share a `ts`, so it can hold more than `limit`; an empty page is the start of

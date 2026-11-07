@@ -29,7 +29,7 @@ import os
 import shutil
 import subprocess
 import time
-from typing import Iterable
+from typing import Iterable, Literal
 
 from . import _gen
 from .connect import ConnectClient
@@ -99,6 +99,28 @@ def _mode_wire(mode: str) -> str:
     if not name.startswith("SEND_MODE_"):
         name = "SEND_MODE_" + name
     return name
+
+
+# ListChildren's scope names, mapped to the wire enum. "owner" widens a CHILD
+# credential's list from its own subtree to every agent its owner owns; a user,
+# admin or unix-socket caller has no position in the tree, so both values are
+# no-ops there (their root is already everything they may see). None leaves the
+# field unset (LIST_SCOPE_UNSPECIFIED), which resolves to the caller's default.
+_LIST_SCOPE_WIRE = {
+    "subtree": _gen.control_pb.ListScope.LIST_SCOPE_SUBTREE,
+    "owner": _gen.control_pb.ListScope.LIST_SCOPE_OWNER,
+}
+
+
+def _list_scope_wire(scope: "Literal['subtree', 'owner'] | None") -> str:
+    """Map "subtree"/"owner"/None to the ListScope enum name; anything else is
+    a ValueError rather than a silently ignored argument."""
+    if scope is None:
+        return _gen.control_pb.ListScope.LIST_SCOPE_UNSPECIFIED
+    try:
+        return _LIST_SCOPE_WIRE[scope]
+    except (KeyError, TypeError):
+        raise ValueError('scope %r is not "subtree" or "owner"' % (scope,)) from None
 
 
 def _tag_scope_wire(scope) -> str:
@@ -346,12 +368,29 @@ class Client:
         :meth:`export`."""
         return self._call("GetChild", _gen.control_pb.GetChildRequest(child_id=child_id), _gen.control_pb.GetChildResponse).child
 
-    def list(self, *, statuses: "Iterable[str] | None" = None, labels: "dict | None" = None):
+    def list(
+        self,
+        *,
+        statuses: "Iterable[str] | None" = None,
+        labels: "dict | None" = None,
+        scope: "Literal['subtree', 'owner'] | None" = None,
+    ):
         """The caller's children — a user's whole tree, a child's subtree —
         optionally narrowed to statuses and, client-side, to children whose
         labels carry every given pair (ListChildrenRequest filters by status
-        only; labels are filtered here, on the summaries it returns)."""
-        req = _gen.control_pb.ListChildrenRequest(statuses=list(statuses) if statuses else [])
+        only; labels are filtered here, on the summaries it returns).
+
+        ``scope`` changes only a CHILD credential's list: ``"subtree"`` is its
+        own subtree (the default when unset), ``"owner"`` every agent its
+        owner owns — which may include agents outside that subtree. For a
+        user, admin or unix-socket caller both values are no-ops: they have no
+        position in the tree, so their root is everything they may see. The
+        summaries themselves carry ``in_subtree`` (set on a child credential's
+        ``"owner"`` list, unset everywhere else) unchanged."""
+        req = _gen.control_pb.ListChildrenRequest(
+            statuses=list(statuses) if statuses else [],
+            scope=_list_scope_wire(scope),
+        )
         children = self._call("ListChildren", req, _gen.control_pb.ListChildrenResponse).children
         if labels:
             want = {str(k): str(v) for k, v in labels.items()}
@@ -442,9 +481,11 @@ class Client:
     def export_conversation(self, conversation_id: str) -> _gen.control_pb.ConversationExportResponse:
         """One conversation's decomposed transcript, by conversation id (the
         ``id`` of a ``conversation_search`` row, or a recall hit's
-        ``conversation_id``) or by child id (see :meth:`export`). A user credential reads any of its owner's
-        conversations; a child credential only its own subtree's, and a
-        conversation outside it is not_found."""
+        ``conversation_id``) or by child id (see :meth:`export`). A user
+        credential reads any of its owner's conversations; a child credential
+        reads its owner's whole corpus — its own, its subtree's and other
+        agents' alike — or only its subtree when its lineage has no owner. A
+        conversation outside that scope is not_found."""
         req = _gen.control_pb.ConversationExportRequest(conversation_id=conversation_id)
         return self._call("ConversationExport", req, _gen.control_pb.ConversationExportResponse)
 
@@ -470,8 +511,9 @@ class Client:
         while the conversation is open). 0 for ``limit`` is the daemon default
         (the server clamps to a maximum). ``since``/``until`` bound turn
         activity (``None`` is unbounded). A user credential searches every
-        conversation it may read; a child credential answers from its own
-        subtree only."""
+        conversation it may read; a child credential reads its owner's whole
+        corpus — its own, its subtree's and other agents' alike — or only its
+        subtree when its lineage has no owner."""
         req = _gen.control_pb.ConversationSearchRequest(
             since=since,
             until=until,

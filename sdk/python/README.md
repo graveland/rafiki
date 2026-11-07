@@ -56,6 +56,12 @@ quiet = c.spawn("audit this", kind="fundi", skip_derived_index=True)
 c.send(child, "and a second turn")        # prompt (queues), "steer", "abort"
 kids = c.list(labels={"team": "infra"})   # status-filtered server-side,
                                           # label-filtered client-side
+# `scope` changes only a CHILD credential's list: "subtree" (the default when
+# unset) is its own subtree, "owner" every agent its owner owns — siblings and
+# its owner's other trees included. For a user, admin or unix-socket caller
+# both are no-ops. Each summary carries `in_subtree`, set only on a child's
+# "owner" list; any other scope name raises ValueError.
+everyone = c.list(scope="owner")
 one  = c.get(child)                       # status, cost, latest_ordinal, result, parent_child_id ("" if top-level)
 
 for settle in c.settled([child]):         # yields Settle(child_id, state)
@@ -76,8 +82,9 @@ rows = c.conversation_search(text="x", source="claude", limit=50)
                                           # conversations (id, name, turns, cost,
                                           # first_message, created_at, closed_at);
                                           # a user credential reads all of its
-                                          # owner's, a child credential only its
-                                          # own subtree
+                                          # owner's, and a child credential reads
+                                          # its owner's whole corpus — its own,
+                                          # its subtree's and other agents' alike
 rows = c.conversation_search(since=dt, until=dt)  # datetime bounds on turn
                                                   # activity; None means unbounded
 ver  = c.status().version                 # daemon version (user credential only)
@@ -247,6 +254,17 @@ token gets `permission_denied` naming the child for any id it does not own
 `list_children`/`status`/`search`/`close_all_exited` answer for the caller's
 own agents only. Admin tokens and the local unix socket are unrestricted.
 
+An agent's credential READS any agent its owner owns: `get()`,
+`get_history()`, `export()`/`export_conversation()` and
+`conversation_search()` answer for its own subtree, its siblings and its
+owner's other trees alike, and `list(scope="owner")` enumerates them
+(`in_subtree` is `False` for one outside the caller's subtree). Acting stays
+on the tree — `send()`, `stop()` and every other verb that changes an agent
+are still refused for anything the caller did not spawn. A foreign owner, an
+unknown id and an agent whose lineage has no owner (an admin's or the unix
+socket's children) answer the one identical `permission_denied`, and an agent
+with no owner of its own keeps subtree-only reads.
+
 Streaming calls retry too, with their delivery contracts spelled out:
 
 - After this client sends a child a prompt (`send()`, or `spawn()` with a
@@ -312,3 +330,7 @@ venv uv builds from this directory's `pyproject.toml` in the user cache
 loudly. The
 wire-level details (envelopes, error mapping, retry budget) are additionally
 covered without a daemon by the same test's self-check script.
+
+`list`'s `scope` wrapper is unit-tested here, with no daemon: `cd sdk/python &&
+uv run --frozen pytest` (pytest is a dev dependency in `pyproject.toml`, so
+`--frozen` resolves it from the committed `uv.lock`).
