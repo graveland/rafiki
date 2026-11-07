@@ -138,8 +138,9 @@ const conversationSearchDescription = "Search your own past conversations by tim
 	"source, status, or a substring of the first message. Returns summaries (turn counts, " +
 	"tokens, cost) -- use conversation_export to read a specific conversation's full transcript. " +
 	"For searching what was said inside conversations, use recall. " +
-	"Results are scoped to conversations you own, and for an agent that includes " +
-	"conversations of other agents your owner owns. There is no way to search another " +
+	"Results are scoped to conversations you own, and for an agent that means the " +
+	"whole conversation corpus of the owner it belongs to -- other agents' and the " +
+	"owner's own alike. There is no way to search another " +
 	"user's conversations with this tool."
 
 type ConversationSearchBlueprint struct{}
@@ -272,8 +273,8 @@ const conversationQueryDescription = "Run a named catalogue query over your own 
 	"\"spend\" (cost and tokens per UTC day by model and served provider; priced=0 means unpriced). " +
 	"Time filters are per query: tools and skills filter message time, models filters turn " +
 	"time, classes and sizes filter turn activity, coverage filters conversation creation week, spend filters turn time. " +
-	"Results are scoped to conversations you own, and for an agent that includes conversations " +
-	"of other agents your owner owns, same as conversation_search."
+	"Results are scoped to conversations you own, and for an agent that means the whole " +
+	"conversation corpus of the owner it belongs to, same as conversation_search."
 
 type ConversationQueryBlueprint struct{}
 

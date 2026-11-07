@@ -302,7 +302,7 @@ func TestConversationBlueprintDescriptionsNameOwnerScope(t *testing.T) {
 		"conversation_query":  conversationQueryDescription,
 	} {
 		c.StrContains(desc, "conversations you own", "%s: the ownership sentence's opening is gone; mcpSearchScopeStart no longer matches", name)
-		c.StrContains(desc, "conversations of other agents your owner owns", "%s: the scope sentence does not say a sibling agent's conversations are readable", name)
+		c.StrContains(desc, "whole conversation corpus of the owner it belongs to", "%s: the scope sentence does not name the owner's whole corpus", name)
 	}
 	c.StrContains(conversationSearchDescription, "no way to search another user's", "conversation_search: the cross-user refusal is gone")
 	c.StrContains(conversationExportDescription, "neither you nor your owner owns", "conversation_export: the refusal does not name the owner's corpus")

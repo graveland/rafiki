@@ -141,7 +141,7 @@ tree:
 | Tool | Purpose |
 |---|---|
 | `agent_spawn` | start a subagent (`kind: fundi\|claude`); returns a handle immediately, does not block. `fork_from` or `from_tag` starts it from a point in another agent's history, by reference |
-| `agent_list` | your subtree — id, name, model, status, assigned task; `scope="owner"` also lists every other agent your owner owns, marked read-only |
+| `agent_list` | your subtree — id, name, model, status, assigned task; `scope="owner"` also lists every other agent your owner owns, marked read-only. One page is at most 50 agents (`status=` narrows it): a longer list keeps the first 50 and appends an exact "N more agents not shown" trailer, for every caller including a user credential's whole-daemon list |
 | `agent_view` | a readable agent's transcript — your subtree's, or another agent your owner owns: the newest entries, or a page (`before=`/`after=`), one entry in full (`entry=`), or a search (`find=`) by the cursors its markers print. Reads LIVE agents only; a closed agent's conversation is read with `conversation_export` instead |
 | `agent_send` | steer a descendant mid-flight, or give it more work |
 | `agent_route` | steer a descendant's provider routing — `prefer`/`sort`/`quant`; `only` is operator-only |

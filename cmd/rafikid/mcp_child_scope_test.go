@@ -152,8 +152,6 @@ func TestChildRecallIdentityNeverAdmin(t *testing.T) {
 	ck.Eq("u-owner", b.owner, "child binding memory owner")
 }
 
-// --- subtree conversation scope ---------------------------------------------
-
 // --- the reader's owner rule -------------------------------------------------
 
 // A child whose lineage resolves an owner reads that OWNER's corpus — the same

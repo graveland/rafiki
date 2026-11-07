@@ -328,8 +328,12 @@ const (
 	// maxOwnerListRows caps one agent_list page. An owner-scoped list can name
 	// every agent a user owns, and an owner running several coordinators can
 	// hold hundreds; the cap applies to both scopes because an unusually large
-	// subtree benefits from the same bound. The tool says how many it hid, so
-	// the model never mistakes a page for the whole set.
+	// subtree benefits from the same bound, and it applies to EVERY caller —
+	// including a user credential's whole-daemon list, which the MCP face serves
+	// from userSpawner.List. The name says "owner" because that is the scope it
+	// was introduced for; the bound itself is unconditional. The Connect
+	// ListChildren verb stays uncapped. The tool says how many it hid, so the
+	// model never mistakes a page for the whole set.
 	maxOwnerListRows = 50
 )
 
