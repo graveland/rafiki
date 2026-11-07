@@ -188,6 +188,31 @@ A job survives daemon restarts, fires into the child's inbox queue whether or
 not the child is busy, never expires, and is held while the agent tree is over
 budget. See `docs/reference/agent-schedules.md` for the full contract.
 
+### Quiet coordinators
+
+By default a child's spawner is woken by every settle and by periodic
+heartbeats while the child works. A coordinator that runs for hours and is
+not being watched pays a turn for each one. Spawn it with `notify: "result"`
+(`rafiki create --notify result`, `SpawnRequest.notify`) and the spawner is
+woken only when something needs it:
+
+- the turn ended with a result recorded (`agent_result`);
+- the agent has a pending question (`agent_report kind=question`);
+- the turn failed;
+- the child's own budget cap is breached;
+- the child exited or failed, including after a daemon restart.
+
+A plain turn-end settle and the heartbeats are dropped. The coordinator must
+therefore end its work with `agent_result` (or ask with `agent_report
+kind=question`): an ending with neither wakes nobody, and a quiet agent that
+went idle without a result looks stalled, so check `agent_list` and
+`agent_view` before assuming it hung. The policy is fixed at spawn and not
+inherited: workers under a quiet coordinator stay on the default `all` so
+their settles still wake that coordinator. Budget, executor and job
+notifications go to the agents they concern whatever the policy, and the
+displayed state is unchanged: a launcher of a quiet child still shows
+`waiting` on `children`.
+
 ### Claude Code's own subagents
 
 A `--kind claude` agent still has its native `Task` tool available, and

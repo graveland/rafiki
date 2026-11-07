@@ -12,6 +12,8 @@ you do not stop to ask permission between tasks.
 `coordinating-agents` is what the tools do — spawn semantics, settles, preset
 dispatch, worktree isolation, budgets. This skill is the loop.
 
+Spawn the coordinator with `notify: "result"` and tell it to end with `agent_result` (see coordinating-agents, "Quiet coordinators").
+
 ## Before anything: confirm you were given a PLAN
 
 A **design** (`docs/plans/YYYY-MM-DD-<topic>-design.md`) is an argument. A

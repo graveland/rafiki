@@ -296,6 +296,7 @@ class Client:
         skip_derived_index: bool = False,
         fork_from: "dict | _gen.control_pb.SpawnRequest.ForkFrom | None" = None,
         from_tag: "str | None" = None,
+        notify: "Literal['all', 'result'] | None" = None,
     ) -> str:
         """Spawn a child; returns its id. ``prompt``, when given, is sent as
         the child's first message (a spawn alone starts no work — fundi
@@ -323,7 +324,18 @@ class Client:
         mutually exclusive, and only ``kind="fundi"`` can be forked to. A
         child may fork only what it could already read, and a foreign or
         unknown tag answers the same permission_denied as one it cannot see.
+
+        ``notify`` is the child's wake policy for its spawner, fixed at spawn
+        and not inherited. ``None`` leaves it unset, which the daemon reads as
+        ``"all"``: every settle and heartbeat wakes the spawner. ``"result"``
+        wakes it only for a recorded result (``agent_result``), a pending
+        question, a turn error, the child's own budget cap, or the child
+        exiting or failing; plain turn ends and heartbeats are dropped. It
+        matters to anything with a parent link or an MCP session, since that
+        is who is woken. Any other value raises ``ValueError``.
         """
+        if notify is not None and notify not in ("all", "result"):
+            raise ValueError('notify must be "all" or "result"')
         req = _gen.control_pb.SpawnRequest(
             cwd=cwd if cwd else os.getcwd(),
             name=name or "",
@@ -354,6 +366,8 @@ class Client:
             )
         if from_tag:
             req.from_tag = from_tag
+        if notify is not None:
+            req.notify = notify
         resp = self._call("Spawn", req, _gen.control_pb.SpawnResponse)
         child_id = resp.child_id
         if prompt:

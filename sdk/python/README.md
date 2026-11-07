@@ -53,6 +53,12 @@ child = c.spawn("one turn, please", kind="fundi", labels={"team": "infra"})
 # subtree and never clearable beneath a parent that set it.
 quiet = c.spawn("audit this", kind="fundi", skip_derived_index=True)
 
+# `notify="result"` wakes the spawner only for a recorded result, a pending
+# question, a turn error, the child's own budget cap, or exit/failure; the
+# default (unset, i.e. "all") wakes it on every settle and heartbeat. Fixed at
+# spawn and not inherited; anything else raises ValueError.
+coordinator = c.spawn("run the plan", kind="fundi", notify="result")
+
 c.send(child, "and a second turn")        # prompt (queues), "steer", "abort"
 kids = c.list(labels={"team": "infra"})   # status-filtered server-side,
                                           # label-filtered client-side

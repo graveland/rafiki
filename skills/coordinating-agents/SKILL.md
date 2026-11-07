@@ -27,7 +27,7 @@ cannot justify in one sentence is usually work you should do yourself.**
 
 `agent_spawn` hands back an id the moment the child registers. The work has not
 started. You will be **notified** when it settles, and pinged periodically
-while it is still working.
+while it is still working (unless it was spawned with `notify=result`).
 
 **Never poll.** `agent_list` in a loop costs a turn each time and tells you
 nothing sooner than the notification will. A progress ping is not a settle.
@@ -42,6 +42,27 @@ agent is which, what one has said — never as a waiting loop.
 A long reply is cut on `agent_view`'s page — read it whole with
 `entry=<cursor>`, or locate something with `find=`, instead of concluding the
 agent stopped there.
+
+## Quiet coordinators
+
+Every settle and heartbeat of a default child wakes you, and each wake costs
+you a turn. For a coordinator, or any long-running agent you will not
+babysit, pass `notify: "result"` to `agent_spawn`.
+
+- Put this in its prompt: "End your work with `agent_result` (DONE /
+  DONE_WITH_CONCERNS / BLOCKED / NEEDS_CONTEXT, then the key points), or
+  `agent_report kind=question` if you need a decision; an ending without one
+  wakes nobody."
+- A `result` agent wakes you for a result, a pending question, a turn error,
+  its own budget cap, or exit/failure. Plain turn ends and heartbeats are
+  dropped.
+- Keep the default (`all`) for short workers whose settle you act on. A worker
+  under a quiet coordinator also stays on `all`, so it can wake that
+  coordinator.
+- A quiet agent that went idle with no result looks stalled. Check
+  `agent_list` and `agent_view` before assuming it hung.
+
+The `notify` policy is fixed at spawn and not inherited.
 
 ## Dispatching by preset
 

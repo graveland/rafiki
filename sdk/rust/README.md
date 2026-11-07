@@ -98,6 +98,12 @@ let rows = client.list_model_aliases(&pb::ListModelAliasesRequest::default()).aw
 client.delete_model_alias(&pb::DeleteModelAliasRequest { name: "ds".into() }).await?;
 ```
 
+`SpawnRequest.notify` is the child's wake policy for its spawner: empty or
+`"all"` wakes it on every settle and heartbeat, `"result"` only for a recorded
+result, a pending question, a turn error, the child's own budget cap, or
+exit/failure. Anything else is refused `invalid_argument`. Set `notify` on the
+generated `SpawnRequest` (`notify: "result".into()`); no wrapper is added.
+
 `tag` / `untag` / `list_tags` manage the calling connection OWNER's tags. A tag
 is a named, scoped handle to a node: naming it is the grant to fork from it,
 and `scope` says who holds it — lineage (the default), tree or owner. Anyone
