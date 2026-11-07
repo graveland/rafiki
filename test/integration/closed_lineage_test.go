@@ -6,19 +6,25 @@ package integration_test
 //
 // The design split is: live-state reads (ListChildren, Kill, Send, Close,
 // StreamEvents, SetBudget) use LIVE rows only, exactly as before; lineage reads
-// (a child credential's subtree conversation scope, subtree spend, budget
-// enforcement) cover ALL descendants, live or closed. `Close` tombstones the
-// child row (child.closed_at) and removes it from the in-memory live store, so
-// before wave 2 a closed descendant silently vanished from its ancestors'
-// subtreeSelector — and with it from a parent's ConversationSearch/Export and
-// from its subtree spend accounting.
+// (a child credential's conversation scope, subtree spend, budget enforcement)
+// cover ALL descendants, live or closed. `Close` tombstones the child row
+// (child.closed_at) and removes it from the in-memory live store, so a closed
+// descendant must not vanish from its ancestors' reads.
+//
+// For a child credential whose lineage has an owner, the conversation scope is
+// insights.ScopeOwner(owner) (childConversationScope), so the conversations
+// these tests seed carry the caller's owner: the owner arm admits them whether
+// the descendant is open or closed, and closure is invisible for that
+// independent reason too. The selector's live+closed union is still what runs
+// for an OWNERLESS lineage, and that is pinned by
+// TestSubtreeSelectorIncludesClosedDescendants (cmd/rafikid) and
+// TestChildConversationScopeIsSubtreeForOwnerlessLineage.
 //
 // These tests drive a REAL daemon over its Connect unix socket and (for the
 // child-credential cases) a REAL per-child secret minted at spawn, so they
-// exercise cmd/rafikid's wiring — the lineage source hung off the Postgres
-// child store (wireLineageSource), childConversationScope's subtreeSelector
-// call, and the connect search adapter's ClosedAt mapping — that no
-// unit fixture can see.
+// exercise cmd/rafikid's wiring — the owner scope childConversationScope builds
+// from the stored lineage, and the connect search adapter's ClosedAt mapping —
+// that no unit fixture can see.
 //
 // Database hygiene (CLAUDE.md): RAFIKI_TEST_DSN points at a disposable but
 // NON-resetting database shared by the whole suite, so every row seeded here
@@ -126,6 +132,25 @@ func seedChildConversation(t *testing.T, pool *pgxpool.Pool, dsn, childID, owner
 	return convID
 }
 
+// childOwnerUserID reads the owner recorded on a spawned child's row. The
+// owner-scope tests must seed their conversation with the SAME owner the
+// caller's lineage resolves to (Controller.OwnerUserIDForChild): a child
+// credential's conversation scope is insights.ScopeOwner(owner) whenever the
+// lineage has one, so a conversation owned by anyone else — including a
+// NULL-owner one — is outside its scope by design.
+func childOwnerUserID(t *testing.T, pool *pgxpool.Pool, childID string) string {
+	t.Helper()
+	var owner *string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT owner_user_id FROM conversations.child WHERE child_id = $1`, childID).Scan(&owner); err != nil {
+		t.Fatalf("read owner_user_id of child %s: %v", childID, err)
+	}
+	if owner == nil || *owner == "" {
+		t.Fatalf("child %s has no owner_user_id; an owner-scope test needs an owned lineage", childID)
+	}
+	return *owner
+}
+
 // searchByText issues one ConversationSearch for marker as the credential token
 // names ("" = the local socket's operator trust). It fails the test on any RPC
 // error; the caller asserts on the returned rows.
@@ -152,15 +177,12 @@ func rowIDs(rows []*rafikiv1.ConversationSummary) []string {
 // headline: a parent's per-child credential still finds and exports a CLOSED
 // descendant's conversation.
 //
-// It dies against the pre-change subtree scope. subtreeSelector (limits.go)
-// before wave 2 read only the live in-memory set (c.st.Get and
-// c.st.Descendants). Connect Close tombstones the descendant's row and calls
-// c.st.Delete, so the descendant leaves the live set — and with the lineage
-// union removed, the descendant's id is no longer in the selector's
-// external-ref lists. The parent's ConversationSearch then matches nothing and
-// ConversationExport answers not-found. Only the union with
-// childstore.LineageSource (wired from the Postgres child store) keeps the
-// closed descendant in scope.
+// The caller's lineage has an owner, so its conversation scope is
+// ScopeOwner(owner) — and the seeded conversation carries that same owner. What
+// this pins end to end is the owner arm childConversationScope builds from the
+// stored lineage, through Connect to insights.Search, with the descendant open
+// and again after Close tombstones it. The positive control before the close
+// keeps the post-close assertion from passing for a search that never worked.
 func TestClosedLineageChildCredentialStillSearchesAClosedDescendant(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
@@ -183,8 +205,14 @@ func TestClosedLineageChildCredentialStillSearchesAClosedDescendant(t *testing.T
 	// The descendant: a real child parented under the caller.
 	descendant := d.spawnChildUnder(t, parent)
 
+	// The seeded conversation carries the SAME owner the caller's lineage
+	// resolves to. A child credential's conversation scope is ScopeOwner(owner)
+	// whenever the lineage has one (childConversationScope), so a NULL-owner
+	// seed is outside the caller's scope by design — and pkg/capture writes
+	// owner_user_id on every real conversation, so the owner is also the
+	// realistic value.
 	marker := uniqueMarker("zqclosedlin")
-	convID := seedChildConversation(t, pool, dsn, descendant, "", marker)
+	convID := seedChildConversation(t, pool, dsn, descendant, childOwnerUserID(t, pool, parent), marker)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -268,22 +296,21 @@ func TestClosedLineageSearchCarriesClosedAt(t *testing.T) {
 }
 
 // TestClosedLineageParentScopeUnchangedByClose pins that closing a descendant
-// does not remove it from its ancestor's lineage SCOPE (the union of
-// subtreeSelector). It asserts selector/scope membership, not a cost figure:
+// does not remove it from its ancestor's conversation scope. The caller's
+// lineage has an owner, so that scope is ScopeOwner(owner) and the seeded
+// conversation carries the same owner: this asserts end-to-end scope membership
+// through ConversationExport (which resolves a conversation only if its id is in
+// the caller's scope), before and after Close.
 //
-// Fallback assertion, and why: the cost rollup (subtreeSpend -> insights
-// .SubtreeCost) prices a turn by consulting the daemon's model catalog
-// (ModelCatalog.Pricing), whose snapshot is fetched from OpenRouter. This
-// harness blanks OPENROUTER_API_KEY (noRealProviderEnv), so the catalog is
-// empty and every seeded turn prices at 0 — a priced-turn assertion would pass
-// for the wrong reason. What IS observable end to end, and is the SAME union
-// the spend rollup reads, is subtreeSelector's result: it feeds both
-// insights.SubtreeCost (spend) and ScopeSubtree (a child credential's
-// conversation reads). So this asserts the selector still names the
-// descendant's conversation AFTER the close, through the parent credential's
-// ConversationExport (which resolves the conversation only if its id is in the
-// caller's scope). Removing the lineage union makes the post-close export
-// answer not-found.
+// It deliberately does NOT assert a cost figure: the rollup (subtreeSpend ->
+// insights.SubtreeCost) prices a turn through the daemon's model catalog, whose
+// snapshot is fetched from OpenRouter. This harness blanks OPENROUTER_API_KEY
+// (noRealProviderEnv), so the catalog is empty and every seeded turn prices at
+// 0 — a priced-turn assertion would pass for the wrong reason.
+//
+// The selector's own live+closed union is the OWNERLESS path's, pinned by
+// TestSubtreeSelectorIncludesClosedDescendants (cmd/rafikid) and
+// TestChildConversationScopeIsSubtreeForOwnerlessLineage.
 func TestClosedLineageParentScopeUnchangedByClose(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
@@ -302,7 +329,10 @@ func TestClosedLineageParentScopeUnchangedByClose(t *testing.T) {
 
 	descendant := d.spawnChildUnder(t, parent)
 	marker := uniqueMarker("zqclosedcost")
-	convID := seedChildConversation(t, pool, dsn, descendant, "", marker)
+	// Owned by the caller's lineage owner: a child credential's conversation
+	// scope is ScopeOwner(owner) when the lineage has one, so a NULL-owner seed
+	// is out of scope by design.
+	convID := seedChildConversation(t, pool, dsn, descendant, childOwnerUserID(t, pool, parent), marker)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
