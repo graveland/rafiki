@@ -619,7 +619,9 @@ const mcpSearchScopeStart = "Results are scoped to conversations you own"
 // mcpToolDescriptions overrides a tool's model-facing description on this
 // surface. The blueprint texts are written for a fundi child, which has a
 // native task tool of its own and a live notification channel; an MCP client
-// has neither, and agent_list's scope is the whole daemon here, not a subtree.
+// has neither, and agent_list's reach follows the CALLING credential — the
+// whole daemon for a user credential, the caller's subtree (plus its owner's
+// other agents under scope="owner") for a child credential.
 // Composed from the blueprints' own descriptions at init so the shared text
 // cannot drift from the fundi surface.
 var mcpToolDescriptions = func() map[string]string {
