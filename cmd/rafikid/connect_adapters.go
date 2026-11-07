@@ -895,19 +895,33 @@ func scopeFor(ctx context.Context) (insights.Scope, error) {
 }
 
 // childConversationScope is scopeFor for the conversation reads a per-child
-// credential may make (ConversationSearch/Export/Query): that caller reads
-// its own subtree through insights.ScopeSubtree — the MCP face's
-// newMCPChildConversationReader boundary — never its owner's corpus. Every
-// other identity resolves through scopeFor unchanged, so the per-boot child
-// shapes stay refused here as they are at the gate.
+// credential may make (ConversationSearch/Export/Query). A child whose lineage
+// resolves an owner reads that OWNER's corpus (insights.ScopeOwner) — the same
+// boundary recall already gives it, and the same rule canReadChild applies to a
+// read: inside one owner every agent acts on that person's behalf, so the
+// subtree boundary guards nothing recall does not.
+//
+// The owner comes from the stored parent chain (OwnerUserIDForChild), never
+// from the identity's UserID field, and the scope is built from that id ALONE —
+// never an admin bit — so a child of an admin reads the admin's own corpus and
+// nothing daemon-wide.
+//
+// A child with NO owner anywhere in its lineage (an anonymous spawn) keeps the
+// subtree boundary: insights.ScopeSubtree, the MCP face's
+// newMCPChildConversationReader boundary. Every other identity resolves through
+// scopeFor unchanged, so the per-boot child shapes stay refused here as they
+// are at the gate.
 func childConversationScope(ctx context.Context, c *Controller) (insights.Scope, error) {
 	if id := server.IdentityFromContext(ctx); id != nil && id.Via == server.ProvenanceChildToken {
+		if owner, ok := c.OwnerUserIDForChild(id.ChildID); ok && owner != "" {
+			return insights.ScopeOwner(owner), nil
+		}
 		sel, err := c.subtreeSelector(ctx, id.ChildID)
 		if err != nil {
 			// Fail CLOSED, never empty-and-allowed: a lineage that cannot be read
 			// must not shrink the boundary to nothing (that would look like "no
-			// rows", i.e. no authority) NOR widen it to the owner's corpus. An
-			// error the verb answers is the only shape that is neither.
+			// rows", i.e. no authority). An error the verb answers is the only
+			// shape that is neither.
 			return insights.Scope{}, err
 		}
 		return insights.ScopeSubtree(sel), nil

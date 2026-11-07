@@ -176,15 +176,17 @@ func TestSubtreeSpendCountsAClosedChildsSpend(t *testing.T) {
 	ck.Contains(coster.selector.ConversationIDs, "s-closed", "the coster must still price the closed child's conversation; selector = %+v", coster.selector)
 }
 
-// A per-child credential whose lineage cannot be read gets an ERROR, never an
-// empty-and-allowed scope.
-func TestChildConversationScopeDeniesOnALineageError(t *testing.T) {
+// An ownerless per-child credential whose lineage cannot be read gets an ERROR,
+// never an empty-and-allowed scope — and never an owner scope either, which
+// would be the other way to widen a failed lookup.
+func TestChildConversationScopeLineageErrorFailsClosed(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c := limitsFixture(t, 3)
+	c := limitsFixture(t, 3) // c_d0 has no owner, so the subtree arm is the one that runs
 	c.lineage = &fakeLineageSource{err: errors.New("lineage down")}
 
-	_, err := childConversationScope(childTokenCtx("c_d0"), c)
+	got, err := childConversationScope(childTokenCtx("c_d0"), c)
 	ck.Require().Error(err, "the child-scope verb must answer an error, not an allowed scope")
+	ck.Eq(insights.Scope{}, got, "a failed lookup must not widen to an owner scope")
 }
 
 // The MCP child reader binds the documented fail-closed shape — an EMPTY

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/recall"
@@ -152,11 +154,61 @@ func TestChildRecallIdentityNeverAdmin(t *testing.T) {
 
 // --- subtree conversation scope ---------------------------------------------
 
+// --- the reader's owner rule -------------------------------------------------
+
+// A child whose lineage resolves an owner reads that OWNER's corpus — the same
+// boundary the Connect plane's childConversationScope applies, so a child
+// credential gets one answer on both faces. The owner comes from the stored
+// parent chain, never from the caller's identity.
+func TestMCPChildConversationReaderIsOwnerScope(t *testing.T) {
+	c := assert.NewAborting(t)
+	t0 := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	ctrl := ownerReadFixture(t,
+		ownerReadChild{id: "c_a", owner: "u-owner-lineage", started: t0},
+		ownerReadChild{id: "c_a1", parent: "c_a", started: t0.Add(time.Minute)},
+	)
+
+	r := newMCPChildConversationReader(context.Background(), ctrl, "c_a1")
+	c.Eq(insights.ScopeOwner("u-owner-lineage"), r.scope, "an ownerful child reads its owner's corpus")
+}
+
+// An ownerless lineage keeps the subtree boundary: the caller's own
+// conversation plus every descendant's.
+func TestMCPChildConversationReaderOwnerlessIsSubtree(t *testing.T) {
+	c := assert.NewAborting(t)
+	t0 := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	ctrl := ownerReadFixture(t,
+		ownerReadChild{id: "c_d", started: t0},
+		ownerReadChild{id: "c_d1", parent: "c_d", started: t0.Add(time.Minute)},
+	)
+	_ = ctrl.st.Update("c_d1", func(s *childstore.Session) { s.SessionID = "s-ownerless" })
+
+	r := newMCPChildConversationReader(context.Background(), ctrl, "c_d")
+	sel, err := ctrl.subtreeSelector(context.Background(), "c_d")
+	c.NoError(err, "subtree selector")
+	c.True(reflect.DeepEqual(insights.ScopeSubtree(sel), r.scope),
+		"an ownerless child keeps the subtree scope; got %+v", r.scope)
+	c.Contains(sel.ConversationIDs, "s-ownerless", "the subtree names the descendant's conversation")
+}
+
+// A vanished child has no live row, so no owner resolves and the reader falls
+// through to the empty subtree selector — which denies every row. It must never
+// become an owner scope, the shape that would silently widen a dead credential.
+func TestMCPChildConversationReaderVanishedChildDeniesAll(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctrl := ownerReadFixture(t)
+
+	r := newMCPChildConversationReader(context.Background(), ctrl, "c_vanished")
+	c.True(reflect.DeepEqual(insights.ScopeSubtree(insights.SubtreeSelector{}), r.scope),
+		"a vanished child must deny every row; got %+v", r.scope)
+}
+
 // TestMCPChildConversationReaderScopeIsSubtree is the database proof of the
-// child caller's conversation boundary: the reader resolves the caller's
-// subtree — its own conversation by session id, a claude descendant's by
-// external_ref — and its owner's other conversations never appear, in search
-// or export.
+// OWNERLESS lineage path: the reader resolves the caller's subtree — its own
+// conversation by session id, a claude descendant's by external_ref — and a
+// conversation outside it never appears, in search or export. The caller's row
+// carries no owner, so the subtree boundary is the one that applies; the owner
+// path is pinned by TestMCPChildConversationReaderIsOwnerScope.
 func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := openTestPool(t)
@@ -231,13 +283,17 @@ func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
 	c.Eq(2, convs, "models conversations")
 }
 
-// TestMCPFaceChildConversationsBindingIsSubtree pins the getServer DECISION,
+// TestMCPFaceChildConversationsBindingResolvesTheChildsOwner pins the getServer DECISION,
 // not just the reader: a per-child caller's conversation_search runs through
-// newMCPChildConversationReader. Reverting the `if isChild` branch to the
-// owner reader (newMCPConversationReader, ScopeOwner) makes the sibling row
-// reappear here, because this drives the tool through the SDK session
-// getServer builds — the same path a real child's RAFIKI_MCP_TOKEN drives.
-func TestMCPFaceChildConversationsBindingIsSubtree(t *testing.T) {
+// newMCPChildConversationReader, which resolves the owner from the CHILD's
+// stored lineage — never from the identity's UserID. The caller's row carries
+// ownerA; the identity deliberately carries ownerB, who owns the sibling. The
+// correct binding surfaces the caller's own and its descendant's conversation
+// (both ownerA's) and never the sibling's, so a regression to
+// newMCPConversationReader(owner identity) re-leaks the sibling here. This
+// drives the tool through the SDK session getServer builds — the same path a
+// real child's RAFIKI_MCP_TOKEN drives.
+func TestMCPFaceChildConversationsBindingResolvesTheChildsOwner(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := openTestPool(t)
 	ctx := context.Background()
@@ -245,26 +301,30 @@ func TestMCPFaceChildConversationsBindingIsSubtree(t *testing.T) {
 
 	own := insertConvForCost(t, pool, "")             // fundi caller: session-id route
 	desc := insertConvForCost(t, pool, uniq+"kid")    // claude descendant: ref route
-	sibling := insertConvForCost(t, pool, uniq+"sib") // the owner's OTHER child
+	sibling := insertConvForCost(t, pool, uniq+"sib") // another owner's conversation
+	ownerName := "mcp-child-scope-owner-" + uniq
+	otherName := "mcp-child-scope-other-" + uniq
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(),
 			`DELETE FROM conversations.conversation WHERE id = ANY($1::uuid[])`,
 			[]string{own, desc, sibling})
 		_, _ = pool.Exec(context.Background(),
-			`DELETE FROM conversations.users WHERE username = 'mcp-child-scope-owner' AND deleted_at IS NULL`)
+			`DELETE FROM conversations.users WHERE username = ANY($1::text[])`,
+			[]string{ownerName, otherName})
 	})
-	// Own all three rows by the owner user, so this test is a true leak
-	// oracle: reverting the binding to the owner reader (ScopeOwner) surfaces
-	// the sibling here, it does not merely return nothing.
-	var ownerID string
-	c.NoError(pool.QueryRow(ctx,
-		`INSERT INTO conversations.users (username, token_sha256)
-		 VALUES ('mcp-child-scope-owner', 'mcp-child-scope-owner:' || gen_random_uuid()::text)
-		 RETURNING id::text`).Scan(&ownerID), "insert owner user")
+	// The caller's lineage owns own+desc; the sibling belongs to a different
+	// user, so it must stay invisible however the owner is resolved.
+	ownerID := insertOwnerUser(t, pool, ownerName, false)
+	otherID := insertOwnerUser(t, pool, otherName, false)
 	if _, err := pool.Exec(ctx,
 		`UPDATE conversations.conversation SET owner_user_id = $1::uuid
-		  WHERE id = ANY($2::uuid[])`, ownerID, []string{own, desc, sibling}); err != nil {
+		  WHERE id = ANY($2::uuid[])`, ownerID, []string{own, desc}); err != nil {
 		t.Fatalf("own conversations: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET owner_user_id = $1::uuid
+		  WHERE id = ANY($2::uuid[])`, otherID, []string{sibling}); err != nil {
+		t.Fatalf("own the sibling conversation: %v", err)
 	}
 	st := childstore.New()
 	dir := t.TempDir()
@@ -273,7 +333,7 @@ func TestMCPFaceChildConversationsBindingIsSubtree(t *testing.T) {
 	caller := uniq + "caller"
 	st.Insert(&childstore.Session{
 		ChildID: caller, SessionID: own, Status: protocol.StatusIdle,
-		Kind: protocol.KindFundi, StartedAt: time.Now(),
+		Kind: protocol.KindFundi, StartedAt: time.Now(), OwnerUserID: ownerID,
 	})
 	st.Insert(&childstore.Session{
 		ChildID: uniq + "kid", Status: protocol.StatusIdle,
@@ -290,15 +350,15 @@ func TestMCPFaceChildConversationsBindingIsSubtree(t *testing.T) {
 	face.SetController(ctrl)
 	child := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
 	child = child.WithContext(server.WithIdentity(child.Context(), &server.Identity{
-		UserID: "u-owner", ChildID: caller, Via: server.ProvenanceChildToken,
+		UserID: otherID, ChildID: caller, Via: server.ProvenanceChildToken,
 	}))
 	cs := mcpConnect(t, face.getServer(child))
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "conversation_search"})
 	c.NoError(err, "conversation_search")
-	// The tool renders rows by conversation id, so the ids are the oracle:
-	// both in-subtree rows surface, the sibling's never does.
+	// The tool renders rows by conversation id, so the ids are the oracle: the
+	// caller's own and its descendant's rows surface, the other owner's never.
 	text := mcpCallText(t, res)
 	c.StrContains(text, desc, "conversation_search did not surface the in-subtree descendant")
 	c.StrContains(text, own, "conversation_search did not surface the caller's own conversation")
-	c.NotStrContains(text, sibling, "conversation_search leaked the owner's other child's conversation")
+	c.NotStrContains(text, sibling, "conversation_search leaked another owner's conversation")
 }

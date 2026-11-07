@@ -49,23 +49,28 @@ func newMCPConversationReader(ctrl *Controller, owner users.Identity) *conversat
 	}
 }
 
-// newMCPChildConversationReader binds a per-child MCP caller to its own
-// SUBTREE: the caller's own conversation plus every descendant's, through the
-// same three correlation routes SubtreeCost prices (fundi session ids, claude
-// external_refs, branch prefixes) — insights.ScopeSubtree, never
-// ScopeOwner. This is the closing of review-0's F1 first row: the previous
-// binding mapped a child credential to its OWNER's user id and handed it the
-// owner's whole conversation corpus, full transcripts included.
+// newMCPChildConversationReader binds a per-child MCP caller to its OWNER's
+// corpus when its lineage resolves an owner (insights.ScopeOwner) — the same
+// boundary the Connect plane's childConversationScope applies, because a child
+// credential gets the same answer on both faces. This is a deliberate reversal
+// of the earlier subtree-only binding: the subtree boundary never guarded
+// anything recall does not already expose to the same child (recall resolves a
+// child to its owner's non-admin identity), and a coordinator needs a sibling's
+// conversation to get up to speed on its context.
 //
-// The selector is built from childstore state only. A child whose row has
-// gone yields an (empty) selector that denies every row — a vanished child
-// reads as nothing visible, never as the owner's corpus.
+// The owner is read from childstore state (OwnerUserIDForChild), never from the
+// caller's identity, and the scope is built from that id alone — no admin bit —
+// so a child of an admin owner reads the admin's OWN corpus, never daemon-wide.
 //
-// A lineage error FAILS CLOSED to the same empty selector: the reader denies
-// every row and logs the child id (never the owner's corpus, never the error
-// text's payload). This is the deny shape the doc above documents, applied to
-// the one other way the selector can fail to resolve.
+// Two deny shapes remain. A vanished child (no live row, so no owner) falls
+// through to the subtree selector, which names nothing and therefore denies
+// every row: a child whose row is gone reads as nothing visible, never as the
+// owner's corpus. A lineage error FAILS CLOSED to the same empty selector, and
+// logs the child id (never the owner's corpus, never the error text's payload).
 func newMCPChildConversationReader(ctx context.Context, ctrl *Controller, childID string) *conversationReader {
+	if owner, ok := ctrl.OwnerUserIDForChild(childID); ok && owner != "" {
+		return &conversationReader{ctrl: ctrl, scope: insights.ScopeOwner(owner)}
+	}
 	sel, err := ctrl.subtreeSelector(ctx, childID)
 	if err != nil {
 		slog.Warn("mcp: child conversation scope unavailable; denying all rows", "child", childID, "error", err)
