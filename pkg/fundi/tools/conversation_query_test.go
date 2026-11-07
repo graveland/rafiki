@@ -286,3 +286,24 @@ func TestConversationQueryReaderErrorIsAnError(t *testing.T) {
 	_, err := tool.Execute(context.Background(), ToolInput(`{"name":"tools"}`))
 	assert.NewAborting(t).Error(err, "Execute with a failing reader returned no error")
 }
+
+// The conversation blueprints' scope sentence is prose, but it is the model's
+// only statement of what these tools can reach, so it is checked rather than
+// left to a proofread. A reader is bound to its OWNER's conversation corpus
+// (newControllerConversationReader on the fundi surface,
+// newMCPChildConversationReader on the MCP one), so "conversations you own"
+// alone understates it: another agent of the same owner is readable. The
+// opening words are also the marker mcpSearchScopeStart matches by exact text
+// to excise the sentence, so they must stay.
+func TestConversationBlueprintDescriptionsNameOwnerScope(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for name, desc := range map[string]string{
+		"conversation_search": conversationSearchDescription,
+		"conversation_query":  conversationQueryDescription,
+	} {
+		c.StrContains(desc, "conversations you own", "%s: the ownership sentence's opening is gone; mcpSearchScopeStart no longer matches", name)
+		c.StrContains(desc, "conversations of other agents your owner owns", "%s: the scope sentence does not say a sibling agent's conversations are readable", name)
+	}
+	c.StrContains(conversationSearchDescription, "no way to search another user's", "conversation_search: the cross-user refusal is gone")
+	c.StrContains(conversationExportDescription, "neither you nor your owner owns", "conversation_export: the refusal does not name the owner's corpus")
+}

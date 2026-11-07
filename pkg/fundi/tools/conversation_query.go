@@ -138,8 +138,9 @@ const conversationSearchDescription = "Search your own past conversations by tim
 	"source, status, or a substring of the first message. Returns summaries (turn counts, " +
 	"tokens, cost) -- use conversation_export to read a specific conversation's full transcript. " +
 	"For searching what was said inside conversations, use recall. " +
-	"Results are scoped to conversations you own; there is no way to search another user's " +
-	"conversations with this tool."
+	"Results are scoped to conversations you own, and for an agent that includes " +
+	"conversations of other agents your owner owns. There is no way to search another " +
+	"user's conversations with this tool."
 
 type ConversationSearchBlueprint struct{}
 
@@ -205,10 +206,10 @@ func (t *conversationSearchTool) Execute(ctx context.Context, in ToolInput) (Too
 	return NewTextResult(sb.String()), nil
 }
 
-const conversationExportDescription = "Read one of your own conversations' full transcript " +
+const conversationExportDescription = "Read a conversation's full transcript " +
 	"(every message, with per-turn token/cost metrics and skills invoked). Use conversation_search " +
-	"first to find the id. Refuses -- as not-found, not a permission error -- a conversation you " +
-	"do not own."
+	"first to find the id. Refuses -- as not-found, not a permission error -- a conversation " +
+	"neither you nor your owner owns."
 
 type ConversationExportBlueprint struct{}
 
@@ -271,7 +272,8 @@ const conversationQueryDescription = "Run a named catalogue query over your own 
 	"\"spend\" (cost and tokens per UTC day by model and served provider; priced=0 means unpriced). " +
 	"Time filters are per query: tools and skills filter message time, models filters turn " +
 	"time, classes and sizes filter turn activity, coverage filters conversation creation week, spend filters turn time. " +
-	"Results are scoped to conversations you own, same as conversation_search."
+	"Results are scoped to conversations you own, and for an agent that includes conversations " +
+	"of other agents your owner owns, same as conversation_search."
 
 type ConversationQueryBlueprint struct{}
 
