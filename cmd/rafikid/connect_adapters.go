@@ -437,6 +437,7 @@ func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 		ParentChildID:    p.ParentChildID,
 		ExecutorSelector: p.ExecutorSelector,
 		SkipDerivedIndex: p.SkipDerivedIndex,
+		Notify:           p.Notify,
 		ExecutorRef:      p.ExecutorRef,
 		MaxDepth:         p.MaxDepth,
 		MaxCost:          p.MaxCost,

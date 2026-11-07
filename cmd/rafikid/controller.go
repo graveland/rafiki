@@ -2311,6 +2311,17 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		}
 	}
 
+	notifyPolicy, notifyOK := protocol.NormalizeNotify(req.Notify)
+	if !notifyOK {
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: fmt.Sprintf("notify %q is not one of %q, %q", req.Notify, protocol.NotifyAll, protocol.NotifyResult),
+		}
+	}
+	if notifyPolicy == protocol.NotifyAll {
+		notifyPolicy = ""
+	}
+
 	if err := c.checkTaskHandle(ctx, req); err != nil {
 		return protocol.SpawnResponseData{}, err
 	}
@@ -2720,6 +2731,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		RecordRequests:     req.RecordRequests,
 		ExecutorSelector:   req.ExecutorSelector,
 		SkipDerivedIndex:   req.SkipDerivedIndex,
+		NotifyPolicy:       notifyPolicy,
 		WorkspaceMode:      req.WorkspaceMode,
 		MaxDepth:           grantedDepth(req, childDepthFor(c.st, req.ParentChildID), resolveAbsoluteDepthCeiling()),
 		MaxCost:            grantedCost(req),
@@ -3046,6 +3058,7 @@ func (c *Controller) activateLiveChild(
 		RecordRequests:     snap.RecordRequests,
 		ExecutorSelector:   snap.ExecutorSelector,
 		SkipDerivedIndex:   snap.SkipDerivedIndex,
+		NotifyPolicy:       snap.NotifyPolicy,
 		WorkspaceMode:      snap.WorkspaceMode,
 		MaxDepth:           snap.MaxDepth,
 		MaxCost:            snap.MaxCost,
@@ -3140,6 +3153,7 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		ExtraArgs:          snap.ExtraArgs,
 		ExecutorSelector:   snap.ExecutorSelector,
 		SkipDerivedIndex:   snap.SkipDerivedIndex,
+		Notify:             snap.NotifyPolicy,
 		WorkspaceMode:      snap.WorkspaceMode,
 		RecordRequests:     snap.RecordRequests,
 		MaxDepth:           &snap.MaxDepth,
@@ -4932,7 +4946,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
 		if c.evbuf != nil {
 			if isWorkingStatus(storePrev) {
-				c.notifySubagentSettled(childID, c.settleReason(childID), "", "")
+				c.notifyTurnEnd(childID)
 			}
 			c.evbuf.DrainIdle(childID)
 		}

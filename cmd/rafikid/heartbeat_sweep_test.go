@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/clock"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/sched"
@@ -173,4 +174,20 @@ func TestHeartbeatWorkingToWorkingDoesNotReset(t *testing.T) {
 	clk.Advance(6 * time.Second)
 
 	ck.Eq(1, heartbeatBatches(cap), "working->working must not move the deadline; want 1 check-in at 4m, got")
+}
+
+func TestHeartbeatSkipsQuietChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c, clk, cap := heartbeatFixture(t)
+	ck.Require().NoError(c.st.Update("c_w2", func(s *childstore.Session) {
+		s.NotifyPolicy = protocol.NotifyResult
+	}))
+
+	c.armHeartbeat("c_w2")
+	ck.Empty(c.sched.Pending(), "a quiet child must not arm a check-in deadline")
+	clk.Advance(10 * time.Minute)
+	ck.Eq(0, heartbeatBatches(cap), "a quiet child got a check-in")
+
+	c.armHeartbeat("c_w1")
+	ck.Len(c.sched.Pending(), 1, "a default-policy child must still arm its check-in")
 }

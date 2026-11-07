@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/inject"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // heartbeatEventSource is the event-buffer source name for periodic
@@ -86,6 +87,9 @@ func (c *Controller) armHeartbeat(childID string) {
 	}
 	if parent, ok := c.st.ParentOf(childID); !ok || parent == "" {
 		return // top-level: nobody to check in with
+	}
+	if snap, ok := c.st.Get(childID); ok && snap.NotifyPolicy == protocol.NotifyResult {
+		return // a quiet child does not check in
 	}
 	c.at(heartbeatKey(childID), c.now().Add(c.heartbeatInterval), func() {
 		c.fireHeartbeat(childID)
