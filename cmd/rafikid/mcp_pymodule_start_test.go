@@ -20,7 +20,7 @@ type recordingSpawner struct {
 	specs []tools.SpawnSpec
 }
 
-func (s *recordingSpawner) List(context.Context) ([]tools.AgentInfo, error) {
+func (s *recordingSpawner) List(context.Context, tools.ListOpts) ([]tools.AgentInfo, error) {
 	return nil, nil
 }
 func (s *recordingSpawner) Models(context.Context, tools.ModelQuery) ([]tools.ModelInfo, error) {

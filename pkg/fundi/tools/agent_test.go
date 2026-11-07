@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -43,13 +44,17 @@ type fakeSpawner struct {
 	routingResult string
 	viewErr       error
 	listErr       error
+	// listOpts is every ListOpts that reached List, in call order, so a test
+	// can pin which scope the TOOL resolved (the fake never widens it itself).
+	listOpts []ListOpts
 	// viewSpecs is every ViewSpec that reached View, in call order. A refused
 	// argument combination must leave this empty: Validate runs in the tool,
 	// before any spawner sees the spec.
 	viewSpecs []ViewSpec
 }
 
-func (f *fakeSpawner) List(context.Context) ([]AgentInfo, error) {
+func (f *fakeSpawner) List(_ context.Context, opts ListOpts) ([]AgentInfo, error) {
+	f.listOpts = append(f.listOpts, opts)
 	return f.children, f.listErr
 }
 
@@ -174,6 +179,156 @@ func TestAgentListSurfacesStoreErrors(t *testing.T) {
 	reg, ctx := newAgentTools(t, &fakeSpawner{listErr: errors.New("boom")})
 	_, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
 	assert.NewAborting(t).Error(err, "a spawner error must reach the model, not be swallowed")
+}
+
+// listBoolPtr marks a row's InSubtree in a fixture. Nil (unset) and a
+// pointer-to-false mean different things to RenderAgents, so a fixture cannot
+// get away with a bare bool.
+func listBoolPtr(v bool) *bool { return &v }
+
+// lineOf returns the one rendered line containing needle, so an assertion can
+// be about THAT row rather than the whole list.
+func lineOf(t *testing.T, out, needle string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	t.Fatalf("no rendered line contains %q; got:\n%s", needle, out)
+	return ""
+}
+
+// agentListRows builds n rows with distinct ids, for the page-cap tests.
+func agentListRows(n int) []AgentInfo {
+	rows := make([]AgentInfo, 0, n)
+	for i := 0; i < n; i++ {
+		rows = append(rows, AgentInfo{ChildID: fmt.Sprintf("c_%02d", i), Status: "idle"})
+	}
+	return rows
+}
+
+// A bare call is the SUBTREE scope: the empty string resolves to the narrow
+// default at the tool, so the spawner never sees an unset scope, and nothing is
+// marked read-only because a subtree list has nothing outside the subtree.
+func TestAgentListDefaultIsSubtree(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sp := &fakeSpawner{children: []AgentInfo{{ChildID: "c_a", Name: "worker", Status: "idle"}}}
+	reg, ctx := newAgentTools(t, sp)
+	outRes, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
+	c.Require().NoError(err, "agent_list")
+	c.Require().Len(sp.listOpts, 1, "want 1 List call, got %d", len(sp.listOpts))
+	c.Eq(ListScopeSubtree, sp.listOpts[0].Scope, "a bare call must resolve to the subtree scope, got")
+	c.NotStrContains(outRes.Text, "read-only", "a subtree list marks nothing read-only; got:\n%s", outRes.Text)
+
+	// The explicit spelling is the same request, and must not be mistaken for
+	// an unknown value.
+	_, err = reg.Execute(ctx, "agent_list", json.RawMessage(`{"scope":"subtree"}`))
+	c.Require().NoError(err, `agent_list scope="subtree"`)
+	c.Eq(ListScopeSubtree, sp.listOpts[1].Scope, `scope="subtree" must resolve to the subtree scope, got`)
+}
+
+// An owner-scope list renders the rows in the order the spawner gave them —
+// subtree first, the owner's other agents after — and marks exactly the rows
+// outside the caller's subtree read-only.
+func TestAgentListOwnerScopeMarksReadOnlyAndOrdersSubtreeFirst(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sp := &fakeSpawner{children: []AgentInfo{
+		{ChildID: "c_worker", Name: "worker", Status: "idle", Depth: 1, InSubtree: listBoolPtr(true)},
+		{ChildID: "c_peer", Name: "peer", Status: "idle", InSubtree: listBoolPtr(false)},
+	}}
+	reg, ctx := newAgentTools(t, sp)
+	outRes, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{"scope":"owner"}`))
+	c.Require().NoError(err, "agent_list scope=owner")
+	c.Require().Len(sp.listOpts, 1, "want 1 List call, got %d", len(sp.listOpts))
+	c.Eq(ListScopeOwner, sp.listOpts[0].Scope, `scope="owner" must reach the spawner, got`)
+
+	out := outRes.Text
+	workerAt := strings.Index(out, "c_worker")
+	peerAt := strings.Index(out, "c_peer")
+	c.Require().True(workerAt >= 0 && peerAt >= 0, "both rows must render; got:\n%s", out)
+	c.True(workerAt < peerAt, "the subtree row must render before the owner's others; got:\n%s", out)
+	c.Eq(1, strings.Count(out, "read-only"), "exactly the out-of-subtree row is marked; got:\n%s", out)
+	c.NotStrContains(lineOf(t, out, "c_worker"), "read-only", "the caller's own subtree row must not be marked; got")
+	c.StrContains(lineOf(t, out, "c_peer"), "read-only", "the owner's other agent must be marked read-only; got")
+}
+
+// An unrecognised scope is refused at the tool, naming both values, and never
+// reaches the spawner: silently treating it as the default would widen or
+// narrow a caller's view without telling it.
+func TestAgentListInvalidScopeIsRefused(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	_, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{"scope":"everything"}`))
+	c.Require().Error(err, "an unknown scope must be refused")
+	c.StrContains(err.Error(), `scope must be "subtree" or "owner"`, "the refusal must name both values; got %v", err)
+	c.Len(sp.listOpts, 0, "a refused scope must not reach the spawner; got %d call(s)", len(sp.listOpts))
+}
+
+// The status filter is an exact match on the row's status, applied before the
+// page cap so the header counts what survived it.
+func TestAgentListStatusFilter(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sp := &fakeSpawner{children: []AgentInfo{
+		{ChildID: "c_idle", Status: "idle"},
+		{ChildID: "c_busy", Status: "streaming"},
+		{ChildID: "c_busy2", Status: "streaming"},
+	}}
+	reg, ctx := newAgentTools(t, sp)
+	outRes, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{"status":"streaming"}`))
+	c.Require().NoError(err, "agent_list status filter")
+	out := outRes.Text
+	c.NotStrContains(out, "c_idle", "a filtered-out agent must not render; got:\n%s", out)
+	c.StrContains(out, "c_busy", "a matching agent must render; got:\n%s", out)
+	c.StrContains(out, "c_busy2", "a matching agent must render; got:\n%s", out)
+	c.Eq("2 agent(s)", strings.SplitN(out, "\n", 2)[0], "the header counts the filtered rows, got")
+}
+
+// A page past the cap says how many rows it hid, exactly, and heads itself
+// with the page and the total: a model must never mistake a truncated list for
+// the whole set.
+func TestAgentListCapTrailerCountsHiddenRows(t *testing.T) {
+	c := assert.NewCollecting(t)
+	reg, ctx := newAgentTools(t, &fakeSpawner{children: agentListRows(51)})
+	outRes, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
+	c.Require().NoError(err, "agent_list")
+	out := outRes.Text
+	c.Eq("50 of 51 agent(s)", strings.SplitN(out, "\n", 2)[0], "the truncated header names the page and the total, got")
+	c.StrContains(out, "... 1 more agents not shown; narrow with status=<state>", "the trailer must count the hidden rows exactly; got:\n%s", out)
+	c.NotStrContains(out, "c_50", "the row past the cap must not render; got:\n%s", out)
+	c.Eq(50, strings.Count(out, "c_"), "exactly the capped rows render; got:\n%s", out)
+}
+
+// At exactly the cap nothing is hidden, so there is no trailer and the header
+// stays the plain count.
+func TestAgentListNoTrailerAtExactlyTheCap(t *testing.T) {
+	c := assert.NewCollecting(t)
+	reg, ctx := newAgentTools(t, &fakeSpawner{children: agentListRows(50)})
+	outRes, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
+	c.Require().NoError(err, "agent_list")
+	out := outRes.Text
+	c.Eq("50 agent(s)", strings.SplitN(out, "\n", 2)[0], "an untruncated page keeps the plain header, got")
+	c.NotStrContains(out, "more agents not shown", "nothing is hidden at the cap, so there is no trailer; got:\n%s", out)
+}
+
+// The read-only marker exists for exactly one value: a pointer to false. Nil
+// means "this caller has no position in the tree", which is what every other
+// RenderAgents caller passes, so it must render nothing extra.
+func TestRenderAgentsReadOnlyMarkerOnlyWhenInSubtreeIsFalse(t *testing.T) {
+	c := assert.NewCollecting(t)
+	out := RenderAgents([]AgentInfo{
+		{ChildID: "c_nil", Status: "idle"},
+		{ChildID: "c_mine", Status: "idle", InSubtree: listBoolPtr(true)},
+		{ChildID: "c_peer", Status: "idle", InSubtree: listBoolPtr(false)},
+	})
+	c.NotStrContains(lineOf(t, out, "c_nil"), "read-only", "an unset InSubtree must not mark the row; got")
+	c.NotStrContains(lineOf(t, out, "c_mine"), "read-only", "a row inside the subtree must not be marked; got")
+	c.StrContains(lineOf(t, out, "c_peer"), "read-only", "a row outside the subtree must be marked; got")
+
+	// The spawn and pymodule_start results render one row with InSubtree unset.
+	c.NotStrContains(RenderAgents([]AgentInfo{{ChildID: "c_spawned", Status: "idle"}}), "read-only",
+		"a spawn result must render exactly as before")
 }
 
 // TestAgentModelsRendersCatalog: a NARROWED call renders rows. A bare call

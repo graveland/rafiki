@@ -73,7 +73,28 @@ func (s *controllerSpawner) authorize(target string) error {
 	return nil
 }
 
-func (s *controllerSpawner) List(context.Context) ([]tools.AgentInfo, error) {
+// authorizeRead is the READ gate: any agent the caller's owner owns, not only
+// its own subtree. It reads stored state through canReadChild, which admits a
+// descendant, or a target resolving to the caller's own non-empty owner, and
+// refuses everything else — a foreign owner, an unknown id and a lineage with
+// no owner — with the one identical sentence.
+//
+// It is deliberately NOT authorize: reads widen to the owner, acts do not, so
+// View uses this while Send, Kill, SetBudget and SetRouting keep authorize.
+func (s *controllerSpawner) authorizeRead(target string) error {
+	if target == "" {
+		return errors.New("agent id is required")
+	}
+	if !s.c.canReadChild(s.selfID, target) {
+		return fmt.Errorf(notReadableText, target)
+	}
+	return nil
+}
+
+// subtreeList is the pre-existing listing: the caller's descendants, nearest
+// first. InSubtree stays nil — this is the default scope, where "in your
+// subtree" is true of every row and so says nothing.
+func (s *controllerSpawner) subtreeList() []tools.AgentInfo {
 	snaps := s.c.st.Descendants(s.selfID)
 	out := make([]tools.AgentInfo, 0, len(snaps))
 	for _, snap := range snaps {
@@ -82,8 +103,47 @@ func (s *controllerSpawner) List(context.Context) ([]tools.AgentInfo, error) {
 	// Nearest first, then newest first within a depth, so a coordinator's own
 	// workers head the list and their reviewers follow.
 	sortAgents(out)
+	return out
+}
+
+// List answers agent_list for a child caller. The subtree scope is the
+// pre-existing body; the owner scope adds the caller's owner's other agents
+// AFTER the subtree, marked InSubtree false and at depth 0, because they are
+// not nodes beneath the caller and indenting them as if they were would be a
+// fabricated position in the tree.
+func (s *controllerSpawner) List(_ context.Context, opts tools.ListOpts) ([]tools.AgentInfo, error) {
+	if opts.Scope != tools.ListScopeOwner {
+		return s.subtreeList(), nil
+	}
+	subtree, others, ok := s.c.ownedSnapshots(s.selfID)
+	if !ok {
+		// An ownerless caller (no owner anywhere in its lineage) has no owner
+		// scope at all, so it falls back to the subtree alone — still marked,
+		// because the rows ARE in its subtree and the caller asked for a scope
+		// it cannot widen.
+		out := s.subtreeList()
+		for i := range out {
+			out[i].InSubtree = boolPtr(true)
+		}
+		return out, nil
+	}
+	out := make([]tools.AgentInfo, 0, len(subtree)+len(others))
+	for _, snap := range subtree {
+		info := s.infoFor(snap)
+		info.InSubtree = boolPtr(true)
+		out = append(out, info)
+	}
+	sortAgents(out)
+	// ownedSnapshots' own order is kept: newest first, ties by child id.
+	for _, snap := range others {
+		info := snapshotInfo(snap, 0)
+		info.InSubtree = boolPtr(false)
+		out = append(out, info)
+	}
 	return out, nil
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 func (s *controllerSpawner) infoFor(snap childstore.Snapshot) tools.AgentInfo {
 	return snapshotInfo(snap, s.hopsTo(snap.ChildID))
@@ -284,11 +344,12 @@ func toolModelInfo(r *rafikiv1.ModelRow) tools.ModelInfo {
 	return m
 }
 
-// View renders a descendant's transcript: the newest page by default, or the
-// page, entry or search spec names. authorize runs FIRST, before any load,
-// render or cursor parse — the gate must not depend on arguments.
+// View renders a readable agent's transcript: the newest page by default, or
+// the page, entry or search spec names. authorizeRead runs FIRST, before any
+// load, render or cursor parse — the gate must not depend on arguments — and
+// admits any agent the caller's owner owns, not only its descendants.
 func (s *controllerSpawner) View(ctx context.Context, spec tools.ViewSpec) (string, error) {
-	if err := s.authorize(spec.ChildID); err != nil {
+	if err := s.authorizeRead(spec.ChildID); err != nil {
 		return "", err
 	}
 	return s.c.viewTranscript(spec, true)

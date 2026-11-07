@@ -99,7 +99,7 @@ func TestUserSpawnerListToleratesIndeterminateDepth(t *testing.T) {
 	}
 
 	sp := newUserSpawner(c, users.Identity{UserID: "u_1", Username: "op"})
-	kids, err := sp.List(context.Background())
+	kids, err := sp.List(context.Background(), tools.ListOpts{})
 	ck.Require().NoError(err)
 	var deep, shallow *tools.AgentInfo
 	for i := range kids {
@@ -117,10 +117,29 @@ func TestUserSpawnerListToleratesIndeterminateDepth(t *testing.T) {
 	_ = tools.RenderAgents(kids)
 }
 
+// A user caller already sees every agent it may, so the scope argument changes
+// nothing: the same rows in the same order, and no InSubtree claim, because "in
+// your subtree" is meaningless for a caller with no position in the tree.
+func TestUserSpawnerListIgnoresScope(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sp := newUserSpawner(userSpawnerFixture(t), users.Identity{UserID: "u_1", Username: "op"})
+	ctx := context.Background()
+
+	subtree, err := sp.List(ctx, tools.ListOpts{Scope: tools.ListScopeSubtree})
+	c.Require().NoError(err)
+	owner, err := sp.List(ctx, tools.ListOpts{Scope: tools.ListScopeOwner})
+	c.Require().NoError(err)
+	c.Len(owner, 3, "want every child, got %d", len(owner))
+	c.EqDeep(subtree, owner, "an owner-scope list must be identical to a subtree list")
+	for _, k := range owner {
+		c.Nil(k.InSubtree, "%s must carry no InSubtree claim on a user's list; got %v", k.ChildID, k.InSubtree)
+	}
+}
+
 func TestUserSpawnerListReportsAbsoluteDepth(t *testing.T) {
 	c := assert.NewCollecting(t)
 	sp := newUserSpawner(userSpawnerFixture(t), users.Identity{UserID: "u_1", Username: "op"})
-	kids, err := sp.List(context.Background())
+	kids, err := sp.List(context.Background(), tools.ListOpts{})
 	c.Require().NoError(err)
 	c.Require().Len(kids, 3, "want all three children, got")
 	for i, want := range []struct {

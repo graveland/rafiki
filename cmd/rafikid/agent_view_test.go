@@ -193,12 +193,12 @@ func TestAgentViewPagesAStoredConversation(t *testing.T) {
 	ck.False(strings.Contains(full, "…(truncated)"), "entry= must not truncate; got:\n%s", full)
 }
 
-// TestAgentViewAuthorizesBeforeReading pins the gate's POSITION: authorize runs
-// before any load, render or cursor parse, so a non-descendant learns nothing
-// and cannot make the daemon read somebody else's conversation by guessing a
-// cursor. The error-text assertions are what make that observable — a cursor
-// parsed first would answer "no entry m:0.0", and a load first would answer
-// "loading …'s conversation".
+// TestAgentViewAuthorizesBeforeReading pins the gate's POSITION: authorizeRead
+// runs before any load, render or cursor parse, so an unreadable agent learns
+// nothing and cannot make the daemon read somebody else's conversation by
+// guessing a cursor. The error-text assertions are what make that observable —
+// a cursor parsed first would answer "no entry m:0.0", and a load first would
+// answer "loading …'s conversation".
 func TestAgentViewAuthorizesBeforeReading(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	f := agentViewDBFixtureFor(t)
@@ -219,7 +219,7 @@ func TestAgentViewAuthorizesBeforeReading(t *testing.T) {
 		m.spec.ChildID = "c_stranger"
 		_, err := sp.View(ctx, m.spec)
 		ck.Require().Error(err, "%s view of a stranger must refuse", m.name)
-		ck.StrContains(err.Error(), "descendant", "%s: want the not-a-descendant refusal; got %v", m.name, err)
+		ck.StrContains(err.Error(), "not one you can read", "%s: want the shared unreadable refusal; got %v", m.name, err)
 		ck.False(strings.Contains(err.Error(), "entries"), "%s: the refusal must not leak the transcript; got %v", m.name, err)
 		ck.False(strings.Contains(err.Error(), "no entry"), "%s: the cursor must not be parsed before authorize; got %v", m.name, err)
 	}

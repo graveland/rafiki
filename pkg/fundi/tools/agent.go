@@ -32,6 +32,13 @@ type AgentInfo struct {
 	// Task is the handle of the ledger row assigned to this child at spawn,
 	// or "" when it was spawned without one.
 	Task string
+	// InSubtree is set only on an OWNER-scope list a child caller made: true
+	// for a row inside its own subtree, false for another of its owner's
+	// agents, which it may read but not steer. Nil everywhere else — a spawn
+	// result, the settle digest, and every list a caller with no position in
+	// the tree makes — because "not in your subtree" would be a claim those
+	// callers cannot make.
+	InSubtree *bool
 }
 
 // SpawnSpec is a request to create a child. It carries NO parent field: the
@@ -221,6 +228,31 @@ type SendResult struct {
 	Steps []protocol.StepSummary
 }
 
+// ListScope selects which agents a list reports.
+//
+// The EMPTY string means ListScopeSubtree, and that is deliberate: the narrow
+// answer is the default, so a caller that names no scope can never be handed
+// its owner's whole agent set by an ordinary zero value.
+//
+// The two scopes differ only in who is READING. Steering stays on the spawn
+// tree either way: an agent outside the caller's subtree appears on an owner
+// list marked read-only.
+type ListScope string
+
+const (
+	// ListScopeSubtree lists the agents the caller spawned, and anything they
+	// spawned in turn.
+	ListScopeSubtree ListScope = "subtree"
+	// ListScopeOwner adds every other agent the caller's owner owns: readable,
+	// not steerable.
+	ListScopeOwner ListScope = "owner"
+)
+
+// ListOpts is one list request. The zero value asks for ListScopeSubtree.
+type ListOpts struct {
+	Scope ListScope
+}
+
 // AgentSpawner is the daemon-side capability behind the agent_* tools.
 //
 // Every method is scoped to the ONE binding this value was constructed for,
@@ -231,8 +263,12 @@ type SendResult struct {
 // import cmd/rafikid, so the daemon provides the implementation — the same
 // seam as LSPClient and ExecutorClient.
 type AgentSpawner interface {
-	// List returns every live and exited descendant, nearest first.
-	List(ctx context.Context) ([]AgentInfo, error)
+	// List returns every live and exited agent opts.Scope selects, nearest
+	// first: the caller's descendants for ListScopeSubtree, plus every other
+	// agent its owner owns for ListScopeOwner, those marked InSubtree false.
+	// Authority to LIST is the binding's, exactly as it is for every other
+	// method here.
+	List(ctx context.Context, opts ListOpts) ([]AgentInfo, error)
 	// Models enumerates the models a child may be spawned on, narrowed by q.
 	// A zero ModelQuery asks for everything the child's kind can resolve; the
 	// caller renders a summary rather than several hundred rows.
@@ -280,12 +316,21 @@ type AgentSpawner interface {
 
 const (
 	agentListDescription = "List the agents you have spawned (your subagents and " +
-		"anything they spawned in turn). Shows each one's id, name, model, current " +
-		"status, working directory and assigned task handle. Takes no arguments — " +
-		"you only ever see your own subtree. Use this before agent_send or " +
-		"agent_kill to find the id you mean, or to look something up. Calling it in a " +
-		"loop to detect completion is unnecessary — you are notified when a subagent " +
-		"settles, and pinged periodically while one is still working."
+		"anything they spawned in turn), with each one's id, name, model, current " +
+		"status, working directory and assigned task handle. Pass scope=\"owner\" to " +
+		"add every other agent your owner owns: those are marked read-only — you " +
+		"can read them (agent_view, conversation_export) but not steer them. Use " +
+		"this before agent_send or agent_kill to find the id you mean, or to look " +
+		"something up. Calling it in a loop to detect completion is unnecessary — " +
+		"you are notified when a subagent settles, and pinged periodically while " +
+		"one is still working."
+
+	// maxOwnerListRows caps one agent_list page. An owner-scoped list can name
+	// every agent a user owns, and an owner running several coordinators can
+	// hold hundreds; the cap applies to both scopes because an unusually large
+	// subtree benefits from the same bound. The tool says how many it hid, so
+	// the model never mistakes a page for the whole set.
+	maxOwnerListRows = 50
 )
 
 // --- agent_list ---
@@ -295,7 +340,19 @@ type AgentListBlueprint struct{}
 func (AgentListBlueprint) Name() string        { return "agent_list" }
 func (AgentListBlueprint) Description() string { return agentListDescription }
 func (AgentListBlueprint) InputSchema() Schema {
-	return Schema{Type: "object", Properties: []SchemaProperty{}}
+	return Schema{Type: "object", Properties: []SchemaProperty{
+		{
+			Name: "scope", Type: "string",
+			Enum: []string{string(ListScopeSubtree), string(ListScopeOwner)},
+			Description: "subtree (default) lists the agents you spawned; owner also lists " +
+				"every other agent your owner owns, which you can read (agent_view, " +
+				"conversation_export) but not steer",
+		},
+		{
+			Name: "status", Type: "string",
+			Description: "only agents with exactly this status",
+		},
+	}}
 }
 
 func (AgentListBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
@@ -314,22 +371,69 @@ type agentListTool struct {
 	agents AgentSpawner
 }
 
-func (t *agentListTool) Execute(ctx context.Context, _ ToolInput) (ToolResult, error) {
+func (t *agentListTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+	var params struct {
+		Scope  string `json:"scope,omitempty"`
+		Status string `json:"status,omitempty"`
+	}
+	if err := input.Unmarshal(&params); err != nil {
+		return ToolResult{}, fmt.Errorf("agent_list: invalid input: %w", err)
+	}
 	if err := ctx.Err(); err != nil {
 		return ToolResult{}, err
 	}
-	kids, err := t.agents.List(ctx)
+	// The empty scope is the SUBTREE default, spelled out here rather than
+	// passed through, so the spawner only ever sees the two documented values.
+	scope := ListScope(params.Scope)
+	switch scope {
+	case "", ListScopeSubtree:
+		scope = ListScopeSubtree
+	case ListScopeOwner:
+	default:
+		return ToolResult{}, errors.New(`agent_list: scope must be "subtree" or "owner"`)
+	}
+	kids, err := t.agents.List(ctx, ListOpts{Scope: scope})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_list: %w", err)
 	}
-	return NewTextResult(RenderAgents(kids)), nil
+	if params.Status != "" {
+		// A fresh slice, not an in-place filter: the spawner owns the slice it
+		// returned, and compacting it would rewrite that caller's rows.
+		kept := make([]AgentInfo, 0, len(kids))
+		for _, k := range kids {
+			if k.Status == params.Status {
+				kept = append(kept, k)
+			}
+		}
+		kids = kept
+	}
+	total := len(kids)
+	if total > maxOwnerListRows {
+		kids = kids[:maxOwnerListRows]
+	}
+	text := renderAgents(kids, total)
+	if hidden := total - len(kids); hidden > 0 {
+		text += fmt.Sprintf("\n... %d more agents not shown; narrow with status=<state>\n", hidden)
+	}
+	return NewTextResult(text), nil
 }
 
 // RenderAgents formats a descendant list for the model. Exported so the
 // daemon-side settle digest renders identically to what agent_list shows.
 func RenderAgents(kids []AgentInfo) string {
+	return renderAgents(kids, len(kids))
+}
+
+// renderAgents renders kids under a header naming total, the number of rows
+// the caller had before the cap: a truncated page heads "50 of 83 agent(s)"
+// so the model can tell it is not seeing everything.
+func renderAgents(kids []AgentInfo, total int) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d agent(s)\n", len(kids))
+	if total != len(kids) {
+		fmt.Fprintf(&sb, "%d of %d agent(s)\n", len(kids), total)
+	} else {
+		fmt.Fprintf(&sb, "%d agent(s)\n", len(kids))
+	}
 	for _, k := range kids {
 		indent := strings.Repeat("  ", k.Depth)
 		fmt.Fprintf(&sb, "%s%s  %s  [%s]  %s  %s", indent, k.ChildID, orDash(k.Name), k.Status, kindOrDefault(k.Kind), orDash(k.Model))
@@ -338,6 +442,12 @@ func RenderAgents(kids []AgentInfo) string {
 		}
 		if k.Cwd != "" {
 			fmt.Fprintf(&sb, "  cwd=%s", k.Cwd)
+		}
+		// Only a pointer-to-FALSE marks a row: a caller that may read but not
+		// steer this agent gets told so, and a nil (every caller with no
+		// position in the tree) says nothing at all.
+		if k.InSubtree != nil && !*k.InSubtree {
+			sb.WriteString("  read-only")
 		}
 		sb.WriteString("\n")
 	}

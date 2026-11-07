@@ -50,7 +50,11 @@ func newUserSpawner(c *Controller, owner users.Identity) *userSpawner {
 // hops from a binding: an MCP caller is not a node in the tree, so "hops from
 // me" is undefined, while "depth in the daemon's forest" renders the same
 // nesting `rafiki list` shows.
-func (s *userSpawner) List(context.Context) ([]tools.AgentInfo, error) {
+//
+// opts.Scope is ignored: a user already sees every agent it may, so owner
+// scope adds nothing to this list, and InSubtree stays nil because "in your
+// subtree" is meaningless for a caller with no position in the tree.
+func (s *userSpawner) List(context.Context, tools.ListOpts) ([]tools.AgentInfo, error) {
 	snaps := s.c.st.List()
 	out := make([]tools.AgentInfo, 0, len(snaps))
 	for _, snap := range snaps {
