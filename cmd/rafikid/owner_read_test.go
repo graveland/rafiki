@@ -54,8 +54,12 @@ func ownerReadFixture(t *testing.T, children ...ownerReadChild) *Controller {
 }
 
 // ownerReadBase is the shared shape: two same-owner top-level trees (A and B),
-// a foreign owner's tree (C), and an ownerless tree (D). A1 and B1 inherit their
-// owner through the parent chain rather than carrying it themselves.
+// a foreign owner's tree (C), and TWO ownerless trees (D and F) that are
+// unrelated to each other. A1 and B1 inherit their owner through the parent
+// chain rather than carrying it themselves. F exists so a test can compare two
+// unowned agents that are not in a descendant relationship: without it, the
+// both-sides-unowned branch of canReadChild's owner comparison is unreachable
+// and deleting its two `== ""` guards would go unnoticed.
 func ownerReadBase(t *testing.T) *Controller {
 	t.Helper()
 	t0 := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
@@ -67,6 +71,7 @@ func ownerReadBase(t *testing.T) *Controller {
 		ownerReadChild{id: "c_c", owner: "u2", started: t0.Add(4 * time.Minute)},
 		ownerReadChild{id: "c_d", started: t0.Add(5 * time.Minute)},
 		ownerReadChild{id: "c_d1", parent: "c_d", started: t0.Add(6 * time.Minute)},
+		ownerReadChild{id: "c_f", started: t0.Add(7 * time.Minute)},
 	)
 }
 
@@ -121,6 +126,19 @@ func TestCanReadChildRefusesTargetWithoutOwner(t *testing.T) {
 	c := ownerReadBase(t)
 	ck.False(c.canReadChild("c_a", "c_d"), "a target with no owner must not be readable")
 	ck.False(c.canReadChild("c_a", "c_d1"), "nor anything beneath an unowned target")
+}
+
+// TWO ownerless agents that are not in a descendant relationship must not read
+// each other. This is the only case where the two `== ""` guards around the
+// owner comparison do any work: without them both owners resolve to "" and the
+// equality holds, which would let every unowned tree read every other unowned
+// tree — the admin/UDS-only lineage the design says must fail closed.
+func TestCanReadChildRefusesTwoOwnerlessTrees(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := ownerReadBase(t)
+	ck.False(c.canReadChild("c_d", "c_f"), "one unowned tree must not read another")
+	ck.False(c.canReadChild("c_f", "c_d"), "and the refusal must be symmetric")
+	ck.False(c.canReadChild("c_f", "c_d1"), "nor anything beneath another unowned tree")
 }
 
 // Empty ids are refused before any lookup.
@@ -189,6 +207,9 @@ func TestCanReadChildOwnedSnapshotsOwnerlessCaller(t *testing.T) {
 
 	_, _, ok = c.ownedSnapshots("c_nope")
 	ck.False(ok, "an unknown caller resolves no owner scope")
+
+	_, _, ok = c.ownedSnapshots("c_f")
+	ck.False(ok, "a second ownerless caller resolves no owner scope either")
 
 	_, _, ok = c.ownedSnapshots("")
 	ck.False(ok, "an empty caller resolves no owner scope")
