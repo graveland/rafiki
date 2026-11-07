@@ -246,7 +246,8 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// at the call site, matching how Tasks and Agents are always set in this
 	// same literal. The reader takes no caller id in any method, so this
 	// construction is the binding -- see its doc comment. A per-child caller
-	// reads its own SUBTREE, never its owner's corpus (see
+	// reads its OWNER's conversation corpus when its lineage has an owner,
+	// falling back to its own subtree only when it has none (see
 	// newMCPChildConversationReader).
 	conversations := newMCPConversationReader(ctrl, owner)
 	if isChild {
@@ -590,17 +591,19 @@ const mcpSpawnKeepDoing = "Keep doing your own work"
 // scoped to conversations you own; there is no way to search another
 // user's") are written for a fundi child, whose scope is always its owner's
 // -- but this surface's scope story is the CALLING credential's: a user token
-// reads its own conversations, a per-child token reads its own subtree's
-// (wave 1 — never the owner's corpus), and an admin token reads the whole
+// reads its own conversations, a per-child token reads its OWNER's whole
+// conversation corpus when its lineage has an owner (falling back to its own
+// subtree when it has none), and an admin token reads the whole
 // daemon's. The not-found-not-permission framing of the export description
 // stays verbatim (a conversation outside the caller's scope answers
 // not-found), which is correct for every provenance -- for an admin nothing
 // is ever out of scope, so the sentence never bites.
 const mcpConversationScopeNote = "Scope: results cover the conversations the " +
-	"credential you are calling with can see -- your own conversations, your own " +
-	"subtree's when you call as a spawned agent, or, when you hold an admin " +
-	"credential, the whole daemon's. A conversation outside that scope answers " +
-	"not-found, never a permission error."
+	"credential you are calling with can see -- your own conversations, the whole " +
+	"conversation corpus of the owner you belong to when you call as a spawned " +
+	"agent (your own, your subtree's and your owner's other agents' alike), or, " +
+	"when you hold an admin credential, the whole daemon's. A conversation " +
+	"outside that scope answers not-found, never a permission error."
 
 // mcpSearchScopeStart begins the fundi-only ownership claim inside the
 // conversation_search blueprint text. Note and the remainder of the blueprint

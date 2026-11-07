@@ -35,10 +35,11 @@ func ScopeOwner(ownerID string) Scope { return Scope{ownerID: ownerID} }
 // routes). An EMPTY selector fails closed: the zero rows it names render an
 // always-false condition, the same rule the zero Scope obeys.
 //
-// This is the boundary a per-child credential reads conversations through
-// (the MCP face's conversation tools): a child sees its own subtree's
-// conversations, never its owner's whole corpus. Unlike ScopeOwner there is
-// no owner dimension -- a subtree may be an anonymous lineage -- so the
+// This is the boundary an OWNERLESS per-child credential reads conversations
+// through (the MCP face's conversation tools): a child with no owner anywhere
+// in its lineage sees its own subtree's conversations. An owned child reads
+// its owner's whole corpus through ScopeOwner instead. Unlike ScopeOwner there
+// is no owner dimension -- a subtree may be an anonymous lineage -- so the
 // selector itself is the whole boundary and must be built from stored state,
 // never from a request argument.
 func ScopeSubtree(sel SubtreeSelector) Scope { return Scope{subtree: &sel} }

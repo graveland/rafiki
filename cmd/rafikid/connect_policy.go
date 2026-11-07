@@ -140,9 +140,10 @@ var controlPolicyTable = map[string]controlPolicy{
 	// SetRouting from a child is subtree-scoped and refused only= — see
 	// SetChildRouting. It edits the stored spec, never re-resolves policy.
 	"SetRouting": policyChildScoped,
-	// Conversation reads a child may make on its own subtree, the MCP face's
-	// conversation_* tools' boundary (insights.ScopeSubtree). Review,
-	// Findings and Stats stay userOnly: nothing a child runs needs them.
+	// Conversation reads a child may make: its OWNER's whole corpus when its
+	// lineage has an owner (insights.ScopeOwner), its own subtree only when it
+	// has none (insights.ScopeSubtree), the MCP face's conversation_* boundary.
+	// Review, Findings and Stats stay userOnly: nothing a child runs needs them.
 	"ConversationSearch": policyChildScoped,
 	"ConversationExport": policyChildScoped,
 	"ConversationQuery":  policyChildScoped,
