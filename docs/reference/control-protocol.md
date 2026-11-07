@@ -2175,15 +2175,23 @@ persist-and-deliver path, so their `message_id` names the queued row.
 
 `/model` is an operator command: a child credential is refused
 (`permission_denied`), so an agent cannot move a conversation to another model.
-It rewrites the child's stored model and runs the abort cycle (interrupt, then
-restart with `--resume` of the live session id, else the recorded one (a child resumed after a daemon restart announces none until its next prompt); a child with neither is refused — `Pool.Restart` for a daraja-routed child, whose
-launch environment is fixed). The current and the requested model must both be
-ones Claude Code accepts as a plain `--model` (`proxyenv.RestartModel` /
-`AnthropicModel`: a concrete `claude-*` id, `anthropic/` prefix optional);
-anything else is `InvalidArgument` naming `rafiki models switch`, and a failed
-restart puts the previous model back. The in-flight turn is lost and the prompt
-cache starts cold. The cockpit's `/model` line and `M` form send it for a live
-claude child switching between such ids, and fork otherwise.
+It rewrites the child's stored model (and its `rafiki/model` label), then
+relaunches the process from that snapshot with `--resume` of the live session
+id, else the recorded one (a child resumed after a daemon restart announces
+none until its next prompt); a child with neither is refused. A local child
+goes through the abort cycle (interrupt, then resume). A child hosted by an
+executor's daraja goes through Kill and Resume instead of `Pool.Restart`,
+because the host builds its argv from launch-wide options (the proxied
+`--model`, the registered custom model option) that a restart spec cannot
+change, so a restart there comes back on the old model. The command always
+relaunches, even onto the stored model. The current and the requested model
+must both be ones Claude Code accepts as a plain `--model`
+(`proxyenv.RestartModel` / `AnthropicModel`: a concrete `claude-*` id,
+`anthropic/` prefix optional); anything else is `InvalidArgument` naming
+`rafiki models switch`, and a failed relaunch of a still-running child puts the
+previous model back. The in-flight turn is lost and the prompt cache starts
+cold. The cockpit's `/model` line and `M` form send it for a live claude child
+switching between such ids, and fork otherwise.
 
 For a fundi child the daemon does no side effect: the queued prompt reaches
 `Engine.runSlash` (`pkg/fundi/engine.go`), which runs it against the

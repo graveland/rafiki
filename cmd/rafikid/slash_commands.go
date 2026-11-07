@@ -4,8 +4,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -73,19 +73,26 @@ func (c *Controller) handleSlashCommand(ctx context.Context, in inbox.Inbound) (
 	return false, nil
 }
 
-// switchClaudeModel restarts a claude child on another Anthropic model: the
-// snapshot's model is rewritten, then the abort cycle (interrupt, restart with
-// --resume) relaunches it from that snapshot, so the conversation continues
-// under the same child id and session. An in-flight turn is lost, as with an
-// abort, and the prompt cache starts cold.
+// switchClaudeModel relaunches a claude child on another Anthropic model: the
+// stored model is rewritten, then the process is relaunched from that
+// snapshot with --resume, so the conversation continues under the same child
+// id and session. An in-flight turn is lost and the prompt cache starts cold.
 //
-// Anything a restart cannot carry is refused with the fork's name rather than
-// attempted: the launch environment is fixed (proxyenv.RestartModel), so both
-// the current and the requested model must be concrete Anthropic ids.
+// A child hosted by an executor's daraja is relaunched through Kill and Resume
+// rather than Pool.Restart: the host builds its argv from launch-wide options
+// (the proxied --model, the registered custom model option) that a Restart
+// spec cannot change, so a restart there comes back on the OLD model.
+//
+// Anything a relaunch cannot carry is refused with the fork's name rather than
+// attempted: the launch environment of a local child is rebuilt but a hosted
+// one's is not, so both the current and the requested model must be concrete
+// Anthropic ids (proxyenv.RestartModel).
 //
 // The command is the operator's. A child credential reaches Send for its own
 // subtree, and nothing there should let an agent move a conversation to a model
-// of its choosing; the cockpit is the only sender.
+// of its choosing; the cockpit is the only sender. It always relaunches, even
+// onto the model already stored, so it also converges a child whose process
+// and stored model have drifted apart.
 func (c *Controller) switchClaudeModel(ctx context.Context, snap childstore.Snapshot, arg string) error {
 	if id := server.IdentityFromContext(ctx); id != nil && !id.IsUserCredential() {
 		return &connectapi.ControllerError{Code: protocol.ErrPermissionDenied, Message: "/model is an operator command"}
@@ -100,21 +107,72 @@ func (c *Controller) switchClaudeModel(ctx context.Context, snap childstore.Snap
 		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs,
 			Message: fmt.Sprintf("/model: this child runs %q, which was registered at launch and cannot be changed in place%s", snap.Model, fork)}
 	}
-	if target == snap.Model {
-		return nil
-	}
 	if ch, ok := c.cm.Get(snap.ChildID); ok && liveOrRecordedSessionID(ch, snap) == "" {
 		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs,
 			Message: "/model: this child has no session yet (it has not taken a turn), so there is nothing to carry over; spawn it on the model you want"}
 	}
-	if err := c.st.Update(snap.ChildID, func(s *childstore.Session) { s.Model = target }); err != nil {
-		return err
+
+	previous := joinModel(snap.Provider, snap.Model)
+	c.handleModelChange(snap.ChildID, target)
+	var err error
+	if snap.Labels["rafiki/executor"] != "" {
+		err = c.relaunchClaude(ctx, snap.ChildID)
+	} else {
+		err = c.handleClaudeAbort(snap.ChildID)
 	}
-	if err := c.handleClaudeAbort(snap.ChildID); err != nil {
-		if rerr := c.st.Update(snap.ChildID, func(s *childstore.Session) { s.Model = snap.Model }); rerr != nil {
-			slog.Error("/model: restoring the previous model after a failed restart", "child", snap.ChildID, "error", rerr)
+	if err != nil {
+		if cur, ok := c.st.Get(snap.ChildID); ok && cur.Status != protocol.StatusExited {
+			// Still running its old process: keep the stored model the one it
+			// runs on. An exited child keeps the requested one, which is what a
+			// later resume should start on.
+			c.handleModelChange(snap.ChildID, previous)
 		}
 		return err
+	}
+	return nil
+}
+
+// relaunchClaude stops a daraja-hosted claude child and resumes it from its
+// snapshot, so the replacement is launched with argv and environment built
+// from the stored model. The session id is recorded first: Resume reads it
+// from the store.
+func (c *Controller) relaunchClaude(ctx context.Context, childID string) error {
+	ch, ok := c.cm.Get(childID)
+	if !ok {
+		return &connectapi.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+	}
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return &connectapi.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+	}
+	sessionID := liveOrRecordedSessionID(ch, snap)
+	if sessionID == "" {
+		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot relaunch claude child before its session is established"}
+	}
+	if snap.SessionID != sessionID {
+		if err := c.st.Update(childID, func(s *childstore.Session) { s.SessionID = sessionID }); err != nil {
+			return err
+		}
+	}
+	if _, err := c.Kill(ctx, childID, abortShutdownGrace, abortKillGrace); err != nil {
+		var ce *connectapi.ControllerError
+		if !errors.As(err, &ce) || (ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
+			return fmt.Errorf("claude relaunch stop: %w", err)
+		}
+	}
+	// Resume adds the child to the manager, which can race the exit handler's
+	// removal of the old one: wait for both the exited status and the removal.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		cur, ok := c.st.Get(childID)
+		_, live := c.cm.Get(childID)
+		if ok && cur.Status == protocol.StatusExited && !live {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := c.Resume(ctx, childID, ""); err != nil {
+		return fmt.Errorf("claude relaunch resume (the child is stopped; resume it to continue on the new model): %w", err)
 	}
 	return nil
 }
