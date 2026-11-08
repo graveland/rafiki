@@ -350,6 +350,104 @@ func TestNativeTurnEndWithoutACostKeepsTheBaseline(t *testing.T) {
 	ck.Eq(0.5, next[0].GetTurnEnd().GetCostUsd(), "cost measured from the last priced total")
 }
 
+// turnEndUsage feeds one turn's stdout frames to a fresh provider and returns
+// the usage the turn's turn_end carries (nil when it carries none).
+func turnEndUsage(t *testing.T, frames ...string) *rafikiv1.Usage {
+	t.Helper()
+	p := newClaudeProvider()
+	var usage *rafikiv1.Usage
+	for i, line := range frames {
+		for _, ev := range p.BusFramesNative([]byte(line), int64(1000+i)) {
+			if te := ev.GetTurnEnd(); te != nil {
+				usage = te.GetUsage()
+			}
+		}
+	}
+	return usage
+}
+
+// claude's result-frame `usage` is a SESSION-wide sum -- the same shape
+// total_cost_usd has -- not one call's prompt size. TurnEnd is what every
+// context consumer reads (the cockpit's ctx readout, a fork's overflow check),
+// so passing the result's counts through made a ~400k-token conversation report
+// 6.5M and refuse a fork that fit.
+func TestNativeTurnEndUsageIsTheFinalCallsPromptSize(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	usage := turnEndUsage(t,
+		// Call 1 of the turn: the tool round.
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"bash","input":{}}],"usage":{"input_tokens":2,"output_tokens":5,"cache_read_input_tokens":23272,"cache_creation_input_tokens":8579}}}`,
+		// Call 2 of the turn: the reply. This is the prompt the next call carries.
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":8444,"output_tokens":79,"cache_read_input_tokens":41125,"cache_creation_input_tokens":13998}}}`,
+		// The result restates the session's running totals, orders of magnitude larger.
+		`{"type":"result","subtype":"success","usage":{"input_tokens":100000,"output_tokens":200000,"cache_read_input_tokens":6460742,"cache_creation_input_tokens":56646}}`,
+	)
+
+	ck.Require().NotNil(usage, "turn_end usage")
+	ck.Eq(int64(8444), usage.GetInputTokens(), "input tokens are the final call's")
+	ck.Eq(int64(79), usage.GetOutputTokens(), "output tokens are the final call's")
+	ck.Eq(int64(41125), usage.GetCacheReadTokens(), "cache read tokens are the final call's")
+	ck.Eq(int64(13998), usage.GetCacheWriteTokens(), "cache write tokens are the final call's")
+}
+
+// A turn that made no main-thread call (claude's local commands, /clear among
+// them, end in a result with all-zero usage) reports NO usage rather than a
+// zero one: absent means "not reported", which is a different fact.
+func TestNativeTurnEndUsageIsAbsentWhenTheTurnMadeNoCall(t *testing.T) {
+	usage := turnEndUsage(t,
+		`{"type":"result","subtype":"success","result":"","local_command":"clear","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`,
+	)
+
+	assert.NewCollecting(t).Nil(usage, "a turn with no assistant frame reports no usage")
+}
+
+// The reading belongs to the turn that made the call: a following turn with no
+// assistant frame must not restate the previous turn's prompt size as its own.
+func TestNativeTurnEndUsageDoesNotLeakIntoTheNextTurn(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	p := newClaudeProvider()
+
+	p.BusFramesNative([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"one"}],"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":300,"cache_creation_input_tokens":40}}}`), 1000)
+	first := p.BusFramesNative([]byte(`{"type":"result","subtype":"success"}`), 1001)
+	second := p.BusFramesNative([]byte(`{"type":"result","subtype":"success"}`), 1002)
+
+	ck.Require().Len(first, 1, "first turn events")
+	ck.Require().NotNil(first[0].GetTurnEnd().GetUsage(), "first turn usage")
+	ck.Require().Len(second, 1, "second turn events")
+	ck.Nil(second[0].GetTurnEnd().GetUsage(), "the second turn made no call of its own")
+}
+
+// A Task sub-agent's call is another conversation's context, so its usage never
+// becomes the parent turn's reading -- even when it is the LAST assistant frame
+// of the turn.
+func TestNativeTurnEndUsageIgnoresASubagentCall(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	usage := turnEndUsage(t,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"main"}],"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":300,"cache_creation_input_tokens":40}}}`,
+		`{"type":"assistant","parent_tool_use_id":"toolu_task","message":{"role":"assistant","content":[{"type":"text","text":"sub"}],"usage":{"input_tokens":2,"output_tokens":5,"cache_read_input_tokens":999999,"cache_creation_input_tokens":1}}}`,
+		`{"type":"result","subtype":"success"}`,
+	)
+
+	ck.Require().NotNil(usage, "turn_end usage")
+	ck.Eq(int64(300), usage.GetCacheReadTokens(), "the main thread's call, not the sub-agent's")
+}
+
+// Claude Code's synthetic API-error reply is not an API call, so its counts are
+// no prompt size and must not overwrite the turn's real reading.
+func TestNativeTurnEndUsageIgnoresASyntheticErrorReply(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	usage := turnEndUsage(t,
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"main"}],"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":300,"cache_creation_input_tokens":40}}}`,
+		`{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error"}],"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+		`{"type":"result","subtype":"success","is_error":true}`,
+	)
+
+	ck.Require().NotNil(usage, "turn_end usage")
+	ck.Eq(int64(300), usage.GetCacheReadTokens(), "the real call's reading, not the synthetic reply's")
+}
+
 // Message events come from persisted rows, so no stdout or echo translation may
 // produce an AssistantMessage or UserMessage.
 func TestNativeEmitsNoMessageEvents(t *testing.T) {

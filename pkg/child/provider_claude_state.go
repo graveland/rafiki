@@ -61,6 +61,21 @@ type claudeState struct {
 	// say whether claude zeroed its counter, and turnCost already rebaselines
 	// when the total goes down.
 	lastTotalCost float64
+	// lastCallUsage is the usage of the LAST main-thread assistant frame of the
+	// turn in progress, i.e. of the one API call whose reply that frame carries.
+	// TurnEnd publishes it because input + cache_read + cache_creation of the
+	// final call is the prompt size the NEXT call carries -- what the cockpit's
+	// ctx readout plots against the model's window and what a fork measures
+	// before refusing a history that does not fit.
+	//
+	// The result frame's own `usage` is NOT that reading: claude sums it across
+	// every API call in the SESSION, exactly like total_cost_usd, so a long
+	// session restates millions of prompt tokens and every consumer above
+	// believes the history is many times its real size. Cleared by nativeResult
+	// so a turn with no assistant frame reports NO usage rather than the
+	// previous turn's reading. Touched only by readStdout (BusFramesNative and
+	// ResetState), like model/provider/api -- never by the supervise goroutine.
+	lastCallUsage *claudeUsage
 }
 
 // newClaudeProvider constructs a fresh per-child claude translator.
@@ -92,6 +107,7 @@ func (p *claudeProvider) ResetState() {
 	p.st.api = ""
 	p.st.turnActive = false
 	p.st.nativeTurnActive = false
+	p.st.lastCallUsage = nil
 }
 
 // snapshotMessages returns a copy of the accumulated messages under the lock,
@@ -204,6 +220,11 @@ type claudeStreamFrame struct {
 		Role    string        `json:"role"`
 		Model   string        `json:"model,omitempty"`
 		Content claudeContent `json:"content"`
+		// Usage is THIS API call's token counts -- the prompt it carried plus
+		// what it produced. Unlike the result frame's usage it is not a
+		// session-wide sum, which is why TurnEnd is built from it: see
+		// claudeState.lastCallUsage.
+		Usage *claudeUsage `json:"usage,omitempty"`
 	} `json:"message,omitempty"`
 	// CompactMetadata is present on system/compact_boundary frames (Claude
 	// Code's own compaction having just run). Absent otherwise.
@@ -214,9 +235,11 @@ type claudeStreamFrame struct {
 	} `json:"compact_metadata,omitempty"`
 }
 
-// claudeUsage is the subset of claude's result-frame usage we surface: turn
-// token counts. The per-category cost breakdown isn't provided (only a single
-// total_cost_usd), so only the total cost is carried.
+// claudeUsage is the subset of claude's usage we surface: token counts. The
+// per-category cost breakdown isn't provided (only a single total_cost_usd), so
+// only the total cost is carried. It decodes two frames with DIFFERENT
+// semantics: an assistant frame's `message.usage` is one API call's, while a
+// result frame's `usage` is the whole session's running sum.
 type claudeUsage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
@@ -721,7 +744,15 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 			return nil
 		}
 		if f.ParentToolUseID != "" {
+			// A sub-agent thread's call is not this child's context, so its
+			// usage must never become the turn's reading: see lastCallUsage.
 			return nil
+		}
+		// Claude Code's synthetic API-error reply is not an API call at all, so
+		// its counts are no reading of anything; GatedMessageID excludes it for
+		// the same reason.
+		if f.Message.Usage != nil && f.Message.Model != "<synthetic>" {
+			p.st.lastCallUsage = f.Message.Usage
 		}
 		return p.nativeAssistant(f.Message.Content, f.Message.Model, ts)
 
@@ -827,15 +858,14 @@ func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1
 	p.st.nativeTurnActive = false
 	p.st.mu.Unlock()
 
-	var usage *rafikiv1.Usage
-	if f.Usage != nil {
-		usage = &rafikiv1.Usage{
-			InputTokens:      int64Ptr(int64(f.Usage.InputTokens)),
-			OutputTokens:     int64Ptr(int64(f.Usage.OutputTokens)),
-			CacheReadTokens:  int64Ptr(int64(f.Usage.CacheReadInputTokens)),
-			CacheWriteTokens: int64Ptr(int64(f.Usage.CacheCreationInputTokens)),
-		}
-	}
+	// The turn's usage is the LAST main-thread call's, never the result frame's:
+	// claude sums the result's counts across the whole SESSION (the same shape
+	// total_cost_usd has), so passing them through reports a context many times
+	// the real one -- and a fork refuses history that does fit. See
+	// lastCallUsage. A turn that made no main-thread call (a local command such
+	// as /clear) reports no usage at all rather than the previous turn's.
+	usage := protoUsage(p.st.lastCallUsage)
+	p.st.lastCallUsage = nil
 	costUSD := p.turnCost(f.TotalCostUSD)
 	return []*rafikiv1.Event{{
 		Ts: timestamppb.New(time.UnixMilli(ts)),
@@ -846,6 +876,20 @@ func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1
 			},
 		},
 	}}
+}
+
+// protoUsage renders one API call's claude usage as the wire type, nil when the
+// turn reported none.
+func protoUsage(u *claudeUsage) *rafikiv1.Usage {
+	if u == nil {
+		return nil
+	}
+	return &rafikiv1.Usage{
+		InputTokens:      int64Ptr(int64(u.InputTokens)),
+		OutputTokens:     int64Ptr(int64(u.OutputTokens)),
+		CacheReadTokens:  int64Ptr(int64(u.CacheReadInputTokens)),
+		CacheWriteTokens: int64Ptr(int64(u.CacheCreationInputTokens)),
+	}
 }
 
 // turnCost converts claude's cumulative session total into this turn's share,

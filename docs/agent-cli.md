@@ -679,7 +679,8 @@ borrowed history is ~120000 tokens but openrouter/qwen/qwen3-8b's window is 3276
 ```
 
 The check is the source's last completed turn's usage
-(`input + cache_read + cache_write`) against the destination's catalog window,
+(`input + cache_read + cache_write` of its FINAL call, for both child kinds —
+never a turn or session total) against the destination's catalog window,
 and **unknown never refuses**: no completed turn yet, or a model the catalog
 does not price, skips it. A model ALIAS resolves daemon-side at spawn, so the
 alias NAME itself matches no catalog row and is not checked; note the one way a
