@@ -92,4 +92,8 @@ func TestSpawnPublishesNativeChildSpawned(t *testing.T) {
 	ck.Require().NotNil(found, "no child_spawned event in the log")
 	ck.Eq(parent, found.GetParentId(), "parent_id")
 	ck.Eq(childID, found.GetChildId(), "child_id")
+	// The kind rides the event that introduces the rail row: a client that only
+	// learned it from ListChildren showed a Kind-less row until the next
+	// re-list, and the cockpit picks a send's acknowledgement from it.
+	ck.Eq(protocol.KindClaude, found.GetKind(), "kind")
 }

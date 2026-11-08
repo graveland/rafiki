@@ -45,6 +45,7 @@ func TestEnsureThreadChildPublishesNativeChildSpawned(t *testing.T) {
 	ck.Require().NotNil(found, "no child_spawned event in the log")
 	ck.Eq("c_parent", found.GetParentId(), "parent_id")
 	ck.Eq(id, found.GetChildId(), "child_id")
+	ck.Eq(protocol.KindClaude, found.GetKind(), "kind")
 }
 
 func TestSyntheticChildIsParentedAndDoesNotConsumeTheChildBudget(t *testing.T) {

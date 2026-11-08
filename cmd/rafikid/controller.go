@@ -2802,6 +2802,10 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			ChildId:  childID,
 			ParentId: req.ParentChildID,
 			Name:     req.Name,
+			// The kind is known here and immutable afterwards, so the event that
+			// introduces the row carries it: a client that only learned it from
+			// ListChildren showed a Kind-less row until the next re-list.
+			Kind: req.Kind,
 		}},
 	})
 
@@ -3098,6 +3102,13 @@ func (c *Controller) activateLiveChild(
 			ChildId:  childID,
 			ParentId: snap.Labels[childstore.LabelParent],
 			Name:     snap.Name,
+			// A resume re-announces the same child, and its kind never changes;
+			// carrying it keeps a client that re-learned the row from a
+			// reconnect from having to wait for a re-list to know it. req.Kind,
+			// not snap.Kind: a row written before the empty-kind default existed
+			// carries "" in its snapshot, and the resolved kind rides the request
+			// (see the resume path's req.Kind assignment).
+			Kind: req.Kind,
 		}},
 	})
 

@@ -416,15 +416,25 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 	// cockpit closes that by re-seeding when it sees an event for a child it
 	// does not know; see Cockpit.applyEvent.
 	if cs := ev.GetChildSpawned(); cs != nil {
-		if _, exists := r.nodes[cid]; !exists {
-			// No Kind: child_spawned does not carry one. The next Seed fills it.
+		if n, exists := r.nodes[cid]; !exists {
 			r.nodes[cid] = &Node{
 				ChildID:  cid,
 				Name:     cs.GetName(),
 				ParentID: cs.GetParentId(),
 				Status:   "spawning",
+				// The kind is immutable, so the event that introduces the row
+				// can carry it (a resume re-announces with the same one). Empty
+				// from a daemon that predates the field: unknown, not an answer,
+				// and the next Seed fills it.
+				Kind: cs.GetKind(),
 			}
 			r.recomputeDepths()
+		} else if n.Kind == "" && cs.GetKind() != "" {
+			// A row that predates the field's arrival (or a resume of a child
+			// this client first saw from a Kind-less source) takes it here.
+			// Only an EMPTY kind is overwritten: the kind never changes, so a
+			// non-empty one is already right, and this can never fight a Seed.
+			n.Kind = cs.GetKind()
 		}
 	}
 

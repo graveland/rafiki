@@ -114,6 +114,7 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 			ChildId:  id,
 			ParentId: parentChildID,
 			Name:     "task:" + threadID,
+			Kind:     protocol.KindClaude,
 		}},
 	})
 	return nil

@@ -27,10 +27,14 @@ func summary(id, name, parent, status string, latest int32) *rafikiv1.ChildSumma
 }
 
 func spawned(id, parent, name string, ord int32) *rafikiv1.Event {
+	return spawnedKind(id, parent, name, "", ord)
+}
+
+func spawnedKind(id, parent, name, kind string, ord int32) *rafikiv1.Event {
 	return &rafikiv1.Event{
 		ChildId: id, Ordinal: &ord,
 		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
-			ChildId: id, ParentId: parent, Name: name,
+			ChildId: id, ParentId: parent, Name: name, Kind: kind,
 		}},
 	}
 }
@@ -155,8 +159,9 @@ func TestSeedCarriesKind(t *testing.T) {
 		c.Require().True(ok, "no node for %q", tc.id)
 		c.Eq(tc.want, n.Kind, "Node(%q).Kind = %q, want", tc.id, n.Kind)
 	}
-	// Re-seed refresh: a node introduced by child_spawned arrives Kind-less and
-	// only a later Seed fills it, so the refresh path must update Kind too.
+	// Re-seed refresh: a row introduced by traffic (or by a daemon that predates
+	// ChildSpawned.kind) arrives Kind-less and only a later Seed fills it, so the
+	// refresh path must update Kind too.
 	r.Seed([]*rafikiv1.ChildSummary{
 		{ChildId: "c_a", Name: "worker", Kind: "fundi", Status: "idle"},
 	})
@@ -214,6 +219,41 @@ func TestChildSpawnedAddsARow(t *testing.T) {
 	n, ok := r.Get("c_kid")
 	c.Require().True(ok, "c_kid missing")
 	c.False(n.ParentID != "c_root" || n.Name != "scout", "node = %+v, want parent c_root name scout", n)
+}
+
+// The event that introduces a row carries the child's kind, because the kind is
+// known when the child is created and immutable afterwards. It is load-bearing
+// beyond the row's readouts: the cockpit picks a send's acknowledgement from it
+// (text echo for fundi, delivery receipt for everything else), and a fundi child
+// never sends a receipt, so a Kind-less row stranded the first message to a new
+// agent.
+func TestChildSpawnedCarriesTheKind(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := rail.New()
+	r.Apply(spawnedKind("c_kid", "", "worker", "fundi", 0))
+
+	n, ok := r.Get("c_kid")
+	c.Require().True(ok, "c_kid missing")
+	c.Eq("fundi", n.Kind, "the spawn event's kind must land on the row it introduces")
+
+	// A resume re-announces the same child; an event with no kind (an older
+	// daemon, or a resume built before the field) must not WIPE a known one.
+	r.Apply(spawned("c_kid", "", "worker", 1))
+	n, _ = r.Get("c_kid")
+	c.Eq("fundi", n.Kind, "a Kind-less re-announcement erased the kind")
+
+	// A Kind-less first sighting stays unknown rather than guessing: the next
+	// Seed is what fills it.
+	r.Apply(spawned("c_kid2", "", "worker", 2))
+	n, _ = r.Get("c_kid2")
+	c.Eq("", n.Kind, "an absent kind must stay unknown")
+
+	// A row first seen from a Kind-less source takes the kind a later
+	// re-announcement carries (a resume, or a spawn event that arrives after the
+	// row was introduced by traffic).
+	r.Apply(spawnedKind("c_kid2", "", "worker", "fundi", 3))
+	n, _ = r.Get("c_kid2")
+	c.Eq("fundi", n.Kind, "a Kind-less row must take the kind a later re-announcement carries")
 }
 
 func TestChildExitedKeepsTheRow(t *testing.T) {

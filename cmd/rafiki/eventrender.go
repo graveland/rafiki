@@ -143,6 +143,12 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 		if parent := p.ChildSpawned.GetParentId(); parent != "" {
 			detail = " parent=" + parent
 		}
+		// The kind is on the event because it is known at creation and never
+		// changes; showing it here is what makes `rafiki logs` answer "what kind
+		// of child was this" without a second query.
+		if kind := p.ChildSpawned.GetKind(); kind != "" {
+			detail += " kind=" + kind
+		}
 		r.status[id] = "spawning"
 		r.statusAt[id] = t
 		if _, born := r.bornAt[id]; !born {

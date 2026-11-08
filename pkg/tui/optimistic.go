@@ -37,8 +37,9 @@ const (
 	// Unknown is receipt, not text, because the two mistakes are not
 	// symmetrical: treating a claude row as fundi can retire a message the
 	// agent never saw, while treating a fundi row as claude merely leaves a
-	// ghost standing (and a fundi send always has an explicit Kind on its rail
-	// row by the time a user can type into it).
+	// ghost standing — which textAckFor then retires as soon as the rail knows
+	// the child's kind, so the asymmetry costs a delayed ghost rather than a
+	// standing one.
 	ackReceipt ackMode = iota
 
 	// ackText is a fundi child, whose echo is the persisted user row and whose
@@ -322,12 +323,35 @@ func (st *optimisticState) sig() string {
 // ackModeFor is the acknowledgement mode a send to child is captured with.
 //
 // Only an explicitly fundi child gets the legacy text matcher. See ackMode for
-// why unknown is the receipt path.
+// why unknown is the receipt path — and textAckFor for the one way a row
+// captured under that default can still retire on its text echo.
 func (c *Cockpit) ackModeFor(child string) ackMode {
 	if n, ok := c.rail.Get(child); ok && n.Kind == protocol.KindFundi {
 		return ackText
 	}
 	return ackReceipt
+}
+
+// textAckFor reports whether a text echo may retire a pending send to child.
+//
+// The send-time mode is one answer, but not the only one, and on its own it is
+// not enough: a send can be issued before the rail knows the child's kind — a
+// row introduced by a daemon that predates ChildSpawned.kind, or by traffic
+// from a child this client never saw spawn — which captures the row on the
+// conservative receipt path, and a fundi child never sends the receipt that
+// path waits for. The kind is static for the child's life, so the kind the rail
+// knows NOW is just as good an answer, and it is what lets such a row retire on
+// its echo instead of standing until the child leaves the rail.
+func (c *Cockpit) textAckFor(child string) bool {
+	return c.ackModeFor(child) == ackText
+}
+
+// kindKnown reports whether the rail knows child's runtime kind. "" means
+// unknown -- a daemon that predates ChildSpawned.kind, or a row this client has
+// not re-listed yet -- and never a kind.
+func (c *Cockpit) kindKnown(child string) bool {
+	n, ok := c.rail.Get(child)
+	return ok && n.Kind != ""
 }
 
 // overlayFor builds child's overlay: the signature that says when it changed,
@@ -371,9 +395,11 @@ func (c *Cockpit) optimisticRows(st *optimisticState, width int) []string {
 // of is retired. With no such run an exact match wins, else the oldest send
 // (an image-only message echoes no text to match).
 //
-// Only ackText rows are candidates. A claude row is acknowledged by its receipt
-// and retired immediately — never by text, whose oldest-send fallback
-// is precisely the wrong-ghost defect this path used to have.
+// Only rows a text echo may answer are candidates: ackText rows, and any row of
+// a child the rail knows is fundi NOW (see textAckFor). A claude row is
+// acknowledged by its receipt and retired immediately — never by text, whose
+// oldest-send fallback is precisely the wrong-ghost defect this path used to
+// have.
 func (c *Cockpit) ackPending(child, text string) {
 	st := c.optimistic.get(child)
 	if st == nil {
@@ -382,9 +408,10 @@ func (c *Cockpit) ackPending(child, text string) {
 	if c.ackPendingRun(child, text) {
 		return
 	}
+	textAck := c.textAckFor(child)
 	first := -1
 	for i, p := range st.sends {
-		if p.mode != ackText {
+		if p.mode != ackText && !textAck {
 			continue
 		}
 		if p.text == text {
@@ -416,11 +443,12 @@ func (c *Cockpit) ackPendingRun(child, text string) bool {
 		return false
 	}
 	rest := strings.TrimSpace(text)
+	textAck := c.textAckFor(child)
 	retired := false
 	for rest != "" {
 		i := slices.IndexFunc(st.sends, func(p optimisticSend) bool {
 			t := strings.TrimSpace(p.text)
-			return p.mode == ackText && t != "" && strings.HasPrefix(rest, t)
+			return (p.mode == ackText || textAck) && t != "" && strings.HasPrefix(rest, t)
 		})
 		if i < 0 {
 			break
@@ -448,12 +476,28 @@ func (c *Cockpit) ackPendingRun(child, text string) bool {
 // it returns is this send's capture rather than one the client had not loaded,
 // and a wrong match would remove a message from the display.
 func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
+	c.ackPendingBlocks(child, blocks, true)
+}
+
+// ackPendingBlocks is ackPendingFromHistory with the oldest-send fallback made
+// optional.
+//
+// The fallback belongs to a FETCHED transcript, where the trailing user block is
+// still the likeliest echo. A rescue that re-runs the matcher over a transcript
+// this client already holds (the seed that finally teaches a child's kind -- see
+// textAckFor) passes false: that text is history, not the echo that just
+// arrived, so a row may only go on a match.
+func (c *Cockpit) ackPendingBlocks(child string, blocks []session.Block, fallback bool) {
 	st := c.optimistic.get(child)
 	if st == nil || len(blocks) == 0 {
 		return
 	}
 	if i := trailingUserIndex(blocks); i >= 0 {
-		c.ackPending(child, blocks[i].Text)
+		if fallback {
+			c.ackPending(child, blocks[i].Text)
+		} else {
+			c.ackPendingRun(child, blocks[i].Text)
+		}
 		blocks = slices.Delete(slices.Clone(blocks), i, i+1)
 	}
 	newest := -1
@@ -463,6 +507,7 @@ func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
 			break
 		}
 	}
+	textAck := c.textAckFor(child)
 	for i := len(blocks) - 1; i >= 0 && c.hasTextAck(child); i-- {
 		if blocks[i].Kind != session.KindUser {
 			continue
@@ -472,7 +517,7 @@ func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
 			continue
 		}
 		for j, p := range st.sends {
-			if p.mode == ackText && p.text == blocks[i].Text {
+			if (p.mode == ackText || textAck) && p.text == blocks[i].Text {
 				st.sends = slices.Delete(st.sends, j, j+1)
 				break
 			}
@@ -480,11 +525,16 @@ func (c *Cockpit) ackPendingFromHistory(child string, blocks []session.Block) {
 	}
 }
 
-// hasTextAck reports whether child still has a send the legacy text matcher
-// may act on.
+// hasTextAck reports whether child still has a send a text echo may act on.
 func (c *Cockpit) hasTextAck(child string) bool {
 	st := c.optimistic.get(child)
-	return st != nil && slices.ContainsFunc(st.sends, func(p optimisticSend) bool { return p.mode == ackText })
+	if st == nil || len(st.sends) == 0 {
+		return false
+	}
+	if c.textAckFor(child) {
+		return true
+	}
+	return slices.ContainsFunc(st.sends, func(p optimisticSend) bool { return p.mode == ackText })
 }
 
 // forgetOptimistic drops every trace of a child's optimistic sends. Called when

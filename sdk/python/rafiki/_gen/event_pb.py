@@ -655,6 +655,7 @@ class ChildSpawned:
     child_id: str = ""
     parent_id: str = ""
     name: str = ""
+    kind: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -664,6 +665,8 @@ class ChildSpawned:
             out["parentId"] = self.parent_id
         if self.name != "":
             out["name"] = self.name
+        if self.kind != "":
+            out["kind"] = self.kind
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ChildSpawned":
@@ -677,6 +680,9 @@ class ChildSpawned:
         _v = _d.get("name")
         if _v is not None:
             obj.name = _v
+        _v = _d.get("kind")
+        if _v is not None:
+            obj.kind = _v
         return obj
 
 @dataclasses.dataclass

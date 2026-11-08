@@ -1566,10 +1566,19 @@ func (x *Retry) GetMaxAttempts() int32 {
 // an in-conversation tool call, so these — not a parent_tool_use_id field on a
 // tool block — are how lineage reaches a client.
 type ChildSpawned struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
-	ParentId      string                 `protobuf:"bytes,2,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
-	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	ChildId  string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	ParentId string                 `protobuf:"bytes,2,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
+	Name     string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// kind is the child's runtime ("fundi", "claude", "script"), carried here
+	// because this event is the ONE thing that introduces a rail row for every
+	// spawner alike — the cockpit's form, the CLI, a tool, another client, a
+	// native claude subagent — and until it was carried the row stayed Kind-less
+	// until the next ListChildren. It is immutable for the child's life, which is
+	// why it rides the event: no later event can contradict it. Absent from a
+	// daemon that predates the field, so a reader must treat "" as unknown and
+	// fall back to the re-list rather than as an answer.
+	Kind          string `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1621,6 +1630,13 @@ func (x *ChildSpawned) GetParentId() string {
 func (x *ChildSpawned) GetName() string {
 	if x != nil {
 		return x.Name
+	}
+	return ""
+}
+
+func (x *ChildSpawned) GetKind() string {
+	if x != nil {
+		return x.Kind
 	}
 	return ""
 }
@@ -2614,11 +2630,12 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"will_retry\x18\x02 \x01(\bR\twillRetry\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x127\n" +
 	"\tresume_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\bresumeAt\x12!\n" +
-	"\fmax_attempts\x18\x05 \x01(\x05R\vmaxAttemptsJ\x04\b\x04\x10\x05R\x11resume_at_unix_ms\"Z\n" +
+	"\fmax_attempts\x18\x05 \x01(\x05R\vmaxAttemptsJ\x04\b\x04\x10\x05R\x11resume_at_unix_ms\"n\n" +
 	"\fChildSpawned\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1b\n" +
 	"\tparent_id\x18\x02 \x01(\tR\bparentId\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name\"p\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x12\n" +
+	"\x04kind\x18\x04 \x01(\tR\x04kind\"p\n" +
 	"\vChildExited\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12 \n" +
 	"\texit_code\x18\x02 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x16\n" +

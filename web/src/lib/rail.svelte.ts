@@ -285,13 +285,15 @@ function applyEvent(event: Event): void {
   switch (payload.case) {
     case 'childSpawned':
       // A provisional row keeps status events arriving before the fetch lands
-      // from being dropped; getChild enriches it.
+      // from being dropped; getChild enriches it. The kind rides the event — it
+      // is immutable, so no later event can contradict it — which is the one
+      // field the fetch was previously needed for on the very first frame.
       if (!children.has(id)) {
         children.set(id, {
           id,
           name: payload.value.name,
           status: 'spawning',
-          kind: '',
+          kind: payload.value.kind,
           model: '',
           labels: {},
           parentId: payload.value.parentId || undefined,

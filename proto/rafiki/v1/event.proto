@@ -274,6 +274,15 @@ message ChildSpawned {
   string child_id = 1;
   string parent_id = 2;
   string name = 3;
+  // kind is the child's runtime ("fundi", "claude", "script"), carried here
+  // because this event is the ONE thing that introduces a rail row for every
+  // spawner alike — the cockpit's form, the CLI, a tool, another client, a
+  // native claude subagent — and until it was carried the row stayed Kind-less
+  // until the next ListChildren. It is immutable for the child's life, which is
+  // why it rides the event: no later event can contradict it. Absent from a
+  // daemon that predates the field, so a reader must treat "" as unknown and
+  // fall back to the re-list rather than as an answer.
+  string kind = 4;
 }
 
 message ChildExited {

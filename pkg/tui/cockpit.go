@@ -1048,8 +1048,28 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.membershipOnly {
 			seed = c.rail.Reconcile
 		}
+		// A child whose kind this client did not know when a send was issued
+		// holds that send on the receipt path, which a fundi child never
+		// satisfies (see textAckFor). The seed below is what teaches the kind,
+		// but the echo has usually already landed by then and nothing re-runs
+		// the matcher on its own -- so remember who was unknown and rescue
+		// their rows once the kinds are in.
+		var unknownKind []string
+		for id, st := range c.optimistic.children {
+			if len(st.sends) > 0 && !c.kindKnown(id) {
+				unknownKind = append(unknownKind, id)
+			}
+		}
 		var cmds []tea.Cmd
 		retired := seed(inSubject)
+		for _, id := range unknownKind {
+			if !c.textAckFor(id) {
+				continue
+			}
+			if s := c.sessions[id]; s != nil {
+				c.ackPendingBlocks(id, s.Blocks, false)
+			}
+		}
 		for _, n := range retired {
 			// The daemon no longer lists this child, so it was closed: by
 			// another cockpit, by the CLI, or by the daemon's own grace

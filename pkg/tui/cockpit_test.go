@@ -1790,6 +1790,114 @@ func TestSlashCommandLeavesNoPendingEcho(t *testing.T) {
 	ck.EqDeep([]string(nil), pendingTexts(c), "/clear must not leave a pending echo")
 }
 
+// The compat path must not depend on the order the two facts arrive in. A
+// daemon that predates ChildSpawned.kind teaches the kind only with a re-list,
+// while the echo lands within milliseconds — so the echo routinely arrives
+// FIRST, and a rescue that only ran when the event was applied would leave the
+// ghost standing exactly as before.
+func TestFundiEchoArrivingBeforeTheKindIsRetiredWhenTheKindLands(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
+	ck.Require().EqDeep([]string{"hello"}, pendingTexts(c), "pending")
+
+	// The echo lands while the rail still has no kind for this child.
+	c.applyEvent(userMessageEventFor("c_1", "hello", 5))
+	ck.Require().EqDeep([]string{"hello"}, pendingTexts(c),
+		"an echo the rail cannot attribute to a fundi child must not retire anything yet")
+
+	// The re-list that finally teaches the kind must rescue the row.
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
+	ck.EqDeep([]string(nil), pendingTexts(c),
+		"the kind arrived after the echo; the pending send must still retire")
+}
+
+// The rescue re-runs the matcher over a transcript this client already holds, so
+// it must never use the oldest-send fallback: that would retire a message on an
+// unrelated block the moment a re-list happened to land. Only a match counts.
+func TestKindArrivingLaterNeverRetiresAnUnmatchedSend(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	// An older, unrelated user block sits in the transcript.
+	c.applyEvent(userMessageEventFor("c_1", "an earlier question", 5))
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
+	ck.Require().EqDeep([]string{"hello"}, pendingTexts(c), "pending")
+
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
+	ck.EqDeep([]string{"hello"}, pendingTexts(c),
+		"an unrelated trailing block must not retire a send the rescue cannot match")
+}
+
+// A send can be captured BEFORE the rail knows the child's kind: a daemon that
+// predates ChildSpawned.kind sends no kind on the spawn event, so the row is
+// Kind-less until a re-list fills it. ackMode then records the conservative
+// receipt path — and a fundi child never sends the receipt that path waits for,
+// so the ghost of a message typed into a freshly spawned agent stood until the
+// child left the rail. The kind is static for the child's life, so the kind the
+// rail knows NOW retires the row just as well.
+func TestFundiEchoRetiresASendCapturedBeforeTheRailKnewTheKind(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	// summaryFor carries no kind: the state a daemon that predates
+	// ChildSpawned.kind leaves, and the state a missed spawn event leaves too.
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+	if n, ok := c.rail.Get("c_1"); !ok || n.Kind != "" {
+		t.Fatalf("fixture: rail kind = %q (ok=%v), want a Kind-less row", n.Kind, ok)
+	}
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
+	ck.Require().EqDeep([]string{"hello"}, pendingTexts(c), "pending")
+
+	// The seed that fills the kind lands AFTER the send was captured.
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{fundiSummary("c_1", "one", 4)}})
+	if n, ok := c.rail.Get("c_1"); !ok || n.Kind != protocol.KindFundi {
+		t.Fatalf("fixture: rail kind = %q (ok=%v), want the seed to fill it", n.Kind, ok)
+	}
+
+	c.applyEvent(userMessageEventFor("c_1", "hello", 5))
+	ck.EqDeep([]string(nil), pendingTexts(c),
+		"a fundi child's echo must retire a send captured while its kind was unknown")
+}
+
+// The FIRST message to a newly spawned agent is the common case, and it is the
+// one that used to strand its ghost: child_spawned introduced the rail row with
+// no kind, ackMode read that as "not fundi" and captured the send on the receipt
+// path — and a fundi child never sends a receipt, so nothing ever retired it.
+// The event carries the kind now, so the row is right from birth and the very
+// first send takes the text path.
+func TestFirstMessageToASpawnedFundiChildRetiresOnItsEcho(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	// The rail knows nothing about c_1 but the spawn event itself.
+	c.focusChild = "c_1"
+
+	c.applyEvent(&rafikiv1.Event{ChildId: "c_1", Ordinal: proto.Int32(0),
+		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
+			ChildId: "c_1", Name: "worker", Kind: protocol.KindFundi}}})
+	if n, ok := c.rail.Get("c_1"); !ok || n.Kind != protocol.KindFundi {
+		t.Fatalf("fixture: rail kind = %q (ok=%v), want the spawn event's kind", n.Kind, ok)
+	}
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "first task", nil)
+	ck.Require().EqDeep([]string{"first task"}, pendingTexts(c), "pending")
+
+	c.applyEvent(userMessageEventFor("c_1", "first task", 5))
+	ck.EqDeep([]string(nil), pendingTexts(c),
+		"the first message to a spawned fundi agent must retire on its echo")
+}
+
 // The rail and focus streams are independent feeds, and only the focus one
 // may advance the session. A rail-delivered agent_status that beats the focus
 // stream's user_message to the cockpit used to advance the ordinal cursor
