@@ -187,36 +187,75 @@ func TestSettleWithResidueNudgesTheAgentItself(t *testing.T) {
 
 // Bound the loop. A model that ignored the first nudge is not more likely to
 // honour the fifth, and each one costs a full turn.
-func TestSecondSettleWithResidueEscalatesInsteadOfNudging(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	c, clk, cap := settleFixture(t)
-	store := tasks.NewMemoryStore()
-	c.tasks = store
-	ctx := context.Background()
+//
+// And it stops there: residue never reaches the spawner, under EITHER notify
+// policy. A pending row is not news — it blocks nothing, fails nothing and
+// retargets nothing — and the ledger is one pull away (`task_list(assignee=…)`,
+// `rafiki tasks`). Waking a spawner to describe state it cannot act on is the
+// cost a quiet spawner exists to avoid, and a coordinator driving a plan settles
+// with residue on EVERY turn, so an escalation would be a flood on the default
+// policy and a wasted turn even once on any policy.
+func TestResidueNeverWakesTheSpawner(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		quiet bool
+	}{
+		{name: "default policy", quiet: false},
+		{name: "notify=result", quiet: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
+			c, clk, cap := settleFixture(t)
+			store := tasks.NewMemoryStore()
+			c.tasks = store
+			ctx := context.Background()
 
-	_ = c.st.Update("c_w1", func(s *childstore.Session) { s.SessionID = "conv-w1" })
-	_, err := store.Add(ctx, "conv-w1", "", []tasks.NewTask{{Content: "never finished"}})
-	ck.Require().NoError(err)
+			ck.Require().NoError(c.st.Update("c_w1", func(s *childstore.Session) {
+				s.SessionID = "conv-w1"
+				if tc.quiet {
+					s.NotifyPolicy = protocol.NotifyResult
+				}
+			}))
+			_, err := store.Add(ctx, "conv-w1", "", []tasks.NewTask{{Content: "never finished"}})
+			ck.Require().NoError(err)
 
-	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
-	clk.Advance(6 * time.Second)
-	c.st.SetStatus("c_w1", protocol.StatusStreaming)
-	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
-	clk.Advance(6 * time.Second)
+			settle := func() {
+				c.st.SetStatus("c_w1", protocol.StatusStreaming)
+				c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+				clk.Advance(6 * time.Second)
+			}
 
-	var toWorker, toCoord int
-	var coordText string
-	for _, b := range cap.batches() {
-		switch b.childID {
-		case "c_w1":
-			toWorker++
-		case "c_coord":
-			toCoord++
-			coordText += strings.Join(b.fragments, "\n")
+			settle() // nudge to the child
+			settle() // second settle: the old ladder escalated from here
+			_, err = store.Add(ctx, "conv-w1", "", []tasks.NewTask{{Content: "and another"}})
+			ck.Require().NoError(err)
+			settle() // changed residue set: still nobody above the child is told
+
+			var toWorker int
+			for _, b := range cap.batches() {
+				if b.childID == "c_w1" {
+					toWorker++
+				}
+			}
+			ck.Eq(1, toWorker, "the child is nudged about its own residue exactly once")
+			ck.Empty(coordResidue(cap), "residue must never be injected into the spawner")
+		})
+	}
+}
+
+// coordResidue collects any fragment about unresolved tasks among the
+// coordinator's batches. Every settle also pushes its own settle fragment, which
+// is not residue and must not be mistaken for one.
+func coordResidue(cap *capturedFlush) []string {
+	var out []string
+	for _, b := range coordBatches(cap) {
+		for _, f := range b.fragments {
+			if strings.Contains(f, "unresolved") {
+				out = append(out, f)
+			}
 		}
 	}
-	ck.Eq(1, toWorker, "want exactly one nudge to the worker, got")
-	ck.False(toCoord == 0 || !strings.Contains(coordText, "unresolved"), "the second settle must escalate to the coordinator; got %q", coordText)
+	return out
 }
 
 func TestCleanSettleIsNotNudged(t *testing.T) {

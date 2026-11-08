@@ -136,8 +136,9 @@ func settleFragment(childID, name, reason string) string {
 		childID, name, reason, childID, childID)
 }
 
-// checkTaskResidue implements prompting.md's enforcement ladder:
-// detect -> nudge once -> escalate.
+// checkTaskResidue implements prompting.md's enforcement ladder: detect -> nudge
+// once. It deliberately stops there; the reasoning for not escalating to the
+// spawner is in the second-settle branch below.
 //
 // The rule ("resolve or drop everything before considering yourself done") is
 // exactly checkable, so it is checked rather than written into a system prompt
@@ -190,23 +191,24 @@ func (c *Controller) checkTaskResidue(childID string) {
 
 	// Second settle with residue: do not nudge again. A model that ignored
 	// the first is not more likely to honour the fifth, and each one costs a
-	// full turn. Escalate to whoever can evaluate the claim of doneness.
-	parent, ok := c.st.ParentOf(childID)
-	if !ok || parent == "" {
-		// A top-level agent escalates to the human, via the log and
-		// `rafiki tasks`. There is nobody above it to inject into.
-		//
-		// Info, not Warn: non-terminal is not the same as neglected. Pending
-		// rows are a backlog's normal steady state, and rows assigned to
-		// still-running children are work in flight — both settle with
-		// "unresolved" residue routinely. This line records that the agent
-		// was nudged once and settled anyway; the ledger (`rafiki tasks`) is
-		// the authoritative view of what is actually left.
-		slog.Info("agent settled again with unresolved tasks",
-			"childId", childID, "unresolved", len(unresolved))
-		return
-	}
-	c.evbuf.Push(parent, subagentEventSource, childID+"::residue", fmt.Sprintf(
-		"agent %s settled again with %d unresolved task(s): %s. It was already asked once.",
-		childID, len(unresolved), strings.Join(unresolved, ", ")))
+	// full turn.
+	//
+	// And do not tell the spawner either, under ANY notify policy. The rule is
+	// enforced against the only party that can satisfy it (the nudge above), and
+	// residue is not news for anyone else: it blocks nothing, fails nothing and
+	// retargets nothing, while the ledger — `task_list(assignee=…)`, `rafiki
+	// tasks` — is the authoritative view a spawner can pull whenever it actually
+	// needs to know. Pushing a digest of that ledger costs a wake, a full turn
+	// when the spawner is an agent, to describe state it cannot act on; that is
+	// precisely the cost a notify=result spawner asked not to pay, and the
+	// reason the quiet-notify design states that this check "does not wake the
+	// spawner" without a policy caveat.
+	//
+	// Info, not Warn: non-terminal is not the same as neglected. Pending rows are
+	// a backlog's normal steady state, and rows assigned to still-running
+	// children are work in flight — both settle with "unresolved" residue
+	// routinely. This line records that the agent was nudged once and settled
+	// anyway; the ledger is the authoritative view of what is actually left.
+	slog.Info("agent settled again with unresolved tasks",
+		"childId", childID, "unresolved", len(unresolved))
 }
