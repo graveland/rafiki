@@ -508,11 +508,27 @@ they follow until its row is reported.
 **Capture failures.** If capture fails after the stream, the rows that were
 stored publish first, then an `Error` event with code `capture_not_persisted`
 and message `turn not persisted: <reason>`. A turn that failed upstream or
-mid-stream (a transport error, a provider rejection, a client hang-up) while
+mid-stream (a transport error, a provider rejection, a client hang-up, or an
+in-band `error` event such as `overloaded_error` after the stream began) while
 capture itself worked publishes `turn_failed` with message
 `turn failed: <reason>` instead. If capture cannot begin for a
 request carrying `X-Rafiki-Session`, the Anthropic proxy answers `503` with body
 `rafiki capture unavailable: <reason>`.
+
+**A claude turn's failure.** `turn_failed` is per request: Claude Code retries a
+429 or 5xx inside one turn, so a failed request is not yet a failed turn. For a
+main-thread, non-helper request the daemon also records the failure on the
+child (`last_turn_error`, and the outcome the turn-end settle reads), and a
+later successful main-thread request clears it, so only a turn that ends with
+no success after its last failure counts as failed
+(`Controller.noteClaudeTurnFailure` / `clearClaudeTurnFailure`,
+`cmd/rafikid/claude_turn_failure.go`, driven by `CaptureReported`). A failure
+reported after the result frame already idled the child still wakes a quiet
+(`notify=result`) spawner, because its plain turn-end settle was dropped. Titler
+and per-tool helper requests (release-only reports) and subagent threads never
+record or clear it. An in-band stream error stores the content that arrived,
+reports the turn as failed, and does not count as the clean completion that
+clears the rate-limit watch.
 
 ### `GetHistory`: ts, `limit` and `before`
 
@@ -1290,7 +1306,10 @@ by a child's own children and kept across resume and a daemon restart. For a
 `result` child the spawner is woken only when the turn ended with a recorded
 `Result`, a `PendingQuestion` or a `LastTurnError`, when the child's own
 budget cap is breached, or when it exits or fails (including "failed (daemon
-restart)"); a plain turn-end settle and the periodic heartbeats are dropped.
+restarted)"); a plain turn-end settle and the periodic heartbeats are dropped.
+A claude child's `LastTurnError` is the proxy's: a main-thread request that
+failed upstream or mid-stream and was not followed by a successful one (see
+"A claude turn's failure" below).
 It never gates exit, failure or restart settles, budget breach steering,
 executor-loss or job-exit fragments, or the child's own task-residue nudge,
 and it does not change the display state: a launcher of a quiet child still
@@ -2408,9 +2427,11 @@ OSC emitter — no consumer re-derives it:
 - `waiting` — the turn ended and the child expects to be woken; `waiting_on`
   says by what. A foreground `bash` or `pymodule_run` blocks the turn, so the
   child is `working`, never `waiting`.
-- `failed` — an idle child whose last turn failed. Today only fundi children
-  have a turn outcome (claude children have none), so v1 derives `failed` for
-  fundi turn errors only.
+- `failed` — an idle child whose last turn failed: a fundi turn error, or a
+  claude child's main-thread request that failed upstream with no later
+  success (see "A claude turn's failure"). A claude child's own `result`
+  error frames (`is_error`, `error_max_turns`, ...) are not read, so a failure
+  Claude Code produces without an upstream error is not derived.
 - `idle` — the turn ended and nothing is expected.
 - `exited` — dead.
 

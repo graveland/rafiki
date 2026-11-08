@@ -1399,11 +1399,25 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	}
 	p.logger.InfoContext(r.Context(), "llm turn", append(turnFields, p.costFields(r, cr.convID, model, usage)...)...)
 	setUsageAttributes(trace.SpanFromContext(r.Context()), usage)
-	p.metrics.ObserveTurn(r.Context(), upstream, "complete", "anthropic", elapsed, usage)
+	turnOutcome := "complete"
+	if diag.StreamError != "" {
+		// The provider ended the stream with an in-band error: what arrived is
+		// stored, but the turn did not finish. Report it as a failed turn.
+		turnOutcome = "error"
+		reason := "stream error: " + diag.StreamError
+		recordSpanError(r.Context(), reason)
+		p.logger.WarnContext(r.Context(), "llm turn ended by an in-band stream error",
+			"conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "error", diag.StreamError)
+		if cr.outcome != nil && cr.outcome.turnFailure == "" {
+			cr.outcome.turnFailure = reason
+		}
+	}
+	p.metrics.ObserveTurn(r.Context(), upstream, turnOutcome, "anthropic", elapsed, usage)
 	// A clean completion is the upstream verdict that clears the rate-limit
 	// watch: the model answered, so nothing is waiting on a reset (see the
-	// Controller side, ratelimit_resume.go).
-	if s := rateLimitWatchable(cr); s != "" && p.rateLimitObserver != nil {
+	// Controller side, ratelimit_resume.go). A stream cut short by an in-band
+	// error is not one.
+	if s := rateLimitWatchable(cr); s != "" && diag.StreamError == "" && p.rateLimitObserver != nil {
 		p.rateLimitObserver.TurnSucceeded(s)
 	}
 	if upstream == "openrouter" {

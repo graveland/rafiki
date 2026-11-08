@@ -54,6 +54,11 @@ type CaptureDiagnostics struct {
 	// or stop for a block index that was never started, an in-band error event, a
 	// malformed event. Bounded by maxCaptureAnomalies, with a trailing count.
 	Anomalies []string
+	// StreamError is the first in-band `error` event the provider sent after the
+	// stream began (overloaded_error, a rate limit, api_error). The content that
+	// arrived before it is still persisted, but the turn did not finish: the
+	// caller must not treat it as a clean completion. Empty when none arrived.
+	StreamError string
 }
 
 // ParseCapturedResponse extracts stop_reason + usage from an Anthropic response
@@ -172,6 +177,10 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, CaptureDiagnostics, e
 				// consuming and persist the events that did arrive.
 				skip(err.Error())
 				break
+			}
+			var apiErr *msg.APIError
+			if diag.StreamError == "" && errors.As(err, &apiErr) {
+				diag.StreamError = apiErr.Error()
 			}
 			skip(err.Error())
 			continue

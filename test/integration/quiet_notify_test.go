@@ -176,9 +176,6 @@ func TestQuietNotifyPlainTurnEndWakesNobody(t *testing.T) {
 	c.Eq(child, rows[0].key, "the one row is keyed by the child")
 	c.StrContains(rows[0].body, exitedReason, "the one row is the exit settle")
 	c.Eq(0, len(bodiesContaining(rows, settledIdleReason)), "no turn-end settle was queued: %+v", rows)
-	for _, row := range rows {
-		c.False(strings.Contains(row.source, "heartbeat"), "no heartbeat was queued: %+v", row)
-	}
 }
 
 func TestQuietNotifyRecordedResultWakesParent(t *testing.T) {

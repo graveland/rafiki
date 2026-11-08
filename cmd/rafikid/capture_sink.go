@@ -120,6 +120,14 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 	if r.ThreadID != "" {
 		return
 	}
+	if !r.ReleaseOnly {
+		switch {
+		case r.TurnErr != "":
+			c.noteClaudeTurnFailure(childID, r.TurnErr)
+		case r.Err == "":
+			c.clearClaudeTurnFailure(childID)
+		}
+	}
 	g, ok := c.gateFor(childID)
 	if !ok {
 		return

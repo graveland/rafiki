@@ -98,6 +98,7 @@ func TestParseCapturedResponseSSESkipsUnmodellableEvents(t *testing.T) {
 		wantStop string
 		wantOut  int64
 		wantIn   string // a substring of the reported anomaly
+		wantErr  string // a substring of diag.StreamError; empty means none
 	}{
 		{
 			name: "unsupported content delta",
@@ -119,7 +120,7 @@ func TestParseCapturedResponseSSESkipsUnmodellableEvents(t *testing.T) {
 			name: "in-band error event",
 			body: start + block + "event: error\n" +
 				`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}` + "\n\n",
-			wantStop: "", wantOut: 1, wantIn: "Overloaded",
+			wantStop: "", wantOut: 1, wantIn: "Overloaded", wantErr: "Overloaded",
 		},
 	}
 	for _, tc := range cases {
@@ -132,6 +133,11 @@ func TestParseCapturedResponseSSESkipsUnmodellableEvents(t *testing.T) {
 			c.Eq(tc.wantOut, u.OutputTokens, "output tokens accumulated")
 			c.Require().True(len(diag.Anomalies) > 0, "the skipped event must be reported")
 			c.StrContains(diag.Anomalies[0], tc.wantIn, "the report names the reason")
+			if tc.wantErr == "" {
+				c.Eq("", diag.StreamError, "only an in-band error event sets StreamError")
+			} else {
+				c.StrContains(diag.StreamError, tc.wantErr, "an in-band error event is surfaced as StreamError")
+			}
 			var stored struct {
 				Content []struct {
 					Text string `json:"text"`
