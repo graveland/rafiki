@@ -584,6 +584,77 @@ func TestClaudeDeliveryRailTurnEndDropsAnUnfocusedChildsAcceptedSend(t *testing.
 	ck.Len(provisionalBlocks(c, "c_1"), 0, "and the block that stood for it")
 }
 
+// A child's exit is an ending too. A claude child's only turn_end comes from
+// its result frame, so a mid-turn kill or crash publishes none; without this,
+// the provisional block and its ledger row stand forever and every history
+// refetch puts the block back.
+func TestClaudeDeliveryChildExitEndsTheFocusedChildsAcceptedSend(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(sends(c, "c_1"), 1, "accepted")
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
+
+	feedFocus(c, exitedFor("c_1", 2))
+
+	ck.Len(sends(c, "c_1"), 0, "the child's death ends the send no turn end will")
+	ck.Len(provisionalBlocks(c, "c_1"), 0, "and the block that stood for it")
+	ck.Len(c.optimistic.accepted("c_1"), 0, "a history refetch has nothing left to re-insert")
+}
+
+// Nothing else will ever end an unfocused child's accepted send: its session is
+// not the one the focus stream advances, so the rail's child_exited is what
+// finishes it.
+func TestClaudeDeliveryRailChildExitDropsAnUnfocusedChildsAcceptedSend(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+	c.hop("c_2")
+	c.focusChild = "c_2"
+
+	sendNow(t, c, "c_1", "hello")
+	feedRail(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(sends(c, "c_1"), 1, "accepted")
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
+
+	feedRail(c, exitedFor("c_1", 2))
+
+	ck.Len(sends(c, "c_1"), 0, "an unfocused child's death ends its accepted send")
+	ck.Len(provisionalBlocks(c, "c_1"), 0, "and the block that stood for it")
+}
+
+// The rail's ending is subject to the same per-feed rule as its turn_end: the
+// focus stream owns the focused child, and its exit arrives on that feed.
+func TestClaudeDeliveryRailChildExitSparesTheFocusedChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(sends(c, "c_1"), 1, "accepted")
+
+	feedRail(c, exitedFor("c_1", 2))
+
+	ck.Len(sends(c, "c_1"), 1, "the focused child's ending belongs to its own feed")
+	ck.Len(provisionalBlocks(c, "c_1"), 1, "the block still stands for the send")
+}
+
+// The rail and focus subscriptions overlap on the durable tier, so the same
+// receipt arrives twice, and a reconnect replays it. The second delivery must
+// return nothing: the caller would insert a provisional block whose linked
+// capture has already replaced it.
+func TestClaudeDeliveryLedgerDeliverIsIdempotent(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	l := newOptimisticLedger(time.Now)
+	attempt := l.add("c_1", ackReceipt, "hello", nil)
+	l.settle("c_1", attempt, "row-1")
+
+	ck.Require().Len(l.deliver("c_1", "row-1"), 1, "the first receipt accepts the send")
+	ck.Len(l.deliver("c_1", "row-1"), 0, "a replayed receipt returns no send")
+	ck.Len(l.get("c_1").sends, 1, "and leaves the row in place for its capture")
+}
+
 // A history fetch rebuilds the transcript from the database, which holds no
 // provisional block. The ledger is what remembers the send the receipt accepted,
 // so the rebuilt transcript gets it back in the place its capture will land.

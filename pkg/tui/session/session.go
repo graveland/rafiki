@@ -464,8 +464,12 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 	case *rafikiv1.Event_SystemMessage:
 		s.applySystemMessage(p.SystemMessage)
 	case *rafikiv1.Event_ChildExited:
-		// A dead child answers no more tool calls.
+		// A dead child answers no more tool calls, and no turn end is coming to
+		// finish what it left standing: a claude child's only turn_end comes
+		// from its result frame, which a mid-turn kill or crash never
+		// produces, so the exit is that send's one bounded end.
 		s.settleAll()
+		s.DropProvisional()
 	}
 }
 

@@ -4,15 +4,20 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/msg"
+	"go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/server"
 
 	"github.com/multigres/testkit/assert"
@@ -324,4 +329,63 @@ func TestCaptureReportedLinksOnlyTheMainThread(t *testing.T) {
 
 	ck.Eq(0, len(h.got), "a release-only report publishes nothing")
 	ck.Eq(1, h.c.claudeDeliveries.acceptedCount("c_1"), "a release-only report consumes nothing")
+}
+
+// recordedMidTurnRequest is the corpus's mid-turn request. It is the evidence
+// that the relay split and the link agree on what Claude Code actually wrote,
+// so the test reads the recorded bytes rather than retyping them.
+const recordedMidTurnRequest = "../../testdata/claude-capture-delivery/000002-request.http"
+
+// recordedMidTurnRelay decodes the one recorded message that carries a relayed
+// mid-turn message, through the same codec the capture uses.
+func recordedMidTurnRelay(t *testing.T) msg.Message {
+	t.Helper()
+	c := assert.NewAborting(t)
+	raw, err := os.ReadFile(recordedMidTurnRequest)
+	c.NoError(err, "read the recorded mid-turn request")
+	_, body, ok := bytes.Cut(raw, []byte("\r\n\r\n"))
+	if !ok {
+		t.Fatalf("%s is not an HTTP fixture", recordedMidTurnRequest)
+	}
+	var req struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	c.NoError(json.Unmarshal(body, &req), "parse the recorded request")
+	var found []msg.Message
+	for _, m := range req.Messages {
+		if !bytes.Contains(m.Content, []byte("The user sent a new message while you were working")) {
+			continue
+		}
+		decoded, err := anthropic.Decode(m.Role, m.Content)
+		c.NoError(err, "decode the recorded message")
+		found = append(found, decoded)
+	}
+	c.Require().Len(found, 1, "the recording carries exactly one mid-turn relay")
+	return found[0]
+}
+
+// The relay split and the link are unit-tested apart, in different packages,
+// so this drives the seam between them with the RECORDED bytes: Claude Code
+// folded the mid-turn message into a tool result, the split recovers exactly
+// the words the user sent, and the linker names the row that delivered them.
+func TestClaudeLinkWorksOnTheRecordedMidTurnRelay(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	m := recordedMidTurnRelay(t)
+
+	um := eventconv.UserMessageFrom(conv.OriginClaudeCode, m)
+	unit, ok := linkUnitOf(um)
+	ck.Require().True(ok, "the split leaves a linkable unit")
+	ck.Eq("Reply with exactly one word: also", unit.text, "the unit is exactly the relayed user words")
+	ck.Eq(0, unit.images, "the recorded relay carries no image")
+
+	r := &claudeDeliveryRegistry{}
+	seedAccepted(t, r, "c", claudeDelivery{rowID: "row-also", text: "Reply with exactly one word: also"})
+	ids, logs := r.link("c", time.Now(), []linkUnit{unit})
+
+	ck.EqDeep([]string{"row-also"}, ids, "the recorded relay links to the row that carried it")
+	ck.Len(logs, 0, "an exact match warns about nothing")
+	ck.Eq(0, r.acceptedCount("c"), "the linked delivery left the queue")
 }

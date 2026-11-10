@@ -628,7 +628,8 @@ func (c *Cockpit) insertAccepted(child string, accepted []optimisticSend) {
 
 // endAcceptedSends ends a child's accepted sends from the RAIL feed, which
 // never reaches Session.Apply: the ledger row goes, and so does the block
-// standing for it.
+// standing for it. It is the rail's ending for a child that is not the focus
+// subscription's -- either the turn's end or the child's exit.
 func (c *Cockpit) endAcceptedSends(child string) {
 	c.optimistic.dropAccepted(child)
 	if s := c.sessions[child]; s != nil {

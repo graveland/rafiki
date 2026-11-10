@@ -1160,12 +1160,16 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// session's cursor past an event it never applied.
 				c.insertAccepted(ev.GetChildId(), c.optimistic.deliver(ev.GetChildId(), d.GetMessageId()))
 			}
-			if ev.GetTurnEnd() != nil && ev.GetChildId() != c.focusChild {
-				// The two feeds are not ordered against each other, so a rail
-				// turn_end can arrive BEFORE the focus stream's linked message
-				// for the focused child. Retiring its accepted send here would
-				// take the transcript block away from a capture still on its
-				// way, so the focused child's ending belongs to its own feed.
+			if (ev.GetTurnEnd() != nil || ev.GetChildExited() != nil) && ev.GetChildId() != c.focusChild {
+				// A child's exit ends its send exactly as its turn end does: a
+				// claude child publishes no turn_end for a mid-turn kill or
+				// crash, because its only one comes from the result frame. Both
+				// follow the same per-feed rule -- the two feeds are not
+				// ordered against each other, so a rail ending can arrive
+				// BEFORE the focus stream's linked message for the focused
+				// child. Retiring its accepted send here would take the
+				// transcript block away from a capture still on its way, so
+				// the focused child's ending belongs to its own feed.
 				c.endAcceptedSends(ev.GetChildId())
 			}
 			c.applyRailEvent(ev)
@@ -1582,10 +1586,12 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 			// so the ledger row is done.
 			c.optimistic.retire(id, um.GetMessageId())
 		}
-		if ev.GetTurnEnd() != nil {
+		if ev.GetTurnEnd() != nil || ev.GetChildExited() != nil {
 			// A send the receipt accepted and no capture ever linked ends here:
-			// the turn that answered it is over, and the session has dropped its
-			// provisional block through the same event.
+			// the turn that answered it is over, or the child died before any
+			// turn end could arrive (a claude child's only one comes from its
+			// result frame). The session has dropped its provisional block
+			// through the same event.
 			c.optimistic.dropAccepted(id)
 		}
 	}
