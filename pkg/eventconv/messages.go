@@ -3,6 +3,8 @@
 package eventconv
 
 import (
+	"slices"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -102,8 +104,13 @@ func EventsFromNodes(childID string, nodes []*conv.Node) []*rafikiv1.Event {
 // by the cache), and BlocksFromMsg keeps each block's index in the stored
 // message, so the split is recoverable without renumbering or compacting
 // anything.
+//
+// A message the user sent mid-turn, which Claude Code relayed inside a tool
+// result, is split out as the user's own content text, carrying the tool
+// result's index.
 func UserMessageFrom(origin conv.Origin, m msg.Message) *rafikiv1.UserMessage {
 	h := harness.For(origin)
+	m, relays := h.SplitRelays(m)
 	marked := h.Mark(m)
 	var content, injected []*rafikiv1.ContentBlock
 	for _, cb := range BlocksFromMsg(marked) {
@@ -114,6 +121,20 @@ func UserMessageFrom(origin conv.Origin, m msg.Message) *rafikiv1.UserMessage {
 			continue
 		}
 		content = append(content, cb)
+	}
+	for _, r := range relays {
+		cb := &rafikiv1.ContentBlock{
+			Index: int32(r.Index),
+			Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: r.Text}},
+		}
+		at := len(content)
+		for i, c := range content {
+			if c.Index == cb.Index {
+				at = i + 1
+				break
+			}
+		}
+		content = slices.Insert(content, at, cb)
 	}
 	return &rafikiv1.UserMessage{Content: content, Injected: injected}
 }

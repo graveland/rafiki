@@ -383,3 +383,78 @@ func TestInjectedSplitUsesFixture(t *testing.T) {
 	}
 	c.Eq("Reply with exactly one word: ready", um.GetContent()[0].GetText().GetText(), "the user's own text")
 }
+
+// relayRecorded is the exact text Claude Code 2.1.290 appended to a tool result
+// when the user sent a message mid-turn (testdata/claude-capture-delivery,
+// 000002-request.http).
+const relayRecorded = "(Bash completed with no output)\n\n<system-reminder>\nThe user sent a new message while you were working:\nReply with exactly one word: also\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n</system-reminder>"
+
+// relayOnly is the same relay with no tool output before it.
+const relayOnly = "<system-reminder>\nThe user sent a new message while you were working:\nReply with exactly one word: also\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n</system-reminder>"
+
+// A mid-turn message Claude Code relayed inside a tool result is the user's own
+// text, not tool output: it is drawn beside the truncated tool result, carrying
+// that block's index, and is not in the injected half.
+func TestUserMessageFromSplitsARelayedMidTurnMessage(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	in := msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolResult{ToolUseID: "toolu_1", Content: []msg.Block{msg.Text{Text: relayRecorded}}},
+	}}
+
+	um := eventconv.UserMessageFrom(conv.OriginClaudeCode, in)
+
+	content := um.GetContent()
+	c.Require().Len(content, 2, "the tool result and the user's message")
+	c.Eq(int32(0), content[0].GetIndex(), "the tool result keeps index 0")
+	c.Eq("(Bash completed with no output)", content[0].GetToolResult().GetContent()[0].GetText().GetText(), "the tool output is what is left")
+	c.Eq(int32(0), content[1].GetIndex(), "the user's message carries the tool result's index")
+	c.Eq("Reply with exactly one word: also", content[1].GetText().GetText(), "the user's own words")
+	c.Eq("", content[1].GetInjectedKind(), "the user's own message names no kind")
+	c.Len(um.GetInjected(), 0, "nothing is injected")
+
+	// The relayed text sits immediately after the block it was found in, so a
+	// block that follows that tool result stays after the user's message.
+	um = eventconv.UserMessageFrom(conv.OriginClaudeCode, msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolResult{ToolUseID: "toolu_1", Content: []msg.Block{msg.Text{Text: relayRecorded}}},
+		msg.Text{Text: "the user's next line"},
+	}})
+	content = um.GetContent()
+	c.Require().Len(content, 3, "tool result, the relayed message, the user's next line")
+	c.Eq(int32(0), content[0].GetIndex(), "the tool result keeps index 0")
+	c.Eq("(Bash completed with no output)", content[0].GetToolResult().GetContent()[0].GetText().GetText(), "the tool output is what is left")
+	c.Eq("Reply with exactly one word: also", content[1].GetText().GetText(), "the relayed message follows its block")
+	c.Eq("the user's next line", content[2].GetText().GetText(), "the following block stays after it")
+	c.Eq(int32(1), content[2].GetIndex(), "the following block keeps its index")
+}
+
+// A relay that arrives as a top-level block is the user's text too, not a
+// harness reminder.
+func TestUserMessageFromTopLevelRelayIsUserText(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	um := eventconv.UserMessageFrom(conv.OriginClaudeCode,
+		msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: relayOnly}}})
+
+	content := um.GetContent()
+	c.Require().Len(content, 1, "the block keeps its place")
+	c.Eq("Reply with exactly one word: also", content[0].GetText().GetText(), "the user's own words")
+	c.Eq("", content[0].GetInjectedKind(), "not a reminder")
+	c.Len(um.GetInjected(), 0, "nothing is injected")
+}
+
+// TestUserMessageFromOrdinaryReminderStillInjected is the regression guard for
+// the order of the split and the mark: an ordinary reminder is still a reminder.
+func TestUserMessageFromOrdinaryReminderStillInjected(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	const ordinary = "<system-reminder>\nfoo\n</system-reminder>"
+	um := eventconv.UserMessageFrom(conv.OriginClaudeCode,
+		msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: ordinary}}})
+
+	c.Len(um.GetContent(), 0, "a reminder is not the user's content")
+	injected := um.GetInjected()
+	c.Require().Len(injected, 1, "the reminder is injected")
+	c.Eq("foo", injected[0].GetText().GetText(), "the body, wrapper removed")
+	c.Eq("claude-reminder", injected[0].GetInjectedKind(), "its kind rides the block")
+}

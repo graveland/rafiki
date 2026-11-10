@@ -27,6 +27,11 @@ type Harness interface {
 	// Unwrap returns a marked block's text for display, wrapper removed; an
 	// unmarked block's text unchanged.
 	Unwrap(t msg.Text) string
+	// SplitRelays returns m with a message the user sent mid-turn, which this
+	// harness relayed inside content it returned, taken out as the user's own
+	// text. It is display-only: eventconv.UserMessageFrom is its only caller,
+	// and the stored node keeps its bytes.
+	SplitRelays(m msg.Message) (msg.Message, []claudecode.Relayed)
 }
 
 // Replayer rewrites one origin's messages for a run under another harness,
@@ -70,6 +75,10 @@ func (claude) Unwrap(t msg.Text) string {
 	return claudecode.Harness{}.Unwrap(t)
 }
 
+func (claude) SplitRelays(m msg.Message) (msg.Message, []claudecode.Relayed) {
+	return claudecode.Harness{}.SplitRelays(m)
+}
+
 func (claude) Replayer(has func(name string) bool) Replayer { return claudecode.NewReplayer(has) }
 
 // plain is the harness for an origin with no harness package of its own
@@ -85,6 +94,8 @@ func (plain) ForeignReplay(m msg.Message) msg.Message { return rafiki.Harness{}.
 func (plain) Replayer(func(name string) bool) Replayer { return noneReplayer{} }
 
 func (plain) Unwrap(t msg.Text) string { return rafiki.Harness{}.Unwrap(t) }
+
+func (plain) SplitRelays(m msg.Message) (msg.Message, []claudecode.Relayed) { return m, nil }
 
 // noneReplayer rewrites nothing: an origin with no harness package of its own
 // has nothing to replay under another one.

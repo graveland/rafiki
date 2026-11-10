@@ -88,3 +88,19 @@ func TestNoneReplayerIsIdentity(t *testing.T) {
 	unclassified := harness.For(conv.OriginUnclassified).Replayer(nil)
 	c.EqDeep(in, unclassified.Replay(in), "and neither does the unclassified one")
 }
+
+// TestSplitRelaysPlainHarnessIsNoop pins that the relay split is Claude Code's
+// own: an origin with no harness package knows nothing about it.
+func TestSplitRelaysPlainHarnessIsNoop(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	in := msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.ToolResult{ToolUseID: "toolu_1", Content: []msg.Block{msg.Text{Text: "<system-reminder>\nThe user sent a new message while you were working:\nalso\n\nThis is how Claude Code surfaces messages the user sends mid-turn\n</system-reminder>"}}},
+	}}
+
+	for _, origin := range []conv.Origin{conv.OriginFundi, conv.OriginUnclassified} {
+		got, relays := harness.For(origin).SplitRelays(in)
+		c.EqDeep(in, got, "%q: the message is unchanged", origin)
+		c.Len(relays, 0, "%q: nothing is relayed", origin)
+	}
+}
