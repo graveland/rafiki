@@ -610,9 +610,15 @@ func (*ContentBlock_ToolResult) isContentBlock_Block() {}
 // interleaving is recoverable. An old client ignores injected and shows the
 // user's own text.
 type UserMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Content       []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
-	Injected      []*ContentBlock        `protobuf:"bytes,2,rep,name=injected,proto3" json:"injected,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Content  []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
+	Injected []*ContentBlock        `protobuf:"bytes,2,rep,name=injected,proto3" json:"injected,omitempty"`
+	// message_id is the INBOX ROW id this message delivered — the id
+	// SendResponse.message_id returned — set only when the daemon linked a
+	// claude child's captured message to the send it carried. Empty otherwise
+	// (every fundi message, every history read, and any capture the daemon
+	// could not link). It identifies; it never changes how the message is drawn.
+	MessageId     string `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -659,6 +665,13 @@ func (x *UserMessage) GetInjected() []*ContentBlock {
 		return x.Injected
 	}
 	return nil
+}
+
+func (x *UserMessage) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
 }
 
 // SystemMessage is a durable-tier event: a persisted system-role message — a
@@ -2563,10 +2576,12 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\vtool_result\x18\x06 \x01(\v2\x1a.rafiki.v1.ToolResultBlockH\x00R\n" +
 	"toolResult\x12#\n" +
 	"\rinjected_kind\x18\a \x01(\tR\finjectedKindB\a\n" +
-	"\x05block\"u\n" +
+	"\x05block\"\x94\x01\n" +
 	"\vUserMessage\x121\n" +
 	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\x123\n" +
-	"\binjected\x18\x02 \x03(\v2\x17.rafiki.v1.ContentBlockR\binjected\"B\n" +
+	"\binjected\x18\x02 \x03(\v2\x17.rafiki.v1.ContentBlockR\binjected\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x03 \x01(\tR\tmessageId\"B\n" +
 	"\rSystemMessage\x121\n" +
 	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\"\xd2\x01\n" +
 	"\x10AssistantMessage\x121\n" +

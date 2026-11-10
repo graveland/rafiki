@@ -101,6 +101,12 @@ message ContentBlock {
 message UserMessage {
   repeated ContentBlock content = 1;
   repeated ContentBlock injected = 2;
+  // message_id is the INBOX ROW id this message delivered — the id
+  // SendResponse.message_id returned — set only when the daemon linked a
+  // claude child's captured message to the send it carried. Empty otherwise
+  // (every fundi message, every history read, and any capture the daemon
+  // could not link). It identifies; it never changes how the message is drawn.
+  string message_id = 3;
 }
 
 // SystemMessage is a durable-tier event: a persisted system-role message — a

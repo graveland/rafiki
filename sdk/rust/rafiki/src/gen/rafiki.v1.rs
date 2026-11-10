@@ -112,6 +112,13 @@ pub struct UserMessage {
     pub content: ::prost::alloc::vec::Vec<ContentBlock>,
     #[prost(message, repeated, tag = "2")]
     pub injected: ::prost::alloc::vec::Vec<ContentBlock>,
+    /// message_id is the INBOX ROW id this message delivered — the id
+    /// SendResponse.message_id returned — set only when the daemon linked a
+    /// claude child's captured message to the send it carried. Empty otherwise
+    /// (every fundi message, every history read, and any capture the daemon
+    /// could not link). It identifies; it never changes how the message is drawn.
+    #[prost(string, tag = "3")]
+    pub message_id: ::prost::alloc::string::String,
 }
 /// SystemMessage is a durable-tier event: a persisted system-role message — a
 /// message the child's harness injected (a heartbeat nudge, an environment
