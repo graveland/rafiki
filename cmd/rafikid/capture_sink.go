@@ -91,7 +91,14 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 			live = append(live, m)
 		}
 	}
-	for _, ev := range eventconv.EventsFromNodes(childID, live) {
+	evs := eventconv.EventsFromNodes(childID, live)
+	// Only the main thread's own report can name a delivered inbox row: a
+	// subagent thread is a different conversation whose messages this child's
+	// stream never carried, and a release-only report has no rows at all.
+	if r.ThreadID == "" && !r.ReleaseOnly {
+		c.linkCapturedUserMessages(childID, r.RequestReceived, evs)
+	}
+	for _, ev := range evs {
 		c.publishEvent(childID, ev)
 	}
 	if len(kept) > 0 {

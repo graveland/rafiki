@@ -482,7 +482,7 @@ func TestClaudeDeliveryStaleExitDoesNotRetireANewLaunch(t *testing.T) {
 
 	// The successor's teardown still works.
 	h.c.claudeDeliveries.endLaunch("c_deliver", newInst)
-	_, live := h.c.claudeDeliveries.register("c_deliver", "0198e5f2-9c3a-7def-8a1b-4c2d9e0f1a2b", "row")
+	_, live := h.c.claudeDeliveries.register("c_deliver", "0198e5f2-9c3a-7def-8a1b-4c2d9e0f1a2b", "row", "", 0)
 	ck.False(live, "the successor's own teardown left its generation live")
 }
 
@@ -498,11 +498,11 @@ func TestClaudeDeliveryAbortedSpawnRetiresItsGeneration(t *testing.T) {
 	// this spawn moments ago.
 	spec := child.SpawnSpec{ChildID: "c_abort_nil"}
 	ck.Require().True(ctrl.installChildHooks(&spec, protocol.KindClaude) != 0, "generation")
-	_, ok := ctrl.claudeDeliveries.register("c_abort_nil", "uuid-1", "row-1")
+	_, ok := ctrl.claudeDeliveries.register("c_abort_nil", "uuid-1", "row-1", "", 0)
 	ck.Require().True(ok, "register")
 	ctrl.abortSpawn("c_abort_nil", nil)
 	ck.Eq(0, ctrl.claudeDeliveries.entryCount("c_abort_nil"), "entries after abortSpawn")
-	_, live := ctrl.claudeDeliveries.register("c_abort_nil", "uuid-2", "row-2")
+	_, live := ctrl.claudeDeliveries.register("c_abort_nil", "uuid-2", "row-2", "", 0)
 	ck.False(live, "abortSpawn left a refused spawn's generation live")
 
 	// The child.Spawn SUCCEEDED and a later step refused the spawn: the
@@ -511,11 +511,11 @@ func TestClaudeDeliveryAbortedSpawnRetiresItsGeneration(t *testing.T) {
 	childID := spawnTestChild(t, ctrl, nil)
 	inst, liveChild := ctrl.cm.Get(childID)
 	ck.Require().True(liveChild, "the spawned child is not live")
-	_, ok = ctrl.claudeDeliveries.register(childID, "uuid-3", "row-3")
+	_, ok = ctrl.claudeDeliveries.register(childID, "uuid-3", "row-3", "", 0)
 	ck.Require().True(ok, "register")
 	ctrl.abortSpawn(childID, inst)
 	ck.Eq(0, ctrl.claudeDeliveries.entryCount(childID), "entries after abortSpawn")
-	_, live = ctrl.claudeDeliveries.register(childID, "uuid-4", "row-4")
+	_, live = ctrl.claudeDeliveries.register(childID, "uuid-4", "row-4", "", 0)
 	ck.False(live, "abortSpawn left the aborted instance's generation live")
 }
 
@@ -529,7 +529,7 @@ func TestClaudeDeliveryExitRetiresTheLaunchGeneration(t *testing.T) {
 	ctrl := newTestController(t)
 	childID := spawnTestChild(t, ctrl, nil)
 
-	_, ok := ctrl.claudeDeliveries.register(childID, "0198e5f2-9c3a-7def-8a1b-4c2d9e0f1a2b", "row_1")
+	_, ok := ctrl.claudeDeliveries.register(childID, "0198e5f2-9c3a-7def-8a1b-4c2d9e0f1a2b", "row_1", "", 0)
 	ck.Require().True(ok, "a spawned claude child has no launch generation")
 	ck.Eq(1, ctrl.claudeDeliveries.entryCount(childID), "registered entries")
 
@@ -543,7 +543,7 @@ func TestClaudeDeliveryExitRetiresTheLaunchGeneration(t *testing.T) {
 
 	ck.Eq(0, ctrl.claudeDeliveries.entryCount(childID),
 		"handleChildExit left the launch's outstanding receipts registered")
-	_, live := ctrl.claudeDeliveries.register(childID, "another", "row_2")
+	_, live := ctrl.claudeDeliveries.register(childID, "another", "row_2", "", 0)
 	ck.False(live, "handleChildExit left the child's launch generation live")
 }
 

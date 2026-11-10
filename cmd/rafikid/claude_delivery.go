@@ -4,8 +4,10 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -44,6 +46,30 @@ type claudeDeliveryKey struct {
 	uuid    string
 }
 
+// claudeDelivery is one registered delivery: the inbox row it names and what
+// that row carried. The text and image count are kept because a captured user
+// message has to be matched back to the row that delivered it, and text is what
+// the frame said rather than what the client typed.
+type claudeDelivery struct {
+	rowID  string
+	text   string
+	images int
+}
+
+// acceptedDelivery is one delivery Claude Code has accepted and the capture
+// that stores its message has not yet reported. It outlives take (the receipt
+// publishes immediately) because the captured message arrives later, on the
+// request that carried it: gen is the launch that accepted it, and echoAt is
+// when the echo landed, which is what bounds how late a capture can still be
+// linked to it.
+type acceptedDelivery struct {
+	rowID  string
+	text   string
+	images int
+	gen    uint64
+	echoAt time.Time
+}
+
 // claudeDeliveryRegistry maps a delivery uuid to the inbox row it names.
 //
 // Deliberately separate from sentFrames: that map is fundi's, keyed by FRAME id,
@@ -68,7 +94,11 @@ type claudeDeliveryRegistry struct {
 	// handleChildExit, endLaunch near the bottom), and retiring the successor's
 	// generation would silently stop every receipt for the resumed launch.
 	insts map[*child.Child]uint64
-	rows  map[claudeDeliveryKey]string
+	rows  map[claudeDeliveryKey]claudeDelivery
+	// accepted is the echo-ordered queue of deliveries accepted but not yet
+	// linked to a captured message, per child. A row leaves it when a capture
+	// links it (link), when its launch retires, or when the queue overflows.
+	accepted map[string][]acceptedDelivery
 }
 
 // beginLaunch starts a new launch generation for childID and retires every
@@ -86,7 +116,7 @@ func (r *claudeDeliveryRegistry) beginLaunch(childID string) uint64 {
 		r.gens = make(map[string]uint64)
 	}
 	if r.rows == nil {
-		r.rows = make(map[claudeDeliveryKey]string)
+		r.rows = make(map[claudeDeliveryKey]claudeDelivery)
 	}
 	r.gens[childID] = gen
 	for k := range r.rows {
@@ -94,11 +124,13 @@ func (r *claudeDeliveryRegistry) beginLaunch(childID string) uint64 {
 			delete(r.rows, k)
 		}
 	}
+	delete(r.accepted, childID)
 	return gen
 }
 
 // register records rowID as awaiting deliveryUUID's echo on childID's CURRENT
-// launch, and reports the generation it landed in.
+// launch, and reports the generation it landed in. text and images are what the
+// row carried, kept for the eventual link to its captured message.
 //
 // The generation is read and the entry inserted under one lock hold, so a
 // launch that begins mid-delivery retires this entry with the rest of its
@@ -106,7 +138,7 @@ func (r *claudeDeliveryRegistry) beginLaunch(childID string) uint64 {
 // child has no live launch (a daemon that never launched it, or one whose exit
 // already tore the generation down): nothing would ever acknowledge it, so the
 // caller writes no uuid.
-func (r *claudeDeliveryRegistry) register(childID, deliveryUUID, rowID string) (gen uint64, ok bool) {
+func (r *claudeDeliveryRegistry) register(childID, deliveryUUID, rowID, text string, images int) (gen uint64, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	gen, ok = r.gens[childID]
@@ -114,33 +146,47 @@ func (r *claudeDeliveryRegistry) register(childID, deliveryUUID, rowID string) (
 		return 0, false
 	}
 	if r.rows == nil {
-		r.rows = make(map[claudeDeliveryKey]string)
+		r.rows = make(map[claudeDeliveryKey]claudeDelivery)
 	}
-	r.rows[claudeDeliveryKey{childID: childID, gen: gen, uuid: deliveryUUID}] = rowID
+	r.rows[claudeDeliveryKey{childID: childID, gen: gen, uuid: deliveryUUID}] = claudeDelivery{rowID: rowID, text: text, images: images}
 	return gen, true
 }
 
-// take removes deliveryUUID's entry and reports the row it named.
+// take removes deliveryUUID's entry, reports the row it named, and appends the
+// accepted delivery to the child's link queue. dropped is the row an overflowing
+// queue pushed out ("" when nothing did), which the caller logs once it has
+// released the lock.
 //
-// Removal and the current-generation check are ONE critical section: a late
-// echo from a retired launch finds its entry already gone, and two echoes for
-// the same uuid (claude may replay, and the frame is at-least-once) yield one
-// receipt. A miss is the ordinary case, not an error — an unknown uuid, another
-// child's uuid, or a replay of a message from a previous launch all publish
-// nothing rather than guessing.
-func (r *claudeDeliveryRegistry) take(childID string, gen uint64, deliveryUUID string) (string, bool) {
+// Removal, the current-generation check and the queue append are ONE critical
+// section: a late echo from a retired launch finds its entry already gone, and
+// two echoes for the same uuid (claude may replay, and the frame is at-least-once)
+// yield one receipt and one queued delivery. A miss is the ordinary case, not an
+// error — an unknown uuid, another child's uuid, or a replay of a message from a
+// previous launch all publish nothing rather than guessing.
+func (r *claudeDeliveryRegistry) take(childID string, gen uint64, deliveryUUID string) (rowID, dropped string, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.gens[childID] != gen {
-		return "", false
+		return "", "", false
 	}
 	k := claudeDeliveryKey{childID: childID, gen: gen, uuid: deliveryUUID}
-	rowID, ok := r.rows[k]
+	d, ok := r.rows[k]
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	delete(r.rows, k)
-	return rowID, true
+	if r.accepted == nil {
+		r.accepted = make(map[string][]acceptedDelivery)
+	}
+	q := append(r.accepted[childID], acceptedDelivery{
+		rowID: d.rowID, text: d.text, images: d.images, gen: gen, echoAt: time.Now(),
+	})
+	if len(q) > claudeLinkQueueCap {
+		dropped = q[0].rowID
+		q = q[1:]
+	}
+	r.accepted[childID] = q
+	return d.rowID, dropped, true
 }
 
 // drop forgets ONE delivery whose write definitively failed. Its row stays
@@ -195,6 +241,7 @@ func (r *claudeDeliveryRegistry) endLaunch(childID string, ch *child.Child) {
 			delete(r.rows, k)
 		}
 	}
+	r.retireAccepted(childID, gen)
 }
 
 // abandonLaunch retires childID's current generation for a spawn that never
@@ -218,6 +265,26 @@ func (r *claudeDeliveryRegistry) abandonLaunch(childID string) {
 			delete(r.rows, k)
 		}
 	}
+	r.retireAccepted(childID, gen)
+}
+
+// retireAccepted drops childID's queued deliveries from gen, keeping any a later
+// launch already registered: a captured message is linked only to the launch
+// that accepted it, and a replayed user frame is indistinguishable from a fresh
+// acceptance.
+func (r *claudeDeliveryRegistry) retireAccepted(childID string, gen uint64) {
+	q := r.accepted[childID]
+	kept := q[:0]
+	for _, a := range q {
+		if a.gen != gen {
+			kept = append(kept, a)
+		}
+	}
+	if len(kept) == 0 {
+		delete(r.accepted, childID)
+		return
+	}
+	r.accepted[childID] = kept
 }
 
 // claudeReplayHook is the OnUserReplay callback for one claude launch.
@@ -232,9 +299,12 @@ func (r *claudeDeliveryRegistry) abandonLaunch(childID string) {
 // capture persists the row that gate is holding.
 func (c *Controller) claudeReplayHook(childID string, gen uint64) func(string) {
 	return func(deliveryUUID string) {
-		rowID, ok := c.claudeDeliveries.take(childID, gen, deliveryUUID)
+		rowID, dropped, ok := c.claudeDeliveries.take(childID, gen, deliveryUUID)
 		if !ok {
 			return
+		}
+		if dropped != "" {
+			slog.Warn("claude delivery never linked", "child", childID, "message_id", dropped, "reason", "accepted queue full")
 		}
 		c.publishEvent(childID, &rafikiv1.Event{
 			ChildId: childID,
@@ -294,7 +364,7 @@ func (c *Controller) claudeDeliveryFor(b inbox.Batch) (deliveryUUID string, gen 
 	if err != nil {
 		return "", 0, fmt.Errorf("inbox: mint a claude delivery uuid: %w", err)
 	}
-	gen, ok = c.claudeDeliveries.register(b.ChildID, u.String(), b.IDs[0])
+	gen, ok = c.claudeDeliveries.register(b.ChildID, u.String(), b.IDs[0], strings.Join(b.Frags, "\n"), len(b.Attachments))
 	if !ok {
 		// No live launch to acknowledge against. Deliver untracked rather than
 		// write a uuid nothing will ever resolve.

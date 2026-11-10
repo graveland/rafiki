@@ -101,6 +101,9 @@ func TestCaptureReportOnSuccess(t *testing.T) {
 	c.EqDeep(rows, got[0].Rows)
 	c.Eq(1, fs.sinceCalls, "MessagesSince calls")
 	c.True(fs.lastSince.Equal(time.Unix(0, 0)), "MessagesSince since = %v, want the turn intent's createdAt", fs.lastSince)
+	c.False(got[0].RequestReceived.IsZero(), "RequestReceived is unset")
+	c.True(time.Since(got[0].RequestReceived) < time.Minute,
+		"RequestReceived %v is not this request's arrival", got[0].RequestReceived)
 }
 
 func TestCaptureReportOnUpstreamErrorCarriesPromptAndTurnErr(t *testing.T) {
