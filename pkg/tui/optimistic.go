@@ -13,9 +13,12 @@ import (
 )
 
 // The optimistic-send ledger holds messages until the receiving harness accepts
-// custody. Claude's UUID receipt retires its row immediately, including images;
-// capture independently supplies the canonical transcript later. Fundi keeps
-// its persisted-user-row text acknowledgement. This overlay is deliberately
+// custody. A claude send leaves the pending overlay the moment its UUID
+// receipt arrives, but it does not leave the LEDGER: the receipt moves it into
+// the transcript as a provisional block at the position its captured message
+// will occupy, and a linked capture or the turn's end finishes it. Capture
+// independently supplies the canonical transcript later. Fundi keeps its
+// persisted-user-row text acknowledgement. This overlay is deliberately
 // separate from session.Session's canonical transcript state.
 
 // ackMode says which acknowledgement mechanism a child's runtime provides, and
@@ -79,6 +82,10 @@ type optimisticSend struct {
 	images []stagedAttachment
 	// inboxID is the row id SendResponse returned, "" until the RPC settles.
 	inboxID string
+	// accepted records that a receipt has taken custody: the row no longer
+	// belongs in the pending overlay, and a provisional block in the transcript
+	// stands for it until a linked capture or the turn's end finishes it.
+	accepted bool
 }
 
 // displayText is what a PENDING row draws: the message, or a count of its
@@ -171,21 +178,25 @@ func (l *optimisticLedger) add(child string, mode ackMode, text string, images [
 }
 
 // settle records the inbox id a Send RPC returned and applies any receipt that
-// arrived before it.
-func (l *optimisticLedger) settle(child string, attempt uint64, inboxID string) {
+// arrived before it. A receipt already buffered here is applied now, and the
+// send(s) it accepts are returned for the caller to put in the transcript.
+func (l *optimisticLedger) settle(child string, attempt uint64, inboxID string) []optimisticSend {
 	st := l.get(child)
 	if st == nil {
-		return
+		return nil
 	}
 	i := st.indexOf(attempt)
 	if i < 0 {
-		return
+		return nil
 	}
 	st.sends[i].inboxID = inboxID
+	var accepted []optimisticSend
 	if st.sends[i].mode == ackReceipt && inboxID != "" && st.consumeEarly(inboxID) {
-		st.sends = slices.Delete(st.sends, i, i+1)
+		st.sends[i].accepted = true
+		accepted = append(accepted, st.sends[i])
 	}
 	st.dropSettledEarly()
+	return accepted
 }
 
 // fail removes exactly the attempt whose RPC failed. Its siblings are other
@@ -203,24 +214,30 @@ func (l *optimisticLedger) fail(child string, attempt uint64) {
 
 // deliver applies a message_delivered receipt naming inboxID.
 //
+// A claude send it names becomes ACCEPTED, and is returned so the caller can
+// give it a place in the transcript: the receipt says the agent has the
+// message, and the canonical row that will describe it arrives separately. A
+// send that is already accepted is returned by nothing.
+//
 // It is idempotent by construction: the rail and focus subscriptions overlap on
 // the durable tier, so the same receipt arrives twice, and a replayed receipt
 // arrives again after a reconnect. The second application finds the row already
-// retired and does nothing.
-func (l *optimisticLedger) deliver(child, inboxID string) {
+// accepted and does nothing.
+func (l *optimisticLedger) deliver(child, inboxID string) []optimisticSend {
 	if inboxID == "" {
-		return
+		return nil
 	}
 	st := l.get(child)
 	if st == nil {
-		return
+		return nil
 	}
 	if i := st.indexOfInbox(inboxID); i >= 0 {
-		if st.sends[i].mode == ackReceipt {
-			st.sends = slices.Delete(st.sends, i, i+1)
+		if st.sends[i].mode == ackReceipt && !st.sends[i].accepted {
+			st.sends[i].accepted = true
 			st.dropSettledEarly()
+			return []optimisticSend{st.sends[i]}
 		}
-		return
+		return nil
 	}
 	// Nothing claims it yet. Buffer it only while an RPC is still outstanding
 	// for this child: otherwise the id belongs to a send that has already
@@ -228,6 +245,46 @@ func (l *optimisticLedger) deliver(child, inboxID string) {
 	if st.unresolved() {
 		st.buffer(inboxID, l.clock())
 	}
+	return nil
+}
+
+// retire removes one send by inbox id. This is where an accepted send ends when
+// its linked capture arrives: the transcript now has the canonical row in the
+// place the provisional block was holding.
+func (l *optimisticLedger) retire(child, inboxID string) {
+	st := l.get(child)
+	if st == nil || inboxID == "" {
+		return
+	}
+	if i := st.indexOfInbox(inboxID); i >= 0 {
+		st.sends = slices.Delete(st.sends, i, i+1)
+	}
+}
+
+// dropAccepted removes every accepted send of the child. A turn that ends with
+// an accepted send still standing is the one whose capture is not coming.
+func (l *optimisticLedger) dropAccepted(child string) {
+	st := l.get(child)
+	if st == nil {
+		return
+	}
+	st.sends = slices.DeleteFunc(st.sends, func(s optimisticSend) bool { return s.accepted })
+}
+
+// accepted lists the child's accepted sends, oldest first -- the sends whose
+// transcripts must still carry a provisional block.
+func (l *optimisticLedger) accepted(child string) []optimisticSend {
+	st := l.get(child)
+	if st == nil {
+		return nil
+	}
+	var out []optimisticSend
+	for _, s := range st.sends {
+		if s.accepted {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // expire drops buffered receipts past their TTL. The cockpit's existing 250ms
@@ -305,10 +362,15 @@ func (st *optimisticState) dropSettledEarly() {
 }
 
 // sig is the overlay's cache signature: what changed about the rows without
-// their rendered bytes.
+// their rendered bytes. Accepted sends are not rows here — they are in the
+// transcript — so their departure from this signature is what rebuilds a pane
+// whose block list also moved.
 func (st *optimisticState) sig() string {
 	var b strings.Builder
 	for _, s := range st.sends {
+		if s.accepted {
+			continue
+		}
 		b.WriteString(strconv.FormatUint(s.attempt, 10))
 		b.WriteString(strconv.Itoa(len(s.images)))
 		b.WriteByte(':')
@@ -371,10 +433,14 @@ func (c *Cockpit) overlayFor(child string) overlay {
 	}
 }
 
-// optimisticRows draws pending sends as grey ghosts, oldest first.
+// optimisticRows draws pending sends as grey ghosts, oldest first. An accepted
+// send is not drawn here: the transcript has it.
 func (c *Cockpit) optimisticRows(st *optimisticState, width int) []string {
 	var rows []string
 	for _, s := range st.sends {
+		if s.accepted {
+			continue
+		}
 		rows = append(rows, "")
 		// Sanitized: an optimistic row is drawn from text the
 		// user typed, which can carry an escape sequence like anything else
@@ -541,4 +607,31 @@ func (c *Cockpit) hasTextAck(child string) bool {
 // the child leaves the rail: nothing will ever acknowledge them.
 func (c *Cockpit) forgetOptimistic(child string) {
 	c.optimistic.forget(child)
+}
+
+// insertAccepted puts each newly accepted send into its child's transcript as
+// the provisional block whose position the linked capture will take. A child
+// with no session loaded keeps the ledger row alone: the next history fetch is
+// what inserts it.
+func (c *Cockpit) insertAccepted(child string, accepted []optimisticSend) {
+	if len(accepted) == 0 {
+		return
+	}
+	s := c.sessions[child]
+	if s == nil {
+		return
+	}
+	for _, send := range accepted {
+		s.InsertProvisional(send.inboxID, send.displayText())
+	}
+}
+
+// endAcceptedSends ends a child's accepted sends from the RAIL feed, which
+// never reaches Session.Apply: the ledger row goes, and so does the block
+// standing for it.
+func (c *Cockpit) endAcceptedSends(child string) {
+	c.optimistic.dropAccepted(child)
+	if s := c.sessions[child]; s != nil {
+		s.DropProvisional()
+	}
 }

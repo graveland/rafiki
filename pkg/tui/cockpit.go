@@ -1158,7 +1158,15 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// reach Session.Apply from this feed. A rail-delivered event one
 				// ordinal ahead of the focus stream's own copy would advance that
 				// session's cursor past an event it never applied.
-				c.optimistic.deliver(ev.GetChildId(), d.GetMessageId())
+				c.insertAccepted(ev.GetChildId(), c.optimistic.deliver(ev.GetChildId(), d.GetMessageId()))
+			}
+			if ev.GetTurnEnd() != nil && ev.GetChildId() != c.focusChild {
+				// The two feeds are not ordered against each other, so a rail
+				// turn_end can arrive BEFORE the focus stream's linked message
+				// for the focused child. Retiring its accepted send here would
+				// take the transcript block away from a capture still on its
+				// way, so the focused child's ending belongs to its own feed.
+				c.endAcceptedSends(ev.GetChildId())
 			}
 			c.applyRailEvent(ev)
 		}
@@ -1222,6 +1230,13 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fundi row is retired here: a fetched transcript cannot say whether a
 		// row it holds is this send's capture or one this client had not loaded.
 		c.ackPendingFromHistory(msg.childID, s.Blocks)
+		// A claude send the receipt accepted is still waiting for its captured
+		// row, and a rebuild dropped the provisional block that stood for it.
+		// Put it back where its linked capture will land — last, above any open
+		// placeholder — so the transcript keeps the send it was given.
+		for _, send := range c.optimistic.accepted(msg.childID) {
+			s.InsertProvisional(send.inboxID, send.displayText())
+		}
 		// The cursor takes the LOG watermark captured before the fetch -- never
 		// a conversation ordinal; ApplyHistory's doc has the full hazard. It is
 		// the resume point the subscription opens from. A session holding history
@@ -1267,8 +1282,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sendAcceptedMsg:
 		// The inbox id is the handle every delivery receipt names. Recording it
-		// also joins a receipt that beat this response (see optimisticLedger).
-		c.optimistic.settle(msg.childID, msg.attempt, msg.inboxID)
+		// also joins a receipt that beat this response (see optimisticLedger),
+		// and a joined receipt puts the send straight into the transcript.
+		c.insertAccepted(msg.childID, c.optimistic.settle(msg.childID, msg.attempt, msg.inboxID))
 		return c, nil
 
 	case modelsLoadedMsg:
@@ -1531,7 +1547,19 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	// viewed one. Applied here as well as there because the two overlap on the
 	// durable tier; the application is idempotent by inbox id.
 	if d := ev.GetMessageDelivered(); d != nil {
-		c.optimistic.deliver(id, d.GetMessageId())
+		c.insertAccepted(id, c.optimistic.deliver(id, d.GetMessageId()))
+	}
+	if um := ev.GetUserMessage(); um != nil {
+		// The daemon linked this capture to the send it carried. The send is in
+		// the transcript now — the session puts the canonical row in the place
+		// its provisional block held, below — so the ledger row is done.
+		c.optimistic.retire(id, um.GetMessageId())
+	}
+	if ev.GetTurnEnd() != nil {
+		// A send the receipt accepted and no capture ever linked ends here: the
+		// turn that answered it is over. The session drops its provisional
+		// block itself, through the same event.
+		c.optimistic.dropAccepted(id)
 	}
 
 	// ONLY the session the subscription is on may be advanced. The rail

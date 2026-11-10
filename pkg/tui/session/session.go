@@ -84,6 +84,15 @@ type Block struct {
 	// can decorate one kind differently from another. Empty when the wire
 	// named none — an older daemon, or a Claude Code reminder.
 	InjectedKind string
+	// MessageID is the inbox row id this user block delivered, when the daemon
+	// linked a captured message to the send that carried it. It identifies; it
+	// never changes how the block is drawn. Empty otherwise.
+	MessageID string
+	// Provisional marks a user block standing in for an accepted send whose
+	// captured message has not arrived. It holds that send's PLACE in the
+	// transcript — above the reply already streaming — until the linked
+	// message replaces it or the turn ends.
+	Provisional bool
 }
 
 // Fingerprint returns a cheap content hash for cache-invalidation.
@@ -121,6 +130,9 @@ func (b Block) Fingerprint() string {
 	if b.Final {
 		sb.WriteString("final")
 	}
+	if b.Provisional {
+		sb.WriteString("provisional")
+	}
 	return sb.String()
 }
 
@@ -155,6 +167,13 @@ func LiveFingerprint(blocks []Block, finalized int) string {
 // calls resolve AFTER the message announcing them arrives, which is why
 // Final alone is not enough.
 func (b Block) Settled() bool {
+	// A provisional block is the one thing here that is KNOWN to change: its
+	// linked capture replaces it, or the turn ending drops it. Caching it below
+	// the watermark would freeze the send's "delivered" decoration on screen
+	// with nothing left to invalidate it.
+	if b.Provisional {
+		return false
+	}
 	if b.Kind != KindAssistant {
 		return true
 	}
@@ -188,6 +207,80 @@ type Session struct {
 // New returns an empty session for one child.
 func New(childID string) *Session {
 	return &Session{ChildID: childID}
+}
+
+// InsertProvisional puts an accepted send into the transcript at the position
+// its captured message will occupy.
+//
+// The send is already on the wire — its receipt says so — and the reply it
+// prompted may already be streaming. Appending the canonical message when
+// capture finally supplies it would land it BELOW that reply; this block holds
+// the place instead, and applyUserMessage replaces it in place.
+//
+// It does nothing when any block already carries the same message id: the
+// linked capture may have arrived first, and a second block would be a
+// duplicate row. An empty id names no send and can never be linked, so it
+// inserts nothing.
+func (s *Session) InsertProvisional(messageID, text string) {
+	if messageID == "" {
+		return
+	}
+	if slices.ContainsFunc(s.Blocks, func(b Block) bool { return b.MessageID == messageID }) {
+		return
+	}
+	s.insertBeforePlaceholder([]Block{{
+		Kind:        KindUser,
+		At:          time.Now(),
+		Text:        text,
+		MessageID:   messageID,
+		Provisional: true,
+		Final:       true,
+	}})
+	s.recomputeFinalized()
+}
+
+// DropProvisional removes every provisional block, returning their message ids.
+//
+// This is what ends a send whose captured message never came: the turn that
+// answered it is over, so the block it stood in for will not arrive in this
+// transcript.
+func (s *Session) DropProvisional() []string {
+	var ids []string
+	first := -1
+	kept := s.Blocks[:0]
+	for i, b := range s.Blocks {
+		if !b.Provisional {
+			kept = append(kept, b)
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		ids = append(ids, b.MessageID)
+	}
+	if first < 0 {
+		return nil
+	}
+	s.Blocks = kept
+	// A turn end settles everything, watermark included, so a block removed
+	// from below it shifts the blocks above down. Reopen the watermark there
+	// rather than leaving it naming a block that has moved.
+	if first < s.Finalized {
+		s.Finalized = first
+		s.recomputeFinalized()
+	}
+	return ids
+}
+
+// provisionalIndex returns the index of the provisional block standing for
+// messageID, or -1.
+func (s *Session) provisionalIndex(messageID string) int {
+	if messageID == "" {
+		return -1
+	}
+	return slices.IndexFunc(s.Blocks, func(b Block) bool {
+		return b.Provisional && b.MessageID == messageID
+	})
 }
 
 // recomputeFinalized advances the watermark to the first block that can still
@@ -274,6 +367,7 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 		s.Blocks = append(s.Blocks, Block{Kind: KindAssistant, At: time.Now()})
 	case *rafikiv1.Event_TurnEnd:
 		s.applyTurnEnd(p.TurnEnd)
+		s.DropProvisional()
 	case *rafikiv1.Event_ContentBlockDelta:
 		s.applyDelta(p.ContentBlockDelta)
 	case *rafikiv1.Event_ToolExecutionStart:
@@ -478,6 +572,31 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 
 	text := TextFromContent(um.GetContent())
 	images := imagesFrom(um.GetContent())
+	if i := s.provisionalIndex(um.GetMessageId()); i >= 0 {
+		// The daemon linked this message to the send that carried it, so its
+		// provisional block already holds the position: replace it THERE. The
+		// placeholder logic below exists to find that position from scratch,
+		// and running it here would append a second row below the streaming
+		// reply. A linked message with no user content of its own — a
+		// results-only capture — removes the block and leaves only what was
+		// injected alongside it.
+		at := s.Blocks[i].At
+		if text == "" && len(images) == 0 {
+			s.Blocks = slices.Delete(s.Blocks, i, i+1)
+		} else {
+			s.Blocks[i] = Block{
+				Kind:      KindUser,
+				At:        at,
+				Text:      text,
+				Images:    images,
+				MessageID: um.GetMessageId(),
+				Final:     true,
+			}
+		}
+		s.Blocks = slices.Insert(s.Blocks, i, added...)
+		s.recomputeFinalized()
+		return
+	}
 	if text == "" && len(images) == 0 && (results > 0 || len(um.GetInjected()) > 0) {
 		// A results-only message appends no KindUser block, but it just answered
 		// tool calls -- which is exactly what unsticks the watermark. An
@@ -490,11 +609,12 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 		return
 	}
 	added = append(added, Block{
-		Kind:   KindUser,
-		At:     time.Now(),
-		Text:   text,
-		Images: images,
-		Final:  true,
+		Kind:      KindUser,
+		At:        time.Now(),
+		Text:      text,
+		Images:    images,
+		MessageID: um.GetMessageId(),
+		Final:     true,
 	})
 	s.insertBeforePlaceholder(added)
 	s.recomputeFinalized()

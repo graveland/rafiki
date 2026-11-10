@@ -21,13 +21,16 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
 // ── Claude delivery acknowledgement ─────────────────────────────────────────
 //
 // A claude send is acknowledged by a durable message_delivered receipt naming
 // the inbox row id SendResponse returned — never by matching the captured text.
-// The receipt immediately removes the overlay, independently of capture.
+// The receipt takes the row out of the pending overlay and puts it into the
+// transcript as a provisional block, at the position the captured message will
+// occupy; a linked capture or the turn's end finishes it.
 //
 // Everything here drives the real Update path: the Send RPC against an HTTP
 // server, the stream channels' message types, and the cockpit's own tick. The
@@ -96,7 +99,8 @@ func deliveredFor(child, id string, ord int32) *rafikiv1.Event {
 }
 
 // capturedFor is a stored user row as the focus stream delivers it: a
-// timestamp (the stored node's created_at) and the message's content.
+// timestamp (the stored node's created_at) and the message's content. It
+// carries no message id — the daemon could not link it to a send.
 func capturedFor(child, text string, ord int32, at time.Time) *rafikiv1.Event {
 	return &rafikiv1.Event{ChildId: child, Ordinal: &ord, Ts: timestamppb.New(at),
 		Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
@@ -104,6 +108,14 @@ func capturedFor(child, text string, ord int32, at time.Time) *rafikiv1.Event {
 				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
 			}},
 		}}}
+}
+
+// linkedFor is capturedFor with the inbox row id the daemon linked it to: the
+// stored node, and the send it delivered.
+func linkedFor(child, messageID, text string, ord int32, at time.Time) *rafikiv1.Event {
+	ev := capturedFor(child, text, ord, at)
+	ev.GetUserMessage().MessageId = messageID
+	return ev
 }
 
 // sendNow issues a send through the real RPC and applies whatever the command
@@ -131,6 +143,33 @@ func sends(c *Cockpit, child string) []optimisticSend {
 	return nil
 }
 
+// pending is the rows still drawn in child's pending overlay.
+func pending(c *Cockpit, child string) []optimisticSend {
+	var out []optimisticSend
+	for _, s := range sends(c, child) {
+		if !s.accepted {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// provisionalBlocks is child's transcript blocks standing in for accepted
+// sends.
+func provisionalBlocks(c *Cockpit, child string) []session.Block {
+	s := c.sessions[child]
+	if s == nil {
+		return nil
+	}
+	var out []session.Block
+	for _, b := range s.Blocks {
+		if b.Provisional {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 func TestClaudeDeliveryReceiptBeforeTheResponseIsJoined(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
@@ -148,8 +187,11 @@ func TestClaudeDeliveryReceiptBeforeTheResponseIsJoined(t *testing.T) {
 			c.Update(m)
 		}
 	}
-	ck.Len(sends(c, "c_1"), 0, "the joined receipt immediately retires the row")
+	ck.Len(sends(c, "c_1"), 1, "the accepted row waits for its capture")
+	ck.True(sends(c, "c_1")[0].accepted, "the joined receipt accepts the row")
 	ck.Len(c.optimistic.get("c_1").early, 0, "the buffer is cleared once the RPC settles")
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
+	ck.Eq("row-1", provisionalBlocks(c, "c_1")[0].MessageID, "the block names the inbox row")
 }
 
 func TestClaudeDeliveryReversedResponsesForIdenticalSends(t *testing.T) {
@@ -174,11 +216,12 @@ func TestClaudeDeliveryReversedResponsesForIdenticalSends(t *testing.T) {
 	ck.Require().NotEq(firstID, secondID, "two sends get two ids")
 
 	feedFocus(c, deliveredFor("c_1", secondID, 1))
-	ck.Require().Len(sends(c, "c_1"), 1, "only the acknowledged attempt retires")
-	ck.Eq(firstID, sends(c, "c_1")[0].inboxID, "the first attempt remains")
+	ck.Require().Len(pending(c, "c_1"), 1, "only the acknowledged attempt leaves the overlay")
+	ck.Eq(firstID, pending(c, "c_1")[0].inboxID, "the first attempt remains")
 
 	feedFocus(c, deliveredFor("c_1", firstID, 2))
-	ck.Len(sends(c, "c_1"), 0, "each receipt retires its own attempt")
+	ck.Len(pending(c, "c_1"), 0, "each receipt takes its own attempt out of the overlay")
+	ck.Len(sends(c, "c_1"), 2, "both accepted rows wait for their captures")
 }
 
 func TestClaudeDeliveryEarlyBufferExpiresAndEvicts(t *testing.T) {
@@ -246,17 +289,18 @@ func TestClaudeDeliveryRailReceiptAdvancesWithoutMovingACursor(t *testing.T) {
 	c.railCh <- deliveredFor("c_1", "row-1", 7)
 	c.Update(<-streamMsg(t, func() tea.Msg { return waitForRailEvent(c.railCh)() }))
 
-	ck.Len(sends(c, "c_1"), 0, "the receipt removes the overlay without capture")
+	ck.Len(pending(c, "c_1"), 0, "the receipt takes the row out of the overlay")
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
 	ck.Eq(before, c.sessions["c_1"].Cursor, "the rail feed must never advance a session cursor")
 	ck.Eq(int32(7), railCursor(c, "c_1"), "the rail's own cursor does advance")
 
 	// The focus stream's own copy arrives afterwards. It advances the session
-	// cursor and changes nothing else — no transcript block, no duplicate row.
+	// cursor and adds no second block for a send already in the transcript.
 	blocks := len(c.sessions["c_1"].Blocks)
 	feedFocus(c, deliveredFor("c_1", "row-1", 7))
 	ck.Eq(int32(7), c.sessions["c_1"].Cursor, "the focus feed owns the session cursor")
-	ck.Eq(blocks, len(c.sessions["c_1"].Blocks), "a receipt is not transcript content")
-	ck.Len(sends(c, "c_1"), 0, "the duplicate delivery is idempotent")
+	ck.Eq(blocks, len(c.sessions["c_1"].Blocks), "a duplicate receipt is not transcript content")
+	ck.Len(sends(c, "c_1"), 1, "the duplicate delivery is idempotent")
 }
 
 func TestClaudeDeliveryFocusChannelDrivesTheWholeLifecycle(t *testing.T) {
@@ -268,11 +312,13 @@ func TestClaudeDeliveryFocusChannelDrivesTheWholeLifecycle(t *testing.T) {
 
 	c.focusCh <- deliveredFor("c_1", "row-1", 1)
 	c.Update(<-streamMsg(t, func() tea.Msg { return waitForEvent(c.focusCh)() }))
-	ck.Require().Len(sends(c, "c_1"), 0, "receipt removes it before any capture")
+	ck.Require().Len(pending(c, "c_1"), 0, "the receipt takes the row out of the overlay before any capture")
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
 
-	c.focusCh <- capturedFor("c_1", "hello", 2, time.Unix(100, 0))
+	c.focusCh <- linkedFor("c_1", "row-1", "hello", 2, time.Unix(100, 0))
 	c.Update(<-streamMsg(t, func() tea.Msg { return waitForEvent(c.focusCh)() }))
-	ck.Len(sends(c, "c_1"), 0, "capture does not resurrect the overlay")
+	ck.Len(sends(c, "c_1"), 0, "the linked capture finishes the send")
+	ck.Len(provisionalBlocks(c, "c_1"), 0, "the canonical row took the block's place")
 	ck.Eq(1, strings.Count(ansi.Strip(c.View().Content), "hello"), "the real row is the one left on screen")
 }
 
@@ -288,7 +334,7 @@ func TestClaudeDeliveryFocusSwitchKeepsCursorsApart(t *testing.T) {
 
 	feedRail(c, deliveredFor("c_1", "row-1", 9))
 
-	ck.Len(sends(c, "c_1"), 0, "the receipt removes the overlay without capture")
+	ck.Len(pending(c, "c_1"), 0, "the receipt takes the row out of the overlay")
 	ck.Eq(c1Before, c.sessions["c_1"].Cursor, "c_1's cursor is untouched by the rail")
 	ck.Eq(c2Before, c.sessions["c_2"].Cursor, "the focused child's cursor is untouched by c_1's receipt")
 }
@@ -337,7 +383,7 @@ func TestClaudeDeliveryOverlaySurvivesFocusAndEviction(t *testing.T) {
 	ck.Require().Len(sends(c, "c_1"), 1, "an evicted pane must not lose the send")
 
 	feedRail(c, deliveredFor("c_1", "row-1", 1))
-	ck.Len(sends(c, "c_1"), 0, "the receipt removes the overlay without capture")
+	ck.Len(pending(c, "c_1"), 0, "the receipt takes the row out of the overlay")
 
 	c.forgetChild("c_1")
 	ck.Len(sends(c, "c_1"), 0, "a child that leaves the rail takes its overlay with it")
@@ -372,7 +418,7 @@ func TestClaudeDeliverySlashAndAbortLeaveNoOverlay(t *testing.T) {
 	ck.Len(sends(c, "c_1"), 0, "neither a slash command nor an abort leaves a ghost")
 }
 
-func TestClaudeDeliveryEchoRetiresTextAndAttachmentsWithoutCapture(t *testing.T) {
+func TestClaudeDeliveryEchoMovesTheSendIntoTheTranscript(t *testing.T) {
 	for _, images := range [][]stagedAttachment{nil, {{mediaType: "image/png", data: []byte("png")}}} {
 		for _, text := range []string{"hello there", ""} {
 			if text == "" && len(images) == 0 {
@@ -382,14 +428,20 @@ func TestClaudeDeliveryEchoRetiresTextAndAttachmentsWithoutCapture(t *testing.T)
 				ck := assert.NewCollecting(t)
 				c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
 				sendNow(t, c, "c_1", text, images...)
-				ck.Require().Len(sends(c, "c_1"), 1, "pending before echo")
+				sent := pending(c, "c_1")
+				ck.Require().Len(sent, 1, "pending before echo")
 				_ = c.View() // warm the pane cache before the receipt
 				feedFocus(c, deliveredFor("c_1", "row-1", 1))
-				ck.Len(sends(c, "c_1"), 0, "echo hands custody to Claude, regardless of content")
+				ck.Len(pending(c, "c_1"), 0, "the echo takes the row out of the pending overlay")
 				ck.Eq("", c.overlayFor("c_1").sig, "receipt invalidates the cached overlay")
-				if text != "" {
-					ck.NotStrContains(ansi.Strip(c.View().Content), text, "no bright or grey row remains before capture")
-				}
+				ck.NotStrContains(c.View().Content,
+					styleGhost.Width(c.convWidth()).Render("▌ "+sent[0].displayText()),
+					"the grey pending row is gone")
+				blocks := provisionalBlocks(c, "c_1")
+				ck.Require().Len(blocks, 1, "the send is in the transcript, independently of capture")
+				ck.Eq(session.KindUser, blocks[0].Kind, "the send is drawn as the user's own message")
+				ck.Eq(sent[0].displayText(), blocks[0].Text, "the block carries the send, text or attachments")
+				ck.StrContains(ansi.Strip(c.View().Content), "✓ delivered", "the block says it is delivered")
 			})
 		}
 	}
@@ -400,9 +452,16 @@ func TestClaudeDeliveryCaptureBeforeEchoDoesNotRetirePending(t *testing.T) {
 	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
 	sendNow(t, c, "c_1", "hello")
 	feedFocus(c, capturedFor("c_1", "hello", 1, time.Unix(100, 0)))
-	ck.Len(sends(c, "c_1"), 1, "capture cannot substitute for an acceptance receipt")
+	ck.Require().Len(sends(c, "c_1"), 1, "capture cannot substitute for an acceptance receipt")
+	ck.False(sends(c, "c_1")[0].accepted, "an unlinked capture accepts nothing")
+
 	feedFocus(c, deliveredFor("c_1", "row-1", 2))
-	ck.Len(sends(c, "c_1"), 0, "echo retires even when capture came first")
+	ck.Len(pending(c, "c_1"), 0, "echo takes the row out of the overlay even when capture came first")
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the unlinked capture left the send standing")
+
+	feedFocus(c, turnEndFor("c_1", 3))
+	ck.Len(sends(c, "c_1"), 0, "the turn's end ends the send no capture linked")
+	ck.Len(provisionalBlocks(c, "c_1"), 0, "and the block that stood for it")
 	ck.Eq(1, strings.Count(ansi.Strip(c.View().Content), "hello"), "only the canonical transcript remains")
 }
 
@@ -457,5 +516,91 @@ func TestClaudeDeliveryPendingTextIsSanitized(t *testing.T) {
 	ck.NotStrContains(c.View().Content, "\x1b[2J", "pending text cannot inject terminal escapes")
 	ck.StrContains(ansi.Strip(c.View().Content), "red text", "safe text is visible")
 	feedFocus(c, deliveredFor("c_1", "row-1", 1))
-	ck.NotStrContains(ansi.Strip(c.View().Content), "red text", "echo removes the row")
+	ck.NotStrContains(c.View().Content, "\x1b[2J", "the transcript block cannot inject terminal escapes either")
+	ck.StrContains(ansi.Strip(c.View().Content), "red text ✓ delivered",
+		"the accepted send is drawn as the user's own message")
+}
+
+// A capture the daemon linked to its send finishes that send: the canonical row
+// takes the place the provisional block already held, so nothing moves and no
+// second row appears.
+func TestClaudeDeliveryLinkedCaptureRetiresTheAcceptedSend(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
+	ck.StrContains(ansi.Strip(c.View().Content), "✓ delivered", "the provisional block is on screen")
+
+	feedFocus(c, linkedFor("c_1", "row-1", "hello", 2, time.Unix(100, 0)))
+
+	ck.Len(sends(c, "c_1"), 0, "the linked capture finishes the send")
+	blocks := c.sessions["c_1"].Blocks
+	ck.Require().Len(blocks, 1, "one row, in the place the send already held")
+	ck.Eq(session.KindUser, blocks[0].Kind, "kind")
+	ck.False(blocks[0].Provisional, "the canonical row is not provisional")
+	ck.Eq("row-1", blocks[0].MessageID, "the row names the send it delivered")
+	ck.Eq("hello", blocks[0].Text, "text")
+	ck.Eq(1, strings.Count(ansi.Strip(c.View().Content), "hello"), "the transcript holds the message once")
+	ck.NotStrContains(ansi.Strip(c.View().Content), "✓ delivered", "the canonical row carries no decoration")
+}
+
+// The rail and focus feeds are not ordered against each other, so a rail
+// turn_end can land before the focus stream's linked message for the child the
+// focus stream owns. Ending its accepted send there would take a block away
+// from a capture still on its way.
+func TestClaudeDeliveryRailTurnEndSparesTheFocusedChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(sends(c, "c_1"), 1, "accepted")
+
+	feedRail(c, turnEndFor("c_1", 9))
+
+	ck.Len(sends(c, "c_1"), 1, "the focused child's ending belongs to its own feed")
+	ck.Len(provisionalBlocks(c, "c_1"), 1, "the block still stands for the send")
+}
+
+// Nothing else will ever end an unfocused child's accepted send: its session is
+// not the one the focus stream advances, so the rail's turn_end is the one that
+// finishes it.
+func TestClaudeDeliveryRailTurnEndDropsAnUnfocusedChildsAcceptedSend(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+	c.hop("c_2")
+	c.focusChild = "c_2"
+
+	sendNow(t, c, "c_1", "hello")
+	feedRail(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(sends(c, "c_1"), 1, "accepted")
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
+
+	feedRail(c, turnEndFor("c_1", 2))
+
+	ck.Len(sends(c, "c_1"), 0, "an unfocused child's ending ends its accepted send")
+	ck.Len(provisionalBlocks(c, "c_1"), 0, "and the block that stood for it")
+}
+
+// A history fetch rebuilds the transcript from the database, which holds no
+// provisional block. The ledger is what remembers the send the receipt accepted,
+// so the rebuilt transcript gets it back in the place its capture will land.
+func TestClaudeDeliveryHistoryRefetchReinsertsAcceptedSends(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
+
+	c.hop("c_2")
+	c.sessions["c_1"] = session.New("c_1")
+	c.Update(historyMsg{childID: "c_1", after: 2, events: nil})
+
+	blocks := provisionalBlocks(c, "c_1")
+	ck.Require().Len(blocks, 1, "a rebuilt transcript gets the accepted send back")
+	ck.Eq("hello", blocks[0].Text, "text")
+	ck.Eq("row-1", blocks[0].MessageID, "the block names the inbox row")
 }

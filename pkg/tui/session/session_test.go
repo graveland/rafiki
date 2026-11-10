@@ -901,3 +901,113 @@ func TestSystemMessageKindRidesTheBlock(t *testing.T) {
 	c.Require().Len(s.Blocks, 1, "blocks")
 	c.Eq("daemon-restart", s.Blocks[0].InjectedKind, "the injected kind is kept")
 }
+
+// ── provisional user blocks ───────────────────────────────────────────────
+
+// linkedTextEvent is a stored user message the daemon linked to the send it
+// delivered.
+func linkedTextEvent(childID, messageID, text string) *rafikiv1.Event {
+	ev := textEvent(childID, text)
+	ev.GetUserMessage().MessageId = messageID
+	return ev
+}
+
+// A claude send is acknowledged before its captured row exists. The provisional
+// block has to hold the place ABOVE the reply already streaming: appending the
+// canonical message when capture supplies it lands the prompt below the answer
+// and moves the whole transcript under the reader.
+func TestProvisionalUserBlockHoldsItsPlaceAboveTheReply(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.InsertProvisional("row-1", "hello")
+	c.Require().Len(s.Blocks, 1, "the accepted send takes its own place")
+	c.True(s.Blocks[0].Provisional, "and says it is provisional")
+	c.Eq("row-1", s.Blocks[0].MessageID, "the block names the inbox row")
+	c.Eq(0, s.Finalized, "the provisional block is in the live region, where its replacement can reach it")
+
+	s.Apply(deltaEvent("c_1", "answering"))
+	c.Require().Len(s.Blocks, 2, "the reply streams below the send")
+
+	s.Apply(linkedTextEvent("c_1", "row-1", "hello"))
+
+	c.Require().Len(s.Blocks, 2, "the canonical row replaced the provisional block instead of joining it")
+	c.Eq(session.KindUser, s.Blocks[0].Kind, "block[0] kind")
+	c.Eq("hello", s.Blocks[0].Text, "block[0] text")
+	c.False(s.Blocks[0].Provisional, "the canonical row is not provisional")
+	c.Eq("row-1", s.Blocks[0].MessageID, "block[0] message id")
+	c.Eq(session.KindAssistant, s.Blocks[1].Kind, "block[1] kind")
+	c.Eq("answering", s.Blocks[1].Text, "the reply is still below the prompt")
+}
+
+// The injected blocks ride with the message, so they take the provisional
+// block's index and the user's own words land after them.
+func TestLinkedMessageBringsItsInjectedBlocksAhead(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.InsertProvisional("row-1", "hello")
+	s.Apply(deltaEvent("c_1", "answering"))
+
+	ev := injectedUserMessage("c_1", []string{"A"}, []string{"hello"})
+	ev.GetUserMessage().MessageId = "row-1"
+	s.Apply(ev)
+
+	c.Require().Len(s.Blocks, 3, "blocks")
+	c.Eq(session.KindInjected, s.Blocks[0].Kind, "block[0] kind")
+	c.Eq("A", s.Blocks[0].Text, "block[0] text")
+	c.Eq(session.KindUser, s.Blocks[1].Kind, "block[1] kind")
+	c.Eq("hello", s.Blocks[1].Text, "block[1] text")
+	c.False(s.Blocks[1].Provisional, "block[1] is canonical")
+	c.Eq(session.KindAssistant, s.Blocks[2].Kind, "block[2] kind")
+}
+
+// Nothing linked the send to a captured row, and the turn it asked for is over,
+// so the block stands for a message this transcript will never receive.
+func TestTurnEndDropsAnUnlinkedProvisional(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.InsertProvisional("row-1", "hello")
+	s.Apply(deltaEvent("c_1", "answering"))
+	s.Apply(turnEndEvent("c_1"))
+
+	c.Require().Len(s.Blocks, 1, "blocks")
+	c.Eq(session.KindAssistant, s.Blocks[0].Kind, "only the reply remains")
+	c.Eq(len(s.Blocks), s.Finalized, "the watermark cannot stand past the shorter transcript")
+}
+
+// A message the daemon could not link is somebody else's row: it adds a block
+// and leaves the send standing.
+func TestUnlinkedUserMessageDoesNotTouchAProvisional(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.InsertProvisional("row-1", "hello")
+	s.Apply(textEvent("c_1", "somebody else"))
+
+	c.Require().Len(s.Blocks, 2, "blocks")
+	c.True(s.Blocks[0].Provisional, "the send still holds its place")
+	c.Eq("hello", s.Blocks[0].Text, "block[0] text")
+	c.Eq("somebody else", s.Blocks[1].Text, "block[1] text")
+}
+
+// The receipt and the linked capture race, and each side may arrive first: the
+// id already in the transcript is what says the send is done.
+func TestInsertProvisionalIsIdempotent(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	s := session.New("c_1")
+	s.Apply(linkedTextEvent("c_1", "row-1", "hello"))
+	s.InsertProvisional("row-1", "hello")
+	c.Len(s.Blocks, 1, "a send already captured is not inserted a second time")
+	c.False(s.Blocks[0].Provisional, "and the canonical row does not become provisional")
+
+	twice := session.New("c_1")
+	twice.InsertProvisional("row-1", "hello")
+	twice.InsertProvisional("row-1", "hello")
+	c.Len(twice.Blocks, 1, "a standing provisional block is not duplicated")
+
+	twice.InsertProvisional("", "no send")
+	c.Len(twice.Blocks, 1, "an empty id names no send and inserts nothing")
+}

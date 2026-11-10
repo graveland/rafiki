@@ -505,6 +505,13 @@ func (r *renderer) renderBlock(b session.Block) string {
 				}
 			}
 		}
+		if b.Provisional && len(rows) > 0 {
+			// The send has left the pending overlay for the transcript, but
+			// nothing stored has replaced it yet. One muted note on the first
+			// row says which of the two rows on screen is which; the text
+			// itself is drawn exactly like any other user message.
+			rows[0] += styleMeta.Render(" ✓ delivered")
+		}
 		return "\n" + strings.Join(rows, "\n")
 	case session.KindSystem:
 		return styleMeta.Render("⚙  ") + styleMeta.Render(sanitizeControlChars(b.Text))
