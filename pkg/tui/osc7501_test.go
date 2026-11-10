@@ -285,7 +285,6 @@ func TestOSC7501QuitEmitsNothing(t *testing.T) {
 
 	ck.NotEmpty(e.Sync(d), "work")
 	ck.Eq("", e.Sync(d), "a repeated sync is silent")
-	ck.Eq("", e.Sync(nil), "an empty display set emits nothing, not a clear")
 }
 
 // TestOSC7501CleanupClearsEveryLiveRecord pins the exit teardown: every id with
@@ -451,14 +450,36 @@ func TestOSC7501RemovedChildPrunesHeldDone(t *testing.T) {
 	d, ok := e.pendingDelay()
 	ck.True(ok && d > 0, "the held done has a positive remaining delay")
 
-	// The child is removed from the rail: it is gone from the display set.
-	ck.Eq("", e.Sync(nil), "a vanished child emits nothing")
+	// The child is removed from the rail: it is gone from the display set. Its
+	// last record was working, so the terminal is told to drop it.
+	ck.Eq(osc7501(osc7501Clear, testChildID), e.Sync(nil), "a vanished child clears its record")
 
 	_, held := e.pendingDelay()
 	ck.False(held, "the held done is pruned, so no settle tick is armed")
 	ck.Eq(0, len(e.pending), "pending is empty after the prune")
 	ck.Eq(0, len(e.lastEmitted), "lastEmitted is pruned too")
 	ck.Eq(0, len(e.worked), "worked is pruned too")
+}
+
+// TestOSC7501VanishedChildClearsItsRecord pins that a child dropped from the
+// display set without ever being seen exited (a close, or a reseed that no
+// longer reports it) does not leave its working/blocked/error/done record on
+// the terminal tab, and that nothing is re-sent once it has been cleared.
+func TestOSC7501VanishedChildClearsItsRecord(t *testing.T) {
+	for _, st := range []protocol.DisplayState{protocol.DisplayWorking, protocol.DisplayFailed} {
+		ck := assert.NewCollecting(t)
+		e := supportedEmitter()
+		ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(st, "", "x")}), string(st))
+		ck.Eq(osc7501(osc7501Clear, testChildID), e.Sync(nil), "vanished %s child is cleared", st)
+		ck.Eq("", e.Sync(nil), "the clear is sent once")
+		ck.Eq("", e.cleanup(), "nothing left for the exit cleanup")
+	}
+
+	e := supportedEmitter()
+	ck := assert.NewCollecting(t)
+	ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayWorking, "", "")}), "work")
+	ck.NotEmpty(e.Sync([]rail.TopLevelDisplay{dsp(protocol.DisplayExited, "", "")}), "exit clears")
+	ck.Eq("", e.Sync(nil), "an already-cleared child that vanishes emits nothing")
 }
 
 // TestOSC7501CockpitSettleTickEmitsHeldDone exercises the real cockpit path:

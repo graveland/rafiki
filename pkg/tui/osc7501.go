@@ -287,7 +287,7 @@ func (e *osc7501Emitter) Sync(displays []rail.TopLevelDisplay) string {
 			out.WriteString(s)
 		}
 	}
-	e.prune(displays)
+	out.WriteString(e.prune(displays))
 	return out.String()
 }
 
@@ -329,19 +329,34 @@ func (e *osc7501Emitter) cleanup() string {
 	return out.String()
 }
 
-// prune drops bookkeeping for ids no longer in the display set. A child removed
-// from the rail while its done is held would otherwise leave a stale pending
-// entry whose expired deadline pendingDelay clamps to 0, re-arming a zero-delay
-// settle tick on every sync -- an unbounded tick/Update/re-render loop.
-// lastState, lastEmitted and worked are pruned the same way, so a vanished child
-// leaves nothing behind its record.
-func (e *osc7501Emitter) prune(displays []rail.TopLevelDisplay) {
+// prune drops bookkeeping for ids no longer in the display set and returns a
+// clear record for each one whose last emitted record is not already a clear.
+// A child can leave the rail without its exit ever being seen (a close, or a
+// reseed that no longer reports it); the terminal keeps its last record until
+// told otherwise, and once the id is forgotten here nothing would ever clear a
+// working record, leaving the tab stuck. A child removed from the rail while its
+// done is held would also leave a stale pending entry whose expired deadline
+// pendingDelay clamps to 0, re-arming a zero-delay settle tick on every sync --
+// an unbounded tick/Update/re-render loop. lastState, lastEmitted and worked are
+// pruned the same way, so a vanished child leaves nothing behind its record.
+func (e *osc7501Emitter) prune(displays []rail.TopLevelDisplay) string {
 	if len(e.lastState) == 0 && len(e.lastEmitted) == 0 && len(e.pending) == 0 && len(e.worked) == 0 {
-		return
+		return ""
 	}
 	present := make(map[string]bool, len(displays))
 	for _, d := range displays {
 		present[d.ChildID] = true
+	}
+	var gone []string
+	for id, st := range e.lastState {
+		if !present[id] && st != osc7501Clear {
+			gone = append(gone, id)
+		}
+	}
+	slices.Sort(gone)
+	var out strings.Builder
+	for _, id := range gone {
+		out.WriteString(osc7501(osc7501Clear, id))
 	}
 	for id := range e.lastEmitted {
 		if !present[id] {
@@ -363,6 +378,7 @@ func (e *osc7501Emitter) prune(displays []rail.TopLevelDisplay) {
 			delete(e.worked, id)
 		}
 	}
+	return out.String()
 }
 
 // record maps one display to a record, or "" when it maps to nothing or maps
