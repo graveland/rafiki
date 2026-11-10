@@ -273,6 +273,23 @@ split, daemon-injected text lives in `UserMessage.injected` and `content` is
 empty, so a reader that looks only at `content` goes silently blind. The one
 split is `eventconv.UserMessageFrom`.
 
+Claude Code's mid-turn relay is recognised for DISPLAY only and is not a
+marking. A message the user sent while a tool was running, which Claude Code
+appended to the last text of that tool's result (or returned as a top-level
+text block of its own), gets its wrapper stripped by
+`claudecode.Harness.SplitRelays` (`pkg/harness/claudecode/relay.go`): a
+top-level block becomes the user's own text, and a relay found inside a tool
+result is moved out of it into `content` as a text block carrying that result's
+index. The stored node keeps it verbatim, in the block it arrived in, and so
+does every request path: `pkg/llm` replays the
+relayed message exactly as stored, which is why
+`TestDeliveryCorpusKeepsTheMidTurnWrapperAndBothIdenticalSends` (`pkg/capture`)
+still sees the wrapper. `eventconv.UserMessageFrom` is `SplitRelays`' only
+caller; a near miss is left untouched rather than guessed at. Pinned by
+`TestSplitRelaysRecordedToolResult`, `TestSplitRelaysTakesTheLastOccurrence`
+and `TestSplitRelaysNearMissesUntouched` (`pkg/harness/claudecode`) and
+`TestUserMessageFromSplitsARelayedMidTurnMessage` (`pkg/eventconv`).
+
 ## claude: the request names its parent
 
 A replaying client sends its whole history every turn. Within the conversation

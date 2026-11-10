@@ -182,19 +182,52 @@ is content, not an empty conversation, and is drawn as such.
 
 ## Unacknowledged sends
 
-A pending send is a grey-ground `▌` ghost: rafiki still owns delivery. For a
-**claude** child, the durable `message_delivered` receipt naming the inbox id
-returned by `Send` immediately removes that overlay, including image-bearing
-sends. Claude Code's UUID echo is the custody handoff; capture is not required.
-The canonical transcript arrives independently, so there may be a temporary
-gap between acceptance and capture rather than a stuck bright duplicate.
+A send to a **claude** child moves through three states, and never through a
+bright duplicate:
+
+- **pending** — a grey-ground `▌` ghost in the overlay above the transcript
+  (`Cockpit.optimistic`, `pkg/tui/optimistic.go`): rafiki still owns delivery.
+  The ledger keeps the local attempt id, the original text and images, and the
+  inbox id `Send` returns.
+- **accepted** — the durable `message_delivered` receipt naming that inbox id
+  removes the ghost and puts the same text INTO the transcript as a provisional
+  user block with a muted `✓ delivered` note (`Session.InsertProvisional`). It
+  draws in the ordinary user style and holds the position its captured message
+  will occupy, so the reply already streaming stays BELOW the prompt instead of
+  the prompt jumping under it. Claude Code's UUID echo is the custody handoff;
+  capture is not required.
+- **permanent** — a capture the daemon linked (`UserMessage.message_id`, see
+  `docs/reference/control-protocol.md`) replaces that block IN PLACE
+  (`applyUserMessage`'s provisional branch) and the ledger row retires.
+
+A send the receipt accepted, whose linked capture never arrives, is dropped at
+its turn's end: the turn that answered it is over, so the row it stood for is
+not coming. Both event feeds carry `turn_end`, and the rule differs per feed
+because they are unordered — the focus feed's ends the accepted send, while the
+rail feed's ends one only for a child that is NOT the focused one, since the
+focused child's linked capture must not be raced out of its block. Switching
+away and back re-inserts every accepted send: a `GetHistory` read never carries
+`message_id`, so the fetched transcript cannot hold the block and the ledger
+rebuilds it, to be replaced in place when the capture lands.
 
 Text and history never acknowledge a claude send. A receipt that beats its
-Send response is buffered until the inbox id can be joined to its local
-attempt. Receipts also ride the rail feed, so unfocused sends retire too.
-A **fundi** child still retires its ghost when its persisted user row arrives,
-using the existing text matcher. A send made before the rail knows the child's
-kind uses the receipt path conservatively and can linger without a receipt.
+`Send` response is buffered until the inbox id can be joined to its local
+attempt. Receipts also ride the rail feed, so an unfocused child's send is
+accepted too. A send made before the rail knows the child's kind uses the
+receipt path conservatively and can linger without a receipt.
+
+A **fundi** child is unchanged: its ghost retires when its persisted user row
+arrives, matched on text. Pinned by
+`TestClaudeDeliveryEchoMovesTheSendIntoTheTranscript`,
+`TestClaudeDeliveryLinkedCaptureRetiresTheAcceptedSend`,
+`TestClaudeDeliveryHistoryRefetchReinsertsAcceptedSends`,
+`TestClaudeDeliveryRailTurnEndDropsAnUnfocusedChildsAcceptedSend`,
+`TestClaudeDeliveryRailTurnEndSparesTheFocusedChild`,
+`TestClaudeDeliveryFundiKeepsItsTextAcknowledgement` and
+`TestClaudeDeliveryReceiptDoesNotAcknowledgeFundi` (`pkg/tui`), and by
+`TestProvisionalUserBlockHoldsItsPlaceAboveTheReply`,
+`TestTurnEndDropsAnUnlinkedProvisional` and
+`TestLinkedCaptureAfterASettleReopensTheWatermark` (`pkg/tui/session`).
 
 ## Activity and attention
 

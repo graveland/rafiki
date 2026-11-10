@@ -409,6 +409,51 @@ recorded frames; and, for what the capture stores, by
 `TestDeliveryCorpusKeepsTheMidTurnWrapperAndBothIdenticalSends`
 (`pkg/capture`, corpus `testdata/claude-capture-delivery`).
 
+#### `UserMessage.message_id`: the captured half of the same link
+
+`UserMessage.message_id` (field 3) is the INBOX ROW id the message delivered —
+the value `SendResponse.message_id` returned for the send. It is set only when
+the daemon linked a claude child's MAIN-THREAD capture to the send it carried:
+`Controller.linkCapturedUserMessages` (`cmd/rafikid/claude_link.go`) runs on the
+events a capture report is about to publish, before the publish loop, and sets
+the id on those events. Nothing is written to the stored row.
+
+- **Empty everywhere else.** A `GetHistory` read never carries one, a fundi
+  child never carries one (its acknowledgement is its persisted row's text, and
+  it has no echo to link against), a subagent thread never carries one, and a
+  capture the link cannot place carries none: a unit that does not match is
+  left unlinked rather than named by a guess.
+- **Identifies, never decorates.** The field names the row; nothing about how
+  the message is drawn depends on it, and a client that ignores it shows the
+  same message. A client uses it to recognise the canonical row as the one that
+  replaced its own optimistic copy of that send (`docs/guide/cockpit.md`
+  "Unacknowledged sends").
+- **Eligibility is timing, then order, then text.** A delivery is eligible only
+  if its echo was accepted by the time the request reached the proxy, within
+  `claudeLinkSkew` (1s: the echo and the arrival are stamped by two different
+  goroutines, and a capture is written after its request is forwarded, so an
+  unbounded queue would name a later turn's row). When the two sides' counts
+  agree the pairing is POSITIONAL — position IS the answer, and a pair whose
+  text differs is linked anyway with a WARN ("claude delivery linked by order;
+  text differs"), because a prompt Claude Code rewrote must not cost its row its
+  name. When they differ, units are matched greedily in order against the first
+  eligible delivery each loosely matches (whitespace collapsed, containment in
+  either direction, image count alone for an image-only send); a delivery
+  skipped on the way to a later match is dropped as never linked, and a unit
+  that matches nothing stays unlinked and logs its text. Injected blocks are
+  never part of a unit. The queue a delivery waits in is per child, capped at
+  64 (the OLDEST dropped and logged, because an overflow means captures are not
+  being reported) and retired with the LAUNCH that accepted it.
+
+Pinned by `TestClaudeLinkSkewWindow`, `TestClaudeLinkByOrderWhenTextDiffers`,
+`TestClaudeLinkGreedyByTextWhenCountsDiffer`,
+`TestClaudeLinkUnmatchedUnitStaysUnlinked`, `TestClaudeLinkImageOnlySend`,
+`TestClaudeLinkInjectedNeverAUnit`, `TestClaudeLinkQueueCap`,
+`TestClaudeLinkRetiredWithTheLaunch` and
+`TestCaptureReportedLinksOnlyTheMainThread` (`cmd/rafikid`), and end to end by
+`TestClaudeDeliveryCaptureCarriesTheMessageID` (`test/integration`), which reads
+the same message back through `GetHistory` and finds `message_id` empty there.
+
 #### Who produces the deltas
 
 `content_block_delta` is the only ephemeral type, and it reaches subscribers at
@@ -493,6 +538,27 @@ through ONE function, `eventconv.UserMessageFrom` (`pkg/eventconv/messages.go`),
 so a claude child's live `UserMessage` (`cmd/rafikid/capture_sink.go`), the
 `GetHistory` read (`pkg/connectapi/server.go`) and a fundi child's live event
 (`Emitter.publishUserRow`, `pkg/fundi/native.go`) cannot disagree.
+
+**A mid-turn relay is the user's own text, split out of the block that carried
+it.** Claude Code appends a message the user sent while a turn was running to
+the next content it returns — as the last text of a tool result's content, or as
+a top-level text block of its own — wrapped in `<system-reminder>` around a
+fixed opening ("The user sent a new message while you were working:") and a
+fixed trailer. That is a message a human typed, so
+`claudecode.Harness.SplitRelays` (`pkg/harness/claudecode/relay.go`) strips the
+wrapper: a top-level block becomes the user's own text, and a relay found inside
+a tool result is taken out of that result and `eventconv.UserMessageFrom` adds
+it to the `UserMessage`'s `content` as a text block carrying the TOOL RESULT's
+`index` (a result that held nothing but the relay loses its last content entry).
+It is DISPLAY only — the stored node and every request path keep the relay
+verbatim, in the block Claude Code put it in — and it is the one exception to
+"never moved, never role-promoted" (`CLAUDE.md`): `eventconv.UserMessageFrom`
+is its only caller. A near miss (prose ahead of the relay in a top-level text, a
+relay that is not the last block, a nested reminder) is left untouched rather
+than guessed at. Pinned by `TestSplitRelaysRecordedToolResult`,
+`TestSplitRelaysTopLevelBlock` and `TestSplitRelaysNearMissesUntouched`
+(`pkg/harness/claudecode`) and
+`TestUserMessageFromSplitsARelayedMidTurnMessage` (`pkg/eventconv`).
 
 **Claude children meet it too.** Their `AssistantMessage`/`UserMessage` events
 are published from the stored rows, not from the claude stream: the proxy
@@ -2194,7 +2260,10 @@ default (10); `RecallBackfill` has no default instant.
 `Send` writes a row in `conversations.agent_inbox` before it reaches the
 child, and `message_id` names that row: a prompt, a steer or an abort is
 persisted before it is delivered, and retired only once the agent confirms it
-entered a turn.
+entered a turn. On a `claude` child that row id is also what a captured
+`UserMessage.message_id` names once the send's capture is published (see
+"`UserMessage.message_id`: the captured half of the same link"); everywhere
+else the field is empty.
 
 **`PROMPT` and `STEER` mean different things per child kind — and on a `claude`
 child, nothing.** A `STEER` is what lets a client say "send" without knowing
@@ -2369,7 +2438,7 @@ Every event payload is classified into a tier:
 
 | Event | Tier | Purpose |
 |---|---|---|
-| `UserMessage` | durable | User prompt message (`ts` is its row's `created_at` — see "Message events"); attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way. Text nobody typed — the harness's reminders and the daemon's own injected messages — rides `injected` instead of `content`, split out with its wrapper removed and carrying `injected_kind` (see "Injected text is split out"); every block in both lists keeps its `index` in the stored message |
+| `UserMessage` | durable | User prompt message (`ts` is its row's `created_at` — see "Message events"); attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory`. A `tool_result` rides a `UserMessage` too, and a tool's own images (a `read` of a PNG) ride inside its `ToolResultBlock` the same way. Text nobody typed — the harness's reminders and the daemon's own injected messages — rides `injected` instead of `content`, split out with its wrapper removed and carrying `injected_kind` (see "Injected text is split out"); every block in both lists keeps its `index` in the stored message. `message_id` names the inbox row the message delivered, set only on a claude main-thread capture the daemon linked and empty on every history read (see "`UserMessage.message_id`") |
 | `SystemMessage` | durable | A persisted `system`-role row: a message the child's harness injected (a heartbeat nudge, an environment update, a file-changed notice), not something the user typed. Same `ts` rule as the other message events. Clients may render it distinctly and hide it by default; it is real history and is never omitted from `GetHistory` |
 | `AssistantMessage` | durable | Assistant response message |
 | `TurnStart` | durable | Start of an agent turn, emitted once per turn by both model-backed kinds: a fundi turn opens at `Emitter.AgentStart` (`pkg/fundi/emit.go`) before its first request, so `model` is unset there; a claude turn opens at prompt delivery — its prompt echo (`OutboundEchoNative`, `pkg/child/provider_claude_state.go`), before the first model request reaches the proxy — so `model` is unset there too, and the first assistant frame (which names one) does not reopen it. A second prompt/steer inside the same turn publishes no second `TurnStart`. `turn_id` is unset on both, since no producer mints one and `TurnEnd` carries none either |
