@@ -554,11 +554,13 @@ It is DISPLAY only — the stored node and every request path keep the relay
 verbatim, in the block Claude Code put it in — and it is the one exception to
 "never moved, never role-promoted" (`CLAUDE.md`): `eventconv.UserMessageFrom`
 is its only caller. A near miss (prose ahead of the relay in a top-level text, a
-relay that is not the last block, a nested reminder) is left untouched rather
+relay that is not the last content entry of its tool result, a nested reminder) is left untouched rather
 than guessed at. Pinned by `TestSplitRelaysRecordedToolResult`,
 `TestSplitRelaysTopLevelBlock` and `TestSplitRelaysNearMissesUntouched`
 (`pkg/harness/claudecode`) and
-`TestUserMessageFromSplitsARelayedMidTurnMessage` (`pkg/eventconv`).
+`TestUserMessageFromSplitsARelayedMidTurnMessage` (`pkg/eventconv`), and the
+seam itself — the recorded relay split into the unit the linker names — by
+`TestClaudeLinkWorksOnTheRecordedMidTurnRelay` (`cmd/rafikid`).
 
 **Claude children meet it too.** Their `AssistantMessage`/`UserMessage` events
 are published from the stored rows, not from the claude stream: the proxy

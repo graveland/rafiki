@@ -205,7 +205,12 @@ its turn's end: the turn that answered it is over, so the row it stood for is
 not coming. Both event feeds carry `turn_end`, and the rule differs per feed
 because they are unordered — the focus feed's ends the accepted send, while the
 rail feed's ends one only for a child that is NOT the focused one, since the
-focused child's linked capture must not be raced out of its block. Switching
+focused child's linked capture must not be raced out of its block. A child's
+EXIT is that same ending under the same per-feed rule — `Session.applyPayload`'s
+`Event_ChildExited` case drops the provisional blocks, and the rail's
+`endAcceptedSends` covers an unfocused child — because a claude child publishes
+`turn_end` only from its result frame and a mid-turn kill or crash publishes
+none, which would otherwise leave a `✓ delivered` row with no exit at all. Switching
 away and back re-inserts every accepted send: a `GetHistory` read never carries
 `message_id`, so the fetched transcript cannot hold the block and the ledger
 rebuilds it, to be replaced in place when the capture lands.
@@ -223,6 +228,9 @@ arrives, matched on text. Pinned by
 `TestClaudeDeliveryHistoryRefetchReinsertsAcceptedSends`,
 `TestClaudeDeliveryRailTurnEndDropsAnUnfocusedChildsAcceptedSend`,
 `TestClaudeDeliveryRailTurnEndSparesTheFocusedChild`,
+`TestClaudeDeliveryChildExitEndsTheFocusedChildsAcceptedSend`,
+`TestClaudeDeliveryRailChildExitDropsAnUnfocusedChildsAcceptedSend`,
+`TestClaudeDeliveryLedgerDeliverIsIdempotent`,
 `TestClaudeDeliveryFundiKeepsItsTextAcknowledgement` and
 `TestClaudeDeliveryReceiptDoesNotAcknowledgeFundi` (`pkg/tui`), and by
 `TestProvisionalUserBlockHoldsItsPlaceAboveTheReply`,
