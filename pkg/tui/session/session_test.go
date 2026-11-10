@@ -1105,3 +1105,27 @@ func TestUserMessageAfterASettleReopensTheWatermark(t *testing.T) {
 	c.Eq("a steer", s.Blocks[0].Text, "the message lands ahead of the placeholder")
 	c.Eq(0, s.Finalized, "the watermark is reopened where the message was inserted")
 }
+
+// And the same again on the branch that appends no KindUser block: an
+// injected-only message (or a results-only one) still inserts its blocks ahead
+// of the settled placeholder, so its caller must leave the reopened watermark
+// where it is. Recomputing there walks the watermark forward past the rows that
+// just moved, and renderer.Lines — which only drops its cache when the
+// watermark moves BACK — then serves the frame it cached before the insert:
+// the injected line missing, the placeholder still where it was.
+func TestInjectedOnlyMessageAfterASettleReopensTheWatermark(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.Apply(turnStartEvent("c_1"))
+	s.Apply(childExitedEvent("c_1"))
+	c.Require().Eq(len(s.Blocks), s.Finalized, "a child exit settles everything, the placeholder included")
+
+	s.Apply(injectedUserMessage("c_1", []string{"A"}, nil))
+
+	c.Require().Len(s.Blocks, 2, "blocks")
+	c.Eq(session.KindInjected, s.Blocks[0].Kind, "the injected block lands ahead of the placeholder")
+	c.Eq("A", s.Blocks[0].Text, "block[0] text")
+	c.Eq(session.KindAssistant, s.Blocks[1].Kind, "block[1] is the placeholder")
+	c.Eq(0, s.Finalized, "the watermark is reopened at the insert index and stays there for the renderer")
+}
