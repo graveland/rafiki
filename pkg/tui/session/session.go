@@ -202,11 +202,29 @@ type Session struct {
 	HasCursor bool
 	// Status is the last agent_status state seen.
 	Status string
+	// linked is every inbox row id the daemon has linked to its send in this
+	// transcript. It outlives the block that carried the id, because a captured
+	// message can be linked and yet contribute no block of its own — a
+	// results-only or injected-only row is dropped rather than drawn — and a
+	// receipt that joins afterwards must not insert a block for it again.
+	linked map[string]struct{}
 }
 
 // New returns an empty session for one child.
 func New(childID string) *Session {
 	return &Session{ChildID: childID}
+}
+
+// markLinked records that messageID's send has been linked to a captured
+// message.
+func (s *Session) markLinked(messageID string) {
+	if messageID == "" {
+		return
+	}
+	if s.linked == nil {
+		s.linked = map[string]struct{}{}
+	}
+	s.linked[messageID] = struct{}{}
 }
 
 // InsertProvisional puts an accepted send into the transcript at the position
@@ -217,12 +235,15 @@ func New(childID string) *Session {
 // capture finally supplies it would land it BELOW that reply; this block holds
 // the place instead, and applyUserMessage replaces it in place.
 //
-// It does nothing when any block already carries the same message id: the
-// linked capture may have arrived first, and a second block would be a
-// duplicate row. An empty id names no send and can never be linked, so it
-// inserts nothing.
+// It does nothing when any block already carries the same message id, or when
+// this session has already linked that id: the linked capture may have arrived
+// first, and a second block would be a duplicate row. An empty id names no send
+// and can never be linked, so it inserts nothing.
 func (s *Session) InsertProvisional(messageID, text string) {
 	if messageID == "" {
+		return
+	}
+	if _, linked := s.linked[messageID]; linked {
 		return
 	}
 	if slices.ContainsFunc(s.Blocks, func(b Block) bool { return b.MessageID == messageID }) {
@@ -309,17 +330,22 @@ func (s *Session) settleAll() {
 	s.Finalized = len(s.Blocks)
 }
 
-// Apply folds one event into the session.
+// Apply folds one event into the session, reporting whether it did.
 //
 // It ignores events for other children rather than trusting the caller to
 // route: Phase A shipped its one Critical because every test double at every
 // layer ignored the child id, and this is the layer where the check is free.
-func (s *Session) Apply(ev *rafikiv1.Event) {
+//
+// The report is for state that must not move ahead of the transcript the
+// session holds — the cockpit retires an optimistic send on a linked message
+// and on a turn's end, and neither may happen for an event this session never
+// folded in.
+func (s *Session) Apply(ev *rafikiv1.Event) bool {
 	if ev == nil {
-		return
+		return false
 	}
 	if id := ev.GetChildId(); id != "" && s.ChildID != "" && id != s.ChildID {
-		return
+		return false
 	}
 	// An ordinal we have already folded in is a duplicate, and duplicates are
 	// routine rather than exceptional: the rail and focus subscriptions overlap
@@ -329,13 +355,14 @@ func (s *Session) Apply(ev *rafikiv1.Event) {
 	if ev.Ordinal != nil {
 		ord := ev.GetOrdinal()
 		if s.HasCursor && ord <= s.Cursor {
-			return
+			return false
 		}
 		s.Cursor = ord
 		s.HasCursor = true
 	}
 
 	s.applyPayload(ev)
+	return true
 }
 
 // ApplyHistory folds in one event from GetHistory WITHOUT touching the cursor.
@@ -572,6 +599,11 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 
 	text := TextFromContent(um.GetContent())
 	images := imagesFrom(um.GetContent())
+	// Recorded before the branches below, because a linked capture is linked
+	// whether or not it leaves a block behind: one that carries no user content
+	// of its own is dropped, and its id is all that stops a receipt joining
+	// afterwards from inserting a block nothing will ever replace.
+	s.markLinked(um.GetMessageId())
 	if i := s.provisionalIndex(um.GetMessageId()); i >= 0 {
 		// The daemon linked this message to the send that carried it, so its
 		// provisional block already holds the position: replace it THERE. The
@@ -580,6 +612,21 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 		// reply. A linked message with no user content of its own — a
 		// results-only capture — removes the block and leaves only what was
 		// injected alongside it.
+		//
+		// The watermark is reopened HERE, before either mutation, and STAYS
+		// there: an error or a child exit settles every block, this one
+		// included (`settleAll`), so the replace and the injected insert both
+		// land below it. Left alone it would name rows that have moved, and
+		// renderer.Lines only drops its cache when the watermark moves BACK
+		// — recomputing it forward again in the same call would walk it past
+		// the rows that just changed and leave the cached provisional row, and
+		// every cached row above the insert, on screen. The next event's
+		// recomputeFinalized takes it forward again, and until then the tail is
+		// simply re-rendered.
+		reopened := i < s.Finalized
+		if reopened {
+			s.Finalized = i
+		}
 		at := s.Blocks[i].At
 		if text == "" && len(images) == 0 {
 			s.Blocks = slices.Delete(s.Blocks, i, i+1)
@@ -594,7 +641,9 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 			}
 		}
 		s.Blocks = slices.Insert(s.Blocks, i, added...)
-		s.recomputeFinalized()
+		if !reopened {
+			s.recomputeFinalized()
+		}
 		return
 	}
 	if text == "" && len(images) == 0 && (results > 0 || len(um.GetInjected()) > 0) {

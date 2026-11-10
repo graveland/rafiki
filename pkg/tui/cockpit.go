@@ -1549,19 +1549,6 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	if d := ev.GetMessageDelivered(); d != nil {
 		c.insertAccepted(id, c.optimistic.deliver(id, d.GetMessageId()))
 	}
-	if um := ev.GetUserMessage(); um != nil {
-		// The daemon linked this capture to the send it carried. The send is in
-		// the transcript now — the session puts the canonical row in the place
-		// its provisional block held, below — so the ledger row is done.
-		c.optimistic.retire(id, um.GetMessageId())
-	}
-	if ev.GetTurnEnd() != nil {
-		// A send the receipt accepted and no capture ever linked ends here: the
-		// turn that answered it is over. The session drops its provisional
-		// block itself, through the same event.
-		c.optimistic.dropAccepted(id)
-	}
-
 	// ONLY the session the subscription is on may be advanced. The rail
 	// subscription covers every child in the subject but carries none of their
 	// content, so applying an event to a retained session nothing is streaming
@@ -1580,7 +1567,28 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	}
 	before := len(s.Blocks)
 	usersBefore := countUserBlocks(s.Blocks)
-	s.Apply(ev)
+	applied := s.Apply(ev)
+	// The ledger follows the SESSION, and only for the child the subscription
+	// owns -- the same condition the rail feed uses. A focus-channel event for a
+	// child this stream no longer owns is a stale frame from the previous hop,
+	// and an event the session refused as an ordinal duplicate has already had
+	// its say: moving the ledger on either would take the id away from a
+	// transcript that still draws the provisional block, leaving it with no way
+	// out.
+	if applied {
+		if um := ev.GetUserMessage(); um != nil {
+			// The daemon linked this capture to the send it carried. The session
+			// has put the canonical row in the place the provisional block held,
+			// so the ledger row is done.
+			c.optimistic.retire(id, um.GetMessageId())
+		}
+		if ev.GetTurnEnd() != nil {
+			// A send the receipt accepted and no capture ever linked ends here:
+			// the turn that answered it is over, and the session has dropped its
+			// provisional block through the same event.
+			c.optimistic.dropAccepted(id)
+		}
+	}
 	if s.HasCursor {
 		// Delivery to the displayed session IS reading.
 		c.rail.MarkRead(id, s.Cursor)

@@ -1011,3 +1011,46 @@ func TestInsertProvisionalIsIdempotent(t *testing.T) {
 	twice.InsertProvisional("", "no send")
 	c.Len(twice.Blocks, 1, "an empty id names no send and inserts nothing")
 }
+
+// An error settles every block, the provisional one included. The linked
+// capture then replaces a block BELOW the watermark and inserts the injected
+// ones below it, so the watermark has to come back — left alone it names rows
+// that have moved, and renderer.Lines only drops its cache when it moves back.
+func TestLinkedCaptureAfterASettleReopensTheWatermark(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.InsertProvisional("row-1", "hello")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_Error{
+		Error: &rafikiv1.ErrorEvent{Code: "upstream", Message: "died"}}})
+	c.Require().Eq(len(s.Blocks), s.Finalized, "an error settles everything, the provisional block included")
+
+	ev := injectedUserMessage("c_1", []string{"A"}, []string{"hello"})
+	ev.GetUserMessage().MessageId = "row-1"
+	s.Apply(ev)
+
+	c.Require().Len(s.Blocks, 3, "blocks")
+	c.Eq(session.KindInjected, s.Blocks[0].Kind, "block[0] kind")
+	c.Eq(session.KindUser, s.Blocks[1].Kind, "block[1] kind")
+	c.False(s.Blocks[1].Provisional, "block[1] is canonical")
+	c.Eq(0, s.Finalized, "the watermark is reopened at the row that changed, and stays there for the renderer")
+}
+
+// A linked capture can carry nothing of the user's own — a results-only or
+// injected-only row — and then the provisional block is dropped and the id is
+// the only trace left. A receipt joining afterwards must not put it back.
+func TestLinkedCaptureWithoutContentIsRemembered(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.InsertProvisional("row-1", "hello")
+	ev := injectedUserMessage("c_1", []string{"A"}, nil)
+	ev.GetUserMessage().MessageId = "row-1"
+	s.Apply(ev)
+
+	c.Require().Len(s.Blocks, 1, "the linked capture left only what it injected")
+	c.Eq(session.KindInjected, s.Blocks[0].Kind, "block[0] kind")
+
+	s.InsertProvisional("row-1", "hello")
+	c.Len(s.Blocks, 1, "a send already linked is never inserted again")
+}

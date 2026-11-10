@@ -604,3 +604,108 @@ func TestClaudeDeliveryHistoryRefetchReinsertsAcceptedSends(t *testing.T) {
 	ck.Eq("hello", blocks[0].Text, "text")
 	ck.Eq("row-1", blocks[0].MessageID, "the block names the inbox row")
 }
+
+// errorFor is the durable error the daemon logs, which settles every block.
+func errorFor(child string, ord int32) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: child, Ordinal: &ord,
+		Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
+			Code: "upstream", Message: "died"}}}
+}
+
+// linkedInjectedOnlyFor is a captured row the daemon linked to its send whose
+// only content is what the harness injected alongside it: the user's own words
+// are nowhere, so the row leaves no block of its own behind.
+func linkedInjectedOnlyFor(child, messageID, injected string, ord int32) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: child, Ordinal: &ord,
+		Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
+			Injected: []*rafikiv1.ContentBlock{{
+				Index: 0,
+				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: injected}},
+			}},
+			MessageId: messageID,
+		}}}
+}
+
+// An error settles every block, so the linked capture replaces and inserts
+// BELOW the renderer's cached prefix. Unless the session reopens the watermark
+// there, the pane is served the row it cached before the capture arrived.
+func TestClaudeDeliveryLinkedCaptureAfterASettleRebuildsTheStalePane(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().StrContains(ansi.Strip(c.View().Content), "✓ delivered", "the provisional block is on screen")
+
+	feedFocus(c, errorFor("c_1", 2))
+	ck.Require().StrContains(ansi.Strip(c.View().Content), "Error: died", "the settled transcript is cached above the send")
+
+	feedFocus(c, linkedFor("c_1", "row-1", "hello", 3, time.Unix(100, 0)))
+
+	ck.NotStrContains(ansi.Strip(c.View().Content), "✓ delivered", "the cached provisional row is not what is drawn")
+	ck.Eq(1, strings.Count(ansi.Strip(c.View().Content), "hello"), "the canonical row took its place")
+}
+
+// A focus-channel event for a child the subscription no longer owns is a stale
+// frame from the previous hop. Moving the ledger on it takes the id away from a
+// block the session still draws, and nothing is left to end that block.
+func TestClaudeDeliveryStaleFocusTurnEndSparesAPreviousChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
+
+	c.hop("c_2")
+	c.focusChild = "c_2"
+	feedFocus(c, turnEndFor("c_1", 2))
+
+	ck.Len(sends(c, "c_1"), 1, "a stale frame must not take the send away")
+	ck.Len(provisionalBlocks(c, "c_1"), 1, "the block still stands for it")
+}
+
+// A linked capture carrying nothing of the user's own leaves the session with
+// only the id. A receipt that joins afterwards must not put a block back that
+// nothing will ever replace.
+func TestClaudeDeliveryLateReceiptAfterALinkedCaptureInsertsNothing(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	cmd := c.sendTo("c_1", rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	feedFocus(c, linkedInjectedOnlyFor("c_1", "row-1", "A", 2))
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 0, "the linked row left no block of the user's own")
+
+	for _, m := range runCmdDeep(t, cmd) {
+		if m != nil {
+			c.Update(m)
+		}
+	}
+
+	ck.Len(sends(c, "c_1"), 1, "the buffered receipt still accepts the send")
+	ck.Len(provisionalBlocks(c, "c_1"), 0, "a send already linked is never inserted again")
+}
+
+// The ledger follows the SESSION's decision, not the event's arrival. A focus
+// event the session refuses as an ordinal it has already folded in has had its
+// say once; moving the ledger on it takes the id away from a block the session
+// still draws, and the two never agree again.
+func TestClaudeDeliveryFocusEventTheSessionRefusedDoesNotMoveTheLedger(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, deliveredFor("c_1", "row-1", 1))
+	ck.Require().Len(provisionalBlocks(c, "c_1"), 1, "the send holds its place in the transcript")
+
+	// The session's cursor is past both of these, as it is once a replay
+	// overlaps the point the subscription resumed from.
+	c.sessions["c_1"].Cursor, c.sessions["c_1"].HasCursor = 9, true
+	feedFocus(c, linkedFor("c_1", "row-1", "hello", 9, time.Unix(100, 0)))
+	ck.Len(sends(c, "c_1"), 1, "the send is not retired by an event the session refused")
+
+	feedFocus(c, turnEndFor("c_1", 9))
+	ck.Len(sends(c, "c_1"), 1, "nor dropped by a turn end it refused")
+	ck.Len(provisionalBlocks(c, "c_1"), 1, "the block the ledger still stands for is still there")
+}
