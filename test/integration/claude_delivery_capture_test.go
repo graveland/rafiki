@@ -26,6 +26,12 @@ package integration_test
 //  4. the next request carries message 2 WRAPPED in Claude Code's mid-turn
 //     prose, and its capture publishes that wrapped row — which is exactly why
 //     the acknowledgement names a row id instead of matching text.
+//
+// The two link tests below take the same harness one step further: the row the
+// receipt named is applied to the captured USER MESSAGE, so a client can tell
+// which published row its own send produced. History is the other half of that
+// contract — the stored row is drawn identically with or without the link, so
+// every history read carries an EMPTY message_id.
 
 import (
 	"context"
@@ -38,6 +44,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
@@ -87,6 +95,18 @@ func (u *captureUpstream) body(n int) string {
 		return ""
 	}
 	return string(u.bodies[n])
+}
+
+// expectRequest blocks until the upstream receives request n, and fails with
+// the configured base_url named when the daemon never forwards one.
+func (u *captureUpstream) expectRequest(t *testing.T, n int) {
+	t.Helper()
+	select {
+	case got := <-u.arrived:
+		assert.NewAborting(t).Eq(n, got, "the request the upstream sees")
+	case <-time.After(60 * time.Second):
+		t.Fatalf("the daemon never forwarded the child's request %d to the configured base_url; providers.toml pointed at %s", n, u.srv.URL)
+	}
 }
 
 func (u *captureUpstream) serve(w http.ResponseWriter, r *http.Request) {
@@ -311,4 +331,113 @@ func TestClaudeDeliveryCapturePublishesOnlyAfterTheReceipt(t *testing.T) {
 	c.Less(wrapped.GetOrdinal(), secondReceipt.GetOrdinal(),
 		"the mid-turn receipt (ordinal %d) must precede its captured row (ordinal %d)",
 		secondReceipt.GetOrdinal(), wrapped.GetOrdinal())
+}
+
+// ─── the link ────────────────────────────────────────────────────────────────
+
+// TestClaudeDeliveryCaptureCarriesTheMessageID pins both halves of the link: the
+// captured user message a send produced names the inbox row Send returned, and
+// the same message read back from history names nothing — the link describes the
+// live publish, never the stored row.
+func TestClaudeDeliveryCaptureCarriesTheMessageID(t *testing.T) {
+	t.Parallel()
+	c := assert.NewCollecting(t)
+
+	up := newCaptureUpstream(t)
+	firstGate := up.gate(0)
+
+	d, _ := claudeDeliveryDaemon(t,
+		"RAFIKI_PROVIDERS="+writeAnthropicBaseProviders(t, up.srv.URL),
+		"FAKE_CLAUDE_TURNS=1",
+		"FAKE_CLAUDE_REQUEST_MODEL=claude-haiku-4-5",
+	)
+	client := d.control(t)
+	childID := spawnClaudeChild(t, d)
+	stream := d.openEvents(t, childEventsSubject(childID), nil, eventWatermark(t, client, childID))
+
+	const prompt = "name the inbox row this prompt delivered"
+	rowID := sendPromptRow(t, client, childID, prompt)
+	receipt := stream.waitEvent(t, deliveredEvent(childID, rowID), 60*time.Second)
+	c.Eq(rowID, receipt.GetMessageDelivered().GetMessageId(), "the receipt names the row Send returned")
+
+	up.expectRequest(t, 0)
+	c.EqDeep(0, len(childUserTexts(stream, childID)), "a transcript row was published while the capture was still blocked")
+
+	close(firstGate)
+	published := stream.waitEvent(t, userMessageMatching(childID, func(s string) bool {
+		return strings.TrimSpace(s) == prompt
+	}), 60*time.Second)
+	c.Eq(rowID, published.GetUserMessage().GetMessageId(),
+		"the captured user message must name the inbox row it delivered")
+
+	hist, err := client.GetHistory(context.Background(), connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: childID}))
+	c.NoError(err, "GetHistory")
+	var stored int
+	for _, ev := range hist.Msg.GetEvents() {
+		if ev.GetUserMessage() == nil || !strings.Contains(eventText(ev), prompt) {
+			continue
+		}
+		stored++
+		c.Eq("", ev.GetUserMessage().GetMessageId(),
+			"history carries the message link; every client draws the stored row, so the link stays on the live publish")
+	}
+	c.Eq(1, stored, "user messages in history carrying the prompt")
+}
+
+// TestClaudeDeliveryCaptureTwoIdenticalSendsLinkInOrder sends the SAME words
+// twice in two turns: text cannot tell the two rows apart, so the ids must, and
+// position decides which send each captured message names.
+func TestClaudeDeliveryCaptureTwoIdenticalSendsLinkInOrder(t *testing.T) {
+	t.Parallel()
+	c := assert.NewCollecting(t)
+
+	up := newCaptureUpstream(t)
+	firstGate := up.gate(0)
+	secondGate := up.gate(1)
+
+	d, _ := claudeDeliveryDaemon(t,
+		"RAFIKI_PROVIDERS="+writeAnthropicBaseProviders(t, up.srv.URL),
+		"FAKE_CLAUDE_TURNS=1",
+		"FAKE_CLAUDE_REQUEST_MODEL=claude-haiku-4-5",
+	)
+	client := d.control(t)
+	childID := spawnClaudeChild(t, d)
+	stream := d.openEvents(t, childEventsSubject(childID), nil, eventWatermark(t, client, childID))
+
+	const prompt = "the same words twice"
+
+	firstRow := sendPromptRow(t, client, childID, prompt)
+	stream.waitEvent(t, deliveredEvent(childID, firstRow), 60*time.Second)
+	up.expectRequest(t, 0)
+	close(firstGate)
+	first := stream.waitEvent(t, userMessageMatching(childID, func(s string) bool {
+		return strings.Contains(s, prompt)
+	}), 60*time.Second)
+	c.Eq(firstRow, first.GetUserMessage().GetMessageId(), "the first captured message names the first send")
+
+	// BARRIER: the child must be idle again before the second send, or the
+	// fixture wraps it as a mid-turn message and the second turn is not a turn.
+	stream.waitEvent(t, agentStatusEvent(childID, "idle"), 60*time.Second)
+
+	secondRow := sendPromptRow(t, client, childID, prompt)
+	stream.waitEvent(t, deliveredEvent(childID, secondRow), 60*time.Second)
+	up.expectRequest(t, 1)
+	close(secondGate)
+	second := stream.waitEvent(t, func(ev *rafikiv1.Event) bool {
+		return ev.GetChildId() == childID && ev.GetUserMessage() != nil &&
+			ev.GetUserMessage().GetMessageId() == secondRow
+	}, 60*time.Second)
+	c.StrContains(eventText(second), prompt, "the second captured row keeps the user's words")
+	c.NotEq(firstRow, secondRow, "the two sends are distinct inbox rows")
+
+	var ids []string
+	stream.mu.Lock()
+	for _, ev := range stream.events {
+		if ev.GetChildId() != childID || ev.GetUserMessage() == nil || !stream.isLive(ev) {
+			continue
+		}
+		ids = append(ids, ev.GetUserMessage().GetMessageId())
+	}
+	stream.mu.Unlock()
+	c.EqDeep([]string{firstRow, secondRow}, ids, "captured user messages name the two sends in send order")
 }
