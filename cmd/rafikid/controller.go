@@ -5315,6 +5315,28 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// same bounded buffer.
 	stderr := ch.StderrSnapshot()
 
+	// Every child's death is logged here, once, with what ended it. Nothing
+	// else in the daemon log records an exit: an operator whose claude child
+	// died at launch had a `child_exited` event and nothing to grep, which is
+	// the "not logging enough to tell what went wrong" shape. A clean exit or a
+	// kill (a signal, an operator's or the abort ladder's) is INFO; an unclean
+	// exit — a nonzero code the process chose — is WARN and carries the stderr
+	// tail, which for a claude launch failure is the whole diagnosis.
+	unclean := exitSignal == "" && recCode != 0
+	attrs := []any{
+		"childId", childID, "kind", snap.Kind, "name", snap.Name,
+		"exitCode", recCode, "signal", exitSignal, "lastStatus", lastStatus,
+	}
+	if snap.SessionID != "" {
+		attrs = append(attrs, "sessionId", snap.SessionID)
+	}
+	if unclean {
+		attrs = append(attrs, "stderr", lastStderrTail(stderr, claudeLaunchStderrBytes))
+		slog.Warn("child exited uncleanly", attrs...)
+	} else {
+		slog.Info("child exited", attrs...)
+	}
+
 	// A claude child that died at LAUNCH says so: ChildExited carries only a
 	// code, and the binary's own stderr (a rejected flag, a bad credential) is
 	// the actionable part. Published before the settlement notice below so a

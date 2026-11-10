@@ -42,8 +42,10 @@ child; "fundi:<provider/model>" spawns a fundi child on that model, e.g.
 
 Each agent check costs tokens on your Claude login or provider, waits up to 3
 minutes for the first reply, then closes the child. Each check prints ok or
-FAIL and, on failure, the next thing to look at; doctor exits non-zero if any
-check failed.`,
+FAIL and, on failure, why: an agent that died prints the daemon's own error
+event (a claude launch failure carries Claude Code's stderr) and the command
+that reads the rest of the child's log. doctor exits non-zero if any check
+failed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runDoctor(cmdCtx(cmd), cmd, cmd.OutOrStdout())
@@ -258,26 +260,67 @@ func closeDoctorChild(client rafikiv1connect.ControlClient, childID string, out 
 	}
 }
 
+// doctorTurn accumulates one first-turn event stream: the assistant's text,
+// and — separately — why the child ended without producing any. The two are
+// kept apart because a child that replied and then died is a pass, while one
+// that died before replying is the failure this check exists to report, and
+// the daemon's own `Error` event (a claude launch failure carries the binary's
+// stderr there) is the diagnosis, not the bare "no reply" the doctor used to
+// print.
+type doctorTurn struct {
+	text strings.Builder
+	why  []string
+}
+
+// apply folds one event in and reports whether the turn is over.
+func (d *doctorTurn) apply(ev *rafikiv1.Event) (done bool) {
+	if am := ev.GetAssistantMessage(); am != nil {
+		for _, b := range am.GetContent() {
+			if t := b.GetText(); t != nil {
+				d.text.WriteString(t.GetText())
+			}
+		}
+	}
+	if e := ev.GetError(); e != nil {
+		// One line: the caller prints this after "FAIL  agent: ", and a
+		// multi-line stderr tail would lose its indentation there. The full
+		// text stays reachable through `rafiki logs <child>`.
+		d.why = append(d.why, strings.Join(strings.Fields(e.GetMessage()), " "))
+	}
+	if ex := ev.GetChildExited(); ex != nil {
+		switch {
+		case ex.GetSignal() != "":
+			d.why = append(d.why, "child was killed ("+ex.GetSignal()+")")
+		case ex.ExitCode != nil:
+			d.why = append(d.why, fmt.Sprintf("child exited (code %d)", ex.GetExitCode()))
+		default:
+			d.why = append(d.why, "child exited")
+		}
+		return true
+	}
+	return ev.GetTurnEnd() != nil
+}
+
+// err reports why the child produced no reply, or nil when it did.
+func (d *doctorTurn) err() error {
+	if d.text.Len() > 0 || len(d.why) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s", strings.Join(d.why, "; "))
+}
+
 // followFirstTurn reads a child event stream, opened from a cursor taken before
 // the prompt was sent, until the first turn completes and returns the
 // accumulated assistant text. The caller owns closing the stream.
 func followFirstTurn(ctx context.Context, stream *connect.ServerStreamForClient[rafikiv1.Event]) (string, error) {
-	var text strings.Builder
+	var turn doctorTurn
 	for stream.Receive() {
-		ev := stream.Msg()
-		if am := ev.GetAssistantMessage(); am != nil {
-			for _, b := range am.GetContent() {
-				if t := b.GetText(); t != nil {
-					text.WriteString(t.GetText())
-				}
-			}
-		}
-		if ev.GetTurnEnd() != nil || ev.GetChildExited() != nil {
-			return text.String(), nil
+		if turn.apply(stream.Msg()) {
+			return turn.text.String(), turn.err()
 		}
 	}
 	if err := stream.Err(); err != nil && ctx.Err() == nil {
-		return text.String(), fmt.Errorf("doctor stream: %w", err)
+		return turn.text.String(), fmt.Errorf("doctor stream: %w", err)
 	}
-	return text.String(), nil
+	return turn.text.String(), turn.err()
 }

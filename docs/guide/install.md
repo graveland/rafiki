@@ -48,7 +48,9 @@ runtime requires on `PATH`). Docker (or OrbStack) is needed only for the
 
 `rafiki doctor` checks the daemon, an executor, and one claude agent end to end;
 `--agent fundi:<provider/model>` (repeatable) checks a fundi agent on that model
-instead or as well.
+instead or as well. A failing agent prints why — the daemon's own error event,
+which for a claude child that dies at launch carries Claude Code's stderr — and
+names the `rafiki logs <child>` command for the rest.
 
 ### The embedded database
 

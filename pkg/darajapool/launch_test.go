@@ -132,6 +132,59 @@ func TestLaunchTimesOutAndEvictsIfNoReverseDialArrives(t *testing.T) {
 	c.LessOrEqual(time.Second, elapsed, "took")
 }
 
+// A connect timeout must say WHAT it saw, not just that nothing dialled: "did
+// not connect" is the same sentence for a daraja that never started, one that
+// died unseen, and one that is running but cannot reach this daemon. Without
+// the last Status poll in the error, a claude spawn that never comes up is
+// undiagnosable from the message.
+func TestLaunchTimeoutNamesWhatTheLastStatusPollSaw(t *testing.T) {
+	c := assert.NewAborting(t)
+	reg := NewRegistry()
+	pool := New(reg)
+
+	execPool := &fakeExecPool{client: &fakeAdminClient{
+		launchFn: func(ctx context.Context, req *connect.Request[adminpb.LaunchRequest]) (*connect.Response[adminpb.LaunchResponse], error) {
+			return connect.NewResponse(&adminpb.LaunchResponse{Pid: 1, Pgid: 1}), nil
+		},
+		statusFn: func(ctx context.Context, req *connect.Request[adminpb.StatusRequest]) (*connect.Response[adminpb.StatusResponse], error) {
+			return connect.NewResponse(&adminpb.StatusResponse{Known: true, Running: true}), nil
+		},
+	}}
+
+	// Longer than one statusPollInterval so the poll actually runs before the
+	// timeout fires; the point is the message, not the speed.
+	_, err := Launch(context.Background(), LaunchParams{
+		ExecPool:   execPool,
+		Pool:       pool,
+		Registry:   reg,
+		DialAddr:   "/tmp/whatever.sock",
+		ExecutorID: "exec-1",
+		ChildID:    "c1",
+		Cwd:        "/tmp",
+		Spec:       validSpec(),
+		Timeout:    statusPollInterval + 200*time.Millisecond,
+	})
+	c.Require().Error(err, "want a timeout error, got nil")
+	c.StrContains(err.Error(), "did not connect within", "timeout shape")
+	c.StrContains(err.Error(), "running but never dialled back",
+		"the timeout must carry what the last Status poll saw, got: %v", err)
+}
+
+// describeStatus is the timeout error's parenthetical. Each shape must read
+// differently, and an executor that never answered must add nothing rather
+// than assert a fault it cannot see.
+func TestDescribeStatus(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.Eq("", describeStatus(nil), "no answer must add nothing")
+	c.StrContains(describeStatus(&adminpb.StatusResponse{Known: true, Running: true}),
+		"never dialled back", "known and running")
+	code := int32(7)
+	c.StrContains(describeStatus(&adminpb.StatusResponse{Known: true, Running: false, ExitCode: &code, StderrTail: "boom"}),
+		"boom", "a known dead daraja must carry its stderr tail")
+	c.StrContains(describeStatus(&adminpb.StatusResponse{Known: false}),
+		"never reported a daraja", "an executor with no record of the child")
+}
+
 // TestLaunchUnregistersItsOnConnectCallback proves Launch's one-shot
 // registration does not accumulate: without unsubscribing, every claude spawn
 // registers one closure on Pool.onConnect that lives forever after firing,

@@ -483,10 +483,20 @@ func (s *Server) Spawn(
 	id, err := (*p).Spawn(ctx, sp)
 	if err != nil {
 		var ce *ControllerError
-		if !errors.As(err, &ce) {
-			// ConnectErr redacts this below; log the cause here or lose it.
-			slog.Error("connect: spawn failed", "cwd", sp.Cwd,
-				"parent_child_id", sp.ParentChildID, "error", err)
+		// A ControllerError is an AUTHORED refusal (a bad model, a bad cwd, a
+		// budget, a name taken) and its message already reaches the caller, so
+		// it is not logged — except when the code says the daemon could not
+		// build or launch the child at all. That is an infrastructure failure
+		// whose cause lives only in this process: the caller sees the message,
+		// but a spawn that failed because an executor's daraja died, or a
+		// claude binary was rejected, must leave a trace here or the operator
+		// has nothing to grep. kind/model ride along because "which child"
+		// is the first thing to ask.
+		if !errors.As(err, &ce) || ce.Code == protocol.ErrSpawnFailed || ce.Code == protocol.ErrUnavailable {
+			// ConnectErr redacts a non-ControllerError below; log the cause
+			// here or lose it.
+			slog.Error("connect: spawn failed", "cwd", sp.Cwd, "kind", sp.Kind,
+				"model", sp.Model, "parent_child_id", sp.ParentChildID, "error", err)
 		}
 		return nil, ConnectErr(err)
 	}

@@ -174,6 +174,14 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 	// spray a warning every second for the rest of the wait.
 	statusErrLogged := false
 
+	// lastStatus is the most recent answer from the executor, carried into the
+	// timeout error. Without it a timeout says only "did not connect", which is
+	// the same sentence for three different faults: the daraja never started,
+	// it started and died without the poller seeing it, or it is running and
+	// simply never dialled back (a relay/network fault on the executor). The
+	// operator cannot tell them apart from the message alone.
+	var lastStatus *adminpb.StatusResponse
+
 	for {
 		select {
 		case <-connected:
@@ -183,7 +191,8 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 			}, nil
 		case <-timeoutC:
 			p.Pool.Evict(p.ChildID)
-			return LaunchResult{}, fmt.Errorf("daraja for child %s did not connect within %s", p.ChildID, timeout)
+			return LaunchResult{}, fmt.Errorf("daraja for child %s did not connect within %s%s",
+				p.ChildID, timeout, describeStatus(lastStatus))
 		case <-ctx.Done():
 			return LaunchResult{}, ctx.Err()
 		case <-ticker.C:
@@ -201,6 +210,7 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 				}
 				continue
 			}
+			lastStatus = status.Msg
 			if st := status.Msg; st.GetKnown() && !st.GetRunning() {
 				p.Pool.Evict(p.ChildID)
 				return LaunchResult{}, fmt.Errorf("daraja for child %s exited (code %d) before connecting: %s",
@@ -208,5 +218,22 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 			}
 			// Known and still running: keep waiting for the dial.
 		}
+	}
+}
+
+// describeStatus renders what the last Status poll saw, as a parenthetical for
+// the timeout error. Empty when there was no usable answer (an executor that
+// predates the RPC, or one that stopped answering), so the message stays as it
+// was rather than asserting something it does not know.
+func describeStatus(st *adminpb.StatusResponse) string {
+	switch {
+	case st == nil:
+		return ""
+	case st.GetKnown() && st.GetRunning():
+		return " (the daraja process is running but never dialled back: check the executor's relay connection to this daemon)"
+	case st.GetKnown():
+		return fmt.Sprintf(" (the daraja process exited (code %d): %s)", st.GetExitCode(), st.GetStderrTail())
+	default:
+		return " (the executor never reported a daraja for this child)"
 	}
 }

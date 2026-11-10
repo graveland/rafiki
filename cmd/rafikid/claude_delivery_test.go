@@ -681,6 +681,15 @@ func TestClaudeDeliveryLaunchFailureSurfacesTheRejectedFlag(t *testing.T) {
 	ck.StrContains(auth.GetMessage(), "invalid API key", "stderr tail")
 	ck.False(containsHint(auth.GetMessage()), "the upgrade hint was added to a failure that did not name a flag: %q", auth.GetMessage())
 
+	// A launch failure that printed NOTHING on stderr is still reported, and
+	// says so. Silence used to be indistinguishable from "nothing to report":
+	// the operator got a bare child_exited and no way to tell whether the
+	// binary said nothing or the daemon never captured it.
+	silent := claudeLaunchFailure(protocol.KindClaude, "", child.ShutdownResult{ExitCode: 1}, nil)
+	ck.Require().True(silent != nil, "a silent launch failure published nothing")
+	ck.StrContains(silent.GetMessage(), "printed nothing on stderr", "the event must state that stderr was empty")
+	ck.StrContains(silent.GetMessage(), "before establishing a session", "the event must name the launch shape")
+
 	for _, tc := range []struct {
 		name      string
 		kind      string
@@ -694,7 +703,6 @@ func TestClaudeDeliveryLaunchFailureSurfacesTheRejectedFlag(t *testing.T) {
 		{"a killed child", protocol.KindClaude, "", child.ShutdownResult{ExitCode: 137, Signal: "killed"}, rejected},
 		{"a resumed child that was killed", protocol.KindClaude, "sess-1", child.ShutdownResult{ExitCode: 137, Signal: "killed"}, rejected},
 		{"a clean exit", protocol.KindClaude, "", child.ShutdownResult{ExitCode: 0}, rejected},
-		{"no stderr to report", protocol.KindClaude, "", child.ShutdownResult{ExitCode: 1}, nil},
 		{"another kind", protocol.KindFundi, "", child.ShutdownResult{ExitCode: 1}, rejected},
 	} {
 		ck.True(claudeLaunchFailure(tc.kind, tc.sessionID, tc.res, tc.stderr) == nil,

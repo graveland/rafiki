@@ -314,21 +314,23 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, chan struct{}, error)
 	stdoutDone := make(chan struct{})
 	stderrDone := make(chan struct{})
 	go h.watch(runner, exitCh, stdoutDone, stderrDone)
-	if spec.Kind == KindScript {
-		// A script's stderr is load-bearing, not noise: its tail is what a
-		// failed run's settle carries when the script never reported a result
-		// (see the daemon-side script settle). Relay it. Claude's stderr stays
-		// discarded — its protocol is stdout and its stderr is engine chatter
-		// the controller cannot use.
-		go h.pumpStderr(stderr, stderrDone)
-	} else {
-		// stderr is drained and discarded: the controller reads the child's
-		// protocol on stdout, and an undrained pipe eventually blocks the writer.
-		go func() {
-			_, _ = io.Copy(io.Discard, stderr)
-			close(stderrDone)
-		}()
-	}
+	// EVERY hosted kind relays stderr, for the same reason on both sides: it is
+	// the only place the process's own words about its failure exist.
+	//
+	// A script's tail is what a failed run's settle carries when the script
+	// never reported a result. A claude child's stderr is the entire diagnosis
+	// of a launch that died — a rejected flag, a missing credential, a broken
+	// config — because claude's stdout protocol says nothing about why it
+	// stopped, and the daemon can neither see this machine's filesystem nor
+	// read a pipe drained to Discard here. Dropping it is what left an
+	// executor-hosted claude child reporting only `child_exited`, with the
+	// cause visible to nobody (see claudeLaunchFailure,
+	// cmd/rafikid/claude_delivery.go).
+	//
+	// What the daemon KEEPS stays bounded (pkg/child's readStderr ring, and
+	// the launch-failure event's ≤4 KiB tail), so relaying a chatty child
+	// costs wire bytes, never unbounded memory.
+	go h.pumpStderr(stderr, stderrDone)
 	return stdout, stdoutDone, nil
 }
 
@@ -457,9 +459,9 @@ func (h *Host) pump(stdout io.ReadCloser, done chan struct{}) {
 	}
 }
 
-// pumpStderr is pump for the stderr side, for the kinds whose stderr reaches
-// the controller (scripts). Same chunking, same shutdown discipline, same
-// done contract.
+// pumpStderr is pump for the stderr side, which every hosted kind relays (a
+// script's settle tail, a claude launch failure's only diagnosis). Same
+// chunking, same shutdown discipline, same done contract.
 func (h *Host) pumpStderr(stderr io.ReadCloser, done chan struct{}) {
 	defer close(done)
 	defer stderr.Close()

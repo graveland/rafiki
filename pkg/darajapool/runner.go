@@ -67,12 +67,13 @@ type Runner struct {
 	pr *io.PipeReader
 	pw *io.PipeWriter
 
-	// sr/sw are the stderr side, for the kinds whose stderr reaches the
-	// controller (a script's settle carries its tail; claude's relay carries no
-	// stderr at all). Same pipe discipline as stdout: a synchronous io.Pipe the
-	// consumer must drain on its own goroutine (pkg/child's readStderr does),
-	// open across a reconnect so buffered bytes are never reported as an exit,
-	// and closed only with the runner itself.
+	// sr/sw are the stderr side, which every hosted kind relays: a script's
+	// settle carries its tail, and a claude child's is the whole diagnosis of a
+	// launch that died (claudeLaunchFailure, cmd/rafikid/claude_delivery.go).
+	// Same pipe discipline as stdout: a synchronous io.Pipe the consumer must
+	// drain on its own goroutine (pkg/child's readStderr does), open across a
+	// reconnect so buffered bytes are never reported as an exit, and closed
+	// only with the runner itself.
 	sr *io.PipeReader
 	sw *io.PipeWriter
 

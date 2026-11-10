@@ -340,15 +340,18 @@ const claudeUnsupportedFlagHint = "rafiki launches every headless claude child w
 // A signal is a kill (an operator's, or the abort ladder), never a launch
 // failure, and exit 0 is a clean end. The stderr is carried verbatim (bounded)
 // rather than summarised, because the binary's own words are the actionable
-// part.
+// part. A launch failure that printed NOTHING on stderr is still reported, with
+// that stated: the operator otherwise gets a bare `child_exited` and no way to
+// tell "silent failure" from "no diagnostics exist".
 //
-// SCOPE — RULING: this covers processes the DAEMON launches. A daraja-hosted
-// claude child's stderr is discarded on the executor host
-// (pkg/daraja/host.go's `io.Copy(io.Discard, stderr)` for non-script children),
-// so StderrSnapshot is empty there and this returns nil: an executor-routed
-// child on an old binary exits with only child_exited, and the operator must
-// read the executor's own log. Surfacing a host's stderr needs a host-protocol
-// change in the executor plane, which this change deliberately does not make.
+// BOTH launch paths carry stderr here. A daraja-hosted child's stderr used to
+// be drained to Discard on the executor host, so an executor-routed child
+// reported only `child_exited` and its cause was unreadable from the daemon —
+// the exact shape of "claude children aren't starting and there is nothing in
+// the log". pkg/daraja/host.go now relays it like a script's (the relay already
+// had a stderr frame, so this needed no wire change), and
+// darajapool.Runner's stderr pipe feeds pkg/child's readStderr on that path
+// too. handleChildExit also logs the exit itself.
 func claudeLaunchFailure(kind, sessionID string, res child.ShutdownResult, stderr []byte) *rafikiv1.ErrorEvent {
 	if kind != protocol.KindClaude {
 		return nil
@@ -357,18 +360,19 @@ func claudeLaunchFailure(kind, sessionID string, res child.ShutdownResult, stder
 		return nil
 	}
 	tail := strings.TrimSpace(lastStderrTail(stderr, claudeLaunchStderrBytes))
-	if tail == "" {
-		return nil
-	}
 	rejected := rejectsAFlag(tail)
 	if sessionID != "" && !rejected {
 		return nil
 	}
+	detail := tail
+	if detail == "" {
+		detail = "(the process printed nothing on stderr)"
+	}
 	var msg string
 	if sessionID == "" {
-		msg = fmt.Sprintf("claude exited (%d) before establishing a session:\n%s", res.ExitCode, tail)
+		msg = fmt.Sprintf("claude exited (%d) before establishing a session:\n%s", res.ExitCode, detail)
 	} else {
-		msg = fmt.Sprintf("claude exited (%d) while resuming session %s:\n%s", res.ExitCode, sessionID, tail)
+		msg = fmt.Sprintf("claude exited (%d) while resuming session %s:\n%s", res.ExitCode, sessionID, detail)
 	}
 	if rejected {
 		msg += "\n\n" + claudeUnsupportedFlagHint

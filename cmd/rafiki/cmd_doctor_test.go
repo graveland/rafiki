@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -77,6 +78,59 @@ func TestDoctorAnyNonEmptyReplyPasses(t *testing.T) {
 	var buf bytes.Buffer
 	c.NoError(runDoctor(context.Background(), newDoctorCmd(), &buf), "any non-empty reply must pass")
 	c.StrContains(buf.String(), "ok    agent", "the agent check line is missing:\n")
+}
+
+// TestDoctorLaunchFailureNamesTheDaemonError: a claude child that dies at
+// launch publishes an `Error` event carrying the binary's own stderr, and
+// doctor must print that instead of a bare "no reply" — the whole point of the
+// check is to say WHY a claude agent cannot start.
+func TestDoctorLaunchFailureNamesTheDaemonError(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	f.stub.spawnChildID = "c_smoke"
+	f.stub.events = []*rafikiv1.Event{
+		{ChildId: "c_smoke", Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
+			Code:    "claude_launch_failed",
+			Message: "claude exited (1) before establishing a session:\nError: invalid API key\n",
+		}}},
+		{ChildId: "c_smoke", Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{
+			ChildId: "c_smoke", ExitCode: proto.Int32(1),
+		}}},
+	}
+
+	var buf bytes.Buffer
+	err := runDoctor(context.Background(), newDoctorCmd(), &buf)
+	c.Require().Error(err, "a claude child that died at launch must fail doctor")
+	out := buf.String()
+	c.StrContains(out, "FAIL  agent", "the agent failure line is missing:\n"+out)
+	c.StrContains(out, "invalid API key", "the daemon's error must reach the FAIL line:\n"+out)
+	c.StrContains(out, "child exited (code 1)", "the exit code must be named too:\n"+out)
+	c.StrContains(out, "next: rafiki logs c_smoke", "the pointer to the full log is missing:\n"+out)
+	c.Eq(1, f.stub.closeCalls, "the doctor child must be closed even on failure")
+}
+
+// doctorTurn keeps the daemon's diagnosis apart from the reply: a child that
+// replied and then died passes, one that died first does not.
+func TestDoctorTurnKeepsTheDiagnosisApartFromTheReply(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	replied := &doctorTurn{}
+	replied.apply(assistantEvent("c1", "pong"))
+	c.True(replied.apply(turnEndEvent("c1")), "a turn end finishes the read")
+	c.NoError(replied.err(), "a reply is a pass even when nothing else arrived")
+	c.Eq("pong", replied.text.String(), "text")
+
+	died := &doctorTurn{}
+	c.True(died.apply(&rafikiv1.Event{Payload: &rafikiv1.Event_ChildExited{
+		ChildExited: &rafikiv1.ChildExited{Signal: "killed"},
+	}}), "a child exit finishes the read")
+	err := died.err()
+	c.Require().Error(err, "a child that died without replying must be a failure")
+	c.StrContains(err.Error(), "child was killed", "the signal must be named")
+
+	silent := &doctorTurn{}
+	silent.apply(turnEndEvent("c1"))
+	c.NoError(silent.err(), "an empty turn with no diagnosis keeps the caller's own 'no reply' message")
 }
 
 func TestParseDoctorAgents(t *testing.T) {

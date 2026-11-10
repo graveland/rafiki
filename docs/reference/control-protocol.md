@@ -1584,11 +1584,13 @@ The executor-hosted path:
   exit. A Restart of a script kind is refused semantically: the wire spec carries names, not the
   executor-resolved argv, and nothing that can call Restart ever calls it for
   a script.
-- A script child's stderr is RELAYED (a `stderr` arm on daraja's relay
-  oneof), because the settle tail is computed from it; claude's stderr stays
-  discarded. Both pipes are synchronous, and the daemon-side consumer drains
-  stdout and stderr on their own goroutines (as `pkg/child` does) — a
-  consumer that stops reading either pipe stalls the other.
+- Every hosted child's stderr is RELAYED (the `stderr` arm on daraja's relay
+  oneof) — a script's because the settle tail is computed from it, claude's
+  because it is the only diagnosis a launch failure has (it feeds the
+  `claude_launch_failed` error event, the daemon's exit log line and the
+  per-child log dump). Both pipes are synchronous, and the daemon-side
+  consumer drains stdout and stderr on their own goroutines (as `pkg/child`
+  does) — a consumer that stops reading either pipe stalls the other.
 - The per-child Connect socket moves to the executor: daraja serves
   `pkg/childsock` against the daemon's face — the address it already
   reverse-dials. A TLS executor dial verifies the same pinned certificate the
@@ -2379,7 +2381,7 @@ Every event payload is classified into a tier:
 | `ChildExited` | durable | A sub-agent exited (optional exit_code, signal) |
 | `ChildClosed` | durable | A child LEFT THE STORE: it was closed (`Control.Close`, `CloseAllExited`, or a cascade's native thread children) and can never be resumed. Not an exit — a killed child stays listed and reports through `ChildExited`. Fields: `ancestors` (the chain from the child's parent up to the root; empty for a top-level child) and `labels` (the child's label set). Both ride the event because the subject predicate resolves scope against the childstore, which a close has just emptied — without them the one subscriber still drawing the row, attached to an ANCESTOR, could never be told it is gone (see "The one event that describes a child the lineage has forgotten"). Published BEFORE the store delete, by every close site. Consumed as a SIGNAL: clients answer it with `ListChildren`, because a close cascades and membership has one authority. Durable because the rail stream subscribes at that tier |
 | `AgentStatus` | durable | Status change from the daemon's closed vocabulary |
-| `Error` | durable | Turn or engine level error event. Code `capture_not_persisted` marks a claude turn whose rows could not be stored, `turn_failed` one that failed upstream with capture intact (see "Message events") |
+| `Error` | durable | Turn or engine level error event. Code `capture_not_persisted` marks a claude turn whose rows could not be stored, `turn_failed` one that failed upstream with capture intact (see "Message events"), `claude_launch_failed` a claude child that died at LAUNCH — before establishing a session (or, on resume, on a binary that rejected a flag) — carrying its own stderr tail, or `(the process printed nothing on stderr)` when it printed none. A launch failure publishes this because `child_exited` carries only a code; the process's own words are the diagnosis, and they reach the daemon from an executor-hosted child too (`pkg/daraja/host.go` relays stderr for every hosted kind) |
 | `CompactionBoundary` | durable | Claude Code compacted this child's context (trigger, optional pre/post token counts) |
 | `ScriptOutput` | durable | One coalesced chunk of a script child's stdout or stderr. Fields: `stream` (`"stdout"`/`"stderr"`) and `text` — the newline-terminated lines or split pieces carried verbatim. Produced by the daemon's per-child coalescer (`cmd/rafikid/script_output.go`); see "Script output" below |
 | `OperatorState` | durable | The operator-facing display state of a child changed (see "Operator display state" below). Fields: `display_state` (working/waiting/failed/idle/exited), `waiting_on` (set only when `display_state` is `waiting`: operator/schedule/job/children/events) and `msg` (the human sentence). Server-derived and deduplicated: published only when the (state, waiting_on, msg) tuple differs from the last published one. `AgentStatus` remains the machine status and is unchanged |

@@ -57,10 +57,11 @@ func TestScriptExitDoesNotRespawn(t *testing.T) {
 	}
 }
 
-// The stderr relay is script-only: claude's stderr stays drained-and-discarded
-// (its protocol is stdout; its engine chatter is noise the consumer cannot
-// use), so a claude event stream must never grow a stderr event.
-func TestClaudeStderrIsStillDiscarded(t *testing.T) {
+// A claude child's stderr is relayed like a script's: it is the only diagnosis
+// an executor-hosted launch failure has, since claude's stdout protocol never
+// says why it stopped. Before this, the host drained it to Discard and the
+// daemon reported nothing but child_exited.
+func TestClaudeStderrIsRelayed(t *testing.T) {
 	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{
 		Binary: testChildBinary(t, `echo out-first; echo err-line >&2; sleep 30`),
@@ -69,17 +70,23 @@ func TestClaudeStderrIsStillDiscarded(t *testing.T) {
 	c.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
-	deadline := time.After(3 * time.Second)
+	deadline := time.After(5 * time.Second)
+	var sawStdout, sawStderr bool
 	for {
 		select {
 		case ev, ok := <-h.Events():
 			c.True(ok, "event channel closed unexpectedly")
 			if len(ev.Stdout) > 0 && strings.Contains(string(ev.Stdout), "out-first") {
-				return // claude's stdout seen; the loop below watches for stderr
+				sawStdout = true
 			}
-			c.LessOrEqual(0, len(ev.Stderr), "claude stderr was relayed: %q", ev.Stderr)
+			if len(ev.Stderr) > 0 && strings.Contains(string(ev.Stderr), "err-line") {
+				sawStderr = true
+			}
+			if sawStdout && sawStderr {
+				return
+			}
 		case <-deadline:
-			t.Fatal("timeout waiting for the claude child's stdout")
+			c.False(true, "timeout: stdout=%v stderr=%v (claude's stderr must reach the consumer)", sawStdout, sawStderr)
 		}
 	}
 }
