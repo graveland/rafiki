@@ -1054,3 +1054,54 @@ func TestLinkedCaptureWithoutContentIsRemembered(t *testing.T) {
 	s.InsertProvisional("row-1", "hello")
 	c.Len(s.Blocks, 1, "a send already linked is never inserted again")
 }
+
+// ── inserting below a settled watermark ──────────────────────────────────
+
+func childExitedEvent(childID string) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: childID,
+		Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{}}}
+}
+
+// A settleAll that appends nothing — a child exit — leaves the open placeholder
+// trailing and settles it. A provisional block then lands AHEAD of that
+// placeholder, below the watermark, and the renderer had already cached the
+// rows from there down. The watermark has to be reopened at the insert, or the
+// next frame draws the rows it cached before the send arrived: the new block
+// invisible and the old ones shifted under it.
+//
+// An ERROR settles just as hard but appends its own block first, so the
+// placeholder is no longer trailing and the insert goes through the append
+// branch, which moves nothing.
+func TestProvisionalInsertAfterASettleReopensTheWatermark(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.Apply(turnStartEvent("c_1"))
+	s.Apply(childExitedEvent("c_1"))
+	c.Require().Eq(len(s.Blocks), s.Finalized, "a child exit settles everything, the placeholder included")
+
+	s.InsertProvisional("row-1", "hello")
+
+	c.Require().Len(s.Blocks, 2, "blocks")
+	c.Eq(session.KindUser, s.Blocks[0].Kind, "the send lands ahead of the placeholder")
+	c.Eq(session.KindAssistant, s.Blocks[1].Kind, "block[1] is the placeholder")
+	c.Eq(0, s.Finalized, "the watermark is reopened where the send was inserted")
+}
+
+// The same hazard on the ordinary path: a child that exits mid-turn settles the
+// placeholder, and the user message that lands ahead of it moves rows the
+// renderer has already cached.
+func TestUserMessageAfterASettleReopensTheWatermark(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+
+	s.Apply(turnStartEvent("c_1"))
+	s.Apply(childExitedEvent("c_1"))
+	c.Require().Eq(len(s.Blocks), s.Finalized, "a child exit settles everything, the placeholder included")
+
+	s.Apply(textEvent("c_1", "a steer"))
+
+	c.Require().Len(s.Blocks, 2, "blocks")
+	c.Eq("a steer", s.Blocks[0].Text, "the message lands ahead of the placeholder")
+	c.Eq(0, s.Finalized, "the watermark is reopened where the message was inserted")
+}

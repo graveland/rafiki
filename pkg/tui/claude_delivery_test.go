@@ -709,3 +709,33 @@ func TestClaudeDeliveryFocusEventTheSessionRefusedDoesNotMoveTheLedger(t *testin
 	ck.Len(sends(c, "c_1"), 1, "nor dropped by a turn end it refused")
 	ck.Len(provisionalBlocks(c, "c_1"), 1, "the block the ledger still stands for is still there")
 }
+
+// exitedFor is the durable child_exited the daemon logs. It settles every
+// block and appends none, so an open placeholder stays trailing and settled.
+func exitedFor(child string, ord int32) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: child, Ordinal: &ord,
+		Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{}}}
+}
+
+// A send answered at an ordinal the session has already folded in is still a
+// send: the ledger accepts it, and the block it stands for has to be DRAWN. The
+// exit above settled the placeholder, so the insert lands below the watermark
+// and the pane rebuilds over a cache that already covers that index — unless
+// the insert reopens the watermark, the new row is never rendered.
+func TestClaudeDeliveryProvisionalAfterASettleRebuildsTheStalePane(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := claudeCockpit(t, &fakeSend{ids: []string{"row-1"}})
+
+	sendNow(t, c, "c_1", "hello")
+	feedFocus(c, turnStartFor("c_1"))
+	feedFocus(c, exitedFor("c_1", 1))
+	ck.Require().Eq(len(c.sessions["c_1"].Blocks), c.sessions["c_1"].Finalized,
+		"the exit settled every block, the placeholder included")
+	_ = c.View() // the settled transcript is what the renderer caches
+
+	feedFocus(c, deliveredFor("c_1", "row-1", 2))
+
+	ck.Len(pending(c, "c_1"), 0, "the receipt takes the row out of the overlay")
+	ck.StrContains(ansi.Strip(c.View().Content), "hello ✓ delivered",
+		"the send stands in the transcript, ahead of the placeholder it answered")
+}

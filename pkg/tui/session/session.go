@@ -249,15 +249,16 @@ func (s *Session) InsertProvisional(messageID, text string) {
 	if slices.ContainsFunc(s.Blocks, func(b Block) bool { return b.MessageID == messageID }) {
 		return
 	}
-	s.insertBeforePlaceholder([]Block{{
+	if !s.insertBeforePlaceholder([]Block{{
 		Kind:        KindUser,
 		At:          time.Now(),
 		Text:        text,
 		MessageID:   messageID,
 		Provisional: true,
 		Final:       true,
-	}})
-	s.recomputeFinalized()
+	}}) {
+		s.recomputeFinalized()
+	}
 }
 
 // DropProvisional removes every provisional block, returning their message ids.
@@ -653,8 +654,9 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 		// block is what clears the cockpit's ⏳ pending echo, and the harness
 		// speaking on its own behalf acknowledges no prompt. Its injected blocks
 		// still land.
-		s.insertBeforePlaceholder(added)
-		s.recomputeFinalized()
+		if !s.insertBeforePlaceholder(added) {
+			s.recomputeFinalized()
+		}
 		return
 	}
 	added = append(added, Block{
@@ -665,8 +667,9 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 		MessageID: um.GetMessageId(),
 		Final:     true,
 	})
-	s.insertBeforePlaceholder(added)
-	s.recomputeFinalized()
+	if !s.insertBeforePlaceholder(added) {
+		s.recomputeFinalized()
+	}
 }
 
 // insertBeforePlaceholder adds blocks at the end of the transcript, except that
@@ -678,15 +681,29 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 // placeholder in place. Appending behind it would leave the reply above the
 // prompt that asked for it. A block that already holds streamed content is a
 // reply in progress, and a steer's echo correctly lands after it.
-func (s *Session) insertBeforePlaceholder(blocks []Block) {
+//
+// It reports whether it inserted BELOW the watermark, which happens when a
+// settleAll — an error, a child exit — has already settled the placeholder this
+// insert goes ahead of. The block that was there shifts down, and the renderer
+// caches every block below the watermark exactly once, so the watermark is
+// reopened at the insert index and the CALLER must leave it alone: recomputing
+// it forward in the same call walks it back past the rows that have moved, and
+// Lines then sees no backwards move and serves what it cached before the
+// insert. The append branch never moves anything and never reports.
+func (s *Session) insertBeforePlaceholder(blocks []Block) bool {
 	if n := len(s.Blocks); n > 0 {
 		if last := s.Blocks[n-1]; last.Kind == KindAssistant && !last.Final &&
 			last.Text == "" && last.ThinkText == "" && len(last.ToolCalls) == 0 && len(last.Content) == 0 {
 			s.Blocks = slices.Insert(s.Blocks, n-1, blocks...)
-			return
+			if n-1 < s.Finalized {
+				s.Finalized = n - 1
+				return true
+			}
+			return false
 		}
 	}
 	s.Blocks = append(s.Blocks, blocks...)
+	return false
 }
 
 // attachToolResult files one result against its call, searching backwards:
