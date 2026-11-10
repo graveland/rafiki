@@ -160,6 +160,40 @@ func TestClaudeLinkImageOnlySend(t *testing.T) {
 	ck.Eq(2, two.acceptedCount("c"), "an image mismatch consumes nothing")
 }
 
+// A delivery is eligible when the echo landed no later than the request plus the
+// grace: the echo and the arrival are stamped by different goroutines, so a small
+// lag is the same request, and a longer one is a later request's message.
+func TestClaudeLinkSkewWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		after  time.Duration
+		linked bool
+	}{
+		{"inside the grace", claudeLinkSkew / 2, true},
+		{"past the grace", claudeLinkSkew + time.Millisecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
+			r := &claudeDeliveryRegistry{}
+			t0 := time.Now()
+			seedAccepted(t, r, "c", claudeDelivery{rowID: "row-A", text: "hello"})
+
+			r.mu.Lock()
+			r.accepted["c"][0].echoAt = t0.Add(tc.after)
+			r.mu.Unlock()
+
+			ids, _ := r.link("c", t0, []linkUnit{{text: "hello"}})
+			if tc.linked {
+				ck.EqDeep([]string{"row-A"}, ids, "an echo inside the grace belongs to the request")
+				ck.Eq(0, r.acceptedCount("c"), "queue after linking")
+				return
+			}
+			ck.EqDeep([]string{""}, ids, "an echo past the grace belongs to a later request")
+			ck.Eq(1, r.acceptedCount("c"), "the ineligible delivery stays queued")
+		})
+	}
+}
+
 // A queue that overflows means captures are not being reported: the oldest
 // delivery is dropped (nothing will ever link it) and the drop is logged, so the
 // live deliveries stay matchable and the stall is visible.
