@@ -5,19 +5,9 @@ package main
 import (
 	"log/slog"
 	"strings"
-	"time"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
-
-// claudeLinkSkew bounds how long AFTER the request arrived a delivery may still
-// count as one of its messages. On a perfect clock the bound would be zero: an
-// accepted message's echo lands before the request it triggers reaches the proxy.
-// The echo and the arrival are stamped by two different goroutines (the child's
-// stdout, the HTTP server), so a second absorbs the scheduling jitter and no
-// more. Anything later belongs to a later request, and linking it here would
-// name the wrong row.
-const claudeLinkSkew = 1 * time.Second
 
 // claudeLinkQueueCap bounds the deliveries a child may have accepted and not had
 // linked to a capture. Overflow drops the OLDEST: a message whose capture never
@@ -105,56 +95,66 @@ type linkLog struct {
 	reason   string
 }
 
-// link pairs the captured user messages of one request with the deliveries that
-// request could have carried, and reports the inbox row for each unit ("" for one
-// it could not place).
+// link pairs the captured user messages of the main-thread request whose
+// response is responseID with the deliveries that request carried, and reports
+// the inbox row for each unit ("" for one it could not place).
 //
-// A delivery is eligible only if it was accepted by the time the request reached
-// the proxy (within claudeLinkSkew). The capture for a turn is written AFTER the
-// request is forwarded, so a message accepted during this turn cannot be in it:
-// without the bound, a capture's rows would be matched against deliveries made
-// while the turn ran and the wrong row would be named.
-//
-// Two shapes decide the pairing:
+// What the request carried is the set bind attached to responseID: the
+// deliveries Claude Code echoed before printing that response's first frame.
+// No clock decides it. Two shapes decide the pairing:
 //
 //   - counts agree: pair positionally. Both sides are one request's worth of
 //     messages in order, so position IS the answer, and a pair whose text differs
 //     is linked anyway with a warning — a rewritten prompt must not cost the row
 //     its name.
-//   - counts differ: match greedily in order, each unit to the first eligible
-//     delivery it loosely matches. A delivery skipped on the way to a later match
-//     is dropped as never linked, because the unit that would have named it
-//     matched something after it.
+//   - counts differ: match greedily in order, each unit to the first bound
+//     delivery it loosely matches; a unit that matches none stays unlinked.
 //
-// Rows linked (and rows skipped) leave the queue; rows no unit matched stay, so a
-// later capture can still name them. Linking never mutates a delivery's identity
-// and publishes nothing: the caller applies the ids to the events it is about to
+// Every delivery bound to responseID leaves the queue here, linked or not: this
+// is the one capture that can name it, so one no unit named is logged as never
+// linked. The id is then remembered as reported, so a delivery bound to it later
+// (the capture beat the stdout frame) is dropped by bind instead of waiting for
+// a report that never comes. Linking never mutates a delivery's identity and
+// publishes nothing: the caller applies the ids to the events it is about to
 // publish.
-func (r *claudeDeliveryRegistry) link(childID string, received time.Time, units []linkUnit) (ids []string, logs []linkLog) {
-	if len(units) == 0 {
-		return nil, nil
+func (r *claudeDeliveryRegistry) link(childID, responseID string, units []linkUnit) (ids []string, logs []linkLog) {
+	if responseID == "" {
+		return make([]string, len(units)), nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	queue := r.accepted[childID]
-	eligible := 0
-	for eligible < len(queue) && (received.IsZero() || queue[eligible].echoAt.Before(received.Add(claudeLinkSkew))) {
-		eligible++
+	ring := append(r.reported[childID], responseID)
+	if len(ring) > claudeLinkQueueCap {
+		ring = ring[len(ring)-claudeLinkQueueCap:]
 	}
-	upTo := queue[:eligible]
-	ids = make([]string, len(units))
-	removed := make([]bool, eligible)
+	if r.reported == nil {
+		r.reported = make(map[string][]string)
+	}
+	r.reported[childID] = ring
 
-	if len(units) == eligible {
+	var bound []acceptedDelivery
+	kept := make([]acceptedDelivery, 0, len(r.accepted[childID]))
+	for _, a := range r.accepted[childID] {
+		if a.responseID == responseID {
+			bound = append(bound, a)
+			continue
+		}
+		kept = append(kept, a)
+	}
+	r.setAcceptedLocked(childID, kept)
+
+	ids = make([]string, len(units))
+	named := make([]bool, len(bound))
+	if len(units) == len(bound) {
 		for i := range units {
-			ids[i] = upTo[i].rowID
-			removed[i] = true
-			if !looseMatch(upTo[i].text, upTo[i].images, units[i]) {
+			ids[i] = bound[i].rowID
+			named[i] = true
+			if !looseMatch(bound[i].text, bound[i].images, units[i]) {
 				logs = append(logs, linkLog{
 					msg:      "claude delivery linked by order; text differs",
-					rowID:    upTo[i].rowID,
-					sent:     linkTruncate(upTo[i].text),
+					rowID:    bound[i].rowID,
+					sent:     linkTruncate(bound[i].text),
 					captured: linkTruncate(units[i].text),
 				})
 			}
@@ -163,14 +163,14 @@ func (r *claudeDeliveryRegistry) link(childID string, received time.Time, units 
 		cursor := 0
 		for i, u := range units {
 			j := -1
-			for k := cursor; k < eligible; k++ {
-				if looseMatch(upTo[k].text, upTo[k].images, u) {
+			for k := cursor; k < len(bound); k++ {
+				if looseMatch(bound[k].text, bound[k].images, u) {
 					j = k
 					break
 				}
 			}
 			if j < 0 {
-				if eligible > 0 {
+				if len(bound) > 0 {
 					logs = append(logs, linkLog{
 						msg:      "captured user message matched no accepted delivery",
 						captured: linkTruncate(u.text),
@@ -178,37 +178,28 @@ func (r *claudeDeliveryRegistry) link(childID string, received time.Time, units 
 				}
 				continue
 			}
-			ids[i] = upTo[j].rowID
-			removed[j] = true
-			for k := cursor; k < j; k++ {
-				removed[k] = true
-				logs = append(logs, linkLog{
-					msg:    "claude delivery never linked",
-					rowID:  upTo[k].rowID,
-					reason: "a later delivery linked",
-				})
-			}
+			ids[i] = bound[j].rowID
+			named[j] = true
 			cursor = j + 1
 		}
 	}
-
-	kept := make([]acceptedDelivery, 0, len(queue))
-	for i, a := range queue {
-		if i < eligible && removed[i] {
-			continue
+	for k, a := range bound {
+		if !named[k] {
+			logs = append(logs, linkLog{
+				msg:    "claude delivery never linked",
+				rowID:  a.rowID,
+				sent:   linkTruncate(a.text),
+				reason: "not in its response's capture",
+			})
 		}
-		kept = append(kept, a)
-	}
-	if len(kept) == 0 {
-		delete(r.accepted, childID)
-	} else {
-		r.accepted[childID] = kept
 	}
 	return ids, logs
 }
 
 // linkCapturedUserMessages sets MessageId on the captured user messages of one
-// main-thread request that delivered a tracked inbox row.
+// main-thread request that delivered a tracked inbox row. responseID is the
+// capture's ResponseMessageID; "" (a response that was not stored) links
+// nothing.
 //
 // It runs BEFORE the publish loop, on the events that loop is about to publish,
 // and publishes nothing itself: the events reach subscribers in ordinal order
@@ -216,7 +207,7 @@ func (r *claudeDeliveryRegistry) link(childID string, received time.Time, units 
 // between them. Everything it decides is in memory; the log lines it emits are
 // the registry's deferred warnings, emitted here because the registry never logs
 // under its lock.
-func (c *Controller) linkCapturedUserMessages(childID string, received time.Time, evs []*rafikiv1.Event) {
+func (c *Controller) linkCapturedUserMessages(childID, responseID string, evs []*rafikiv1.Event) {
 	var at []int
 	var units []linkUnit
 	for i, ev := range evs {
@@ -231,12 +222,17 @@ func (c *Controller) linkCapturedUserMessages(childID string, received time.Time
 		at = append(at, i)
 		units = append(units, u)
 	}
-	ids, logs := c.claudeDeliveries.link(childID, received, units)
+	ids, logs := c.claudeDeliveries.link(childID, responseID, units)
 	for i, id := range ids {
 		if id != "" {
 			evs[at[i]].GetUserMessage().MessageId = id
 		}
 	}
+	logLinks(childID, logs)
+}
+
+// logLinks emits the registry's deferred link warnings for childID.
+func logLinks(childID string, logs []linkLog) {
 	for _, l := range logs {
 		attrs := []any{"child", childID}
 		if l.rowID != "" {

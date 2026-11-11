@@ -428,31 +428,50 @@ the id on those events. Nothing is written to the stored row.
   same message. A client uses it to recognise the canonical row as the one that
   replaced its own optimistic copy of that send (`docs/guide/cockpit.md`
   "Unacknowledged sends").
-- **Eligibility is timing, then order, then text.** A delivery is eligible only
-  if its echo was accepted by the time the request reached the proxy, within
-  `claudeLinkSkew` (1s: the echo and the arrival are stamped by two different
-  goroutines, and a capture is written after its request is forwarded, so an
-  unbounded queue would name a later turn's row). When the two sides' counts
-  agree the pairing is POSITIONAL — position IS the answer, and a pair whose
-  text differs is linked anyway with a WARN ("claude delivery linked by order;
-  text differs"), because a prompt Claude Code rewrote must not cost its row its
-  name. When they differ, units are matched greedily in order against the first
-  eligible delivery each loosely matches (whitespace collapsed, containment in
-  either direction, image count alone for an image-only send); a delivery
-  skipped on the way to a later match is dropped as never linked, and a unit
-  that matches nothing stays unlinked and logs its text. Injected blocks are
-  never part of a unit. The queue a delivery waits in is per child, capped at
-  64 (the OLDEST dropped and logged, because an overflow means captures are not
-  being reported) and retired with the LAUNCH that accepted it.
+- **Eligibility is the response id, decided by stdout order.** Claude Code
+  prints a message's acceptance echo before the first main-thread assistant
+  frame of the response to the request that carried it — whether the message
+  arrived while the child was idle (the echo then follows the request, printed
+  at the response's first `content_block_stop`) or mid-turn (the echo precedes
+  the request carrying the relay). So when the child's stdout shows a NEW
+  main-thread assistant id (`SpawnSpec.OnAssistantMessage`, the provider's
+  `GatedMessageID`: subagent frames and the `<synthetic>` API-error reply never
+  count), every delivery echoed since is bound to it
+  (`claudeDeliveryRegistry.bind`); a repeat of the latest id binds nothing.
+  The capture whose `ResponseMessageID` is that id links exactly those
+  deliveries. No clock is compared anywhere.
+- **Pairing is order, then text.** When the capture's units and the bound
+  deliveries agree in count the pairing is POSITIONAL, and a pair whose text
+  differs is linked anyway with a WARN ("claude delivery linked by order; text
+  differs"), because a prompt Claude Code rewrote must not cost its row its
+  name. When they differ, units are matched greedily in order against the
+  first bound delivery each loosely matches (whitespace collapsed, containment
+  in either direction, image count alone for an image-only send); a unit that
+  matches nothing stays unlinked and logs its text. Injected blocks are never
+  part of a unit.
+- **A delivery has one capture.** Every delivery bound to a response leaves
+  the queue when that response's capture reports, linked or not ("claude
+  delivery never linked", reason `not in its response's capture`). A capture
+  that reports BEFORE the child's stdout reaches its response publishes
+  unlinked, and a delivery bound to that id afterwards is dropped (reason
+  `capture published first`) — a missing id, never a wrong one. The queue is
+  per child, capped at 64 (the OLDEST dropped and logged, because an overflow
+  means captures are not being reported) and retired with the LAUNCH that
+  accepted it.
 
-Pinned by `TestClaudeLinkSkewWindow`, `TestClaudeLinkByOrderWhenTextDiffers`,
-`TestClaudeLinkGreedyByTextWhenCountsDiffer`,
-`TestClaudeLinkUnmatchedUnitStaysUnlinked`, `TestClaudeLinkImageOnlySend`,
+Pinned by `TestClaudeLinkEachTurnNamesItsOwnRow`,
+`TestClaudeLinkRepeatedFrameBindsNothing`,
+`TestClaudeLinkCaptureFirstDropsTheLateBinding`,
+`TestClaudeLinkByOrderWhenTextDiffers`,
+`TestClaudeLinkGreedyByTextWhenCountsDiffer`, `TestClaudeLinkImageOnlySend`,
 `TestClaudeLinkInjectedNeverAUnit`, `TestClaudeLinkQueueCap`,
 `TestClaudeLinkRetiredWithTheLaunch` and
-`TestCaptureReportedLinksOnlyTheMainThread` (`cmd/rafikid`), and end to end by
-`TestClaudeDeliveryCaptureCarriesTheMessageID` (`test/integration`), which reads
-the same message back through `GetHistory` and finds `message_id` empty there.
+`TestCaptureReportedLinksOnlyTheMainThread` (`cmd/rafikid`),
+`TestClaudeAssistantMessageHookFollowsStdoutOrder` (`pkg/child`), and end to
+end by `TestClaudeDeliveryCaptureCarriesTheMessageID` and
+`TestClaudeDeliveryCaptureLinksWhenTheEchoFollowsTheRequest`
+(`test/integration`); the first reads the same message back through
+`GetHistory` and finds `message_id` empty there.
 
 #### Who produces the deltas
 

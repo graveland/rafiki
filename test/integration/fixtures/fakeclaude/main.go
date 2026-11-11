@@ -25,7 +25,10 @@
 //     and the ANTHROPIC_CUSTOM_HEADERS the daemon handed it — which is what makes
 //     the request attributable to the child and therefore CAPTURED. The SSE
 //     message id it sees becomes the assistant frame's message.id, which is what
-//     arms the child's message gate until the capture persists that row.
+//     arms the child's message gate until the capture persists that row. The
+//     frame is printed at the response's first content_block_stop, while the
+//     stream is still open — as 2.1.321 does — so it reaches the daemon before
+//     the proxy can finish relaying the stream and report the capture.
 //   - a message that arrives while a turn is already in flight is echoed at once
 //     and then carried into the NEXT request wrapped in Claude Code's mid-turn
 //     preamble ("The user sent a new message while you were working: …"), which
@@ -53,6 +56,13 @@
 //	                          not on the wire.
 //	FAKE_CLAUDE_ECHO_TIMES=n  echo each accepted message n times (the echo is
 //	                          at-least-once; a duplicate must yield ONE receipt)
+//	FAKE_CLAUDE_ECHO_AFTER_RESPONSE=1  echo a message only once the request
+//	                          that carried it has its response, immediately
+//	                          before that response's assistant frame — what
+//	                          2.1.321 does for a message sent to an idle child
+//	                          (the echo follows the response's first content
+//	                          block). The request is on the wire before the
+//	                          echo exists, so only stdout order ties the two.
 //	--resume                  replays the PREVIOUS process's last echoed uuid
 //	                          before reading stdin, exactly as `--resume`
 //	                          replays an old frame. That uuid belongs to a
@@ -207,6 +217,7 @@ type fixture struct {
 type accepted struct {
 	uuid    string
 	text    string
+	content json.RawMessage
 	midTurn bool
 }
 
@@ -240,31 +251,16 @@ func (f *fixture) readLineLoop() {
 
 		f.mu.Lock()
 		midTurn := f.inTurn
-		f.history = append(f.history, accepted{uuid: in.UUID, text: text, midTurn: midTurn})
+		a := accepted{uuid: in.UUID, text: text, content: in.Message.Content, midTurn: midTurn}
+		f.history = append(f.history, a)
 		f.mu.Unlock()
 
 		// The echo, on read and before any turn work: this is the acceptance
 		// signal, and it must not wait for a turn that is still in flight.
 		f.ensureInit()
-		for range echoTimes() {
-			f.write(map[string]any{
-				"type": "user",
-				// The echo returns the message it was HANDED, content shape and
-				// all: a text-only prompt goes out as a plain string and comes
-				// back as one (measured on 2.1.290 — see
-				// testdata/claude-capture-delivery). A fixture that "helpfully"
-				// re-shaped it into a block array would hide a parser that only
-				// accepts arrays, which is exactly the bug this fixture caught.
-				"message":            map[string]any{"role": "user", "content": in.Message.Content},
-				"session_id":         f.sessionID,
-				"parent_tool_use_id": nil,
-				"uuid":               in.UUID,
-				"timestamp":          time.Now().UTC().Format(time.RFC3339Nano),
-				"isReplay":           true,
-			})
-			record(map[string]any{"event": "echo", "uuid": in.UUID, "text": text, "mid_turn": midTurn})
+		if !echoAfterResponse() {
+			f.writeEcho(a)
 		}
-		rememberLastEcho(in.UUID, text)
 
 		// A turn runs on its own goroutine, so this loop keeps reading: that is
 		// what makes a mid-turn message possible at all — the binary accepts and
@@ -315,6 +311,7 @@ func (f *fixture) runTurn() {
 	f.turnN++
 	n := f.turnN
 	history := append([]accepted(nil), f.history...)
+	fresh := history[f.carried:]
 	f.carried = len(history)
 	f.mu.Unlock()
 	defer func() {
@@ -341,7 +338,14 @@ func (f *fixture) runTurn() {
 	record(map[string]any{"event": "request", "n": n, "messages": body["messages"]})
 
 	f.holdIfAsked(n)
-	status, id, text := f.post(body)
+	status, id, text := f.post(body, func(id, text string) {
+		if echoAfterResponse() {
+			for _, a := range fresh {
+				f.writeEcho(a)
+			}
+		}
+		f.writeAssistant(id, text)
+	})
 
 	if status != "ok" {
 		record(map[string]any{"event": "turn_end", "n": n, "message_id": id, "status": status})
@@ -349,7 +353,6 @@ func (f *fixture) runTurn() {
 		// daemon sees the proxy's own error and publishes it.
 		return
 	}
-	f.writeAssistant(id, text)
 	f.write(map[string]any{
 		"type": "result", "subtype": "success", "is_error": false,
 		"duration_ms": 1, "num_turns": 1, "result": text,
@@ -393,8 +396,10 @@ func (f *fixture) holdIfAsked(n int) {
 
 // post sends one /v1/messages request to the daemon's proxy face and reads the
 // SSE stream back. It returns "ok" plus the response's message id and text, or a
-// failure status for the test to see.
-func (f *fixture) post(body map[string]any) (status, id, text string) {
+// failure status for the test to see. onBlockStop runs once, at the response's
+// first content_block_stop, with the id and the text so far: that is where the
+// binary prints the response's first assistant frame.
+func (f *fixture) post(body map[string]any, onBlockStop func(id, text string)) (status, id, text string) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return "encode failed", "", ""
@@ -422,6 +427,7 @@ func (f *fixture) post(body map[string]any) (status, id, text string) {
 	}
 
 	var sb strings.Builder
+	printed := false
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -447,10 +453,18 @@ func (f *fixture) post(body map[string]any) (status, id, text string) {
 			id = ev.Message.ID
 		case "content_block_delta":
 			sb.WriteString(ev.Delta.Text)
+		case "content_block_stop":
+			if !printed && id != "" {
+				printed = true
+				onBlockStop(id, sb.String())
+			}
 		}
 	}
 	if id == "" {
 		return "stream carried no message id", "", ""
+	}
+	if !printed {
+		onBlockStop(id, sb.String())
 	}
 	return "ok", id, sb.String()
 }
@@ -546,6 +560,31 @@ func record(v any) {
 }
 
 // echoTimes is how many times each echo is written (default one).
+// writeEcho emits the acceptance echo for one message, echoTimes() times.
+func (f *fixture) writeEcho(a accepted) {
+	for range echoTimes() {
+		f.write(map[string]any{
+			"type": "user",
+			// The echo returns the message it was HANDED, content shape and
+			// all: a text-only prompt goes out as a plain string and comes
+			// back as one (measured on 2.1.290 — see
+			// testdata/claude-capture-delivery). A fixture that "helpfully"
+			// re-shaped it into a block array would hide a parser that only
+			// accepts arrays, which is exactly the bug this fixture caught.
+			"message":            map[string]any{"role": "user", "content": a.content},
+			"session_id":         f.sessionID,
+			"parent_tool_use_id": nil,
+			"uuid":               a.uuid,
+			"timestamp":          time.Now().UTC().Format(time.RFC3339Nano),
+			"isReplay":           true,
+		})
+		record(map[string]any{"event": "echo", "uuid": a.uuid, "text": a.text, "mid_turn": a.midTurn})
+	}
+	rememberLastEcho(a.uuid, a.text)
+}
+
+func echoAfterResponse() bool { return os.Getenv("FAKE_CLAUDE_ECHO_AFTER_RESPONSE") == "1" }
+
 func echoTimes() int {
 	n, err := strconv.Atoi(os.Getenv("FAKE_CLAUDE_ECHO_TIMES"))
 	if err != nil || n < 1 {

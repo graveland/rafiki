@@ -21,10 +21,6 @@ type CaptureReport struct {
 	Rows              []*conv.Node
 	Err               string // non-empty: the capture failed
 	TurnErr           string // non-empty: the turn failed upstream or mid-stream; the capture itself is intact
-	// RequestReceived is when the request reached ServeHTTP, by the daemon's
-	// clock; zero when unknown. A sink links delivered inbox rows against it,
-	// so it must not be the turn intent's created_at, which the database stamps.
-	RequestReceived time.Time
 	// ReleaseOnly marks a report from a request that is NOT the child's own
 	// conversation — Claude Code's titler, its quota probe and the per-tool
 	// model helpers all ride the session header, and none of them declares a
@@ -89,8 +85,7 @@ func (p *MessagesProxy) reportCapture(r *http.Request, cr captureRef, reqBody []
 	}
 	report := CaptureReport{
 		Session: cr.session, ThreadID: cr.threadID, ConversationID: cr.convID,
-		RequestReceived: cr.received,
-		Rows:            rows, Err: errText, TurnErr: cr.outcome.turnFailure, ReleaseOnly: releaseOnly,
+		Rows: rows, Err: errText, TurnErr: cr.outcome.turnFailure, ReleaseOnly: releaseOnly,
 	}
 	if errText == "" && report.TurnErr == "" {
 		report.ResponseMessageID = cr.outcome.responseMessageID

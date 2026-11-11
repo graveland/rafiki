@@ -441,3 +441,46 @@ func TestClaudeDeliveryCaptureTwoIdenticalSendsLinkInOrder(t *testing.T) {
 	stream.mu.Unlock()
 	c.EqDeep([]string{firstRow, secondRow}, ids, "captured user messages name the two sends in send order")
 }
+
+// TestClaudeDeliveryCaptureLinksWhenTheEchoFollowsTheRequest is the shape
+// Claude Code 2.1.321 has for a message sent to an IDLE child: the request
+// carrying it is on the wire, and the response's first block is back, before
+// the acceptance echo is printed. Nothing about the request's arrival can say
+// which delivery it carried; only the stdout order — the echo, then that
+// response's assistant frame — can. Two turns in a row, each with different
+// words, must each name their own row: a link keyed on when the echo arrived
+// named every message with the PREVIOUS turn's row.
+func TestClaudeDeliveryCaptureLinksWhenTheEchoFollowsTheRequest(t *testing.T) {
+	t.Parallel()
+	c := assert.NewCollecting(t)
+
+	up := newCaptureUpstream(t)
+	d, _ := claudeDeliveryDaemon(t,
+		"RAFIKI_PROVIDERS="+writeAnthropicBaseProviders(t, up.srv.URL),
+		"FAKE_CLAUDE_TURNS=1",
+		"FAKE_CLAUDE_REQUEST_MODEL=claude-haiku-4-5",
+		"FAKE_CLAUDE_ECHO_AFTER_RESPONSE=1",
+	)
+	client := d.control(t)
+	childID := spawnClaudeChild(t, d)
+	stream := d.openEvents(t, childEventsSubject(childID), nil, eventWatermark(t, client, childID))
+
+	for i, prompt := range []string{"bee is down again", "can we bump the replica elsewhere"} {
+		gate := up.gate(i)
+		row := sendPromptRow(t, client, childID, prompt)
+		up.expectRequest(t, i)
+		// The response's first block arrives 1.5s after the request, as a
+		// thinking block does in production. The link must not care; a link
+		// that compared the echo's arrival with the request's (with a 1s
+		// allowance) misses this message's capture and names the next one.
+		time.Sleep(1500 * time.Millisecond)
+		close(gate)
+		published := stream.waitEvent(t, userMessageMatching(childID, func(s string) bool {
+			return strings.TrimSpace(s) == prompt
+		}), 60*time.Second)
+		c.Eq(row, published.GetUserMessage().GetMessageId(),
+			"turn %d: the captured message names the row that delivered it", i)
+		stream.waitEvent(t, deliveredEvent(childID, row), 60*time.Second)
+		stream.waitEvent(t, agentStatusEvent(childID, "idle"), 60*time.Second)
+	}
+}

@@ -5,9 +5,9 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -59,15 +59,18 @@ type claudeDelivery struct {
 // acceptedDelivery is one delivery Claude Code has accepted and the capture
 // that stores its message has not yet reported. It outlives take (the receipt
 // publishes immediately) because the captured message arrives later, on the
-// request that carried it: gen is the launch that accepted it, and echoAt is
-// when the echo landed, which is what bounds how late a capture can still be
-// linked to it.
+// request that carried it.
+//
+// responseID names that request: it is the message id of the first main-thread
+// assistant frame printed after the echo ("" until that frame is seen), which
+// is the same id the request's capture reports. Binding is by stdout order
+// alone — see bind.
 type acceptedDelivery struct {
-	rowID  string
-	text   string
-	images int
-	gen    uint64
-	echoAt time.Time
+	rowID      string
+	text       string
+	images     int
+	gen        uint64
+	responseID string
 }
 
 // claudeDeliveryRegistry maps a delivery uuid to the inbox row it names.
@@ -96,9 +99,21 @@ type claudeDeliveryRegistry struct {
 	insts map[*child.Child]uint64
 	rows  map[claudeDeliveryKey]claudeDelivery
 	// accepted is the echo-ordered queue of deliveries accepted but not yet
-	// linked to a captured message, per child. A row leaves it when a capture
-	// links it (link), when its launch retires, or when the queue overflows.
+	// linked to a captured message, per child. A row leaves it when its
+	// response's capture reports (link), when its response had already reported
+	// by the time it was bound (bind), when its launch retires, or when the
+	// queue overflows.
 	accepted map[string][]acceptedDelivery
+	// lastResponse is the response id the child's latest main-thread assistant
+	// frame carried, per child. bind acts only on a CHANGE of id: every content
+	// block of one response prints its own frame, and an echo printed between
+	// two of them belongs to a later request, not to the response in progress.
+	lastResponse map[string]string
+	// reported is the per-child ring of response ids whose capture has already
+	// linked, newest last, capped at claudeLinkQueueCap. A delivery bound to one
+	// of them missed its capture (the report beat the stdout frame), and nothing
+	// will ever report that id again.
+	reported map[string][]string
 }
 
 // beginLaunch starts a new launch generation for childID and retires every
@@ -125,6 +140,8 @@ func (r *claudeDeliveryRegistry) beginLaunch(childID string) uint64 {
 		}
 	}
 	delete(r.accepted, childID)
+	delete(r.lastResponse, childID)
+	delete(r.reported, childID)
 	return gen
 }
 
@@ -179,7 +196,7 @@ func (r *claudeDeliveryRegistry) take(childID string, gen uint64, deliveryUUID s
 		r.accepted = make(map[string][]acceptedDelivery)
 	}
 	q := append(r.accepted[childID], acceptedDelivery{
-		rowID: d.rowID, text: d.text, images: d.images, gen: gen, echoAt: time.Now(),
+		rowID: d.rowID, text: d.text, images: d.images, gen: gen,
 	})
 	if len(q) > claudeLinkQueueCap {
 		dropped = q[0].rowID
@@ -187,6 +204,60 @@ func (r *claudeDeliveryRegistry) take(childID string, gen uint64, deliveryUUID s
 	}
 	r.accepted[childID] = q
 	return d.rowID, dropped, true
+}
+
+// bind attaches every unbound accepted delivery of childID's launch gen to
+// responseID, the message id of a main-thread assistant frame, and reports the
+// rows it had to drop.
+//
+// It runs on the child's stdout goroutine (OnAssistantMessage), in line order
+// with the echoes take consumed, and Claude Code prints a message's echo before
+// the first assistant frame of the response to the request that carried it. So
+// the deliveries still unbound when a NEW id appears are exactly the ones that
+// response's request carried — an ordering, not a time window. A repeat of the
+// latest id (the next content block of the same response) binds nothing.
+//
+// A delivery bound to an id whose capture already reported is dropped and
+// logged: its capture published without it, and no other capture can name it.
+func (r *claudeDeliveryRegistry) bind(childID string, gen uint64, responseID string) (logs []linkLog) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if responseID == "" || r.gens[childID] != gen || r.lastResponse[childID] == responseID {
+		return nil
+	}
+	if r.lastResponse == nil {
+		r.lastResponse = make(map[string]string)
+	}
+	r.lastResponse[childID] = responseID
+	late := slices.Contains(r.reported[childID], responseID)
+	q := r.accepted[childID]
+	kept := q[:0]
+	for _, a := range q {
+		if a.gen == gen && a.responseID == "" {
+			if late {
+				logs = append(logs, linkLog{
+					msg:    "claude delivery never linked",
+					rowID:  a.rowID,
+					sent:   linkTruncate(a.text),
+					reason: "capture published first",
+				})
+				continue
+			}
+			a.responseID = responseID
+		}
+		kept = append(kept, a)
+	}
+	r.setAcceptedLocked(childID, kept)
+	return logs
+}
+
+// setAcceptedLocked stores childID's queue, deleting the entry when it is empty.
+func (r *claudeDeliveryRegistry) setAcceptedLocked(childID string, q []acceptedDelivery) {
+	if len(q) == 0 {
+		delete(r.accepted, childID)
+		return
+	}
+	r.accepted[childID] = q
 }
 
 // drop forgets ONE delivery whose write definitively failed. Its row stays
@@ -242,6 +313,8 @@ func (r *claudeDeliveryRegistry) endLaunch(childID string, ch *child.Child) {
 		}
 	}
 	r.retireAccepted(childID, gen)
+	delete(r.lastResponse, childID)
+	delete(r.reported, childID)
 }
 
 // abandonLaunch retires childID's current generation for a spawn that never
@@ -266,6 +339,8 @@ func (r *claudeDeliveryRegistry) abandonLaunch(childID string) {
 		}
 	}
 	r.retireAccepted(childID, gen)
+	delete(r.lastResponse, childID)
+	delete(r.reported, childID)
 }
 
 // retireAccepted drops childID's queued deliveries from gen, keeping any a later
@@ -280,11 +355,7 @@ func (r *claudeDeliveryRegistry) retireAccepted(childID string, gen uint64) {
 			kept = append(kept, a)
 		}
 	}
-	if len(kept) == 0 {
-		delete(r.accepted, childID)
-		return
-	}
-	r.accepted[childID] = kept
+	r.setAcceptedLocked(childID, kept)
 }
 
 // claudeReplayHook is the OnUserReplay callback for one claude launch.
@@ -313,6 +384,16 @@ func (c *Controller) claudeReplayHook(childID string, gen uint64) func(string) {
 				MessageId: rowID,
 			}},
 		})
+	}
+}
+
+// claudeAssistantHook is the OnAssistantMessage callback for one claude launch:
+// it binds the launch's accepted deliveries to the response id the child just
+// printed. Synchronous on the child's stdout goroutine, like claudeReplayHook,
+// and for the same reason it only takes the registry's lock and logs after.
+func (c *Controller) claudeAssistantHook(childID string, gen uint64) func(string) {
+	return func(messageID string) {
+		logLinks(childID, c.claudeDeliveries.bind(childID, gen, messageID))
 	}
 }
 

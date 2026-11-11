@@ -1168,6 +1168,7 @@ func (c *Controller) installChildHooks(spec *child.SpawnSpec, kind string) (clau
 		// a delivery registers can only ever agree on one generation.
 		claudeGen = c.claudeDeliveries.beginLaunch(spec.ChildID)
 		spec.OnUserReplay = c.claudeReplayHook(spec.ChildID, claudeGen)
+		spec.OnAssistantMessage = c.claudeAssistantHook(spec.ChildID, claudeGen)
 	}
 	return claudeGen
 }

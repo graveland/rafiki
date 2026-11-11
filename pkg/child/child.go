@@ -103,6 +103,19 @@ type SpawnSpec struct {
 	// Nil wherever a child has no acknowledgement to report.
 	OnUserReplay func(deliveryUUID string)
 
+	// OnAssistantMessage fires with the message id of every MAIN-THREAD
+	// assistant frame (the provider's GatedMessageID: subagent frames and
+	// Claude Code's synthetic API-error reply never fire it), once per frame.
+	//
+	// Called SYNCHRONOUSLY from the readStdout goroutine, like OnUserReplay, so
+	// the two arrive in stdout line order: an echo's OnUserReplay always fires
+	// before the OnAssistantMessage of any frame printed after it. That order is
+	// the whole contract — Claude Code prints a message's echo before the first
+	// assistant frame of the response to the request that carried it, so the
+	// daemon binds a delivery to its response id by order alone. Nil wherever a
+	// child has no acknowledgement to bind.
+	OnAssistantMessage func(messageID string)
+
 	// OnScriptOutput, when non-nil, receives one raw chunk of a SCRIPT child's
 	// output: the "stdout" chunks come from handleFrame's script_output
 	// ParsedEvents, the "stderr" chunks are split out of the stderr drain (a
@@ -323,6 +336,7 @@ type Child struct {
 	onMeta         func(SnifferMetadata)
 	onSubagent     func(SubagentObservation)
 	onUserReplay   func(string)
+	onAssistantMsg func(string)
 	onScriptOutput func(stream, line string, terminated bool)
 	// preShutdownStatus is the status before BeginShutdown was called, captured
 	// so handleChildExit can record the child's real pre-exit state (idle,
@@ -442,6 +456,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		onMeta:         spec.OnMeta,
 		onSubagent:     spec.OnSubagent,
 		onUserReplay:   spec.OnUserReplay,
+		onAssistantMsg: spec.OnAssistantMessage,
 		onScriptOutput: spec.OnScriptOutput,
 		transitionCh:   make(chan struct{}, 1),
 		idle:           make(chan struct{}),
@@ -938,9 +953,16 @@ func (c *Child) readStdout() {
 		for _, f := range c.provider.BusFrames(line, ts) {
 			c.publishBus(f, ts)
 		}
+		var gatedID string
+		if mg, ok := c.provider.(messageGated); ok && (c.onAssistantMsg != nil || (c.nativeSink != nil && c.gate != nil)) {
+			gatedID = mg.GatedMessageID(line)
+		}
+		if gatedID != "" && c.onAssistantMsg != nil {
+			c.onAssistantMsg(gatedID)
+		}
 		if c.nativeSink != nil {
 			if c.gate != nil {
-				c.gate.await(c.provider.(messageGated).GatedMessageID(line))
+				c.gate.await(gatedID)
 			}
 			for _, ev := range c.busFramesNative(line, ts) {
 				ev.ChildId = c.ID

@@ -96,7 +96,7 @@ func (c *Controller) CaptureReported(r server.CaptureReport) {
 	// subagent thread is a different conversation whose messages this child's
 	// stream never carried, and a release-only report has no rows at all.
 	if r.ThreadID == "" && !r.ReleaseOnly {
-		c.linkCapturedUserMessages(childID, r.RequestReceived, evs)
+		c.linkCapturedUserMessages(childID, r.ResponseMessageID, evs)
 	}
 	for _, ev := range evs {
 		c.publishEvent(childID, ev)

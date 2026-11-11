@@ -23,22 +23,31 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// seedAccepted fills one child's link queue the way an echo does: each delivery
-// is registered against a fresh launch and taken, in order. The newest launch's
-// generation is returned so a test can retire it.
-func seedAccepted(t *testing.T, r *claudeDeliveryRegistry, childID string, ds ...claudeDelivery) uint64 {
+// seedBound fills one child's link queue the way a launch does: each delivery
+// is registered against a fresh launch, echoed (take) in order, and then bound
+// to responseID as the next main-thread assistant frame would. The launch's
+// generation is returned so a test can retire it or keep driving it.
+func seedBound(t *testing.T, r *claudeDeliveryRegistry, childID, responseID string, ds ...claudeDelivery) uint64 {
 	t.Helper()
 	gen := r.beginLaunch(childID)
-	for i, d := range ds {
-		u := fmt.Sprintf("u-%s-%d", childID, i)
-		if _, ok := r.register(childID, u, d.rowID, d.text, d.images); !ok {
-			t.Fatalf("register(%s, %s): no live launch", childID, d.rowID)
-		}
-		if _, _, ok := r.take(childID, gen, u); !ok {
-			t.Fatalf("take(%s, %s): missed", childID, u)
-		}
+	for _, d := range ds {
+		echo(t, r, childID, gen, d)
 	}
+	r.bind(childID, gen, responseID)
 	return gen
+}
+
+// echo registers one delivery on gen and takes it, as a write followed by
+// Claude Code's acceptance echo would. It leaves the delivery unbound.
+func echo(t *testing.T, r *claudeDeliveryRegistry, childID string, gen uint64, d claudeDelivery) {
+	t.Helper()
+	u := "u-" + childID + "-" + d.rowID
+	if _, ok := r.register(childID, u, d.rowID, d.text, d.images); !ok {
+		t.Fatalf("register(%s, %s): no live launch", childID, d.rowID)
+	}
+	if _, _, ok := r.take(childID, gen, u); !ok {
+		t.Fatalf("take(%s, %s): missed", childID, u)
+	}
 }
 
 // acceptedCount is a test-only view of one child's link queue length, so a test
@@ -72,9 +81,9 @@ func (b *lockBuffer) String() string {
 func TestClaudeLinkByOrderWhenTextDiffers(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	r := &claudeDeliveryRegistry{}
-	seedAccepted(t, r, "c", claudeDelivery{rowID: "row-1", text: "hello world"})
+	seedBound(t, r, "c", "msg_1", claudeDelivery{rowID: "row-1", text: "hello world"})
 
-	ids, logs := r.link("c", time.Now(), []linkUnit{{text: "hello  wörld (edited)"}})
+	ids, logs := r.link("c", "msg_1", []linkUnit{{text: "hello  wörld (edited)"}})
 
 	ck.EqDeep([]string{"row-1"}, ids, "linked by order")
 	ck.Require().Len(logs, 1, "logs")
@@ -85,61 +94,146 @@ func TestClaudeLinkByOrderWhenTextDiffers(t *testing.T) {
 	ck.Eq(0, r.acceptedCount("c"), "the linked delivery left the queue")
 }
 
-// The capture is one message, the queue has two: the unit matches the second,
-// so the first is a delivery whose capture never arrived and is dropped.
+// The capture is one message, two deliveries were bound to its response: the
+// unit matches the second, and the first — bound to this response but named by
+// none of its units — leaves the queue as never linked, because no other
+// capture can name it.
 func TestClaudeLinkGreedyByTextWhenCountsDiffer(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	r := &claudeDeliveryRegistry{}
-	seedAccepted(t, r, "c",
+	seedBound(t, r, "c", "msg_1",
 		claudeDelivery{rowID: "row-A", text: "alpha"},
 		claudeDelivery{rowID: "row-B", text: "beta"},
 	)
 
-	ids, logs := r.link("c", time.Now(), []linkUnit{{text: "beta"}})
+	ids, logs := r.link("c", "msg_1", []linkUnit{{text: "beta"}})
 
 	ck.EqDeep([]string{"row-B"}, ids, "linked to the matching delivery")
 	ck.Require().Len(logs, 1, "logs")
 	ck.Eq("claude delivery never linked", logs[0].msg, "log message")
 	ck.Eq("row-A", logs[0].rowID, "logged row")
-	ck.Eq("a later delivery linked", logs[0].reason, "log reason")
+	ck.Eq("not in its response's capture", logs[0].reason, "log reason")
 	ck.Eq(0, r.acceptedCount("c"), "both deliveries left the queue")
 }
 
-// A capture that matches nothing must not consume the deliveries: they may
-// belong to a later request whose capture has not reported yet.
-func TestClaudeLinkUnmatchedUnitStaysUnlinked(t *testing.T) {
+// A unit that matches no bound delivery names nothing, and the bound delivery
+// it failed to match is dropped with its response, never carried to a later one.
+func TestClaudeLinkUnmatchedUnitNamesNothing(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	r := &claudeDeliveryRegistry{}
-	seedAccepted(t, r, "c", claudeDelivery{rowID: "row-A", text: "alpha"})
+	seedBound(t, r, "c", "msg_1", claudeDelivery{rowID: "row-A", text: "alpha"})
 
-	ids, logs := r.link("c", time.Now(), []linkUnit{{text: "xx"}, {text: "yy"}})
+	ids, logs := r.link("c", "msg_1", []linkUnit{{text: "xx"}, {text: "yy"}})
 
 	ck.EqDeep([]string{"", ""}, ids, "no delivery matched")
-	ck.Require().Len(logs, 2, "logs")
+	ck.Require().Len(logs, 3, "logs")
 	ck.Eq("captured user message matched no accepted delivery", logs[0].msg, "log message")
-	ck.Eq(1, r.acceptedCount("c"), "queue after an unmatched capture")
+	ck.Eq("captured user message matched no accepted delivery", logs[1].msg, "log message")
+	ck.Eq("not in its response's capture", logs[2].reason, "the bound row is dropped")
+	ck.Eq(0, r.acceptedCount("c"), "nothing is carried past its response")
 }
 
-// A delivery accepted AFTER the request arrived cannot be one of its messages:
-// the capture is written after the turn it belongs to, so an echo from that turn
-// is later than the request and must stay out of reach.
-func TestClaudeLinkRespectsEchoTiming(t *testing.T) {
+// The production off-by-one: Claude Code echoes an idle send only after the
+// request carrying it has reached the proxy, so a link keyed on the echo's
+// arrival missed every message's own capture and named it on the NEXT turn's.
+// Bound by stdout order instead, each capture names its own row, and a capture
+// of a response printed BEFORE the echo leaves the delivery for its own.
+func TestClaudeLinkEachTurnNamesItsOwnRow(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	r := &claudeDeliveryRegistry{}
-	t0 := time.Now()
-	seedAccepted(t, r, "c", claudeDelivery{rowID: "row-A", text: "hello"})
+	gen := r.beginLaunch("c")
 
-	r.mu.Lock()
-	r.accepted["c"][0].echoAt = t0.Add(2 * time.Second)
-	r.mu.Unlock()
+	turns := []struct{ row, text, resp string }{
+		{"row-0", "bee is down again", "msg_1"},
+		{"row-1", "can we bump z2m's replica?", "msg_2"},
+		{"row-2", "registry: the data is in s3?", "msg_3"},
+	}
+	for _, tc := range turns {
+		echo(t, r, "c", gen, claudeDelivery{rowID: tc.row, text: tc.text})
 
-	ids, _ := r.link("c", t0, []linkUnit{{text: "hello"}})
-	ck.EqDeep([]string{""}, ids, "a delivery echoed after the request is not eligible")
-	ck.Eq(1, r.acceptedCount("c"), "the ineligible delivery stays queued")
+		ids, logs := r.link("c", "msg_prev_"+tc.row, []linkUnit{{text: "Tool loaded."}})
+		ck.EqDeep([]string{""}, ids, "%s: an earlier response's capture names nothing", tc.row)
+		ck.Empty(logs, "%s: an unbound delivery is not that capture's to judge", tc.row)
 
-	ids, _ = r.link("c", time.Time{}, []linkUnit{{text: "hello"}})
-	ck.EqDeep([]string{"row-A"}, ids, "an unknown request time makes every delivery eligible")
-	ck.Eq(0, r.acceptedCount("c"), "queue after linking")
+		r.bind("c", gen, tc.resp)
+		ids, logs = r.link("c", tc.resp, []linkUnit{{text: tc.text}})
+		ck.EqDeep([]string{tc.row}, ids, "%s names its own row", tc.row)
+		ck.Empty(logs, "%s logs nothing", tc.row)
+	}
+	ck.Eq(0, r.acceptedCount("c"), "nothing left queued")
+}
+
+// Every content block of one response prints its own frame with the same id.
+// An echo printed between two of them belongs to the NEXT request, so a repeat
+// of the latest id binds nothing and the delivery waits for a new one.
+func TestClaudeLinkRepeatedFrameBindsNothing(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	r := &claudeDeliveryRegistry{}
+	gen := r.beginLaunch("c")
+
+	echo(t, r, "c", gen, claudeDelivery{rowID: "row-A", text: "alpha"})
+	r.bind("c", gen, "msg_1")
+	echo(t, r, "c", gen, claudeDelivery{rowID: "row-B", text: "beta"})
+	r.bind("c", gen, "msg_1")
+
+	ids, _ := r.link("c", "msg_1", []linkUnit{{text: "alpha"}})
+	ck.EqDeep([]string{"row-A"}, ids, "msg_1 carried only the first")
+	ck.Eq(1, r.acceptedCount("c"), "the second waits for its own response")
+
+	r.bind("c", gen, "msg_2")
+	ids, logs := r.link("c", "msg_2", []linkUnit{{text: "beta"}})
+	ck.EqDeep([]string{"row-B"}, ids, "the next response names it")
+	ck.Empty(logs, "an exact pairing logs nothing")
+}
+
+// A capture can report before the child's stdout reaches its response's first
+// frame. It publishes unlinked, and a delivery bound to that id afterwards is
+// dropped with a warning instead of waiting for a report that will not come.
+func TestClaudeLinkCaptureFirstDropsTheLateBinding(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	r := &claudeDeliveryRegistry{}
+	gen := r.beginLaunch("c")
+	echo(t, r, "c", gen, claudeDelivery{rowID: "row-A", text: "alpha"})
+
+	ids, logs := r.link("c", "msg_1", []linkUnit{{text: "alpha"}})
+	ck.EqDeep([]string{""}, ids, "nothing was bound yet")
+	ck.Empty(logs, "an unbound delivery is not judged")
+
+	logs = r.bind("c", gen, "msg_1")
+	ck.Require().Len(logs, 1, "logs")
+	ck.Eq("claude delivery never linked", logs[0].msg, "log message")
+	ck.Eq("row-A", logs[0].rowID, "logged row")
+	ck.Eq("capture published first", logs[0].reason, "log reason")
+	ck.Eq(0, r.acceptedCount("c"), "the late delivery left the queue")
+}
+
+// Claude Code's synthetic API-error reply has no id the proxy reports, so the
+// child never fires the hook for it (pkg/child: GatedMessageID) and an empty id
+// binds nothing: the delivery rides to the retry, which carries it again.
+func TestClaudeLinkEmptyIDCarriesToTheRetry(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	r := &claudeDeliveryRegistry{}
+	gen := r.beginLaunch("c")
+	echo(t, r, "c", gen, claudeDelivery{rowID: "row-A", text: "alpha"})
+
+	r.bind("c", gen, "")
+	r.bind("c", gen, "msg_retry")
+	ids, _ := r.link("c", "msg_retry", []linkUnit{{text: "alpha"}})
+	ck.EqDeep([]string{"row-A"}, ids, "the retry's capture names it")
+}
+
+// A bind from a retired launch's hook binds nothing in the current one.
+func TestClaudeLinkStaleLaunchBindsNothing(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	r := &claudeDeliveryRegistry{}
+	old := r.beginLaunch("c")
+	gen := r.beginLaunch("c")
+	echo(t, r, "c", gen, claudeDelivery{rowID: "row-A", text: "alpha"})
+
+	r.bind("c", old, "msg_1")
+	ids, _ := r.link("c", "msg_1", []linkUnit{{text: "alpha"}})
+	ck.EqDeep([]string{""}, ids, "a stale launch's frame bound nothing")
+	ck.Eq(1, r.acceptedCount("c"), "the delivery is still waiting")
 }
 
 // An image-only send has no text to compare, so it matches on its image count —
@@ -148,55 +242,20 @@ func TestClaudeLinkImageOnlySend(t *testing.T) {
 	ck := assert.NewCollecting(t)
 
 	one := &claudeDeliveryRegistry{}
-	seedAccepted(t, one, "c", claudeDelivery{rowID: "row-A", images: 2})
-	ids, logs := one.link("c", time.Now(), []linkUnit{{images: 2}})
+	seedBound(t, one, "c", "msg_1", claudeDelivery{rowID: "row-A", images: 2})
+	ids, logs := one.link("c", "msg_1", []linkUnit{{images: 2}})
 	ck.EqDeep([]string{"row-A"}, ids, "the image count matched")
 	ck.Empty(logs, "an exact pairing logs nothing")
 
 	two := &claudeDeliveryRegistry{}
-	seedAccepted(t, two, "c",
+	seedBound(t, two, "c", "msg_1",
 		claudeDelivery{rowID: "row-B", images: 2},
 		claudeDelivery{rowID: "row-C", images: 2},
 	)
-	ids, logs = two.link("c", time.Now(), []linkUnit{{images: 1}})
+	ids, logs = two.link("c", "msg_1", []linkUnit{{images: 1}})
 	ck.EqDeep([]string{""}, ids, "a differing image count links nothing")
-	ck.Require().Len(logs, 1, "logs")
+	ck.Require().Len(logs, 3, "logs")
 	ck.Eq("captured user message matched no accepted delivery", logs[0].msg, "log message")
-	ck.Eq(2, two.acceptedCount("c"), "an image mismatch consumes nothing")
-}
-
-// A delivery is eligible when the echo landed no later than the request plus the
-// grace: the echo and the arrival are stamped by different goroutines, so a small
-// lag is the same request, and a longer one is a later request's message.
-func TestClaudeLinkSkewWindow(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		after  time.Duration
-		linked bool
-	}{
-		{"inside the grace", claudeLinkSkew / 2, true},
-		{"past the grace", claudeLinkSkew + time.Millisecond, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ck := assert.NewCollecting(t)
-			r := &claudeDeliveryRegistry{}
-			t0 := time.Now()
-			seedAccepted(t, r, "c", claudeDelivery{rowID: "row-A", text: "hello"})
-
-			r.mu.Lock()
-			r.accepted["c"][0].echoAt = t0.Add(tc.after)
-			r.mu.Unlock()
-
-			ids, _ := r.link("c", t0, []linkUnit{{text: "hello"}})
-			if tc.linked {
-				ck.EqDeep([]string{"row-A"}, ids, "an echo inside the grace belongs to the request")
-				ck.Eq(0, r.acceptedCount("c"), "queue after linking")
-				return
-			}
-			ck.EqDeep([]string{""}, ids, "an echo past the grace belongs to a later request")
-			ck.Eq(1, r.acceptedCount("c"), "the ineligible delivery stays queued")
-		})
-	}
 }
 
 // A queue that overflows means captures are not being reported: the oldest
@@ -235,18 +294,18 @@ func TestClaudeLinkRetiredWithTheLaunch(t *testing.T) {
 	units := []linkUnit{{text: "hello"}}
 
 	exited := &claudeDeliveryRegistry{}
-	gen := seedAccepted(t, exited, "c", claudeDelivery{rowID: "row-A", text: "hello"})
+	gen := seedBound(t, exited, "c", "msg_1", claudeDelivery{rowID: "row-A", text: "hello"})
 	inst := &child.Child{}
 	exited.attach(inst, gen)
 	exited.endLaunch("c", inst)
-	ids, _ := exited.link("c", time.Now(), units)
+	ids, _ := exited.link("c", "msg_1", units)
 	ck.EqDeep([]string{""}, ids, "endLaunch retired the accepted delivery")
 	ck.Eq(0, exited.acceptedCount("c"), "queue after endLaunch")
 
 	resumed := &claudeDeliveryRegistry{}
-	seedAccepted(t, resumed, "c", claudeDelivery{rowID: "row-A", text: "hello"})
+	seedBound(t, resumed, "c", "msg_1", claudeDelivery{rowID: "row-A", text: "hello"})
 	resumed.beginLaunch("c")
-	ids, _ = resumed.link("c", time.Now(), units)
+	ids, _ = resumed.link("c", "msg_1", units)
 	ck.EqDeep([]string{""}, ids, "beginLaunch retired the accepted delivery")
 	ck.Eq(0, resumed.acceptedCount("c"), "queue after beginLaunch")
 }
@@ -284,18 +343,12 @@ func TestCaptureReportedLinksOnlyTheMainThread(t *testing.T) {
 
 	accept := func(rowID, text string) {
 		t.Helper()
-		gen := h.c.claudeDeliveries.beginLaunch("c_1")
-		if _, ok := h.c.claudeDeliveries.register("c_1", "u-"+rowID, rowID, text, 0); !ok {
-			t.Fatalf("register(%s): no live launch", rowID)
-		}
-		if _, _, ok := h.c.claudeDeliveries.take("c_1", gen, "u-"+rowID); !ok {
-			t.Fatalf("take(%s): missed", rowID)
-		}
+		seedBound(t, &h.c.claudeDeliveries, "c_1", "msg_1", claudeDelivery{rowID: rowID, text: text})
 	}
 
 	accept("row-1", "m0")
 	h.c.CaptureReported(server.CaptureReport{
-		Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1", RequestReceived: time.Now(),
+		Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1",
 		Rows: []*conv.Node{capRow(0, "user", now, ""), capRow(1, "assistant", now, "end_turn")},
 	})
 	h.drain()
@@ -311,7 +364,7 @@ func TestCaptureReportedLinksOnlyTheMainThread(t *testing.T) {
 
 	accept("row-2", "m0")
 	h.c.CaptureReported(server.CaptureReport{
-		Session: "c_1", ThreadID: "th", ConversationID: "conv-th", ResponseMessageID: "msg_9", RequestReceived: time.Now(),
+		Session: "c_1", ThreadID: "th", ConversationID: "conv-th", ResponseMessageID: "msg_9",
 		Rows: []*conv.Node{capRow(0, "user", now, "")},
 	})
 	h.drain()
@@ -322,7 +375,7 @@ func TestCaptureReportedLinksOnlyTheMainThread(t *testing.T) {
 
 	h.log, h.got = nil, nil
 	h.c.CaptureReported(server.CaptureReport{
-		Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1", ReleaseOnly: true, RequestReceived: time.Now(),
+		Session: "c_1", ConversationID: "conv", ResponseMessageID: "msg_1", ReleaseOnly: true,
 		Rows: []*conv.Node{capRow(0, "user", now, "")},
 	})
 	h.drain()
@@ -382,8 +435,8 @@ func TestClaudeLinkWorksOnTheRecordedMidTurnRelay(t *testing.T) {
 	ck.Eq(0, unit.images, "the recorded relay carries no image")
 
 	r := &claudeDeliveryRegistry{}
-	seedAccepted(t, r, "c", claudeDelivery{rowID: "row-also", text: "Reply with exactly one word: also"})
-	ids, logs := r.link("c", time.Now(), []linkUnit{unit})
+	seedBound(t, r, "c", "msg_2", claudeDelivery{rowID: "row-also", text: "Reply with exactly one word: also"})
+	ids, logs := r.link("c", "msg_2", []linkUnit{unit})
 
 	ck.EqDeep([]string{"row-also"}, ids, "the recorded relay links to the row that carried it")
 	ck.Len(logs, 0, "an exact match warns about nothing")

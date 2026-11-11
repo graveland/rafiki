@@ -431,3 +431,56 @@ func TestClaudeDeliveryCallbackFiresWhileTheGateHolds(t *testing.T) {
 	}
 	t.Fatalf("held events were never released after the report; got %v", seen)
 }
+
+// OnAssistantMessage is what binds an echoed delivery to the response that
+// carried it, and the binding is decided by stdout order alone — so the two
+// hooks must fire in line order, once per main-thread assistant frame, and
+// never for a subagent frame or Claude Code's synthetic API-error reply (ids
+// the proxy never reports).
+func TestClaudeAssistantMessageHookFollowsStdoutOrder(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := newResettableStubRunner()
+	seq := make(chan string, 16)
+	ch, err := Spawn(context.Background(), SpawnSpec{
+		ChildID:            "c_assistant_hook",
+		Cwd:                t.TempDir(),
+		Runner:             stub,
+		Provider:           ClaudeProvider{},
+		OnUserReplay:       func(uuid string) { seq <- "echo:" + uuid },
+		OnAssistantMessage: func(id string) { seq <- "assistant:" + id },
+	})
+	c.Require().NoError(err, "spawn")
+	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
+
+	lines := []string{
+		`{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u-1","isReplay":true}`,
+		`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"thinking","thinking":"x"}]}}`,
+		`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5","content":[{"type":"text","text":"y"}]}}`,
+		`{"type":"assistant","parent_tool_use_id":"toolu_t","message":{"id":"msg_sub","model":"claude-opus-5","content":[]}}`,
+		`{"type":"user","message":{"role":"user","content":"again"},"uuid":"u-2","isReplay":true}`,
+		`{"type":"assistant","isApiErrorMessage":true,"message":{"id":"7f3c2a10-0000-4000-8000-000000000000","model":"<synthetic>","content":[{"type":"text","text":"API Error"}]}}`,
+		`{"type":"assistant","message":{"id":"msg_2","model":"claude-opus-5","content":[{"type":"text","text":"z"}]}}`,
+	}
+	for _, l := range lines {
+		if _, werr := stub.stdoutW.Write([]byte(l + "\n")); werr != nil {
+			t.Fatalf("write stdout: %v", werr)
+		}
+	}
+
+	want := []string{"echo:u-1", "assistant:msg_1", "assistant:msg_1", "echo:u-2", "assistant:msg_2"}
+	got := make([]string, 0, len(want))
+	for len(got) < len(want) {
+		select {
+		case s := <-seq:
+			got = append(got, s)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("hooks fired %v, want %v", got, want)
+		}
+	}
+	c.EqDeep(want, got, "hook order")
+	select {
+	case extra := <-seq:
+		t.Fatalf("an extra hook fired: %q", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
+}

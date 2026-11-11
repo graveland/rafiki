@@ -810,14 +810,9 @@ func (p *MessagesProxy) adaptEffortMap(body map[string]any, model string) bool {
 // completion helpers don't each take four positional args. on=false means
 // capture is disabled for this turn (the proxy still forwards).
 type captureRef struct {
-	convID    string
-	turnID    string
-	createdAt time.Time
-	// received is the request's own arrival stamp — the one the proxy also times
-	// the request from, taken before the body is read. It is what a capture sink
-	// links a delivered inbox row against, and it is deliberately NOT createdAt:
-	// that one is stamped by the database (InsertTurnIntent), a different clock.
-	received       time.Time
+	convID         string
+	turnID         string
+	createdAt      time.Time
 	on             bool
 	session        string // X-Rafiki-Session the thread was routed on; the family RecordThread scopes its lookup to
 	prevMessageID  string // diagnostics.previous_message_id, parsed once in beginCapture
@@ -880,7 +875,6 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort capture setup (never blocks the proxy on failure).
 	cr := p.beginCapture(r, reqBody, model)
-	cr.received = start
 	defer p.reportCapture(r, cr, reqBody)
 	if cr.refused != "" {
 		http.Error(w, "rafiki capture unavailable: "+cr.refused, http.StatusServiceUnavailable)
