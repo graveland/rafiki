@@ -475,7 +475,7 @@ func (b *boundExecutor) ensureBinding(ctx context.Context, execID string, wantCw
 		b.mu.Lock()
 		if b.closed {
 			b.mu.Unlock()
-			return nil, errBindingsClosed
+			return nil, errChildExited
 		}
 		bd := b.bindings[execID]
 		if bd == nil {
@@ -505,16 +505,17 @@ func (b *boundExecutor) ensureBinding(ctx context.Context, execID string, wantCw
 		var oldBd *binding
 		var oldWS string
 		var newBd *binding
-		if current && wantCwd && !bd.cwd {
-			// Promotion: a root-level workspace cannot serve as home, because
-			// the child's cwd would never apply there.
+		if current && wantCwd && !bd.cwd && !b.closed {
+			// PUBLISH SITE (promotion): a root-level workspace cannot serve as
+			// home, because the child's cwd would never apply there.
 			//
 			// Provision-then-release, never destroy-then-provision: the
 			// replacement is made FIRST and published under the lock, and the
 			// root-level workspace is released only after that succeeded. A
 			// failed re-provision therefore KEEPS the workspace the agent was
 			// using there — its files, its retained job output — and puts the
-			// old binding back.
+			// old binding back. Its own workspace publish is provision's, which
+			// takes the same guard.
 			oldBd, oldWS = bd, bd.wsID
 			newBd = &binding{ready: make(chan struct{})}
 			b.bindings[execID] = newBd
@@ -554,9 +555,44 @@ func (b *boundExecutor) ensureBinding(ctx context.Context, execID string, wantCw
 	}
 }
 
-// errBindingsClosed is returned to a call that races the child's exit: the
-// binding map was swept and any workspace made after it would be unreleasable.
-var errBindingsClosed = errors.New("this child's executor bindings have been released")
+// The two ways a binding can stop being the place a workspace belongs, each
+// with its own sentence because they mean different things to a caller: the
+// child exited (nothing more will run), or its bindings were released / replaced
+// under it (a caller may retry, or may not).
+var (
+	errChildExited       = errors.New("this child exited")
+	errBindingSuperseded = errors.New("this child's executor bindings were released")
+)
+
+// publishWorkspace installs a just-provisioned workspace into bd, and returns
+// false — after RELEASING the workspace — when this binding is no longer the one
+// the provision started from, or the child has exited.
+//
+// EVERY site that makes a workspace publishes through here, and that is the
+// point: a workspace installed after the exit sweep, or into a binding a
+// promotion has replaced, is a workspace nothing will ever release. The two
+// conditions are deliberately ONE guard rather than two, so a new caller cannot
+// implement half of it.
+//
+// The lock is held only for the check and the field write: the RPC that made the
+// workspace happened outside it.
+// The returned error names why the publish was refused (nil on success).
+func (b *boundExecutor) publishWorkspace(ctx context.Context, bd *binding, execID, wsID string, cl tools.ExecutorClient, cwd bool) error {
+	b.mu.Lock()
+	switch {
+	case b.closed:
+		b.mu.Unlock()
+		b.releaseAsync(ctx, execID, wsID)
+		return errChildExited
+	case b.bindings[execID] != bd:
+		b.mu.Unlock()
+		b.releaseAsync(ctx, execID, wsID)
+		return fmt.Errorf("%w (executor %s)", errBindingSuperseded, shortID(execID))
+	}
+	bd.wsID, bd.cl, bd.cwd = wsID, cl, cwd
+	b.mu.Unlock()
+	return nil
+}
 
 // provision performs one binding's first provision. Called with no lock held;
 // bd is the placeholder already published under it.
@@ -580,21 +616,23 @@ func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID strin
 		return nil, err
 	}
 
-	// Publish under the lock, and only if this placeholder is still the one
-	// that owns the executor: the child may have exited, or the binding may
-	// have been forgotten, while ProvisionOn was in flight. Either way the
-	// workspace just made has no owner left, so release it here — nothing else
-	// knows it exists, and the exit sweep has already taken its snapshot.
-	b.mu.Lock()
-	if b.closed || b.bindings[execID] != bd {
+	// PUBLISH SITE (first provision). publishWorkspace takes the lock, confirms
+	// this placeholder still owns the executor and the child is still running,
+	// and releases the workspace itself when either is false — the exit sweep
+	// has already taken its snapshot, so nothing else knows this workspace
+	// exists.
+	if perr := b.publishWorkspace(ctx, bd, execID, wsID, cl, wantCwd); perr != nil {
+		b.mu.Lock()
+		if b.bindings[execID] == bd {
+			// A dead placeholder left in a closed map would also make the map
+			// claim a binding the sweep already decided about.
+			delete(b.bindings, execID)
+		}
+		bd.err = perr
 		b.mu.Unlock()
-		bd.err = errBindingsClosed
 		close(bd.ready)
-		b.releaseAsync(ctx, execID, wsID)
-		return nil, errBindingsClosed
+		return nil, perr
 	}
-	bd.wsID, bd.cl, bd.cwd = wsID, cl, wantCwd
-	b.mu.Unlock()
 
 	// The labels name the HOME workspace; another executor's workspace is none
 	// of the daemon's business (handleChildExit releases that one by label).
@@ -854,18 +892,17 @@ func (b *boundExecutor) reprovisionInPlace(ctx context.Context, bd *binding, exe
 			"child", b.childID, "executor", shortID(execID), "error", err)
 		return false
 	}
-	// Write the rebuilt workspace into the SAME binding this recovery began on,
-	// and only into that one. If it changed under us — a promotion replaced it,
-	// or it was forgotten — the workspace just made serves nobody, and writing
-	// it anyway would orphan the replacement's own workspace.
-	b.mu.Lock()
-	if cur := b.bindings[execID]; cur != bd {
-		b.mu.Unlock()
-		b.releaseAsync(ctx, execID, wsID)
+	// PUBLISH SITE (re-provision in place). The same guard as every other
+	// publisher: this must still be the binding the recovery began on, and the
+	// child must still be running. A re-provision that lands after the exit
+	// sweep — a liveness failure on a LIVE executor is exactly that window —
+	// would install a workspace nothing will ever release, and would label a
+	// child that is gone.
+	if perr := b.publishWorkspace(ctx, bd, execID, wsID, cl, useCwd); perr != nil {
+		slog.Warn("re-provision landed after the binding was released; discarding it",
+			"child", b.childID, "executor", shortID(execID), "reason", perr)
 		return false
 	}
-	bd.wsID, bd.cl, bd.cwd = wsID, cl, useCwd
-	b.mu.Unlock()
 	if useCwd {
 		b.binder.NoteBinding(b.childID, execID, wsID)
 	}

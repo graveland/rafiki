@@ -1770,11 +1770,12 @@ func TestProvisionInFlightWhenReleasedIsNotLeaked(t *testing.T) {
 
 	err := <-provisioned
 	c.Error(err, "a provision racing the exit must not hand back a binding")
-	c.ErrorIs(err, errBindingsClosed, "the caller must be told the bindings are gone, got")
+	c.ErrorIs(err, errChildExited, "the caller must be told the child is gone, got")
 	leftovers := waitForReleases(t, fb, 1)
 	c.Len(leftovers, 1, "the workspace made after the sweep must be released; released %v", leftovers)
 	_, _, bound := be.Current()
 	c.False(bound, "a closed executor reports no binding")
+	c.Empty(be.Bindings(), "and the dead placeholder must be gone from the map, not left claiming a binding; got %v", be.Bindings())
 
 	// A Forget during an in-flight provision leaks the same way.
 	fb2 := newFakeBinder(&fakeExec{id: "a"})
@@ -1799,7 +1800,9 @@ func TestProvisionInFlightWhenReleasedIsNotLeaked(t *testing.T) {
 	be2.Forget("a") // the Task 3.2 shape: forget first, release by the caller
 	close(release2)
 
-	c.Error(<-provisioned2, "a provision whose binding was forgotten must not be published")
+	forgottenErr := <-provisioned2
+	c.Error(forgottenErr, "a provision whose binding was forgotten must not be published")
+	c.ErrorIs(forgottenErr, errBindingSuperseded, "a forgotten binding gets its own sentence, not the child-exit one; got")
 	released2 := waitForReleases(t, fb2, 1)
 	c.Len(released2, 1, "the forgotten binding's new workspace must be released by the provisioner; released %v", released2)
 }
@@ -1983,4 +1986,57 @@ func TestBoundExecutorCancelledProvisionLeavesNothingBehind(t *testing.T) {
 	released := fb.releasedWorkspaces()
 	fb.mu.Unlock()
 	c.Empty(released, "a cancelled provision leaves no workspace to release; released %v", released)
+}
+
+// A re-provision IN PLACE lands after the exit sweep the same way a first
+// provision does: a liveness failure on a LIVE executor re-provisions, and the
+// child can exit while that RPC is in flight. The rebuilt workspace must then be
+// released like any other workspace made after the sweep — and the gone child
+// must not be labelled.
+func TestReprovisionInPlaceDuringExitIsNotLeaked(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	fb.reachableTo("a")
+	be := newBoundExecutor("c1", fb)
+	be.setHome("a")
+	if _, err := be.ensureBinding(context.Background(), "a", true); err != nil {
+		t.Fatalf("home bind: %v", err)
+	}
+	be.mu.Lock()
+	bd, wsID := be.bindings["a"], be.bindings["a"].wsID
+	labelsBefore := len(fb.noted)
+	be.mu.Unlock()
+
+	// Hold the RE-provision open (the first provision already happened).
+	reprovisioning := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(string) {
+		once.Do(func() { close(reprovisioning) })
+		<-release
+	}
+	fb.mu.Unlock()
+
+	recovered := make(chan bool, 1)
+	go func() {
+		recovered <- be.reprovisionInPlace(context.Background(), bd, "a", wsID)
+	}()
+	<-reprovisioning
+
+	// The child exits while the re-provision is in flight.
+	be.ReleaseOthers(context.Background(), "", "")
+	close(release)
+
+	c.False(<-recovered, "a re-provision that lands after the sweep must report failure")
+	released := waitForReleases(t, fb, 1)
+	c.Len(released, 2, "the sweep releases the labelled workspace and the re-provision releases its own; released %v", released)
+	fb.mu.Lock()
+	labelsAfter := len(fb.noted)
+	fb.mu.Unlock()
+	c.Eq(labelsBefore, labelsAfter, "a gone child must not be labelled by a re-provision that landed too late")
+	be.mu.Lock()
+	wsAfter := bd.wsID
+	be.mu.Unlock()
+	c.Eq(wsID, wsAfter, "the rebuilt workspace must not be installed into the binding; got")
 }
