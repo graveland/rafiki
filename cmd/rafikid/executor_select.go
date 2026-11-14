@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -35,6 +36,15 @@ type executorPool interface {
 	// must be able to DO — a fake pool that silently dropped the call left a
 	// missing release green in every test.
 	Release(ctx context.Context, executorID, workspaceID string) error
+	// Provision creates a workspace on an executor, and ClientForWorkspace
+	// returns a client whose calls are scoped to that workspace. Both are on
+	// the interface rather than reached through a *execpool.Pool type
+	// assertion so provisionWorkspace is drivable by a fake: its rollback —
+	// release the workspace it just made when the scoped client cannot be
+	// obtained — was unreachable from any test while the assertion stood, and
+	// a leak nothing can observe is a leak nothing prevents.
+	Provision(ctx context.Context, executorID string, req *executorpb.ProvisionRequest) (*executorpb.ProvisionResponse, error)
+	ClientForWorkspace(executorID, workspaceID string) (tools.ExecutorClient, error)
 }
 
 // isBareExecutorRef reports whether s is a bare word — a machine name or an

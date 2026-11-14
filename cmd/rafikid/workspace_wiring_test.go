@@ -510,6 +510,55 @@ func TestReleaseWorkspaceSurvivesAShortExecutorID(t *testing.T) {
 	ck.Len(pool.releases(), 1, "an empty workspace id is nothing to release")
 }
 
+// --- provisionWorkspace's rollback ---
+
+// A workspace that was provisioned and then could not be handed a
+// workspace-scoped client must be RELEASED, not leaked.
+//
+// An executor's workspaces are live resources on ITS host: the registry is
+// in-memory and grows until something releases the id. Provision succeeding
+// and ClientForWorkspace failing is a narrow window — the workspace exists, the
+// scoped client for it does not — and the child gets nothing from it, so
+// whoever made the workspace must tear it down.
+//
+// This is reachable from a unit test only because Provision and
+// ClientForWorkspace live on executorPool. While provisionWorkspace
+// type-asserted *execpool.Pool, a fake pool never got past the assertion and
+// this rollback could not be observed by any test — the release could be
+// deleted with every test still green.
+func TestProvisionWorkspaceReleasesTheWorkspaceWhenTheClientCannotBeObtained(t *testing.T) {
+	ck := assert.NewAborting(t)
+	pool := &fakePool{clientForWorkspaceErr: errors.New("executor disconnected mid-provision")}
+	c := &Controller{execPool: pool}
+
+	wsID, wi, exec, workdir, err := c.provisionWorkspace(context.Background(),
+		protocol.SpawnRequest{Cwd: "/repo/wt"}, "exec-1")
+	ck.Error(err, "a workspace with no scoped client must fail the provision, not hand the child a workspace it cannot use")
+	ck.StrContains(err.Error(), "workspace client", "the failure must say which step failed; got: %v", err)
+	ck.Eq("", wsID, "the caller gets no workspace id: nothing may name a workspace that was rolled back; =")
+	ck.Nil(wi, "and nothing about the machine, since it has no usable workspace")
+	ck.Nil(exec, "no client came back")
+	ck.Eq("", workdir, "and no workdir; =")
+
+	// The provision really happened, so the release below is a rollback of a
+	// workspace that EXISTED — not an assertion that passes on a
+	// provisionWorkspace which never called Provision at all.
+	calls := pool.provisionCalls()
+	ck.Require().Len(calls, 1, "want one Provision, got %d", len(calls))
+	ck.Eq("exec-1", calls[0].executorID, "provisioned on")
+	ck.Eq("/repo/wt", calls[0].workdir, "the child's cwd is what the executor is asked to work from; got")
+
+	lookups := pool.workspaceLookups()
+	ck.Require().Len(lookups, 1, "want one ClientForWorkspace, got %d", len(lookups))
+	ck.Eq("exec-1", lookups[0].executorID, "the scoped client was asked for on")
+	ck.Eq("ws-exec-1", lookups[0].workspaceID, "the scoped client was asked for the workspace Provision made; got")
+
+	// THE assertion: the workspace the executor just made is released, by the id
+	// from the Provision response, on the executor that made it.
+	ck.EqDeep([]wsRelease{{executorID: "exec-1", workspaceID: "ws-exec-1"}}, pool.releases(),
+		"a workspace whose scoped client could not be obtained must be released, or it leaks on the executor's host; got")
+}
+
 // --- executor-side plumbing for the release assertion ---
 
 // releaseRecorder is a fake executor that records every Release it is asked to

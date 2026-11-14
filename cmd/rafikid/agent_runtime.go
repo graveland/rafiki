@@ -730,9 +730,9 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	if c.execPool != nil {
 		owner := executorOwner{Name: ownerName, UserID: ownerUserID}
 		// binder is the production binder unless a test installed an override:
-		// provisionWorkspace type-asserts a real *execpool.Pool, so no fake pool
-		// can drive a home bind's refusal or its cause through the controller
-		// binder, and those two outcomes are what this block decides.
+		// the override is how a test scripts a home bind's refusal or its cause
+		// through the controller binder without standing up an executor that
+		// provisions — and those two outcomes are what this block decides.
 		binder := c.binderFor(req, owner)
 		if c.binderForOverride != nil {
 			binder = c.binderForOverride(req, owner)

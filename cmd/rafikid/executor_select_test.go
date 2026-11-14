@@ -10,6 +10,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/nativebus"
@@ -35,6 +36,33 @@ type fakePool struct {
 	// binder tests as well as synchronously from HandleExecutorLost.
 	releaseMu sync.Mutex
 	released  []wsRelease
+
+	// provisionResp, when set, is what Provision answers with. Unset means the
+	// default below: a workspace id derived from the executor id, so a test that
+	// provisions and then releases can name the id it expects.
+	provisionResp *executorpb.ProvisionResponse
+	// provisionErr, when set, is returned by every Provision — a provisioning
+	// failure, which refuses the spawn instead of leaving a workspace behind.
+	provisionErr error
+	// provisions records each Provision call in order, so a test can tell a
+	// provision that happened from one it only assumed.
+	provMu     sync.Mutex
+	provisions []fakeProvision
+
+	// clientForWorkspaceErr, when set, fails the workspace-scoped client lookup.
+	// That is the rollback path: a workspace was made and no client can use it,
+	// so provisionWorkspace must release it rather than leak it.
+	clientForWorkspaceErr error
+	// workspaceLookups records each ClientForWorkspace request, so a rollback
+	// assertion can name the id that was asked for and never got a client.
+	lookupMu sync.Mutex
+	lookups  []wsRelease
+}
+
+// fakeProvision is one workspace a fakePool provisioned.
+type fakeProvision struct {
+	executorID string
+	workdir    string
 }
 
 // wsRelease is one workspace release a fakePool was asked to perform.
@@ -46,6 +74,48 @@ type wsRelease struct {
 func (f *fakePool) Live() []execpool.LiveExecutor { return f.live }
 func (f *fakePool) ClientFor(id string) (tools.ExecutorClient, error) {
 	return &stubExecutorClient{}, nil
+}
+
+// Provision hands out a workspace id without an executor behind it. The
+// default names the executor it would have gone to, so a test can assert the
+// exact id a later release must carry.
+func (f *fakePool) Provision(_ context.Context, executorID string, req *executorpb.ProvisionRequest) (*executorpb.ProvisionResponse, error) {
+	f.provMu.Lock()
+	f.provisions = append(f.provisions, fakeProvision{executorID: executorID, workdir: req.GetWorkdir()})
+	f.provMu.Unlock()
+	if f.provisionErr != nil {
+		return nil, f.provisionErr
+	}
+	if f.provisionResp != nil {
+		return f.provisionResp, nil
+	}
+	return &executorpb.ProvisionResponse{WorkspaceId: "ws-" + executorID, Workdir: req.GetWorkdir()}, nil
+}
+
+// provisionCalls returns a copy of every Provision call in order.
+func (f *fakePool) provisionCalls() []fakeProvision {
+	f.provMu.Lock()
+	defer f.provMu.Unlock()
+	return append([]fakeProvision(nil), f.provisions...)
+}
+
+// ClientForWorkspace mirrors the real pool's shape — a scoped client, or a
+// failure the caller must roll back on.
+func (f *fakePool) ClientForWorkspace(executorID, workspaceID string) (tools.ExecutorClient, error) {
+	f.lookupMu.Lock()
+	f.lookups = append(f.lookups, wsRelease{executorID: executorID, workspaceID: workspaceID})
+	f.lookupMu.Unlock()
+	if f.clientForWorkspaceErr != nil {
+		return nil, f.clientForWorkspaceErr
+	}
+	return &stubExecutorClient{}, nil
+}
+
+// workspaceLookups returns a copy of every ClientForWorkspace request in order.
+func (f *fakePool) workspaceLookups() []wsRelease {
+	f.lookupMu.Lock()
+	defer f.lookupMu.Unlock()
+	return append([]wsRelease(nil), f.lookups...)
 }
 
 // Release records what teardown asked for. It exists on the interface precisely

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi"
@@ -61,13 +60,8 @@ func (c *Controller) provisionWorkspace(
 	ctx context.Context,
 	req protocol.SpawnRequest, executorID string,
 ) (workspaceID string, wi *fundi.WorkspaceInfo, exec tools.ExecutorClient, workdir string, err error) {
-	pool := c.execPool
-	if pool == nil {
+	if c.execPool == nil {
 		return "", nil, nil, "", nil
-	}
-	pp, ok := pool.(*execpool.Pool)
-	if !ok {
-		return "", nil, nil, "", fmt.Errorf("execpool: not a real pool")
 	}
 
 	// ChildId only, plus the one path-shaped field: Workdir.
@@ -98,7 +92,7 @@ func (c *Controller) provisionWorkspace(
 	if wd, ok := c.sandboxWorkdirForExecutor(ctx, executorID); ok {
 		dir = wd
 	}
-	resp, err := pp.Provision(ctx, executorID, &executorpb.ProvisionRequest{
+	resp, err := c.execPool.Provision(ctx, executorID, &executorpb.ProvisionRequest{
 		ChildId: "",
 		Workdir: dir,
 	})
@@ -107,9 +101,9 @@ func (c *Controller) provisionWorkspace(
 	}
 
 	// Get a workspace-scoped client.
-	exec, err = pp.ClientForWorkspace(executorID, resp.WorkspaceId)
+	exec, err = c.execPool.ClientForWorkspace(executorID, resp.WorkspaceId)
 	if err != nil {
-		_ = pp.Release(ctx, executorID, resp.WorkspaceId)
+		_ = c.execPool.Release(ctx, executorID, resp.WorkspaceId)
 		return "", nil, nil, "", fmt.Errorf("workspace client: %w", err)
 	}
 

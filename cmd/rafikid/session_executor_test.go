@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -162,6 +164,19 @@ func (p *syncEvictPool) Tickets() *execpool.TicketRegistry { return p.tickets }
 // Release satisfies executorPool; no test here tears a workspace down. The
 // recording fake is fakePool (executor_select_test.go).
 func (p *syncEvictPool) Release(context.Context, string, string) error { return nil }
+
+// Provision and ClientForWorkspace satisfy executorPool. No test that uses this
+// fake provisions a workspace — it exists for the session-executor lifecycle,
+// which never reaches the controller's provisioning — so both fail loud rather
+// than hand out a workspace id nothing stands behind. The fake that provisions
+// is fakePool (executor_select_test.go).
+func (p *syncEvictPool) Provision(context.Context, string, *executorpb.ProvisionRequest) (*executorpb.ProvisionResponse, error) {
+	return nil, errors.New("syncEvictPool: no workspace provisioning in these tests")
+}
+
+func (p *syncEvictPool) ClientForWorkspace(string, string) (tools.ExecutorClient, error) {
+	return nil, errors.New("syncEvictPool: no workspace provisioning in these tests")
+}
 
 func (p *syncEvictPool) Evict(id string) {
 	p.mu.Lock()

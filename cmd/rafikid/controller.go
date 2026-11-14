@@ -627,10 +627,10 @@ type Controller struct {
 	wsLabelsMu sync.Mutex
 
 	// binderForOverride, when non-nil, replaces the spawn path's executor binder
-	// (agentRuntimeOptionsFor). It exists only for tests: provisionWorkspace
-	// type-asserts a real *execpool.Pool, so a fake pool cannot drive a home
-	// bind's refusal or its failure cause, and those are decisions the spawn
-	// path makes. Nil in production; nothing else reads it.
+	// (agentRuntimeOptionsFor). It exists for tests that script a home bind's
+	// refusal or its failure cause through a fake binder: those are decisions
+	// the spawn path makes, and a test can drive them without standing up an
+	// executor that provisions. Nil in production; nothing else reads it.
 	binderForOverride func(protocol.SpawnRequest, executorOwner) executorBinder
 
 	// sessionExecMu guards sessionExecs, keyed by an opaque session key:
