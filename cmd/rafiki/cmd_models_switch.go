@@ -133,6 +133,12 @@ func completeSwitchArgs(cmd *cobra.Command, args []string, toComplete string) ([
 // resolves first, explicit fields win). A preset DELETED since the source
 // spawned refuses the switch — a safe failure, both conversations remain. Plain
 // --fork-from does NOT carry the preset: pass -p yourself.
+//
+// The carried home is sent VERBATIM, even when this machine's own executor set
+// cannot reach it (a cross-machine switch): the daemon's refusal names the
+// executor, which is the loud and correct outcome. Silently dropping a carried
+// home to dodge that refusal would put the continuation on the wrong machine's
+// cwd and CLAUDE.md without a word.
 func switchSpawnRequest(src *rafikiv1.ChildSummary, sourceChildID, model string) *rafikiv1.SpawnRequest {
 	parent, _ := childstore.ParentLabel(src.GetLabels())
 	req := &rafikiv1.SpawnRequest{
@@ -257,6 +263,13 @@ func runModelsSwitch(cmd *cobra.Command, args []string) error {
 			return diagnoseConnectError(err, ep.describe)
 		}
 		newID = spawned.Msg.GetChildId()
+		// Non-fatal spawn diagnostics — a carried home that is not connected
+		// today, say. The fork exists and is usable, so these are advisories,
+		// printed exactly as `rafiki create` prints them. The compacting path
+		// returns an id only, which is create's own limitation too.
+		for _, w := range spawned.Msg.GetWarnings() {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
 	}
 	fmt.Printf("spawned %s on %s (fork of %s)\n", newID, model, childID)
 

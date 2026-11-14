@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1343,4 +1344,156 @@ func TestHomeExecutorNotFilledWhenSelectorExcludesThisMachine(t *testing.T) {
 
 	c.Eq("", req.HomeExecutor, "a machine outside the selector must not be named as the home")
 	c.Eq(1, fake.calls, "the row set was still read; only this machine's match failed")
+}
+
+// ── runCreate: the home argument, the warning print, and -i --home ───────────
+
+// createStubControl serves what `rafiki create` reaches for a spawn: the
+// executor listing home resolution asks for, and Spawn. Everything else answers
+// Unimplemented via the embed.
+type createStubControl struct {
+	rafikiv1connect.UnimplementedControlHandler
+
+	executors []*rafikiv1.ExecutorRow
+	childID   string
+	warnings  []string
+
+	// spawned is the request the daemon was asked to spawn — the only place the
+	// test can see what the client actually sent.
+	spawned *rafikiv1.SpawnRequest
+}
+
+func (s *createStubControl) ListExecutors(
+	context.Context, *connect.Request[rafikiv1.ListExecutorsRequest],
+) (*connect.Response[rafikiv1.ListExecutorsResponse], error) {
+	return connect.NewResponse(&rafikiv1.ListExecutorsResponse{Rows: s.executors}), nil
+}
+
+func (s *createStubControl) Spawn(
+	_ context.Context, req *connect.Request[rafikiv1.SpawnRequest],
+) (*connect.Response[rafikiv1.SpawnResponse], error) {
+	s.spawned = req.Msg
+	id := s.childID
+	if id == "" {
+		id = "c_new"
+	}
+	return connect.NewResponse(&rafikiv1.SpawnResponse{ChildId: id, Warnings: s.warnings}), nil
+}
+
+// serveCreateStub isolates profiles, then serves stub on the scratch profile's
+// own socket — the path newConnectEndpoint dials.
+func serveCreateStub(t *testing.T, stub *createStubControl) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+
+	// A short directory, not t.TempDir(): unix socket paths are capped at ~104
+	// bytes and t.TempDir() nests under the full test name.
+	dir, err := os.MkdirTemp("", "c22")
+	c.NoError(err, "MkdirTemp")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	sock := filepath.Join(dir, "controller.sock")
+	routePath, handler := rafikiv1connect.NewControlHandler(stub)
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
+
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"scratch": {Name: "scratch", Socket: sock},
+	}}), "Save")
+	c.NoError(profile.SavePointer("scratch"), "SavePointer")
+}
+
+// createCmdForRun builds a real `rafiki create` command with argv parsed, for
+// tests that drive runCreate itself rather than a helper under it.
+func createCmdForRun(t *testing.T, argv ...string) *cobra.Command {
+	t.Helper()
+	cmd := newCreateCmd()
+	cmd.SetArgs(argv)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	assert.NewAborting(t).NoError(cmd.ParseFlags(argv), "parse %v", argv)
+	return cmd
+}
+
+// runCreate must tell the home fill that the session-executor path ran: that
+// selector already names exactly this machine, so the daemon resolves the same
+// home from it. Passing false there would let the fill name this machine and
+// the request would carry it — which is what this test fails on.
+func TestRunCreateSkipsHomeWhenTheSessionExecutorRan(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv(paths.ExecutorName, "greyshift")
+	stub := &createStubControl{executors: []*rafikiv1.ExecutorRow{
+		executorRow("greyshift", true, map[string]string{"owner": "brent"}),
+	}}
+	serveCreateStub(t, stub)
+
+	seam := createStartSessionExecutor
+	createStartSessionExecutor = func(context.Context, string, profile.Resolved) (string, func(), error) {
+		return "owner=brent", func() {}, nil
+	}
+	t.Cleanup(func() { createStartSessionExecutor = seam })
+
+	cmd := createCmdForRun(t, "--detached")
+	c.Require().NoError(runCreate(cmd, nil), "runCreate")
+	c.Require().NotNil(stub.spawned, "no Spawn reached the daemon")
+	c.Eq("owner=brent", stub.spawned.GetExecutorSelector(), "the session executor's selector rides")
+	c.Eq("", stub.spawned.GetHomeExecutor(),
+		"the session executor's selector already names this machine; the fill must be skipped")
+}
+
+// The other side of the same argument: when the caller declared the selector
+// (so the session path did not run), the fill does name this machine, and only
+// after the selector is resolved.
+func TestRunCreateFillsHomeForADeclaredSelector(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv(paths.ExecutorName, "greyshift")
+	stub := &createStubControl{executors: []*rafikiv1.ExecutorRow{
+		executorRow("greyshift", true, map[string]string{"owner": "brent"}),
+	}}
+	serveCreateStub(t, stub)
+
+	cmd := createCmdForRun(t, "--detached", "--executor-selector", "owner=brent")
+	c.Require().NoError(runCreate(cmd, nil), "runCreate")
+	c.Require().NotNil(stub.spawned, "no Spawn reached the daemon")
+	c.Eq("greyshift", stub.spawned.GetHomeExecutor(), "an eligible local row under the declared selector is the home")
+	c.Eq("owner=brent", stub.spawned.GetExecutorSelector(), "the declared selector rides")
+}
+
+// A spawn is not a failure when the daemon answers with warnings: the child
+// exists, so each one is printed to stderr as `warning: <text>` (out of a
+// --detached record's stdout), exactly as the task brief words it.
+func TestRunCreatePrintsSpawnWarnings(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv(paths.ExecutorName, "greyshift")
+	stub := &createStubControl{warnings: []string{
+		"selector matches no live executor",
+		"no home executor resolved",
+	}}
+	serveCreateStub(t, stub)
+
+	read := captureStderr(t)
+	cmd := createCmdForRun(t, "--detached", "--executor-selector", "owner=brent")
+	err := runCreate(cmd, nil)
+	note := read()
+
+	c.Require().NoError(err, "runCreate")
+	c.StrContains(note, "warning: selector matches no live executor", "stderr")
+	c.StrContains(note, "warning: no home executor resolved", "stderr")
+}
+
+// -i forces the form, and the form has no home row: accepting --home there
+// would parse it and then send nothing. Refused at parse time instead, so the
+// caller learns before a spawn is built.
+func TestInteractiveWithHomeIsRefusedAtParseTime(t *testing.T) {
+	c := assert.NewAborting(t)
+	cmd := newCreateCmd()
+	cmd.SetArgs([]string{"-i", "--home", "greyshift"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+	c.Require().Error(err, "-i with --home must be refused: the form cannot show the home it would send")
+	c.StrContains(err.Error(), "interactive", "the refusal names the flag group")
+	c.StrContains(err.Error(), "home", "the refusal names the flag group")
 }

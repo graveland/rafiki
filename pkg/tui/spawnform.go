@@ -88,6 +88,12 @@ type spawnParams struct {
 	// and with the source left running. Set when a switch form's name row no
 	// longer holds the source's name.
 	keepSource bool
+	// home is the executor this spawn names as its home (where cwd applies and
+	// CLAUDE.md is read from), "" leaving it to the daemon. It is resolved in
+	// Update by Cockpit.sealHome, from the cached executor rows: those rows are
+	// written by Update too, so resolving it inside a tea.Cmd closure (where
+	// buildSpawnRequest runs) would be a concurrent map read and write.
+	home string
 }
 
 // tailSource is the child the spawn's follow-up closes and renames over, or ""
@@ -898,6 +904,10 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 			c.setNotice("restarting " + src + " on " + p.model + "…")
 			return c, c.sendTo(src, rafikiv1.SendMode_SEND_MODE_PROMPT, "/model "+p.model, nil)
 		}
+		// The home is sealed HERE, on the Update goroutine, before the spawn is
+		// dispatched: see spawnParams.home. It must not be resolved inside the
+		// tea.Cmd closure below, which runs off Update.
+		p = c.sealHome(p)
 		// An oversized fork is a question, not a refusal: the history can be
 		// compacted first, on the source's own model, and the fork made from
 		// the result. Asked AFTER the executor resolution because that step can
@@ -1065,29 +1075,43 @@ func (c *Cockpit) applySpawned(m spawnedMsg) tea.Cmd {
 		// its routing. The source's history is borrowed, so nothing is lost
 		// by the close; a failure midway is reported by applySwitched with
 		// both ids, and finishing by hand is safe.
+		//
+		// The warnings ride BOTH notices: this one is replaced as soon as the
+		// finish step lands, so applySwitched must write them too (they are
+		// carried on switchedMsg) or the operator never gets to read them.
 		c.setNotice(withWarnings(fmt.Sprintf("created %s; closing %s…", m.childID, m.switchSource), m.warnings))
-		return tea.Batch(cmd, c.leaveRail(),
-			c.switchFinishCmd(m.switchSource, m.childID, m.sourceName, m.sourceRouting))
+		return tea.Batch(cmd, c.leaveRail(), c.switchTailCmd(m))
 	}
 	c.setNotice(withWarnings("created "+m.childID, m.warnings))
 	return tea.Batch(cmd, c.leaveRail())
+}
+
+// switchTailCmd is a switch's finish step carrying the SPAWN's warnings into
+// the result, so applySwitched can keep them on the status line it writes.
+// Extracted so that pass-through is testable: applySpawned returns a batch, and
+// taking a batch apart means running it.
+func (c *Cockpit) switchTailCmd(m spawnedMsg) tea.Cmd {
+	return c.switchFinishCmd(m.switchSource, m.childID, m.sourceName, m.sourceRouting, m.warnings)
 }
 
 // applySwitched reports a model switch's second step. The fork already landed
 // and the cockpit is already looking at it, so every failure here leaves the
 // user on the NEW conversation with both ids in the notice — the state to
 // recover from by hand (close + rename) rather than one to untangle blind.
+//
+// The spawn's warnings are written here as well as by applySpawned: this is the
+// notice that stays on screen, and a warning it overwrote is one nobody read.
 func (c *Cockpit) applySwitched(m switchedMsg) {
 	if m.err != nil {
-		c.setNotice(fmt.Sprintf("switch incomplete: %v — both %s and %s exist", m.err, m.source, m.newID))
+		c.setNotice(withWarnings(fmt.Sprintf("switch incomplete: %v — both %s and %s exist", m.err, m.source, m.newID), m.warnings))
 		return
 	}
 	if m.name != "" {
 		// The rename's own rail update rides the event stream; setting the
 		// name here too keeps the row right when the event is slow.
 		c.rail.SetName(m.newID, m.name)
-		c.setNotice(fmt.Sprintf("switched %s to %s (fork of %s)", m.name, m.newID, m.source))
+		c.setNotice(withWarnings(fmt.Sprintf("switched %s to %s (fork of %s)", m.name, m.newID, m.source), m.warnings))
 		return
 	}
-	c.setNotice(fmt.Sprintf("switched to %s (fork of %s)", m.newID, m.source))
+	c.setNotice(withWarnings(fmt.Sprintf("switched to %s (fork of %s)", m.newID, m.source), m.warnings))
 }

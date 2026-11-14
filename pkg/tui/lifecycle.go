@@ -239,6 +239,10 @@ func (c *Cockpit) buildSpawnRequest(p spawnParams) *rafikiv1.SpawnRequest {
 		Model:   p.model,
 		MaxCost: p.maxCost,
 		Preset:  p.preset,
+		// Home was resolved in Update and sealed into p (see spawnParams.home);
+		// nothing here reads the executor cache, because this runs inside a
+		// tea.Cmd closure and Update writes that cache concurrently.
+		HomeExecutor: p.home,
 	}
 	if p.forkFrom != nil {
 		req.ForkFrom = &rafikiv1.SpawnRequest_ForkFrom{
@@ -251,26 +255,38 @@ func (c *Cockpit) buildSpawnRequest(p spawnParams) *rafikiv1.SpawnRequest {
 		req.ExecutorRef = p.executor
 	case p.kind == protocol.KindFundi || c.executorSelectorFromFlag:
 		req.ExecutorSelector = c.executorSelector
-		// Home is the CLI's rule over the rows this form already fetched: only a
-		// fundi child, only a selector the CALLER declared (a session executor's
-		// selector names exactly this machine, so the daemon resolves the same
-		// home from it), and only a machine the daemon already listed as
-		// eligible and inside that selector.
-		if p.kind == protocol.KindFundi && c.executorSelectorFromFlag {
-			req.HomeExecutor = c.resolvedHome(p.kind, c.executorSelector)
-		}
 	}
 	return req
+}
+
+// sealHome resolves the home executor a spawn request will carry, and must be
+// called from Update — p.home is what buildSpawnRequest puts on the wire.
+//
+// The rule is the CLI's: only a fundi child, only with the executor field
+// blank, and only for a selector the CALLER declared. A session executor's
+// selector already names exactly this machine, so the daemon resolves the same
+// home from it and naming it here would add a value that could be wrong. A
+// switch overrides this from the source's label (switchRequest), because a
+// switch continues the same work on the same machine.
+//
+// This is where the cached rows are read, deliberately: resolvedHome consults
+// c.executors, which applyExecutorsLoaded writes from the same goroutine.
+func (c *Cockpit) sealHome(p spawnParams) spawnParams {
+	if p.executor == "" && p.kind == protocol.KindFundi && c.executorSelectorFromFlag {
+		p.home = c.resolvedHome(p.kind, c.executorSelector)
+	}
+	return p
 }
 
 // resolvedHome is this machine's executor name when the daemon's cached rows
 // for kind list it eligible AND its labels satisfy selector; "" otherwise.
 //
-// It reads only what fetchExecutorsCmd already fetched, so it costs no round
-// trip and never blocks Update. The eligible flag alone is not enough: the
-// daemon computes it for a SELECTORLESS spawn, so a machine can be eligible in
-// general and still be outside this child's reachable set — and Spawn refuses
-// an unreachable home outright.
+// Callers must be on the Update goroutine: it reads c.executors, which Update
+// writes. It costs no round trip — only what fetchExecutorsCmd already
+// fetched. The eligible flag alone is not enough: the daemon computes it for a
+// SELECTORLESS spawn, so a machine can be eligible in general and still be
+// outside this child's reachable set — and Spawn refuses an unreachable home
+// outright.
 func (c *Cockpit) resolvedHome(kind, selector string) string {
 	if selector == "" {
 		return ""
@@ -358,11 +374,17 @@ func (c *Cockpit) switchRequest(ctx context.Context, p spawnParams) (*rafikiv1.S
 		req.Preset = pname
 	}
 	// A switch continues the same work on the same machine, so the fork keeps
-	// the source's home: cwd and CLAUDE.md only exist there, and a re-resolved
-	// home could land the continuation elsewhere.
-	if home := src.GetLabels()["rafiki/home-executor"]; home != "" {
-		req.HomeExecutor = home
-	}
+	// the source's home: cwd and CLAUDE.md only exist there. This is set
+	// UNCONDITIONALLY, including to "" for an unlabelled source, so it also
+	// clears any home the form's own rule inferred — the CLI switch leaves an
+	// unlabelled source's home to the daemon, and the two faces must agree.
+	//
+	// It is sent verbatim even when this cockpit's own executor set cannot reach
+	// it (a cross-machine switch): the daemon's refusal names the executor,
+	// which is the loud, correct outcome. Silently dropping a carried home to
+	// dodge that refusal would put the continuation on the wrong machine's cwd
+	// without a word.
+	req.HomeExecutor = src.GetLabels()["rafiki/home-executor"]
 	labels := map[string]string{}
 	for k, v := range src.GetLabels() {
 		// Only USER labels carry over: rafiki/ and fundi/ are daemon
@@ -464,7 +486,10 @@ func (c *Cockpit) compactForkCmd(p spawnParams, sourceModel string, destWindow i
 // A failure stops the chain and names the step; both conversations exist.
 // Nothing here is re-runnable by repeating the SWITCH — that would spawn a
 // second fork — but each remaining step is a single RPC the notice names.
-func (c *Cockpit) switchFinishCmd(source, newID, name, routing string) tea.Cmd {
+//
+// warnings are the spawn's, passed through so the notice this step ends on
+// still names them: the finish notice is the last one the operator sees.
+func (c *Cockpit) switchFinishCmd(source, newID, name, routing string, warnings []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
@@ -476,20 +501,20 @@ func (c *Cockpit) switchFinishCmd(source, newID, name, routing string) tea.Cmd {
 			ChildId: source,
 			Scope:   rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY,
 		})); err != nil && rpcreason.Reason(err) != protocol.ErrChildExited {
-			return switchedMsg{source: source, newID: newID, err: fmt.Errorf("stop %s: %w", source, err)}
+			return switchedMsg{source: source, newID: newID, warnings: warnings, err: fmt.Errorf("stop %s: %w", source, err)}
 		}
 		if _, err := c.client.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{
 			ChildId: source,
 			Scope:   rafikiv1.DescendantScope_DESCENDANT_SCOPE_TARGET_ONLY,
 		})); err != nil {
-			return switchedMsg{source: source, newID: newID, err: fmt.Errorf("close %s: %w", source, err)}
+			return switchedMsg{source: source, newID: newID, warnings: warnings, err: fmt.Errorf("close %s: %w", source, err)}
 		}
 		if name != "" {
 			if _, err := c.client.Rename(ctx, connect.NewRequest(&rafikiv1.RenameRequest{
 				ChildId: newID,
 				Name:    name,
 			})); err != nil {
-				return switchedMsg{source: source, newID: newID, err: fmt.Errorf("rename %s: %w", newID, err)}
+				return switchedMsg{source: source, newID: newID, warnings: warnings, err: fmt.Errorf("rename %s: %w", newID, err)}
 			}
 		}
 		if routing != "" {
@@ -497,10 +522,10 @@ func (c *Cockpit) switchFinishCmd(source, newID, name, routing string) tea.Cmd {
 				ChildId: newID,
 				Delta:   routing,
 			})); err != nil {
-				return switchedMsg{source: source, newID: newID, name: name, err: fmt.Errorf("routing %s: %w", newID, err)}
+				return switchedMsg{source: source, newID: newID, name: name, warnings: warnings, err: fmt.Errorf("routing %s: %w", newID, err)}
 			}
 		}
-		return switchedMsg{source: source, newID: newID, name: name}
+		return switchedMsg{source: source, newID: newID, name: name, warnings: warnings}
 	}
 }
 
@@ -510,6 +535,11 @@ type switchedMsg struct {
 	newID  string
 	name   string
 	err    error
+	// warnings are the SPAWN's non-fatal diagnostics, carried through the
+	// finish step so applySwitched can put them on the same line it writes.
+	// Without them the finish notice overwrote the spawn notice milliseconds
+	// after it appeared, which is not surfacing anything.
+	warnings []string
 }
 
 // killCmd ends a child. force asks the daemon to escalate immediately instead

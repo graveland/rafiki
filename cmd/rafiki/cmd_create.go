@@ -844,6 +844,12 @@ var (
 	// createResolveLaunchExecutor resolves a launch-required kind's executor
 	// from the daemon's live catalog.
 	createResolveLaunchExecutor = resolveLaunchExecutor
+	// createStartSessionExecutor stands this machine up as a workspace — the
+	// path a bare fundi create takes when the caller named no executor at all.
+	// A seam because that path starts a real executor process: a test can drive
+	// runCreate's session-executor branch (and the home argument it feeds) only
+	// with it replaced.
+	createStartSessionExecutor = startSessionExecutor
 )
 
 // resolveCreateExecutor resolves the executor reference for a kind that must be
@@ -1252,7 +1258,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	sessionExecutorRan := false
 
 	if req.ExecutorRef == "" && req.ExecutorSelector == "" && req.Kind == protocol.KindFundi && !noLocalExecutor {
-		selector, stop, err := startSessionExecutor(cmdCtx(cmd), req.Cwd, p)
+		selector, stop, err := createStartSessionExecutor(cmdCtx(cmd), req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
 		}
