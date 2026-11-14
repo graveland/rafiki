@@ -147,16 +147,23 @@ func (h *sandboxHarness) startLauncher(t *testing.T) {
 	h.launcher = cmd
 }
 
-// waitLiveExecutors polls until the pool reports want live executors, observed
-// through a refused spawn's "N live executor(s)" message (the pool's live set
-// is only observable through selection).
+// waitLiveExecutors polls until the pool reports want live executors, read from
+// a throwaway empty-selector spawn's warnings: the pool's live set is only
+// observable through selection, and a spawn that cannot bind (this one has no
+// selector and, at 2+, no home) starts unbound, carrying selection's
+// "N live executor(s)" text in SpawnResponse.warnings instead of an error.
+// Only that count ends the wait; any other successful spawn keeps polling.
 func (h *sandboxHarness) waitLiveExecutors(t *testing.T, want int) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		_, err := h.spawn(t, spawnOpts{selector: "env=definitely-not-a-match"})
-		if err != nil && strings.Contains(err.Error(), fmt.Sprintf("%d live executor(s)", want)) {
-			return
+		resp, err := h.spawnResp(t, spawnOpts{selector: "env=definitely-not-a-match"})
+		if err == nil {
+			if warningsMentionLiveCount(resp.GetWarnings(), want) {
+				return
+			}
+			// Probe children are throwaway; do not accumulate them.
+			h.killChild(resp.GetChildId())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -177,6 +184,19 @@ type spawnOpts struct {
 
 // spawn spawns a fundi child over Connect and returns its id plus the error.
 func (h *sandboxHarness) spawn(t *testing.T, o spawnOpts) (string, error) {
+	t.Helper()
+	resp, err := h.spawnResp(t, o)
+	if err != nil {
+		return "", err
+	}
+	return resp.GetChildId(), nil
+}
+
+// spawnResp is spawn returning the whole response, so a caller can read the
+// NON-FATAL warnings of a child that started unbound (no home, several machines
+// holding its cwd, or no reachable executor) — where selection's own
+// explanation lives now that such a spawn succeeds.
+func (h *sandboxHarness) spawnResp(t *testing.T, o spawnOpts) (*rafikiv1.SpawnResponse, error) {
 	t.Helper()
 	cwd := o.cwd
 	if cwd == "" {
@@ -199,9 +219,9 @@ func (h *sandboxHarness) spawn(t *testing.T, o spawnOpts) (string, error) {
 	defer cancel()
 	resp, err := h.d.control(t).Spawn(ctx, connect.NewRequest(req))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return resp.Msg.GetChildId(), nil
+	return resp.Msg, nil
 }
 
 // mustSpawn spawns and fails the test on error.
@@ -523,42 +543,116 @@ func TestSandboxHostPathOutsideRootRefusedByTheDaemon(t *testing.T) {
 }
 
 // TestSandboxEmptySelectorNeverLandsInASandbox: with a named sandbox and an
-// ordinary executor both live, an empty-selector spawn binds to the ordinary
-// one — a sandbox is never an implicit choice.
+// ordinary executor both live, an empty-selector spawn's REACHABLE SET is the
+// native executors only — a sandbox is never an implicit choice.
 //
-// This is the end-to-end half of that rule; it cannot be made to fail by
-// deleting dropSandboxCandidates, because sortCandidates already orders
-// sandboxes last and the harness's launcher is itself an ordinary candidate. A
-// sandbox-ONLY candidate set is unreachable end to end: a top-level spawn's set
-// always contains the launcher (which must be live for the sandbox to have been
-// created), and any descendant whose set narrows to the sandbox does so through
-// an INHERITED explicit selector (inheritExecutorGrant), which the implicit
-// drop does not apply to. The sandbox-only case is pinned instead by the unit
-// test TestSandboxSelectionEmptySelectorNeverPicksASandbox
+// The child is legitimately UNBOUND here, not a regression: home resolution's
+// last rule probes every reachable executor for the spawn's cwd, both native
+// executors are host processes that see it, and the daemon refuses to guess
+// between them (2+ candidates, no home_executor). So the guard this test pins is
+// the reachable set, never a label:
+//
+//   - the spawn's warning names the two native machines — the probe found the
+//     cwd there — and NOT the sandbox's machine;
+//   - a workspace-tool call naming the sandbox is refused as unreachable, so the
+//     scripted command it would have run never executes anywhere.
+//
+// Deleting dropSandboxCandidates makes the sandbox a third probe hit (the
+// harness runs the sandbox's `rafiki executor serve` as a host process, so it
+// sees the cwd too): the warning then lists its machine, and the named call
+// resolves and runs. Either assertion turns red on its own.
+//
+// The sandbox-ONLY candidate case is pinned at the unit level by
+// TestSandboxSelectionEmptySelectorNeverPicksASandbox
 // (cmd/rafikid/executor_select_sandbox_test.go), whose fixture is a
-// sandbox-only candidate set and which fails if the drop is deleted.
+// sandbox-only candidate set: end to end a top-level spawn's set always
+// contains the launcher, which must be live for the sandbox to have been
+// created.
 func TestSandboxEmptySelectorNeverLandsInASandbox(t *testing.T) {
 	c := assert.NewAborting(t)
 	h := bootSandboxDaemon(t)
-	h.enrollOrdinaryExecutor(t)
+	ordinaryID := h.enrollOrdinaryExecutor(t)
 	h.waitLiveExecutors(t, 2)
 
 	info, err := h.createSandboxCLI(t, "--name", "implicit-"+runTag())
 	c.NoError(err, "sandbox create")
 
-	childID := h.mustSpawn(t, spawnOpts{})
-	got := h.labelsOf(t, childID)["rafiki/executor"]
-	c.NotEq("", got, "child bound to an executor")
-	c.NotEq(info.GetExecutorId(), got, "an empty-selector spawn must never land in the sandbox")
+	sandboxMachine := h.executorMachine(t, info.GetExecutorId())
+	launcherMachine := h.executorMachine(t, h.resolveLauncherID(t))
+	ordinaryMachine := h.executorMachine(t, ordinaryID)
+	c.False(sandboxMachine == launcherMachine || sandboxMachine == ordinaryMachine,
+		"the sandbox machine must be distinguishable from the native ones: sandbox=%q launcher=%q ordinary=%q",
+		sandboxMachine, launcherMachine, ordinaryMachine)
+
+	marker := filepath.Join(shortTempDir(t, "rafiki-sbx-nosel-"), "must-not-run")
+	turns := sandboxNamedToolTurnsScript(t, sandboxMachine, "touch "+shellQuote(marker))
+
+	resp, err := h.spawnResp(t, spawnOpts{
+		// A host directory both native executors can see, so the probe is
+		// genuinely ambiguous: the daemon must not pick one.
+		cwd:       t.TempDir(),
+		extraArgs: []string{"--fake-turns", turns},
+	})
+	c.Require().NoError(err, "an empty-selector spawn starts unbound; it must not be refused")
+	childID := resp.GetChildId()
+	c.NotEq("", childID, "spawn returned no child id")
+	t.Cleanup(func() { h.cleanupChild(childID) })
+
+	// 1. The reachable set, read from the spawn's own warning.
+	var names string
+	for _, w := range resp.GetWarnings() {
+		if strings.Contains(w, "exists on") {
+			names = w
+		}
+	}
+	c.Require().NotEq("", names, "the ambiguous-cwd warning must name the machines holding it, got %v", resp.GetWarnings())
+	c.StrContains(names, launcherMachine, "warning %q", names)
+	c.StrContains(names, ordinaryMachine, "warning %q", names)
+	c.NotStrContains(names, sandboxMachine, "the sandbox must never be in the reachable set: %q", names)
+	c.Eq("unbound", h.labelsOf(t, childID)["rafiki/executor-state"],
+		"an ambiguous spawn starts unbound, not bound to a guessed machine")
+	c.Eq("", h.labelsOf(t, childID)["rafiki/executor"], "an unbound child names no executor")
+
+	// 2. A workspace-tool call naming the sandbox is outside the reachable set.
+	es := h.d.openEvents(t, childEventsSubject(childID), map[string]int32{childID: -1}, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err = h.d.control(t).SendFrame(ctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+		ChildId:   childID,
+		FrameJson: `{"type":"prompt","message":"go"}`,
+	}))
+	c.NoError(err, "send prompt")
+	es.waitEvent(t, userTextContainsAll(childID, "is not reachable by this agent", sandboxMachine), 30*time.Second)
+	c.False(waitFor(t, 500*time.Millisecond, func() bool { _, statErr := os.Stat(marker); return statErr == nil }),
+		"a call naming the sandbox must not run anywhere: %s exists", marker)
+}
+
+// sandboxNamedToolTurnsScript writes a --fake-turns ndjson script whose only
+// tool_use is a bash call naming executor, so a test can drive a workspace-tool
+// call at one specific machine and read the outcome off the tool result.
+func sandboxNamedToolTurnsScript(t *testing.T, executor, command string) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	input := fmt.Sprintf(`{"command":%s,"executor":%s}`, mustJSON(t, command), mustJSON(t, executor))
+	toolUseTurn := fmt.Sprintf(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"bash","input":%s}],"usage":{"input_tokens":10,"output_tokens":5}}`, input)
+	const endTurn = `{"id":"msg_2","type":"message","role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":4,"output_tokens":2}}`
+
+	path := filepath.Join(t.TempDir(), "fake-turns.ndjson")
+	c.NoError(os.WriteFile(path, []byte(toolUseTurn+"\n"+endTurn+"\n"), 0o600), "write fake-turns script")
+	return path
 }
 
 // enrollOrdinaryExecutor mints a token and starts a native executor (no docker
-// proxy) so ordinary selection has a non-sandbox candidate.
-func (h *sandboxHarness) enrollOrdinaryExecutor(t *testing.T) {
+// proxy) so ordinary selection has a non-sandbox candidate, and returns its
+// executor id. Its labels carry a per-run marker: the shared test database
+// accumulates executor rows across runs, so "machine": "ordinary" alone would
+// identify a row from an earlier run.
+func (h *sandboxHarness) enrollOrdinaryExecutor(t *testing.T) string {
 	t.Helper()
 	c := assert.NewAborting(t)
+	marker := "ord" + uniqueSuffix()
 	token, err := h.store.MintToken(context.Background(), executors.NewToken{
-		Labels:        map[string]string{"machine": "ordinary"},
+		Labels:        map[string]string{"machine": "ordinary", "test-run": marker},
 		Isolation:     "none",
 		WorkspaceMode: "pinned",
 		ExpiresAt:     time.Now().Add(time.Hour),
@@ -581,6 +675,20 @@ func (h *sandboxHarness) enrollOrdinaryExecutor(t *testing.T) {
 		_ = cmd.Process.Signal(os.Kill)
 		_, _ = cmd.Process.Wait()
 	})
+
+	// The row appears with LastSeenAt set once the pool's Describe/Health
+	// handshake completes; that is the id a spawn can name.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, e := range h.listStoreExecutors(t) {
+			if e.Labels["test-run"] == marker && !e.LastSeenAt.IsZero() {
+				return e.ID
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the ordinary executor never enrolled and became live (marker %s)", marker)
+	return ""
 }
 
 // TestSandboxSpawnBlockScopes: a spawn-block sandbox is owned by its child and

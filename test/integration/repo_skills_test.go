@@ -174,14 +174,14 @@ func enrollRepoExecutor(t *testing.T, d *daemon, dsn, ownerLabel string) string 
 // executors. Enrollment's TouchSeen precedes the pool's live-map insert, and a
 // repo refresh only reaches LIVE executors, so this wait is what makes the
 // first `repo add` deterministic. The live set is only observable through
-// selection: a throwaway spawn naming a selector nothing matches is refused
-// with the live count in the message.
+// selection: a throwaway spawn naming a selector nothing matches starts UNBOUND
+// and carries the live count in its warnings, which is what this reads.
 func waitForLiveRepoExecutor(t *testing.T, d *daemon, want int) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
+		resp, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
 			Cwd:              t.TempDir(),
 			Kind:             "fundi",
 			Model:            "anthropic/claude-x",
@@ -189,8 +189,12 @@ func waitForLiveRepoExecutor(t *testing.T, d *daemon, want int) {
 			ExecutorSelector: "env=definitely-not-a-match",
 		}))
 		cancel()
-		if err != nil && strings.Contains(err.Error(), fmt.Sprintf("%d live executor(s)", want)) {
-			return
+		if err == nil {
+			if warningsMentionLiveCount(resp.Msg.GetWarnings(), want) {
+				return
+			}
+			// The probe child is throwaway; do not accumulate them.
+			killChildren(t, d.control(t), resp.Msg.GetChildId())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

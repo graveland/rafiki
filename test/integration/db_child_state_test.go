@@ -145,12 +145,13 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 		"XDG_STATE_HOME="+homeDir,
 		"XDG_DATA_HOME="+homeDir,
 		"RAFIKI_DB="+dsn,
-		// Executors must be off for the suite's plain spawns: a DB-backed daemon
+		// Executors stay off for the suite's plain spawns: a DB-backed daemon
 		// builds an executor pool by default (no RAFIKI_CONTROL_LISTEN, so
-		// executorsEnabled defaults on), and a top-level empty-selector spawn
-		// against a pool with zero live executors is now REFUSED
-		// ("no executor satisfies \"\"") instead of starting toolless. Every
-		// test that wants the executor plane enrolls one and passes
+		// executorsEnabled defaults on), and while a top-level empty-selector
+		// spawn against a zero-live pool now STARTS UNBOUND (with a spawn
+		// warning) rather than being refused, these tests still want no
+		// executor plane: a child under test must not probe or bind one.
+		// Every test that wants the executor plane enrolls one and passes
 		// RAFIKI_EXECUTORS_ENABLED=1 in extraEnv, which appends last and
 		// overrides this default.
 		"RAFIKI_EXECUTORS_ENABLED=0",

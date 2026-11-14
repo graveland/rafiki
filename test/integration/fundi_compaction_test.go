@@ -857,18 +857,25 @@ func startLocalExecutor(t *testing.T, d *daemon, dsn, root string) {
 		_ = cmd.Wait()
 	})
 
+	// The live set is only observable through selection: a throwaway spawn
+	// naming a selector nothing matches starts UNBOUND (it is not refused) and
+	// carries the pool's live count in its warnings, which is what this reads.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
+		resp, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
 			Cwd:              root,
 			Kind:             protocol.KindFundi,
 			Model:            compactionModel,
 			ExecutorSelector: "env=definitely-not-a-match",
 		}))
 		cancel()
-		if err != nil && strings.Contains(err.Error(), "1 live executor(s)") {
-			return
+		if err == nil {
+			if warningsMentionLiveCount(resp.Msg.GetWarnings(), 1) {
+				return
+			}
+			// The probe child is throwaway; do not accumulate them.
+			killChildren(t, d.control(t), resp.Msg.GetChildId())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

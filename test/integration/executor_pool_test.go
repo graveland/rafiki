@@ -12,7 +12,6 @@
 package integration_test
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/multigres/testkit/assert"
@@ -45,11 +44,19 @@ func TestExecutorPool_FullLifecycle(t *testing.T) {
 	c.Require().NoError(err, "spawn onto the enrolled executor failed")
 	c.Require().Eq(execID, g.executorOf(t, childID), "child placed on executor")
 
-	// A selector matching nothing is refused, and the refusal counts the pool —
-	// which is also how we know the executor is still live after the spawn.
-	_, err = g.grantSpawn(t, "", "env=nowhere", "anthropic/claude-x")
-	c.False(err == nil || !strings.Contains(err.Error(), "1 live executor(s)"), "expected a refusal naming 1 live executor, got: %v", err)
-
+	// A selector matching nothing STARTS UNBOUND — every child that cannot bind
+	// does — and the pool's live count rides the spawn's warnings, not an error:
+	// selection's own "1 live executor(s)" text is forwarded verbatim there,
+	// which is also how we know the executor is still live after the spawn. The
+	// count is asserted exactly, so a wrong count still fails.
+	resp, err := g.grantSpawnResp(t, "", "env=nowhere", "anthropic/claude-x")
+	c.Require().NoError(err, "a selector matching nothing must start unbound, not refuse the spawn")
+	c.True(warningsMentionLiveCount(resp.GetWarnings(), 1),
+		"the warning must carry selection's live count (1 live executor(s)), got %v", resp.GetWarnings())
+	unbound := getChild(t, g.control(t), resp.GetChildId())
+	c.Eq("unbound", unbound.GetLabels()["rafiki/executor-state"],
+		"the child starts unbound; labels %v", unbound.GetLabels())
+	c.Eq("", unbound.GetLabels()["rafiki/executor"], "an unbound child names no executor")
 }
 
 // executorOf returns the executor id a child was placed on, from its auto-label.

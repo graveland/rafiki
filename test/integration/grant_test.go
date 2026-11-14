@@ -290,27 +290,64 @@ func (g *grantDaemon) enrollExecutorExtra(t *testing.T, labels map[string]string
 }
 
 // waitForLiveExecutors polls until the daemon's pool reports n live executors.
-// The live set is only observable through selection, so this drives a
-// throwaway spawn and inspects the refusal's live count until it reaches n.
-// The refusal's authored message — "N live executor(s), …" — is forwarded
-// verbatim on the Connect error, which is what makes the substring match work.
+//
+// The live set is only observable through selection, so this drives a throwaway
+// spawn whose selector matches nothing and reads the count out of that spawn's
+// warnings. Such a spawn no longer FAILS — a child that cannot bind starts
+// unbound — so the same authored text selection has always produced
+// ("N live executor(s), …") now rides SpawnResponse.warnings instead of a
+// Connect error, and it is the warning (never "any spawn succeeded") that ends
+// the wait: a spawn that reports no count keeps polling until the deadline.
 func (g *grantDaemon) waitForLiveExecutors(t *testing.T, want int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		_, err := g.grantSpawn(t, "", "env=definitely-not-a-match", "anthropic/claude-x")
-		if err != nil && strings.Contains(err.Error(), fmt.Sprintf("%d live executor(s)", want)) {
-			return
+		resp, err := g.grantSpawnResp(t, "", "env=definitely-not-a-match", "anthropic/claude-x")
+		if err == nil {
+			if warningsMentionLiveCount(resp.GetWarnings(), want) {
+				return
+			}
+			// The probe child has served its purpose and is unbound anyway;
+			// stop it so a long wait does not accumulate children.
+			killChildren(t, g.control(t), resp.GetChildId())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("executors never became live (%d expected)", want)
 }
 
+// warningsMentionLiveCount reports whether any spawn warning carries selection's
+// live-executor count for want. explainNoMatch's authored text is
+// "N live executor(s), M in your parent's set: …", so an off-by-one in the pool
+// still fails a wait that wanted exactly N — the count is asserted, not
+// "some warning exists".
+func warningsMentionLiveCount(warnings []string, want int) bool {
+	needle := fmt.Sprintf("%d live executor(s)", want)
+	for _, w := range warnings {
+		if strings.Contains(w, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // grantSpawn spawns a fundi child with a parent and selector over Connect and
 // returns the child id plus the spawn error, so callers can assert on both the
 // success path and the refusal text.
 func (g *grantDaemon) grantSpawn(t *testing.T, parent, selector, model string) (string, error) {
+	t.Helper()
+	resp, err := g.grantSpawnResp(t, parent, selector, model)
+	if err != nil {
+		return "", err
+	}
+	return resp.GetChildId(), nil
+}
+
+// grantSpawnResp is grantSpawn returning the whole response, so a caller can
+// read the NON-FATAL warnings of a spawn that started unbound (no home, or no
+// executor reachable at all) — the only place selection's text is forwarded now
+// that such a spawn succeeds.
+func (g *grantDaemon) grantSpawnResp(t *testing.T, parent, selector, model string) (*rafikiv1.SpawnResponse, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -323,9 +360,9 @@ func (g *grantDaemon) grantSpawn(t *testing.T, parent, selector, model string) (
 		ExecutorSelector: selector,
 	}))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return resp.Msg.GetChildId(), nil
+	return resp.Msg, nil
 }
 
 // TestGrant_NativeNarrowing drives the join over the wire with native
