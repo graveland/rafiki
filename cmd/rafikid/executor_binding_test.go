@@ -1247,3 +1247,34 @@ func TestExitReleasesEveryBinding(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// An UNNAMED SPAWN keeps the pre-multi-executor behaviour: when per-call
+// resolution refuses (two machines reachable and none named), the spawn still
+// binds to selection's single pick. The refusal is the agent's TOOL CALL's
+// answer; refusing at spawn is a decision spawn-time home resolution owns, and
+// until it lands an unnamed spawn must work on a multi-executor daemon exactly
+// as it did when a child could reach only one machine.
+func TestBoundExecutorUnnamedSpawnFallsBackToSelection(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	b := newBoundExecutor("c1", fb)
+
+	c.NoError(b.bindImplicit(context.Background()), "an unnamed spawn on a multi-executor daemon must still bind")
+	execID, _, bound := b.Current()
+	c.True(bound, "bound")
+	c.Eq("a", execID, "selection's single pick")
+	c.EqDeep([]bool{true}, fb.useCwdFor("a"), "the picked machine is the child's workspace, so its cwd applies")
+	fb.mu.Lock()
+	noted := append([]string(nil), fb.noted...)
+	fb.mu.Unlock()
+	c.Len(noted, 1, "and it owns the labels; noted")
+
+	// When selection has nothing to give, ITS refusal is the one the spawn
+	// reports — never the per-call ambiguity message.
+	fb2 := newFakeBinder()
+	fb2.chooseErr = errors.New(`spawn refused: no executor satisfies ""`)
+	b2 := newBoundExecutor("c2", fb2)
+	err := b2.bindImplicit(context.Background())
+	c.Error(err, "no executor at all must still refuse the bind")
+	c.Eq(`spawn refused: no executor satisfies ""`, err.Error(), "ChooseFor's refusal text")
+}

@@ -221,7 +221,7 @@ func (b *controllerBinder) ProvisionOn(ctx context.Context, executorID string, u
 	if !useCwd {
 		req.Cwd = ""
 	}
-	wsID, _, client, perr, wd := b.c.provisionWorkspace(ctx, req, executorID)
+	wsID, _, client, wd, perr := b.c.provisionWorkspace(ctx, req, executorID)
 	if perr != nil {
 		return "", "", nil, perr
 	}
