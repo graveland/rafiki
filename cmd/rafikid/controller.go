@@ -3730,8 +3730,8 @@ func waitForChildRemoval(cm *ChildManager, childID string, within time.Duration)
 // The one stop policy for an agent: close its stdin and give it agentShutdownGrace
 // to exit, then SIGTERM and give it agentKillGrace, then SIGKILL. There is no
 // polite wait for a turn in flight or a final compaction; the daemon's own
-// shutdown, Kill's defaults, lease loss and failChild all use it. A caller that
-// wants longer passes shutdown_timeout / kill_timeout.
+// shutdown, Kill's defaults and lease loss all use it. A caller that wants
+// longer passes shutdown_timeout / kill_timeout.
 //
 // agentKillGrace is child.TermGrace plus a margin: a host that owns the process
 // (an executor, a daraja) runs its own SIGTERM-to-SIGKILL of child.TermGrace

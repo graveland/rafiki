@@ -10,17 +10,18 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// Pinned means the child is not re-bound to a different executor. Moving it
-// onto a machine no operator marked interchangeable is the thing
-// workspace_mode exists to prevent, and recover ignored it entirely -- so a
-// pinned child migrated on the tool-call path while HandleExecutorLost still
-// failed it on the park timeout, whichever fired first.
+// Pinned means the child is never re-bound to a DIFFERENT executor: moving it
+// onto a machine no operator marked interchangeable is what workspace_mode
+// exists to prevent. Losing its executor never fails the child -- calls to that
+// machine fail until it reconnects, and re-provisioning there is allowed.
 func TestRecoverRefusesToMigrateAPinnedChild(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newFakeBinder()
 	f.mode = "pinned"
 	b := newBoundExecutor("c1", f)
-	c.NoError(b.bindImplicit(context.Background()))
+	home, cerr := f.ChooseFor("c1")
+	c.NoError(cerr, "ChooseFor")
+	bindTestHome(t, b, home)
 	execID, wsID := b.stale()
 
 	// The executor is gone, not just its workspace.
@@ -40,7 +41,9 @@ func TestRecoverReprovisionsAPinnedChildOnItsOwnExecutor(t *testing.T) {
 	f.mode = "pinned"
 	f.live = true
 	b := newBoundExecutor("c1", f)
-	c.NoError(b.bindImplicit(context.Background()))
+	home, cerr := f.ChooseFor("c1")
+	c.NoError(cerr, "ChooseFor")
+	bindTestHome(t, b, home)
 	execID, wsID := b.stale()
 	c.True(b.recover(context.Background(), execID, wsID, execpool.ErrExecutorGone, true), "the executor is live; the workspace must be rebuilt in place")
 }
@@ -50,7 +53,9 @@ func TestRecoverMigratesAnEphemeralChildAndTellsIt(t *testing.T) {
 	f := newFakeBinder()
 	f.mode = "ephemeral"
 	b := newBoundExecutor("c1", f)
-	c.NoError(b.bindImplicit(context.Background()))
+	home, cerr := f.ChooseFor("c1")
+	c.NoError(cerr, "ChooseFor")
+	bindTestHome(t, b, home)
 	execID, wsID := b.stale()
 
 	// a departs, and b is the only machine left to reach.

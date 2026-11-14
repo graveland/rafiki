@@ -654,41 +654,6 @@ func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID strin
 	return bd, nil
 }
 
-// bindImplicit resolves a call that names no executor and binds it, which is
-// what the spawn path wants: the project tier and skills need a live workspace,
-// and a child that CAN bind should start bound.
-//
-// When resolution refuses — an unnamed spawn whose grant admits two or more
-// executors, or none at all — it FALLS BACK to ChooseFor, selection's single
-// pick. That is the PRE-MULTI-EXECUTOR path, kept deliberately until spawn-time
-// home resolution replaces it: until then an unnamed spawn must behave exactly
-// as it did before a child could reach more than one machine, because refusing
-// at spawn is a decision Task 3.1 owns (resolve home, then start unbound), not
-// a side effect of the binding learning to hold several workspaces.
-//
-// The ambiguity REFUSAL belongs to the agent's tool calls, and lives there:
-// resolve returns it, so a call with two reachable machines is refused with the
-// list and the model names one.
-func (b *boundExecutor) bindImplicit(ctx context.Context) error {
-	execID, _, err := b.resolve(ctx)
-	if err != nil {
-		picked, cerr := b.binder.ChooseFor(b.childID)
-		if cerr != nil {
-			return cerr
-		}
-		if picked == "" {
-			return err
-		}
-		// The machine selection landed on is the child's workspace, exactly as
-		// it was when this was the only binding there could be: it carries the
-		// child's cwd and owns the labels. Recorded only once that workspace
-		// exists (adoptHome), so a failed first provision leaves no home.
-		return b.adoptHome(ctx, picked)
-	}
-	_, err = b.clientFor(ctx, execID)
-	return err
-}
-
 // adoptHome makes execID the child's home. The workspace is provisioned AS a
 // home workspace first — the child's cwd applies there and the labels name it —
 // and only then is the home recorded, so a failed first provision leaves the
@@ -856,8 +821,9 @@ func (b *boundExecutor) doRecover(ctx context.Context, bd *binding, execID, stal
 	}
 
 	// The executor itself is gone. Whether the child may follow is the ROW's
-	// call, not this code's: a pinned home fails where it stood, and a call
-	// that NAMED an executor never migrates (the model asked for that machine).
+	// call, not this code's: the loss never fails the child, a pinned home is
+	// only ever re-provisioned on that same executor, and a call that NAMED an
+	// executor never migrates (the model asked for that machine).
 	home := b.homeExecutor()
 	if !implicitCall(ctx) || execID == "" || home != execID || !mayMigrate(b.binder.WorkspaceMode(execID)) {
 		slog.Warn("child lost its executor and will not be migrated",

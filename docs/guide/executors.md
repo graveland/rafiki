@@ -257,9 +257,11 @@ Each child gets a workspace provisioned before it starts and released when it
 exits, at the child's cwd.
 
 - **ephemeral** — the operator declares these machines interchangeable; if
-  the executor is lost, the child reschedules onto another one.
-- **pinned** — the executor exposes an existing tree; if it's lost, the child
-  parks until it returns or a timeout expires.
+  the executor is lost, an implicit tool call re-binds the child onto the
+  single reachable executor.
+- **pinned** — the executor exposes an existing tree. Losing it never ends the
+  child: calls to that executor fail until it reconnects, and the workspace is
+  re-provisioned only on that same executor when it returns.
 
 This says nothing about filesystem isolation, which comes from the
 operator's composition (containers) or from git worktrees passed as cwd.

@@ -596,6 +596,19 @@ func (e *burstExec) JobOutput(context.Context, string, int64) (tools.JobSnapshot
 func (e *burstExec) KillJob(context.Context, string) error { return nil }
 func (e *burstExec) Ping(context.Context) error            { return nil }
 
+// bindTestHome binds be to execID as its HOME through the path production uses
+// -- adoptHome, which provisions the workspace with the child's cwd, notes the
+// labels and records the home. A spawn reaches it through `bindHome` →
+// `clientFor`; a lazy first tool call through `resolve`. Test-only setup:
+// bindImplicit used to stand in for it and hid the ambiguity rule behind a
+// ChooseFor fallback that production never took.
+func bindTestHome(t *testing.T, b *boundExecutor, execID string) {
+	t.Helper()
+	if err := b.adoptHome(context.Background(), execID); err != nil {
+		t.Fatalf("bind home %s: %v", execID, err)
+	}
+}
+
 func TestBoundExecutorConcurrentFailuresProduceOneRebind(t *testing.T) {
 	c := assert.NewAborting(t)
 	const n = 8
@@ -605,7 +618,9 @@ func TestBoundExecutorConcurrentFailuresProduceOneRebind(t *testing.T) {
 	b := newBoundExecutor("child-1", fb)
 
 	// Bind first, so all n failures land against the SAME workspace.
-	c.NoError(b.bindImplicit(context.Background()))
+	home, cerr := fb.ChooseFor("child-1")
+	c.NoError(cerr, "ChooseFor")
+	bindTestHome(t, b, home)
 	c.Eq(1, fb.provisions, "the initial bind provisions once; got")
 
 	var wg sync.WaitGroup
@@ -674,7 +689,9 @@ func TestReprovisionInPlaceReleasesTheOldWorkspace(t *testing.T) {
 	f.mode = "pinned"
 	f.live = true
 	b := newBoundExecutor("c1", f)
-	c.NoError(b.bindImplicit(context.Background()))
+	home, cerr := f.ChooseFor("c1")
+	c.NoError(cerr, "ChooseFor")
+	bindTestHome(t, b, home)
 	first := f.lastWorkspace
 
 	execID, wsID := b.stale()
@@ -708,9 +725,11 @@ func TestRecoverDoesNotHoldTheLockAcrossProvision(t *testing.T) {
 	hook := f.onProvision
 	f.onProvision = nil
 	f.mu.Unlock()
-	if err := b.bindImplicit(context.Background()); err != nil {
-		t.Fatal(err)
+	home, cerr := f.ChooseFor("c1")
+	if cerr != nil {
+		t.Fatal(cerr)
 	}
+	bindTestHome(t, b, home)
 	f.mu.Lock()
 	f.onProvision = hook
 	f.mu.Unlock()
@@ -1110,8 +1129,10 @@ func TestBoundExecutorRecoveryCoalescedPerBinding(t *testing.T) {
 	c.Eq(1, fb.provisionsOn("b"), "b was never re-provisioned; got")
 }
 
-// A pinned home fails where it stood: it is not re-bound to a different
-// executor, and no workspace is made on the machine that is still there.
+// Losing the executor never fails a pinned child: it is not re-bound to a
+// different executor and no workspace is made on the machine that is still
+// there, so the CALL fails until the pinned executor returns and is then
+// re-provisioned in place.
 func TestBoundExecutorPinnedLostDoesNotMigrate(t *testing.T) {
 	c := assert.NewAborting(t)
 	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
@@ -1299,37 +1320,6 @@ func TestExitReleasesEveryBinding(t *testing.T) {
 	}
 }
 
-// An UNNAMED SPAWN keeps the pre-multi-executor behaviour: when per-call
-// resolution refuses (two machines reachable and none named), the spawn still
-// binds to selection's single pick. The refusal is the agent's TOOL CALL's
-// answer; refusing at spawn is a decision spawn-time home resolution owns, and
-// until it lands an unnamed spawn must work on a multi-executor daemon exactly
-// as it did when a child could reach only one machine.
-func TestBoundExecutorUnnamedSpawnFallsBackToSelection(t *testing.T) {
-	c := assert.NewAborting(t)
-	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
-	b := newBoundExecutor("c1", fb)
-
-	c.NoError(b.bindImplicit(context.Background()), "an unnamed spawn on a multi-executor daemon must still bind")
-	execID, _, bound := b.Current()
-	c.True(bound, "bound")
-	c.Eq("a", execID, "selection's single pick")
-	c.EqDeep([]bool{true}, fb.useCwdFor("a"), "the picked machine is the child's workspace, so its cwd applies")
-	fb.mu.Lock()
-	noted := append([]string(nil), fb.noted...)
-	fb.mu.Unlock()
-	c.Len(noted, 1, "and it owns the labels; noted")
-
-	// When selection has nothing to give, ITS refusal is the one the spawn
-	// reports — never the per-call ambiguity message.
-	fb2 := newFakeBinder()
-	fb2.chooseErr = errors.New(`spawn refused: no executor satisfies ""`)
-	b2 := newBoundExecutor("c2", fb2)
-	err := b2.bindImplicit(context.Background())
-	c.Error(err, "no executor at all must still refuse the bind")
-	c.Eq(`spawn refused: no executor satisfies ""`, err.Error(), "ChooseFor's refusal text")
-}
-
 // stale returns the home binding's key, for tests that then simulate a failure
 // against it. Test-only: no production path asks a binding where it is.
 func (b *boundExecutor) stale() (execID, wsID string) {
@@ -1419,7 +1409,7 @@ func TestBoundExecutorNamedCallNeverRetriedElsewhere(t *testing.T) {
 	fb.mu.Unlock()
 
 	be := newBoundExecutor("c1", fb)
-	c.NoError(be.bindImplicit(context.Background()), "bind home a")
+	bindTestHome(t, be, "a")
 
 	// Hold b's provision open so the migration is provably in flight when the
 	// named caller's failure arrives.
@@ -1651,7 +1641,7 @@ func TestBoundExecutorConcurrentImplicitCallersMigrateOnce(t *testing.T) {
 	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
 	fb.reachableTo("a")
 	be := newBoundExecutor("c1", fb)
-	c.NoError(be.bindImplicit(context.Background()), "bind home a")
+	bindTestHome(t, be, "a")
 
 	fb.reachableTo("b")
 	fb.mu.Lock()
@@ -1857,7 +1847,7 @@ func TestBoundExecutorUnfinishedHomePlaceholderIsNotBound(t *testing.T) {
 	}
 	fb.mu.Unlock()
 
-	go func() { _ = be.bindImplicit(context.Background()) }()
+	go func() { _, _ = be.clientFor(context.Background(), "a") }()
 	<-entered
 
 	execID, wsID, bound := be.Current()
