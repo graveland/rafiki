@@ -64,13 +64,20 @@ type executorBinder interface {
 	// resumed child agrees with the daemon that migrated it.
 	SetHomeLabel(childID, executorID string)
 
+	// ClearBinding removes the labels NoteBinding wrote. Best-effort, and it
+	// exists for exactly one caller: a label write that lost a race with the
+	// child's exit names a workspace the exit sweep already released, and a
+	// resumed child plus teardown both read those labels.
+	ClearBinding(childID string)
+
 	// DisplayName names an executor for an operator and for the model: its
 	// machine label, else a short id.
 	DisplayName(executorID string) string
 
 	// WorkspaceMode reports the workspace_mode of executorID, from the
-	// executor's ROW -- never from Describe: the value decides whether losing
-	// a machine fails a child or moves it, and a machine that wants children
+	// executor's ROW -- never from Describe: the value decides whether a child
+	// may be RE-PROVISIONED somewhere else after a machine is lost (it never
+	// decides whether the loss fails one), and a machine that wants children
 	// cannot be the one asserting it is interchangeable.
 	WorkspaceMode(executorID string) string
 
@@ -126,6 +133,13 @@ type boundExecutor struct {
 	// moment publishes a workspace nothing will ever release, so the
 	// provisioner checks this after its RPC and releases what it made.
 	closed bool
+
+	// migrating is non-nil while ONE migrateHome is running its provision and
+	// label write, and is closed when it has settled. It is what keeps two
+	// concurrent migrations from interleaving a winner's home claim with a
+	// loser's label write -- see migrateHome. A channel rather than a lock
+	// because b.mu is never held across an RPC or a store write.
+	migrating chan struct{}
 }
 
 // binding is one live (executor, workspace) pair.
@@ -594,6 +608,45 @@ func (b *boundExecutor) publishWorkspace(ctx context.Context, bd *binding, execI
 	return nil
 }
 
+// noteHomeBinding labels the child's HOME binding, and undoes the write when it
+// lost a race with teardown.
+//
+// publishWorkspace makes a workspace visible atomically under b.mu, but this
+// write is store I/O that necessarily happens after the lock is dropped: the
+// exit sweep can snapshot the labels it releases between the two, so a provision
+// published an instant before an exit labels a child that is gone with a
+// workspace the sweep has already released. The consequence is stale state, not
+// a leak — the release happened — but a resumed child and the next teardown both
+// read those labels, so the compensation is to remove them again and say so.
+//
+// Removal is confined to the EXITED case (b.closed) on purpose. closed is what
+// stops every later publish, so nothing legitimate can be writing these labels
+// once it is set and removing them cannot steal a live binding's only handle. A
+// binding superseded WITHOUT an exit — a promotion, a re-provision — is left
+// alone: whatever replaced it owns the labels, and a removal here would either
+// delete the replacement's fresh workspace label or race it. Best-effort
+// throughout: a failed removal is a warning, never a failure of the call that
+// made the workspace.
+//
+// (Residual: if the sweep read the labels BEFORE this write and sets closed
+// after it, this check does not see it. That window is narrower than the one
+// closed by this compensation and ends the same way — labels naming a released
+// workspace — so it is recorded here rather than pretended away.)
+func (b *boundExecutor) noteHomeBinding(execID, wsID string) {
+	b.binder.NoteBinding(b.childID, execID, wsID)
+
+	b.mu.Lock()
+	closed := b.closed
+	b.mu.Unlock()
+	if !closed {
+		return
+	}
+	b.binder.ClearBinding(b.childID)
+	slog.Warn("labelled the home workspace of a child that exited while the label write was in flight; "+
+		"removed the labels again so nothing reads a released workspace",
+		"child", b.childID, "executor", shortID(execID), "workspace", wsID)
+}
+
 // provision performs one binding's first provision. Called with no lock held;
 // bd is the placeholder already published under it.
 //
@@ -639,7 +692,7 @@ func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID strin
 	// Written before ready closes: a home binding must never be usable before
 	// teardown can find it.
 	if wantCwd {
-		b.binder.NoteBinding(b.childID, execID, wsID)
+		b.noteHomeBinding(execID, wsID)
 	}
 	close(bd.ready)
 
@@ -687,12 +740,58 @@ func (b *boundExecutor) adoptHome(ctx context.Context, execID string) error {
 //   - NoteBinding belongs to the provision (a home workspace is labelled when it
 //     is made), so a migration must not write it again.
 //
-// (N7, accepted: the label is written by the provision, BEFORE this claim, so
-// two concurrent migrations to DIFFERENT targets — which needs the reachable set
-// to flip between the two callers — can leave the labels naming the loser while
-// b.home is the winner. The next implicit call sees the disagreement and
-// re-migrates, so it self-heals.)
+// ONE MIGRATION AT A TIME (b.migrating). The label write above happens inside
+// the provision, i.e. BEFORE the home claim, so two migrations running at once
+// can interleave the WINNER's claim with the LOSER's label write: the durable
+// `rafiki/executor`/`rafiki/workspace` pair then names the loser's executor and
+// a workspace nothing will release, while `rafiki/home-executor` — the value a
+// resumed child binds by — names the winner. That does not self-heal: the next
+// event may be a daemon restart.
+//
+// A caller that finds a migration in flight WAITS for it (its own ctx bounds the
+// wait) and then re-considers: if the home has moved off the executor it set out
+// to leave, it does nothing more and its call proceeds on the executor it
+// RESOLVED, which ensureBinding binds as an ordinary root-level workspace. That
+// path writes no labels, so the waiting caller can never produce a second label
+// set, and it is never failed for losing the race. The leader never waits on a
+// waiter, and b.mu is never held across either the wait or the RPCs, so no
+// arrangement of these calls can deadlock.
 func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error {
+	for {
+		b.mu.Lock()
+		if b.home != from {
+			// Another caller already moved the home (here, or somewhere else).
+			b.mu.Unlock()
+			return nil
+		}
+		wait := b.migrating
+		if wait == nil {
+			done := make(chan struct{})
+			b.migrating = done
+			b.mu.Unlock()
+			return func() error {
+				defer func() {
+					b.mu.Lock()
+					b.migrating = nil
+					b.mu.Unlock()
+					close(done)
+				}()
+				return b.migrateHomeNow(ctx, from, to)
+			}()
+		}
+		b.mu.Unlock()
+
+		select {
+		case <-wait:
+			// Re-consider against the home the winner left behind.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// migrateHomeNow is one migration, run with b.migrating held.
+func (b *boundExecutor) migrateHomeNow(ctx context.Context, from, to string) error {
 	if _, err := b.ensureBinding(ctx, to, true); err != nil {
 		return err
 	}
@@ -704,7 +803,8 @@ func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error 
 	}
 	b.mu.Unlock()
 	if !won {
-		// Another caller already moved the home (here, or somewhere else).
+		// The home was cleared (a loss) while this provision ran: nothing to
+		// move, and the labels belong to whoever binds next.
 		return nil
 	}
 
@@ -870,7 +970,7 @@ func (b *boundExecutor) reprovisionInPlace(ctx context.Context, bd *binding, exe
 		return false
 	}
 	if useCwd {
-		b.binder.NoteBinding(b.childID, execID, wsID)
+		b.noteHomeBinding(execID, wsID)
 	}
 
 	// The old workspace is still registered on a LIVE executor, so unlike the

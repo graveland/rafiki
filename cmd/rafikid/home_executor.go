@@ -300,7 +300,9 @@ func (c *Controller) bindHome(ctx context.Context, be *boundExecutor, homeID str
 //
 // The labels are written before the binding becomes usable (ready closes last),
 // the same ordering provision uses: teardown finds the home workspace by label,
-// so it must never be usable before it is findable.
+// so it must never be usable before it is findable — and, through the same
+// helper, an exit that lands in that gap removes them again rather than
+// leaving them naming a workspace the sweep already released.
 func (b *boundExecutor) adopt(execID, wsID string, cl tools.ExecutorClient) error {
 	if execID == "" || wsID == "" {
 		return errors.New("adopt: a home binding needs an executor id and a workspace id")
@@ -336,7 +338,7 @@ func (b *boundExecutor) adopt(execID, wsID string, cl tools.ExecutorClient) erro
 		return perr
 	}
 
-	b.binder.NoteBinding(b.childID, execID, wsID)
+	b.noteHomeBinding(execID, wsID)
 	b.setHome(execID)
 	close(bd.ready)
 	return nil

@@ -293,6 +293,27 @@ func (b *controllerBinder) NoteBinding(childID, executorID, workspaceID string) 
 	b.c.wsLabelsMu.Unlock()
 }
 
+// ClearBinding removes the labels NoteBinding wrote.
+//
+// Only boundExecutor.noteHomeBinding calls it: a workspace label written just as
+// the child exited names a workspace the exit sweep has already released, and
+// both a resumed child and the next teardown read it. `rafiki/home-executor` and
+// `rafiki/workspace-mode` STAY — they name the machine the child's cwd lives on
+// and the rebinding rule, not the workspace that is gone. Best-effort: failing to
+// remove stale labels must not fail anything.
+func (b *controllerBinder) ClearBinding(childID string) {
+	if b.c.st == nil {
+		return
+	}
+	if _, err := b.c.st.SetLabels(childID, nil, []string{"rafiki/executor", "rafiki/workspace"}); err != nil {
+		if errors.Is(err, childstore.ErrNotFound) {
+			return // no row, so no labels to remove
+		}
+		slog.Warn("could not remove binding labels written after the child exited",
+			"child", childID, "error", err)
+	}
+}
+
 // WorkspaceMode reads the mode from the executor's DURABLE row, never from the
 // live pool and never from Describe.
 //

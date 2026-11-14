@@ -116,6 +116,12 @@ type fakeBinder struct {
 	reachable []string
 	reachErr  error
 
+	// reachNext, when non-empty, is a queue of reachable sets popped ONE PER
+	// Reachable call. It is how a test gives two callers different views of the
+	// live set at the same moment -- what a concurrent migration to two
+	// different targets needs.
+	reachNext [][]string
+
 	// machines maps an executor id to its "machine" label, which is what
 	// DisplayName reports. A missing entry reads as the id itself.
 	machines map[string]string
@@ -143,6 +149,23 @@ type fakeBinder struct {
 	lastSteer  string
 	lastFrom   string
 	lastTo     string
+
+	// labels is what NoteBinding writes and ClearBinding removes, so a test can
+	// assert on the child's durable labels rather than on the calls that made
+	// them.
+	labels map[string]string
+	clears int
+
+	// onNoteBinding, when set, runs synchronously inside NoteBinding -- with the
+	// fake's lock released, AFTER the labels are written. It is the window the
+	// exit sweep can land in: a test drives teardown from here.
+	onNoteBinding func()
+
+	// onWorkspaceMode, when set, runs synchronously inside WorkspaceMode with
+	// the fake's lock released; execID is the executor whose mode is asked for.
+	// It is the last binder call before a migration starts, so a test uses it to
+	// pin which home a racing caller has already read.
+	onWorkspaceMode func(execID string)
 
 	// forgotRunning records ForgetRunningJob calls, as "executorID|handle"
 	// pairs in call order. The daemon prunes a self-killed job from its running
@@ -206,6 +229,7 @@ func newFakeBinder(execs ...*fakeExec) *fakeBinder {
 		live:         true,
 		mode:         "ephemeral",
 		released:     map[string]bool{},
+		labels:       map[string]string{},
 	}
 	for _, e := range execs {
 		fb.execs[e.id] = e
@@ -265,6 +289,10 @@ func (f *fakeBinder) Reachable(string) ([]executors.Executor, error) {
 	defer f.mu.Unlock()
 	if f.reachErr != nil {
 		return nil, f.reachErr
+	}
+	if len(f.reachNext) > 0 {
+		f.reachable = f.reachNext[0]
+		f.reachNext = f.reachNext[1:]
 	}
 	out := make([]executors.Executor, 0, len(f.reachable))
 	for _, id := range f.reachable {
@@ -405,17 +433,50 @@ func (f *fakeBinder) IsLive(id string) bool {
 
 func (f *fakeBinder) NoteBinding(_, execID, wsID string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	hook := f.onNoteBinding
 	f.noted = append(f.noted, execID+"/"+wsID)
+	if f.labels == nil {
+		f.labels = map[string]string{}
+	}
+	f.labels["rafiki/executor"] = execID
+	f.labels["rafiki/workspace"] = wsID
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+// ClearBinding removes what NoteBinding wrote, mirroring the store.
+func (f *fakeBinder) ClearBinding(string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clears++
+	delete(f.labels, "rafiki/executor")
+	delete(f.labels, "rafiki/workspace")
+}
+
+// bindingLabels is a copy of the child's durable binding labels.
+func (f *fakeBinder) bindingLabels() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.labels))
+	for k, v := range f.labels {
+		out[k] = v
+	}
+	return out
 }
 
 // WorkspaceMode returns the scripted mode for every executor. A single value
 // is enough for these tests: they exercise the pinned/ephemeral decision, not
 // per-executor mode variation.
-func (f *fakeBinder) WorkspaceMode(string) string {
+func (f *fakeBinder) WorkspaceMode(execID string) string {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.mode
+	hook, mode := f.onWorkspaceMode, f.mode
+	f.mu.Unlock()
+	if hook != nil {
+		hook(execID)
+	}
+	return mode
 }
 
 func (f *fakeBinder) NotifyMigrated(_, from, to string) {
@@ -1681,6 +1742,110 @@ func TestBoundExecutorConcurrentImplicitCallersMigrateOnce(t *testing.T) {
 	c.EqDeep([]string{"c1|b"}, labels, "one durable home label; got")
 }
 
+// Two concurrent implicit callers whose live sets have flipped to DIFFERENT
+// single executors both decide to migrate the SAME home away. The label write
+// happens inside the PROVISION, i.e. before the home claim, so two migrations at
+// once can leave `rafiki/executor`/`rafiki/workspace` naming the loser's
+// workspace while `rafiki/home-executor` — what a resumed child binds by — and
+// b.home name the winner. That does not self-heal: the next event may be a daemon
+// restart, not another migration. Exactly ONE migration may run.
+//
+// The ordering here is forced rather than hoped for: caller A's provision is held
+// until B has read the home A is migrating away from, and (in the world without
+// the guard) B's provision is held until A's own migration has finished, so a
+// second migration is always given the worst possible order.
+func TestBoundExecutorConcurrentMigrationsToOneHome(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"}, &fakeExec{id: "c"})
+	be := newBoundExecutor("c1", fb)
+	bindTestHome(t, be, "a")
+
+	// The two callers see a DIFFERENT single-executor live set, which is what
+	// gives them different migration targets.
+	fb.mu.Lock()
+	fb.reachNext = [][]string{{"b"}, {"c"}}
+	enteredA := make(chan struct{})
+	releaseA := make(chan struct{})
+	aDone := make(chan struct{})
+	releaseC := make(chan struct{})
+	var enteredAOnce sync.Once
+	fb.onProvision = func(execID string) {
+		switch execID {
+		case "b":
+			enteredAOnce.Do(func() { close(enteredA) })
+			<-releaseA
+		case "c":
+			// Whatever provisions here, in either world, does it only after A's
+			// migration has completed: a loser's label write must be as LATE as
+			// it can be, or the test would pass by accident.
+			<-releaseC
+		}
+	}
+	fb.mu.Unlock()
+
+	aResult := make(chan string, 1)
+	go func() {
+		defer close(aDone)
+		res, err := be.Execute(context.Background(), "read", nil)
+		if err != nil {
+			aResult <- "ERR: " + err.Error()
+			return
+		}
+		aResult <- res.Text
+	}()
+	<-enteredA // A's migration is in flight: it holds the guard and the home is still a
+
+	// B must have read home=a before A claims it, or it would be a SEQUENTIAL
+	// migration (a legal one, and not what this test is about). WorkspaceMode is
+	// the last binder call before migrateHome, so park B there until the test
+	// knows its home read happened.
+	bRead := make(chan struct{})
+	var bReadOnce sync.Once
+	fb.mu.Lock()
+	fb.onWorkspaceMode = func(string) { bReadOnce.Do(func() { close(bRead) }) }
+	fb.mu.Unlock()
+
+	bResult := make(chan string, 1)
+	go func() {
+		res, err := be.Execute(context.Background(), "read", nil)
+		if err != nil {
+			bResult <- "ERR: " + err.Error()
+			return
+		}
+		bResult <- res.Text
+	}()
+	<-bRead
+
+	// A wins: it is the one already provisioning. Release it, let it claim, and
+	// only then let anything else provision.
+	close(releaseA)
+	c.Eq("b:read", <-aResult, "the first caller must serve its call on the executor it migrated to")
+	<-aDone
+	close(releaseC)
+	c.Eq("c:read", <-bResult, "losing the race must not fail the second caller: its call runs on the executor it resolved")
+
+	home := be.homeExecutor()
+	c.Eq("b", home, "home is the winner's executor; got")
+	execID, wsID, bound := be.Current()
+	c.True(bound, "the child is bound")
+	c.Eq("b", execID, "Current executor")
+	c.True(wsID != "", "Current workspace")
+
+	fb.mu.Lock()
+	noted := append([]string(nil), fb.noted...)
+	homeLabels := append([]string(nil), fb.homeLabels...)
+	migrations := fb.migrations
+	fb.mu.Unlock()
+	labels := fb.bindingLabels()
+
+	c.EqDeep([]string{"c1|b"}, homeLabels, "exactly ONE migration recorded its home; a second would move a home the labels do not name")
+	c.Eq(1, migrations, "the child is told its workspace moved once; migrations")
+	c.Len(noted, 2, "exactly one label write for the migration (the spawn's home bind is the other); noted %v", noted)
+	c.Eq("b/"+wsID, noted[len(noted)-1], "the labels must name the HOME binding's executor and workspace; noted %v", noted)
+	c.Eq("b", labels["rafiki/executor"], "rafiki/executor must agree with b.home and rafiki/home-executor; labels %v", labels)
+	c.Eq(wsID, labels["rafiki/workspace"], "rafiki/workspace must name the home binding's workspace; labels %v", labels)
+}
+
 // A dead executor's workspace release must not starve the live ones: teardown
 // releases them concurrently, each on its own deadline. Sequentially they shared
 // one budget in map order, so one hung machine could eat it all.
@@ -2032,4 +2197,50 @@ func TestReprovisionInPlaceDuringExitIsNotLeaked(t *testing.T) {
 	wsAfter := bd.wsID
 	be.mu.Unlock()
 	c.Eq(wsID, wsAfter, "the rebuilt workspace must not be installed into the binding; got")
+}
+
+// The label write is store I/O AFTER the publication guard, so an exit can land
+// between the two: the sweep releases the workspace, and the write labels a child
+// that is gone with a workspace nothing holds any more. The labels must be
+// removed again, not left naming a released workspace — a resumed child and the
+// next teardown both read them.
+func TestNoteHomeBindingRemovedWhenTheChildExitsMidWrite(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	// The ordinary case: nothing exits, so the labels stay.
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	fb.reachableTo("a")
+	be := newBoundExecutor("c1", fb)
+	if _, err := be.Execute(context.Background(), "read", nil); err != nil {
+		t.Fatalf("implicit call: %v", err)
+	}
+	kept := fb.bindingLabels()
+	c.Eq("a", kept["rafiki/executor"], "a live child keeps its binding labels; rafiki/executor")
+	c.True(kept["rafiki/workspace"] != "", "a live child keeps its workspace label; labels %v", kept)
+	fb.mu.Lock()
+	liveClears := fb.clears
+	fb.mu.Unlock()
+	c.Eq(0, liveClears, "nothing exited, so nothing to remove; clears")
+
+	// Now the exit sweep lands INSIDE the label write, with the fake's lock
+	// released exactly as the store's would be.
+	fb2 := newFakeBinder(&fakeExec{id: "a"})
+	fb2.reachableTo("a")
+	be2 := newBoundExecutor("c1", fb2)
+	var once sync.Once
+	fb2.onNoteBinding = func() {
+		once.Do(func() { be2.ReleaseOthers(context.Background(), "", "") })
+	}
+
+	// The call's own outcome is not this test's subject: the sweep has already
+	// made the child exited, so where the call lands is teardown's business.
+	_, _ = be2.Execute(context.Background(), "read", nil)
+
+	stale := fb2.bindingLabels()
+	c.Len(stale, 0, "a label write that lost a race with the exit must be undone, not left naming a released workspace; got %v", stale)
+	fb2.mu.Lock()
+	noted, clears := len(fb2.noted), fb2.clears
+	fb2.mu.Unlock()
+	c.Eq(1, clears, "removed exactly once; clears")
+	c.Eq(1, noted, "the write did happen — this is a compensation, not a skipped write; noted")
 }
