@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,11 +27,42 @@ type fakePool struct {
 	// evicted records each id Evict was called for, so a test can assert a
 	// second session request releases the first.
 	evicted map[string]bool
+
+	// releaseErr, when set, is returned by every Release — the failure path
+	// releaseWorkspace logs, which is also the only way a test reaches it.
+	releaseErr error
+	// releaseMu guards released: releases run on tool-call goroutines in the
+	// binder tests as well as synchronously from HandleExecutorLost.
+	releaseMu sync.Mutex
+	released  []wsRelease
+}
+
+// wsRelease is one workspace release a fakePool was asked to perform.
+type wsRelease struct {
+	executorID  string
+	workspaceID string
 }
 
 func (f *fakePool) Live() []execpool.LiveExecutor { return f.live }
 func (f *fakePool) ClientFor(id string) (tools.ExecutorClient, error) {
 	return &stubExecutorClient{}, nil
+}
+
+// Release records what teardown asked for. It exists on the interface precisely
+// so a missing release (the lost-executor handler's pass 1, the binder's
+// rollback) fails a test instead of being swallowed by a no-op.
+func (f *fakePool) Release(_ context.Context, executorID, workspaceID string) error {
+	f.releaseMu.Lock()
+	f.released = append(f.released, wsRelease{executorID: executorID, workspaceID: workspaceID})
+	f.releaseMu.Unlock()
+	return f.releaseErr
+}
+
+// releases returns a copy of every Release call in order.
+func (f *fakePool) releases() []wsRelease {
+	f.releaseMu.Lock()
+	defer f.releaseMu.Unlock()
+	return append([]wsRelease(nil), f.released...)
 }
 
 func (f *fakePool) Tickets() *execpool.TicketRegistry {

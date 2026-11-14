@@ -223,21 +223,29 @@ func (c *Controller) chooseExecutorCandidate(req protocol.SpawnRequest, owner ex
 // releaseWorkspace tears down a workspace on an executor.
 // Idempotent and best-effort — it must not wedge teardown.
 func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspaceID string) {
-	pool := c.execPool
-	if pool == nil || workspaceID == "" {
+	if c.execPool == nil || workspaceID == "" {
 		return
 	}
-	pp, ok := pool.(*execpool.Pool)
-	if !ok {
-		return
-	}
-	if err := pp.Release(ctx, executorID, workspaceID); err != nil {
+	if err := c.execPool.Release(ctx, executorID, workspaceID); err != nil {
+		// shortID, never executorID[:12]: an executor id shorter than twelve
+		// characters is legal (a test id, a hand-registered row), and slicing it
+		// would panic on the one path that must stay best-effort.
 		slog.Warn("release workspace failed",
 			"workspaceId", workspaceID,
-			"executorId", executorID[:12],
+			"executorId", shortID(executorID),
 			"error", err,
 		)
 	}
+}
+
+// holdsBindingOn reports whether be still holds a workspace binding on
+// executorID. Nil-safe: a child with no retained binding holds nothing.
+func holdsBindingOn(be *boundExecutor, executorID string) bool {
+	if be == nil {
+		return false
+	}
+	_, ok := be.Bindings()[executorID]
+	return ok
 }
 
 // HandleExecutorLost is called by the exec pool when a parked executor's
@@ -270,10 +278,35 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 		if snap.Labels["rafiki/executor"] != lostID || snap.Status == protocol.StatusExited {
 			continue
 		}
+
+		be := c.boundExecutorFor(snap.ChildID)
+
+		// Already unbound with nothing left on the lost machine: this is a
+		// REPEAT loss notice for the same executor id — the pool can declare an
+		// id lost again after it reconnects, parks and expires a second time —
+		// and this child was told the first time. Releasing nothing, rewriting
+		// the labels it already carries and steering it again would spend a turn
+		// on news it already has. A child that re-bound on the lost machine is
+		// NOT in this state: NoteBinding clears rafiki/executor-state and
+		// restores rafiki/workspace, so it is handled below like any other.
+		if snap.Labels["rafiki/executor-state"] == "unbound" && !holdsBindingOn(be, lostID) {
+			continue
+		}
 		handled[snap.ChildID] = true
 
-		if wsID := snap.Labels["rafiki/workspace"]; wsID != "" {
-			c.releaseWorkspace(context.Background(), lostID, wsID)
+		// Both ids are released when they differ, deduped so the same workspace
+		// is asked for once. Normally NoteBinding keeps them equal; they diverge
+		// when the labels and the binding were last written by different paths
+		// (a stash carried over the spawn, a failed label write), and then the
+		// binding's workspace is the one nothing else would ever release.
+		labelWS := snap.Labels["rafiki/workspace"]
+		if labelWS != "" {
+			c.releaseWorkspace(context.Background(), lostID, labelWS)
+		}
+		if be != nil {
+			if wsID, ok := be.Forget(lostID); ok && wsID != labelWS {
+				c.releaseWorkspace(context.Background(), lostID, wsID)
+			}
 		}
 
 		// The binding is gone with the machine; the labels must stop claiming
@@ -288,9 +321,6 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 				"childId", snap.ChildID, "executorId", shortID(lostID), "error", err)
 		}
 
-		if be := c.boundExecutorFor(snap.ChildID); be != nil {
-			be.Forget(lostID)
-		}
 		c.sendSteer(snap.ChildID, executorLostSteer(name))
 	}
 

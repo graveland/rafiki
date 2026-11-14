@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -28,6 +29,12 @@ type executorPool interface {
 	Tickets() *execpool.TicketRegistry
 	Evict(executorID string)
 	DisconnectOwner(userID string) int
+	// Release tears down a workspace on an executor. It is here, not on the
+	// concrete *execpool.Pool only, because teardown is what both the
+	// lost-executor handler (workspace_wiring.go) and the binder's rollback
+	// must be able to DO — a fake pool that silently dropped the call left a
+	// missing release green in every test.
+	Release(ctx context.Context, executorID, workspaceID string) error
 }
 
 // isBareExecutorRef reports whether s is a bare word — a machine name or an

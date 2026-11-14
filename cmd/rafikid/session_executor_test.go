@@ -159,6 +159,10 @@ func (p *syncEvictPool) ClientFor(string) (tools.ExecutorClient, error) {
 
 func (p *syncEvictPool) Tickets() *execpool.TicketRegistry { return p.tickets }
 
+// Release satisfies executorPool; no test here tears a workspace down. The
+// recording fake is fakePool (executor_select_test.go).
+func (p *syncEvictPool) Release(context.Context, string, string) error { return nil }
+
 func (p *syncEvictPool) Evict(id string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

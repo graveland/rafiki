@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -110,9 +111,17 @@ func seedChildOn(c *Controller, childID, execID, wsID, mode string) {
 // waits that long, so the old code looks innocent on that reading.
 func TestHandleExecutorLostKeepsPinnedChildRunning(t *testing.T) {
 	ck := assert.NewAborting(t)
-	c, clk, cp := lostFixture(t, &fakePool{}, row(lostExecID, "build-1"))
-	seedChildOn(c, "c_pinned", lostExecID, "ws-home", "pinned")
+	pool := &fakePool{}
+	c, clk, cp := lostFixture(t, pool, row(lostExecID, "build-1"))
 	be := bindingOn(t, c, "c_pinned", lostExecID, true)
+	// The labels and the binding name the SAME workspace, which is what
+	// NoteBinding keeps true in production. It makes the release assertion below
+	// exact — one workspace, asked for once — and that single release is what
+	// pins the pass-1 teardown AND the dedup: a handler that released the label's
+	// id and the binding's id without comparing them would ask twice here.
+	ws := be.Bindings()[lostExecID]
+	ck.NotEq("", ws, "test setup: the binding names a workspace")
+	seedChildOn(c, "c_pinned", lostExecID, ws, "pinned")
 
 	c.HandleExecutorLost(lostExecID)
 	clk.Advance(6 * time.Second)
@@ -126,6 +135,9 @@ func TestHandleExecutorLostKeepsPinnedChildRunning(t *testing.T) {
 	ck.Eq(lostExecID, snap.Labels["rafiki/executor"], "rafiki/executor names the machine the child's cwd lives on; =")
 	ck.Eq("pinned", snap.Labels["rafiki/workspace-mode"], "rafiki/workspace-mode decides where a rebuild may happen; =")
 	ck.Eq(lostExecID, snap.Labels["rafiki/home-executor"], "the home executor is where a pinned child is re-provisioned; =")
+
+	ck.EqDeep([]wsRelease{{executorID: lostExecID, workspaceID: ws}}, pool.releases(),
+		"pass 1 must release the lost executor's workspace, exactly once; got")
 
 	ck.Empty(be.Bindings(), "a binding on the lost machine must be forgotten, or the next call uses a client whose transport is dead")
 	if _, _, bound := be.Current(); bound {
@@ -288,6 +300,171 @@ func TestHandleExecutorLostFallsBackToAShortIDWithoutAMachineLabel(t *testing.T)
 			ck.Eq(lostSteerShortID, batches[0].fragments[0], "steer text")
 		})
 	}
+}
+
+// --- the lost handler's edge cases: exited, split label/binding, repeat loss ---
+
+// An EXITED child's workspace was already released by its exit sweep, off these
+// same labels, and a steer pushed now parks a durable row in an inbox nothing
+// reads until a resume — waking that child for news about a machine it is not
+// using. So the label pass skips it outright: nothing released, no label
+// rewritten, nothing steered.
+func TestLostExecutorLeavesAnExitedChildAlone(t *testing.T) {
+	ck := assert.NewAborting(t)
+	pool := &fakePool{}
+	c, clk, cp := lostFixture(t, pool, row(lostExecID, "build-1"))
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_exited", Status: protocol.StatusExited, StartedAt: time.Now(),
+		Kind: protocol.KindFundi,
+		Labels: map[string]string{
+			"rafiki/executor":       lostExecID,
+			"rafiki/workspace":      "ws-dead",
+			"rafiki/workspace-mode": "pinned",
+			"rafiki/home-executor":  lostExecID,
+		},
+	})
+
+	c.HandleExecutorLost(lostExecID)
+	clk.Advance(6 * time.Second)
+
+	snap, ok := c.st.Get("c_exited")
+	ck.Require().True(ok, "the row survives")
+	ck.Eq("ws-dead", snap.Labels["rafiki/workspace"],
+		"an exited child's labels belong to its exit sweep, not to a loss notice; rafiki/workspace =")
+	_, unbound := snap.Labels["rafiki/executor-state"]
+	ck.False(unbound, "an exited child must not be marked unbound by a loss it cannot act on")
+	ck.Empty(pool.releases(), "the exit sweep released the workspace already; releasing it again is a second round trip to a dead executor")
+	ck.Empty(cp.batches(), "an exited child must not be steered, or the notice parks a row that wakes its next resume")
+}
+
+// The labels and the binding can name DIFFERENT workspaces — a label write that
+// failed, a stash carried over the spawn — and then the binding's workspace is
+// one nothing else would ever release: not this handler's label release, and
+// not the exit sweep, which reads the labels. Both are released, each once.
+func TestLostExecutorReleasesAWorkspaceOnlyTheBindingNames(t *testing.T) {
+	ck := assert.NewAborting(t)
+	pool := &fakePool{}
+	c, clk, cp := lostFixture(t, pool, row(lostExecID, "build-1"))
+	be := bindingOn(t, c, "c_split", lostExecID, true)
+	boundWS := be.Bindings()[lostExecID]
+	ck.NotEq("", boundWS, "test setup: the binding names a workspace")
+	seedChildOn(c, "c_split", lostExecID, "ws-from-the-label", "pinned")
+
+	c.HandleExecutorLost(lostExecID)
+	clk.Advance(6 * time.Second)
+
+	ck.EqDeep([]wsRelease{
+		{executorID: lostExecID, workspaceID: "ws-from-the-label"},
+		{executorID: lostExecID, workspaceID: boundWS},
+	}, pool.releases(),
+		"both ids must be released when they differ — the binding's workspace is the leak otherwise; got")
+	ck.Empty(be.Bindings(), "the binding must still be forgotten")
+	ck.Len(cp.batches(), 1, "and the child is told once, as for any other loss; got %d", len(cp.batches()))
+}
+
+// execpool can declare the SAME executor id lost more than once: sweepParkedOnce
+// drops the park entry as it fires, but a machine that reconnects is parked
+// again on its next departure and expires again. The handler must be idempotent
+// per child, or a child that was already unbound and already told gets the same
+// notice and a paid turn for it.
+func TestLostExecutorIsIdempotentForASecondLoss(t *testing.T) {
+	t.Run("a repeat notice steers nothing", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		pool := &fakePool{}
+		c, clk, cp := lostFixture(t, pool, row(lostExecID, "build-1"))
+		be := bindingOn(t, c, "c_twice", lostExecID, true)
+		seedChildOn(c, "c_twice", lostExecID, be.Bindings()[lostExecID], "pinned")
+
+		c.HandleExecutorLost(lostExecID)
+		clk.Advance(6 * time.Second)
+		ck.Require().Len(cp.batches(), 1, "the first loss steers, got %d", len(cp.batches()))
+
+		// The executor comes back under the same id, and is declared lost again.
+		c.HandleExecutorLost(lostExecID)
+		clk.Advance(6 * time.Second)
+
+		ck.Len(cp.batches(), 1,
+			"an already-unbound child with nothing on the lost machine must not be steered a second time; got %d steers: %+v",
+			len(cp.batches()), cp.batches())
+		ck.Len(pool.releases(), 1, "nor must a workspace already released be asked for again; got %d", len(pool.releases()))
+	})
+
+	t.Run("a child recovered as unbound is left alone", func(t *testing.T) {
+		// The shape a boot leaves behind for a pinned child whose machine
+		// restarted with the daemon (load_children.go's stripStaleWorkspace):
+		// the executor label stays as a hint, the workspace is gone, and the
+		// state says unbound because the eager bind has not run yet.
+		ck := assert.NewAborting(t)
+		pool := &fakePool{}
+		c, clk, cp := lostFixture(t, pool, row(lostExecID, "build-1"))
+		c.st.Insert(&childstore.Session{
+			ChildID: "c_recovered", Status: protocol.StatusStreaming, StartedAt: time.Now(),
+			Kind: protocol.KindFundi,
+			Labels: map[string]string{
+				"rafiki/executor":       lostExecID,
+				"rafiki/executor-state": "unbound",
+				"rafiki/workspace-mode": "pinned",
+				"rafiki/home-executor":  lostExecID,
+			},
+		})
+
+		c.HandleExecutorLost(lostExecID)
+		clk.Advance(6 * time.Second)
+
+		ck.Empty(cp.batches(), "an already-unbound child holding nothing on the lost machine is not steered again")
+		ck.Empty(pool.releases(), "and there is no workspace to release")
+		snap, ok := c.st.Get("c_recovered")
+		ck.Require().True(ok, "the row survives")
+		ck.Eq("unbound", snap.Labels["rafiki/executor-state"], "its labels are left exactly as they were; =")
+	})
+
+	t.Run("an unbound child that still holds a binding IS handled", func(t *testing.T) {
+		// The skip is narrow on purpose: skipping must not become a leak. A
+		// child whose state label says unbound but whose binding on the lost
+		// machine survives still has a workspace to release and a client to
+		// forget, so it is handled like any other.
+		ck := assert.NewAborting(t)
+		pool := &fakePool{}
+		c, clk, cp := lostFixture(t, pool, row(lostExecID, "build-1"))
+		be := bindingOn(t, c, "c_stillbound", lostExecID, true)
+		boundWS := be.Bindings()[lostExecID]
+		ck.NotEq("", boundWS, "test setup: the binding names a workspace")
+		c.st.Insert(&childstore.Session{
+			ChildID: "c_stillbound", Status: protocol.StatusStreaming, StartedAt: time.Now(),
+			Kind: protocol.KindFundi,
+			Labels: map[string]string{
+				"rafiki/executor":       lostExecID,
+				"rafiki/executor-state": "unbound",
+				"rafiki/workspace-mode": "pinned",
+				"rafiki/home-executor":  lostExecID,
+			},
+		})
+
+		c.HandleExecutorLost(lostExecID)
+		clk.Advance(6 * time.Second)
+
+		ck.EqDeep([]wsRelease{{executorID: lostExecID, workspaceID: boundWS}}, pool.releases(),
+			"a live binding on the lost machine must still be released; got")
+		ck.Empty(be.Bindings(), "and forgotten")
+		ck.Len(cp.batches(), 1, "and the child is told")
+	})
+}
+
+// The warn branch names the executor with shortID, never executorID[:12]: an
+// executor id shorter than twelve characters is legal, and slicing it panicked
+// on the one path that must stay best-effort. A failing release is what reaches
+// that log line, so the fake fails it.
+func TestReleaseWorkspaceSurvivesAShortExecutorID(t *testing.T) {
+	ck := assert.NewAborting(t)
+	pool := &fakePool{releaseErr: errors.New("workspace gone")}
+	c := &Controller{execPool: pool}
+
+	c.releaseWorkspace(context.Background(), "ex", "ws-1")
+	ck.EqDeep([]wsRelease{{executorID: "ex", workspaceID: "ws-1"}}, pool.releases(),
+		"a short executor id must still be released, and a failed release must not panic; got")
+
+	c.releaseWorkspace(context.Background(), "ex", "")
+	ck.Len(pool.releases(), 1, "an empty workspace id is nothing to release")
 }
 
 // --- executor-side plumbing for the release assertion ---
