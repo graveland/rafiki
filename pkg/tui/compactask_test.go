@@ -322,7 +322,7 @@ func TestCompactAskSwitchReusesTheSwitchTail(t *testing.T) {
 	ck.Eq("sort=price", sm.sourceRouting, "the routing the tail must replay")
 
 	// Exactly what applySpawned dispatches for a switch.
-	sw, ok := c.switchFinishCmd(sm.switchSource, sm.childID, sm.sourceName, sm.sourceRouting, sm.warnings)().(switchedMsg)
+	sw, ok := c.switchTailCmd(sm)().(switchedMsg)
 	ck.Require().True(ok, "the switch tail answers a switchedMsg")
 	ck.Nil(sw.err, "switch tail error")
 	ck.Eq("c_new2", sw.newID, "the fork took the source's place")

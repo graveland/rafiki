@@ -118,7 +118,7 @@ func switchMsg(t *testing.T, c *Cockpit, p spawnParams) (spawnedMsg, switchedMsg
 	if sm.err != nil {
 		return sm, switchedMsg{}
 	}
-	cm := c.switchFinishCmd(sm.switchSource, sm.childID, sm.sourceName, sm.sourceRouting, sm.warnings)
+	cm := c.switchTailCmd(sm)
 	sw, ok := cm().(switchedMsg)
 	assert.NewAborting(t).Require().True(ok, "switchFinishCmd = %T", cm)
 	return sm, sw

@@ -1105,15 +1105,36 @@ func matchModelRow(rows []*rafikiv1.ModelRow, model string) *rafikiv1.ModelRow {
 // unresolved or disconnected home. The child exists and is usable, so these are
 // advisories rather than a refusal — and stderr keeps them out of a --detached
 // record's stdout.
-//
-// Every verb that reads a Spawn response reports them through here (`rafiki
-// create`, `rafiki models switch`), so the wording and the shape are one
-// function's, not a copy's. A create spawned through compactfork reports none:
-// that path returns an id only, so it has no response to read.
 func printSpawnWarnings(w io.Writer, warnings []string) {
 	for _, warn := range warnings {
 		fmt.Fprintf(w, "warning: %s\n", warn)
 	}
+}
+
+// spawner is the one Control method spawnWithWarnings needs. The generated
+// ControlClient's Spawn method satisfies it exactly, so no adapter is needed,
+// and a test can fake it without a socket.
+type spawner interface {
+	Spawn(context.Context, *connect.Request[rafikiv1.SpawnRequest]) (*connect.Response[rafikiv1.SpawnResponse], error)
+}
+
+// spawnWithWarnings issues the spawn and prints the daemon's warnings to w.
+// One place, so a verb that spawns cannot forget to surface them: `rafiki
+// create` and `rafiki models switch` both go through it, and a third spawner
+// gets it for free.
+//
+// The spawn's own error is returned untouched and prints nothing — the caller's
+// diagnoseConnectError owns that wording. A create spawned through compactfork
+// reports none: that helper returns an id only, so it has no response to read.
+func spawnWithWarnings(
+	ctx context.Context, s spawner, req *rafikiv1.SpawnRequest, w io.Writer,
+) (*rafikiv1.SpawnResponse, error) {
+	resp, err := s.Spawn(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	printSpawnWarnings(w, resp.Msg.GetWarnings())
+	return resp.Msg, nil
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
@@ -1306,15 +1327,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		resp, err := ctrl.Spawn(cmdCtx(cmd), connect.NewRequest(connectSpawnRequest(req)))
+		// spawnWithWarnings surfaces the daemon's non-fatal diagnostics — an
+		// unbound selector, an unresolved or disconnected home — so no spawn
+		// path can forget them.
+		resp, err := spawnWithWarnings(cmdCtx(cmd), ctrl, connectSpawnRequest(req), os.Stderr)
 		if err != nil {
 			return diagnoseConnectError(err, ep.describe)
 		}
-		childID = resp.Msg.GetChildId()
-		// Non-fatal spawn diagnostics — an unbound selector, an unresolved or
-		// disconnected home. The child exists and is usable, so these are
-		// advisories; stderr keeps them out of a --detached record's stdout.
-		printSpawnWarnings(os.Stderr, resp.Msg.GetWarnings())
+		childID = resp.GetChildId()
 	}
 
 	// The child set changed, so whatever a TAB answered a moment ago is stale.

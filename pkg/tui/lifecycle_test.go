@@ -713,6 +713,15 @@ func (f *switchHomeClient) GetChild(_ context.Context, req *connect.Request[rafi
 	}}), nil
 }
 
+// GetHistory answers the focus command the spawn's hop produces — running
+// applySpawned's batch executes it — with an empty conversation. The switch it
+// is used for never reads it.
+func (f *switchHomeClient) GetHistory(
+	context.Context, *connect.Request[rafikiv1.GetHistoryRequest],
+) (*connect.Response[rafikiv1.GetHistoryResponse], error) {
+	return connect.NewResponse(&rafikiv1.GetHistoryResponse{}), nil
+}
+
 func (f *switchHomeClient) Spawn(_ context.Context, req *connect.Request[rafikiv1.SpawnRequest]) (*connect.Response[rafikiv1.SpawnResponse], error) {
 	f.spawned = req.Msg
 	return connect.NewResponse(&rafikiv1.SpawnResponse{ChildId: "c_new", Warnings: f.warnings}), nil
@@ -769,13 +778,18 @@ func TestHomeExecutorCarriedFromTheSwitchSource(t *testing.T) {
 // The daemon's warnings must survive the switch: applySpawned's notice is
 // replaced by applySwitched's as soon as the close+rename lands, so a warning
 // only on the first one is a warning nobody reads.
+//
+// Driven through the Cmd applySpawned actually returns — tea.BatchMsg is an
+// exported []tea.Cmd, so the batch can be taken apart without running the
+// program — which exercises the argument applySpawned hands the finish step,
+// not just the finish step's own behaviour.
 func TestSwitchWarningsSurviveTheFinishNotice(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
-	c.client = &switchHomeClient{warnings: []string{"home executor not connected"}}
+	c.client = &switchHomeClient{}
 	c.form.busy = true
 
-	c.applySpawned(spawnedMsg{
+	batched := c.applySpawned(spawnedMsg{
 		childID:      "c_new",
 		switchSource: "c_src",
 		sourceName:   "scout",
@@ -783,13 +797,19 @@ func TestSwitchWarningsSurviveTheFinishNotice(t *testing.T) {
 	})
 	ck.StrContains(c.notice, "warning: home executor not connected", "the spawn notice names it")
 
-	sw, ok := c.switchTailCmd(spawnedMsg{
-		childID:      "c_new",
-		switchSource: "c_src",
-		sourceName:   "scout",
-		warnings:     []string{"home executor not connected"},
-	})().(switchedMsg)
-	ck.Require().True(ok, "switchTailCmd answered %T", sw)
+	batch, ok := batched().(tea.BatchMsg)
+	ck.Require().True(ok, "applySpawned answered %T, want a tea.BatchMsg", batched())
+	var sw switchedMsg
+	found := false
+	for _, cmd := range batch {
+		if cmd == nil {
+			continue
+		}
+		if msg, ok := cmd().(switchedMsg); ok {
+			sw, found = msg, true
+		}
+	}
+	ck.Require().True(found, "the batch carried no switch finish step")
 	ck.Require().NoError(sw.err, "switch tail")
 	c.applySwitched(sw)
 

@@ -258,17 +258,15 @@ func runModelsSwitch(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		spawned, err := ctrl.Spawn(ctx, connect.NewRequest(req))
+		// spawnWithWarnings issues the spawn and surfaces the daemon's warnings
+		// — a carried home that is not connected today, say — through the same
+		// function `rafiki create` uses. The compacting path returns an id
+		// only, which is create's own limitation too.
+		spawned, err := spawnWithWarnings(ctx, ctrl, req, os.Stderr)
 		if err != nil {
 			return diagnoseConnectError(err, ep.describe)
 		}
-		newID = spawned.Msg.GetChildId()
-		// Non-fatal spawn diagnostics — a carried home that is not connected
-		// today, say. The fork exists and is usable, so these are advisories,
-		// reported through the same function `rafiki create` uses. The
-		// compacting path returns an id only, which is create's own limitation
-		// too.
-		printSpawnWarnings(os.Stderr, spawned.Msg.GetWarnings())
+		newID = spawned.GetChildId()
 	}
 	fmt.Printf("spawned %s on %s (fork of %s)\n", newID, model, childID)
 

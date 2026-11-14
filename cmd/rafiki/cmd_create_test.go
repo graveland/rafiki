@@ -1524,3 +1524,63 @@ func TestPrintSpawnWarnings(t *testing.T) {
 		})
 	}
 }
+
+// spawnerFake is the one Control method spawnWithWarnings calls: a response, or
+// an error, plus the request it was handed.
+type spawnerFake struct {
+	resp *rafikiv1.SpawnResponse
+	err  error
+	got  *rafikiv1.SpawnRequest
+}
+
+func (f *spawnerFake) Spawn(
+	_ context.Context, req *connect.Request[rafikiv1.SpawnRequest],
+) (*connect.Response[rafikiv1.SpawnResponse], error) {
+	f.got = req.Msg
+	if f.err != nil {
+		return nil, f.err
+	}
+	return connect.NewResponse(f.resp), nil
+}
+
+// spawnWithWarnings is the ONE place a spawn's warnings are printed, and both
+// `rafiki create` and `rafiki models switch` spawn through it — so this pins
+// both call sites by construction rather than by the two copies agreeing. A
+// failed spawn prints nothing: that message is the caller's to write.
+func TestSpawnWithWarnings(t *testing.T) {
+	req := &rafikiv1.SpawnRequest{Cwd: "/tmp", Kind: protocol.KindFundi}
+
+	t.Run("two warnings are two lines in order", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		fake := &spawnerFake{resp: &rafikiv1.SpawnResponse{ChildId: "c_new", Warnings: []string{
+			"selector matches no live executor",
+			"home executor not connected",
+		}}}
+		var buf bytes.Buffer
+		resp, err := spawnWithWarnings(context.Background(), fake, req, &buf)
+		ck.Require().NoError(err, "spawnWithWarnings")
+		ck.Eq("c_new", resp.GetChildId(), "the response rides back to the caller")
+		ck.Eq("warning: selector matches no live executor\nwarning: home executor not connected\n",
+			buf.String(), "the warnings written to w")
+		ck.Eq("/tmp", fake.got.GetCwd(), "the request went out as built")
+	})
+
+	t.Run("a failed spawn writes nothing", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		fake := &spawnerFake{err: connect.NewError(connect.CodeInvalidArgument, errors.New("cwd is required"))}
+		var buf bytes.Buffer
+		resp, err := spawnWithWarnings(context.Background(), fake, req, &buf)
+		ck.Require().Error(err, "the spawn error must travel to the caller")
+		ck.Nil(resp, "no response on failure")
+		ck.Eq("", buf.String(), "a refusal is the caller's message, never a warning")
+	})
+
+	t.Run("no warnings writes nothing", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		fake := &spawnerFake{resp: &rafikiv1.SpawnResponse{ChildId: "c_new"}}
+		var buf bytes.Buffer
+		_, err := spawnWithWarnings(context.Background(), fake, req, &buf)
+		c.Require().NoError(err, "spawnWithWarnings")
+		c.Eq("", buf.String(), "the warnings written to w")
+	})
+}
