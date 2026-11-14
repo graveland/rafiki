@@ -2853,3 +2853,64 @@ func TestFirstHomeProvisionRacingMigrationLeavesTheMigrationExecutor(t *testing.
 	c.Eq(1, undos, "exactly one compensation — the write did happen and was then taken back; undos")
 	assertNoWorkspaceLeaked(t, be, fb)
 }
+
+// The case the rule exists for: the first provision ACQUIRES the home-transition
+// slot — it just does so after a migration has already finished and made another
+// executor the home. Holding the slot is no defence, because the read this write
+// labels on was stale before the slot was taken: "I hold the slot" says only that
+// no other transition is running NOW, not that the home still names the executor
+// this provision started for.
+//
+// Only a caller that WILL SET the home (a migration, an adoption) may label ahead
+// of its own claim. A provision never does, so its write is judged against the
+// settled home and taken back when that home is someone else. Otherwise the
+// durable pair names the old executor while rafiki/home-executor names the new
+// one — the disagreement a resume reads.
+func TestHomeProvisionThatAcquiredTheSlotAfterAMigrationNamesTheMigrationExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	be := newBoundExecutor("c1", fb)
+	be.setHome("a")
+
+	// Hold the first provision inside its Provision RPC, before it tries the slot.
+	provisioning := make(chan struct{})
+	releaseProvision := make(chan struct{})
+	var provisionOnce sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(id string) {
+		if id != "a" {
+			return
+		}
+		provisionOnce.Do(func() { close(provisioning) })
+		<-releaseProvision
+	}
+	fb.mu.Unlock()
+
+	provisionResult := make(chan error, 1)
+	go func() {
+		_, err := be.ensureBinding(context.Background(), "a", true)
+		provisionResult <- err
+	}()
+	<-provisioning
+
+	// The migration runs to completion -- slot released, home claimed -- while the
+	// provision is still inside its Provision RPC.
+	c.NoError(be.migrateHome(context.Background(), "a", "b"), "the migration completes")
+	c.Eq("b", be.homeExecutor(), "test setup: the home moved before the provision took the slot")
+
+	close(releaseProvision)
+	c.NoError(<-provisionResult, "losing the home is not the provision's failure")
+
+	labels := fb.bindingLabels()
+	c.Eq("b", be.homeExecutor(), "the migration's executor is still the home; home =")
+	c.Eq("b", labels["rafiki/executor"],
+		"a provision that took a FREE slot after the home moved is labelling on a stale read, so the "+
+			"durable pair must still name the MIGRATION's executor; labels %v", labels)
+	c.Eq("", labels["rafiki/workspace"],
+		"and its own workspace must be taken back, not left as the home's; labels %v", labels)
+	fb.mu.Lock()
+	undos := fb.undos
+	fb.mu.Unlock()
+	c.Eq(1, undos, "exactly one compensation — the write did happen and was then taken back; undos")
+	assertNoWorkspaceLeaked(t, be, fb)
+}

@@ -334,11 +334,13 @@ func (b *boundExecutor) adopt(execID, wsID string, cl tools.ExecutorClient) erro
 	b.bindings[execID] = bd
 	b.mu.Unlock()
 
-	perr := b.withHomeTransition(context.Background(), homeWaitNone, func(held bool) error {
+	perr := b.withHomeTransition(context.Background(), homeWaitNone, func(bool) error {
 		if perr := b.publishWorkspace(context.Background(), bd, execID, wsID, cl, true); perr != nil {
 			return perr
 		}
-		b.noteHomeBinding(bd, execID, wsID, held)
+		// The adoption claims the home right after this returns (setHome), so
+		// its label write is claim-pending and is never judged against the home.
+		b.noteHomeBinding(bd, execID, wsID, true)
 		return nil
 	})
 	if perr != nil {
