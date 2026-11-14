@@ -2029,7 +2029,10 @@ func TestReprovisionInPlaceDuringExitIsNotLeaked(t *testing.T) {
 	close(release)
 
 	c.False(<-recovered, "a re-provision that lands after the sweep must report failure")
-	released := waitForReleases(t, fb, 1)
+	// The sweep's release is recorded synchronously (ReleaseOthers waits on it),
+	// while the re-provision's rides the publish refusal's releaseAsync, so it can
+	// land after the first. Wait for BOTH; the assertion below is the guard.
+	released := waitForReleases(t, fb, 2)
 	c.Len(released, 2, "the sweep releases the labelled workspace and the re-provision releases its own; released %v", released)
 	fb.mu.Lock()
 	labelsAfter := len(fb.noted)
