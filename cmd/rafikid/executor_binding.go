@@ -121,6 +121,11 @@ type boundExecutor struct {
 	// once. Without it a Forget of the home binding would be undone by the
 	// label read on the very next call.
 	homeSeeded bool
+
+	// closed is set by the exit sweep. A provision still in flight at that
+	// moment publishes a workspace nothing will ever release, so the
+	// provisioner checks this after its RPC and releases what it made.
+	closed bool
 }
 
 // binding is one live (executor, workspace) pair.
@@ -153,14 +158,6 @@ type binding struct {
 	inflight *recovery
 }
 
-// newBinding returns a binding whose first provision has already settled. Used
-// for a binding built outside the provisioning path (a re-provision in place).
-func newBinding(wsID string, cl tools.ExecutorClient, cwd bool) *binding {
-	ready := make(chan struct{})
-	close(ready)
-	return &binding{wsID: wsID, cl: cl, cwd: cwd, ready: ready}
-}
-
 // recovery is one in-flight recover() call, shared by every goroutine that
 // fails against the same stale binding while it runs.
 type recovery struct {
@@ -181,7 +178,10 @@ func (b *boundExecutor) Current() (executorID, workspaceID string, bound bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	bd := b.bindings[home]
-	if bd == nil {
+	// An unprovisioned PLACEHOLDER is not a binding: "bound" promises a
+	// workspace exists. The placeholder's executor id is still reported, so a
+	// caller can say which machine the child is coming up on.
+	if bd == nil || bd.wsID == "" {
 		return home, "", false
 	}
 	// Snapshotted under the lock: a reprovision rewrites wsID in place.
@@ -473,6 +473,10 @@ func (b *boundExecutor) ensureBinding(ctx context.Context, execID string, wantCw
 
 	for {
 		b.mu.Lock()
+		if b.closed {
+			b.mu.Unlock()
+			return nil, errBindingsClosed
+		}
 		bd := b.bindings[execID]
 		if bd == nil {
 			bd = &binding{ready: make(chan struct{})}
@@ -487,26 +491,61 @@ func (b *boundExecutor) ensureBinding(ctx context.Context, execID string, wantCw
 		if bd.err != nil {
 			// This placeholder's first provision failed. Its error is the
 			// answer; a later call (or a concurrent caller that has not yet
-			// captured it) provisions afresh.
+			// captured it) provisions afresh. (N2, accepted: a waiter also
+			// inherits a LEADER's context cancellation, because the RPC ran on
+			// the leader's context. The placeholder is dropped with it, so the
+			// next call retries and nothing is leaked or wedged.)
 			return nil, bd.err
 		}
+
 		b.mu.Lock()
 		current := b.bindings[execID] == bd
-		// cwd and wsID are read under the lock: a reprovisioning recovery
-		// rewrites both in place.
-		promotedWS, promote := "", false
+		// cwd is read under the lock: a reprovisioning recovery rewrites it in
+		// place.
+		var oldBd *binding
+		var oldWS string
+		var newBd *binding
 		if current && wantCwd && !bd.cwd {
-			promote = true
 			// Promotion: a root-level workspace cannot serve as home, because
-			// the child's cwd would never apply there. Take it out of the map
-			// and release it; the loop then provisions the home workspace.
-			delete(b.bindings, execID)
-			promotedWS = bd.wsID
+			// the child's cwd would never apply there.
+			//
+			// Provision-then-release, never destroy-then-provision: the
+			// replacement is made FIRST and published under the lock, and the
+			// root-level workspace is released only after that succeeded. A
+			// failed re-provision therefore KEEPS the workspace the agent was
+			// using there — its files, its retained job output — and puts the
+			// old binding back.
+			oldBd, oldWS = bd, bd.wsID
+			newBd = &binding{ready: make(chan struct{})}
+			b.bindings[execID] = newBd
 		}
 		b.mu.Unlock()
-		if promote {
-			b.releaseAsync(ctx, execID, promotedWS)
-			continue
+
+		if oldBd != nil {
+			nb, perr := b.provision(ctx, newBd, execID, true)
+			if perr != nil {
+				b.mu.Lock()
+				// The failed provision has already dropped its own placeholder,
+				// so "nil" is ours too. Put the old binding back: its workspace
+				// is still registered and unreleased.
+				cur := b.bindings[execID]
+				restore := !b.closed && (cur == newBd || cur == nil)
+				if cur == newBd {
+					delete(b.bindings, execID)
+				}
+				if restore {
+					b.bindings[execID] = oldBd
+				}
+				b.mu.Unlock()
+				if !restore {
+					// The child exited: nothing else will release the
+					// workspace the promotion was replacing.
+					b.releaseAsync(ctx, execID, oldWS)
+				}
+				return nil, perr
+			}
+			b.releaseAsync(ctx, execID, oldWS)
+			return nb, nil
 		}
 		if !current {
 			continue // replaced while we waited: use the winner's binding
@@ -514,6 +553,10 @@ func (b *boundExecutor) ensureBinding(ctx context.Context, execID string, wantCw
 		return bd, nil
 	}
 }
+
+// errBindingsClosed is returned to a call that races the child's exit: the
+// binding map was swept and any workspace made after it would be unreleasable.
+var errBindingsClosed = errors.New("this child's executor bindings have been released")
 
 // provision performs one binding's first provision. Called with no lock held;
 // bd is the placeholder already published under it.
@@ -537,17 +580,29 @@ func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID strin
 		return nil, err
 	}
 
+	// Publish under the lock, and only if this placeholder is still the one
+	// that owns the executor: the child may have exited, or the binding may
+	// have been forgotten, while ProvisionOn was in flight. Either way the
+	// workspace just made has no owner left, so release it here — nothing else
+	// knows it exists, and the exit sweep has already taken its snapshot.
+	b.mu.Lock()
+	if b.closed || b.bindings[execID] != bd {
+		b.mu.Unlock()
+		bd.err = errBindingsClosed
+		close(bd.ready)
+		b.releaseAsync(ctx, execID, wsID)
+		return nil, errBindingsClosed
+	}
+	bd.wsID, bd.cl, bd.cwd = wsID, cl, wantCwd
+	b.mu.Unlock()
+
 	// The labels name the HOME workspace; another executor's workspace is none
 	// of the daemon's business (handleChildExit releases that one by label).
-	// Written BEFORE the binding is published: a home binding must never be
-	// visible to a caller before teardown can find it.
+	// Written before ready closes: a home binding must never be usable before
+	// teardown can find it.
 	if wantCwd {
 		b.binder.NoteBinding(b.childID, execID, wsID)
 	}
-
-	b.mu.Lock()
-	bd.wsID, bd.cl, bd.cwd = wsID, cl, wantCwd
-	b.mu.Unlock()
 	close(bd.ready)
 
 	if !wantCwd {
@@ -600,6 +655,12 @@ func (b *boundExecutor) bindImplicit(ctx context.Context) error {
 // home workspace first — the child's cwd applies there and the labels name it —
 // and only then is the home recorded, so a failed first provision leaves the
 // child WITH NO HOME rather than with one that has no workspace behind it.
+//
+// (N6, accepted: in the window between that provision and the setHome below, a
+// concurrent NAMED call to the same executor can provision a root-level
+// workspace there, which this adoption then promotes. Narrow, and self-healing
+// now that promotion is provision-then-release: the root workspace survives
+// until its replacement exists.)
 func (b *boundExecutor) adoptHome(ctx context.Context, execID string) error {
 	if _, err := b.ensureBinding(ctx, execID, true); err != nil {
 		return err
@@ -622,6 +683,12 @@ func (b *boundExecutor) adoptHome(ctx context.Context, execID string) error {
 //     bookkeeping — one label write, one steer;
 //   - NoteBinding belongs to the provision (a home workspace is labelled when it
 //     is made), so a migration must not write it again.
+//
+// (N7, accepted: the label is written by the provision, BEFORE this claim, so
+// two concurrent migrations to DIFFERENT targets — which needs the reachable set
+// to flip between the two callers — can leave the labels naming the loser while
+// b.home is the winner. The next implicit call sees the disagreement and
+// re-migrates, so it self-heals.)
 func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error {
 	if _, err := b.ensureBinding(ctx, to, true); err != nil {
 		return err
@@ -724,7 +791,7 @@ func (b *boundExecutor) recover(ctx context.Context, execID, staleWS string, cal
 	bd.inflight = r
 	b.mu.Unlock()
 
-	ok := b.doRecover(ctx, execID, staleWS)
+	ok := b.doRecover(ctx, bd, execID, staleWS)
 
 	b.mu.Lock()
 	bd.inflight = nil
@@ -739,13 +806,13 @@ func (b *boundExecutor) recover(ctx context.Context, execID, staleWS string, cal
 // released; it takes the lock only to install its result, because every RPC
 // here targets an executor that is by definition unwell and no caller on this
 // child may block behind it for a full RPC timeout.
-func (b *boundExecutor) doRecover(ctx context.Context, execID, staleWS string) bool {
+func (b *boundExecutor) doRecover(ctx context.Context, bd *binding, execID, staleWS string) bool {
 	// An executor still in the live set means the WORKSPACE went, not the
 	// machine: pkg/executor keeps its workspace registry in memory, so a
 	// restart loses every id while the connection is fine. Re-provision in
 	// place rather than re-running selection.
 	if execID != "" && b.binder.IsLive(execID) {
-		if b.reprovisionInPlace(ctx, execID, staleWS) {
+		if b.reprovisionInPlace(ctx, bd, execID, staleWS) {
 			return true
 		}
 	}
@@ -758,7 +825,7 @@ func (b *boundExecutor) doRecover(ctx context.Context, execID, staleWS string) b
 		slog.Warn("child lost its executor and will not be migrated",
 			"child", b.childID, "executor", shortID(execID),
 			"implicit", implicitCall(ctx), "home", home == execID)
-		b.dropBinding(ctx, execID, staleWS)
+		b.dropBinding(ctx, bd, execID, staleWS)
 		return false
 	}
 
@@ -768,10 +835,10 @@ func (b *boundExecutor) doRecover(ctx context.Context, execID, staleWS string) b
 	if err != nil || next == "" || next == execID {
 		slog.Warn("could not re-bind the child to any executor",
 			"child", b.childID, "error", err)
-		b.dropBinding(ctx, execID, staleWS)
+		b.dropBinding(ctx, bd, execID, staleWS)
 		return false
 	}
-	b.dropBinding(ctx, execID, staleWS)
+	b.dropBinding(ctx, bd, execID, staleWS)
 	slog.Info("re-bound child to a new executor",
 		"child", b.childID, "from", shortID(execID), "to", shortID(next))
 	return true
@@ -779,7 +846,7 @@ func (b *boundExecutor) doRecover(ctx context.Context, execID, staleWS string) b
 
 // reprovisionInPlace rebuilds the workspace on an executor whose connection is
 // still live. Not a migration: the machine is the same one.
-func (b *boundExecutor) reprovisionInPlace(ctx context.Context, execID, staleWS string) bool {
+func (b *boundExecutor) reprovisionInPlace(ctx context.Context, bd *binding, execID, staleWS string) bool {
 	useCwd := b.homeExecutor() == execID
 	wsID, _, cl, err := b.binder.ProvisionOn(ctx, execID, useCwd)
 	if err != nil {
@@ -787,12 +854,17 @@ func (b *boundExecutor) reprovisionInPlace(ctx context.Context, execID, staleWS 
 			"child", b.childID, "executor", shortID(execID), "error", err)
 		return false
 	}
+	// Write the rebuilt workspace into the SAME binding this recovery began on,
+	// and only into that one. If it changed under us — a promotion replaced it,
+	// or it was forgotten — the workspace just made serves nobody, and writing
+	// it anyway would orphan the replacement's own workspace.
 	b.mu.Lock()
-	if bd := b.bindings[execID]; bd != nil {
-		bd.wsID, bd.cl, bd.cwd = wsID, cl, useCwd
-	} else {
-		b.bindings[execID] = newBinding(wsID, cl, useCwd)
+	if cur := b.bindings[execID]; cur != bd {
+		b.mu.Unlock()
+		b.releaseAsync(ctx, execID, wsID)
+		return false
 	}
+	bd.wsID, bd.cl, bd.cwd = wsID, cl, useCwd
 	b.mu.Unlock()
 	if useCwd {
 		b.binder.NoteBinding(b.childID, execID, wsID)
@@ -828,10 +900,11 @@ func (b *boundExecutor) releaseAsync(ctx context.Context, execID, wsID string) {
 // dropBinding forgets one binding and releases its workspace best-effort: the
 // executor it lived on is usually unreachable, and the child must not wait on
 // it.
-func (b *boundExecutor) dropBinding(ctx context.Context, execID, wsID string) {
+func (b *boundExecutor) dropBinding(ctx context.Context, bd *binding, execID, wsID string) {
 	b.mu.Lock()
-	if bd := b.bindings[execID]; bd != nil && bd.wsID != wsID {
-		// Something else rebuilt this binding while we were deciding.
+	if b.bindings[execID] != bd {
+		// Not the binding this recovery began on: something else owns it now,
+		// and it will release its own workspace.
 		b.mu.Unlock()
 		return
 	}
@@ -1090,9 +1163,17 @@ func (b *boundExecutor) MaterializeSkill(ctx context.Context, treeHash string, f
 func (b *boundExecutor) ReleaseOthers(ctx context.Context, keepExec, keepWS string) {
 	type pair struct{ execID, wsID string }
 	b.mu.Lock()
+	// Closed first: a provision still in flight must know to release what it
+	// is about to make rather than publish a workspace nothing will release.
+	b.closed = true
 	extra := make([]pair, 0, len(b.bindings))
 	for execID, bd := range b.bindings {
 		if execID == keepExec && bd.wsID == keepWS {
+			continue
+		}
+		if bd.wsID == "" {
+			// An unfinished PLACEHOLDER: no workspace exists yet, and the
+			// provisioner releases whatever it lands (b.closed above).
 			continue
 		}
 		extra = append(extra, pair{execID, bd.wsID})

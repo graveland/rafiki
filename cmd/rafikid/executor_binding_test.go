@@ -178,6 +178,10 @@ type fakeBinder struct {
 	// boundExecutor's lock across it.
 	onProvision func(execID string)
 
+	// onProvisionCtx is onProvision with the CALL's context, for tests that
+	// need the provision to observe cancellation.
+	onProvisionCtx func(ctx context.Context, execID string)
+
 	// clientOverride, when non-nil, is what ProvisionOn returns instead of a
 	// registered fakeExec. The owner-propagation test needs a client that
 	// records the ctx each bound call is made with, not a scripted tool exec.
@@ -302,12 +306,20 @@ func (f *fakeBinder) SetHomeLabel(childID, execID string) {
 	f.homeLabels = append(f.homeLabels, childID+"|"+execID)
 }
 
-func (f *fakeBinder) ProvisionOn(_ context.Context, id string, useCwd bool) (string, string, tools.ExecutorClient, error) {
+func (f *fakeBinder) ProvisionOn(ctx context.Context, id string, useCwd bool) (string, string, tools.ExecutorClient, error) {
 	f.mu.Lock()
-	hook := f.onProvision
+	hook, hookCtx := f.onProvision, f.onProvisionCtx
 	f.mu.Unlock()
 	if hook != nil {
 		hook(id)
+	}
+	if hookCtx != nil {
+		hookCtx(ctx, id)
+	}
+	// A real Provision RPC fails when its call is cancelled; the fake does too,
+	// so a test can drive the cancelled-leader shape.
+	if err := ctx.Err(); err != nil {
+		return "", "", nil, err
 	}
 
 	f.mu.Lock()
@@ -342,6 +354,34 @@ func (f *fakeBinder) ProvisionOn(_ context.Context, id string, useCwd bool) (str
 	ws := fmt.Sprintf("ws-%s-%d", id, f.provisions)
 	f.lastWorkspace = ws
 	return ws, workdir, e, nil
+}
+
+// waitForReleases polls until the fake has recorded at least n releases, or the
+// deadline passes. The releases run on their own goroutines (each on its own
+// deadline by contract), so a test cannot read them the instant a caller
+// returns.
+func waitForReleases(t *testing.T, fb *fakeBinder, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fb.mu.Lock()
+		got := fb.releasedWorkspaces()
+		fb.mu.Unlock()
+		if len(got) >= n || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// releasedWorkspaces is the release record as a slice. Caller holds f.mu or
+// calls it from a test goroutine after the releases settled.
+func (f *fakeBinder) releasedWorkspaces() []string {
+	out := make([]string, 0, len(f.released))
+	for ws := range f.released {
+		out = append(out, ws)
+	}
+	return out
 }
 
 func (f *fakeBinder) ReleaseOn(_ context.Context, executorID, workspaceID string) {
@@ -1693,4 +1733,254 @@ func TestReleaseOthersReleasesConcurrently(t *testing.T) {
 	close(release)
 	<-done
 	c.Len(seen, 3, "released executors")
+}
+
+// --- the re-review's defects (N1–N5) ---------------------------------------
+
+// A provision still in flight when the child's bindings are swept must not
+// leave its workspace behind: the exit snapshot cannot name it, and nothing
+// else will ever release it. The same holds for a forgotten binding.
+func TestProvisionInFlightWhenReleasedIsNotLeaked(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	// Exit during an in-flight provision.
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	fb.reachableTo("a")
+	be := newBoundExecutor("c1", fb)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(string) {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	fb.mu.Unlock()
+
+	provisioned := make(chan error, 1)
+	go func() {
+		_, err := be.ensureBinding(context.Background(), "a", false)
+		provisioned <- err
+	}()
+	<-entered
+
+	// The child exits: the sweep runs while the workspace is still being made.
+	be.ReleaseOthers(context.Background(), "", "")
+	close(release)
+
+	err := <-provisioned
+	c.Error(err, "a provision racing the exit must not hand back a binding")
+	c.ErrorIs(err, errBindingsClosed, "the caller must be told the bindings are gone, got")
+	leftovers := waitForReleases(t, fb, 1)
+	c.Len(leftovers, 1, "the workspace made after the sweep must be released; released %v", leftovers)
+	_, _, bound := be.Current()
+	c.False(bound, "a closed executor reports no binding")
+
+	// A Forget during an in-flight provision leaks the same way.
+	fb2 := newFakeBinder(&fakeExec{id: "a"})
+	fb2.reachableTo("a")
+	be2 := newBoundExecutor("c2", fb2)
+	entered2 := make(chan struct{})
+	release2 := make(chan struct{})
+	var once2 sync.Once
+	fb2.mu.Lock()
+	fb2.onProvision = func(string) {
+		once2.Do(func() { close(entered2) })
+		<-release2
+	}
+	fb2.mu.Unlock()
+
+	provisioned2 := make(chan error, 1)
+	go func() {
+		_, perr := be2.ensureBinding(context.Background(), "a", false)
+		provisioned2 <- perr
+	}()
+	<-entered2
+	be2.Forget("a") // the Task 3.2 shape: forget first, release by the caller
+	close(release2)
+
+	c.Error(<-provisioned2, "a provision whose binding was forgotten must not be published")
+	released2 := waitForReleases(t, fb2, 1)
+	c.Len(released2, 1, "the forgotten binding's new workspace must be released by the provisioner; released %v", released2)
+}
+
+// Promotion PROVISIONS the home workspace before it releases the root-level one.
+// A failed re-provision must therefore keep the workspace the agent was using —
+// its files and any retained job output — and must leave no home.
+func TestBoundExecutorFailedPromotionKeepsTheOldWorkspace(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	fb.reachableTo("a", "b")
+	be := newBoundExecutor("c1", fb)
+	if _, err := be.ensureBinding(context.Background(), "a", false); err != nil {
+		t.Fatalf("root binding on a: %v", err)
+	}
+	rootWS := be.Bindings()["a"]
+
+	// Every later provision on a fails: the home re-provision cannot happen.
+	fb.mu.Lock()
+	delete(fb.execs, "a") // ProvisionOn("a") now answers "no such executor"
+	fb.mu.Unlock()
+
+	err := be.adoptHome(context.Background(), "a")
+	c.Error(err, "the promotion's provision fails")
+	c.Eq("", be.homeExecutor(), "a failed promotion must leave NO home; got")
+	fb.mu.Lock()
+	released := fb.released[rootWS]
+	fb.mu.Unlock()
+	c.False(released, "the root workspace was destroyed before its replacement existed: %v", be.Bindings())
+	bindings := be.Bindings()
+	c.Eq(rootWS, bindings["a"], "the old binding must still serve the executor; bindings %v", bindings)
+}
+
+// "bound" promises a workspace exists: a home placeholder whose provision has
+// not finished reports the executor it is coming up on, but bound=false.
+func TestBoundExecutorUnfinishedHomePlaceholderIsNotBound(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	fb.reachableTo("a")
+	// A resumed child: its home is already known (from rafiki/home-executor)
+	// while the home workspace is still being made.
+	fb.homeLabel = "a"
+	be := newBoundExecutor("c1", fb)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(string) {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	fb.mu.Unlock()
+
+	go func() { _ = be.bindImplicit(context.Background()) }()
+	<-entered
+
+	execID, wsID, bound := be.Current()
+	c.False(bound, "a home placeholder has no workspace yet, so it is not bound")
+	c.Eq("", wsID, "workspace id")
+	c.Eq("a", execID, "the executor it is coming up on is still reportable")
+
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, ws, nowBound := be.Current()
+		if nowBound {
+			c.NotEq("", ws, "a bound executor must name its workspace")
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the provision never published its binding")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A recovery must not write its rebuilt workspace into a binding it no longer
+// owns: a promotion can replace the binding while the re-provision is in
+// flight, and writing into the replacement would orphan one workspace (the
+// rebuild's or the promotion's own).
+func TestReprovisionInPlaceDoesNotWriteIntoAReplacement(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	fb.reachableTo("a")
+	be := newBoundExecutor("c1", fb)
+	be.setHome("a")
+	if _, err := be.ensureBinding(context.Background(), "a", true); err != nil {
+		t.Fatalf("home binding: %v", err)
+	}
+	// Make it look like a root-level binding about to be promoted.
+	be.mu.Lock()
+	be.bindings["a"].cwd = false
+	be.mu.Unlock()
+
+	// The re-provision is held open; the promotion replaces the binding first.
+	reprovisioning := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(execID string) {
+		if execID != "a" {
+			return
+		}
+		once.Do(func() { close(reprovisioning) })
+		<-release
+	}
+	fb.mu.Unlock()
+
+	recovered := make(chan bool, 1)
+	go func() {
+		execID, wsID := "a", ""
+		be.mu.Lock()
+		bd := be.bindings["a"]
+		wsID = bd.wsID
+		be.mu.Unlock()
+		recovered <- be.reprovisionInPlace(context.Background(), bd, execID, wsID)
+	}()
+	<-reprovisioning
+
+	// The promotion swaps the binding out from under the recovery: the map now
+	// holds a NEW placeholder, not the binding this recovery began on.
+	be.mu.Lock()
+	be.bindings["a"] = &binding{ready: make(chan struct{})}
+	be.mu.Unlock()
+
+	close(release)
+	c.False(<-recovered, "a rebuild that lost its binding must not report success")
+
+	// The workspace the rebuild made must not be handed to the new binding.
+	released := waitForReleases(t, fb, 1)
+	c.Len(released, 1, "the orphaned rebuild must release its own workspace; released %v", released)
+}
+
+// A provision that fails because its own call was cancelled leaves NOTHING
+// behind: the placeholder is dropped with its error, so the next call provisions
+// afresh rather than waiting on a corpse (N2's invariant).
+//
+// The "a waiter inherits the leader's failure" half is deliberately NOT asserted:
+// whether a second caller waits on the leader's placeholder or becomes the new
+// provisioner is a scheduling detail, so a test for it is either flaky or needs a
+// hook inside ensureBinding. What always holds — and what matters — is that a
+// cancelled provision wedges nothing and leaks nothing.
+func TestBoundExecutorCancelledProvisionLeavesNothingBehind(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	fb.reachableTo("a")
+	be := newBoundExecutor("c1", fb)
+
+	entered := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvisionCtx = func(ctx context.Context, execID string) {
+		if execID != "a" {
+			return
+		}
+		once.Do(func() { close(entered) })
+		<-ctx.Done()
+	}
+	fb.mu.Unlock()
+
+	leaderCtx, cancel := context.WithCancel(context.Background())
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := be.Execute(leaderCtx, "read", nil)
+		leaderErr <- err
+	}()
+	<-entered
+	cancel()
+	c.ErrorIs(<-leaderErr, context.Canceled, "the leader's own cancellation, got")
+
+	// Nothing is wedged, and nothing was provisioned behind the failure.
+	fb.mu.Lock()
+	fb.onProvisionCtx = nil
+	fb.mu.Unlock()
+	if _, err := be.Execute(context.Background(), "read", nil); err != nil {
+		t.Fatalf("the next call must provision afresh: %v", err)
+	}
+	c.Eq(1, fb.provisionsOn("a"), "one successful provision on a (the cancelled one never reached the executor)")
+	fb.mu.Lock()
+	released := fb.releasedWorkspaces()
+	fb.mu.Unlock()
+	c.Empty(released, "a cancelled provision leaves no workspace to release; released %v", released)
 }
