@@ -37,17 +37,33 @@ const lostSteerBuild1 = "EXECUTOR LOST: executor build-1 disconnected. Calls to 
 
 const lostSteerCiRunner7 = "EXECUTOR LOST: executor ci-runner-7 disconnected. Calls to it fail until it reconnects; when it does, your workspace there is rebuilt and anything not committed on that machine may be gone. Your other tools, and any other executors, still work."
 
+// The fallback name: shortID truncates to 12 characters, and a steer that names
+// nothing at all ("executor  disconnected") would be worse than one naming a
+// fragment of an id.
+const lostSteerShortID = "EXECUTOR LOST: executor exec-lost-00 disconnected. Calls to it fail until it reconnects; when it does, your workspace there is rebuilt and anything not committed on that machine may be gone. Your other tools, and any other executors, still work."
+
 // lostFixture: a controller with the daemon's event-buffer shape — a manual
 // clock and a capturing flush, so a steer is an assertion rather than a wait —
-// and the given executor pool.
-func lostFixture(t *testing.T, pool executorPool) (*Controller, *clock.FakeClock, *capturedFlush) {
+// the given executor pool, and the DURABLE executor rows an operator would have
+// (which is where the lost machine's name comes from: by the time a park
+// expires, the executor is already out of the live pool).
+func lostFixture(t *testing.T, pool executorPool, rows ...executors.Executor) (*Controller, *clock.FakeClock, *capturedFlush) {
 	t.Helper()
 	clk := clock.NewFakeClock(time.Unix(0, 0))
 	buf := eventbuf.New(eventbuf.Config{Debounce: 5 * time.Second}, clk)
 	cp := &capturedFlush{}
 	buf.SetFlush(cp.fn)
 	buf.SetBusy(func(string) bool { return false })
-	return &Controller{st: childstore.New(), cm: newChildManager(), execPool: pool, evbuf: buf}, clk, cp
+	store := newFakeExecStore()
+	for _, e := range rows {
+		store.execs[e.ID] = e
+	}
+	return &Controller{st: childstore.New(), cm: newChildManager(), execPool: pool, execStore: store, evbuf: buf}, clk, cp
+}
+
+// row is a durable executor row carrying the machine label an operator gave it.
+func row(id, machine string) executors.Executor {
+	return executors.Executor{ID: id, Enabled: true, Labels: map[string]string{"machine": machine}}
 }
 
 // bindingOn gives the child a live boundExecutor holding ONE provisioned
@@ -94,9 +110,7 @@ func seedChildOn(c *Controller, childID, execID, wsID, mode string) {
 // waits that long, so the old code looks innocent on that reading.
 func TestHandleExecutorLostKeepsPinnedChildRunning(t *testing.T) {
 	ck := assert.NewAborting(t)
-	c, clk, cp := lostFixture(t, &fakePool{live: []execpool.LiveExecutor{
-		ex(lostExecID, map[string]string{"machine": "build-1"}, ""),
-	}})
+	c, clk, cp := lostFixture(t, &fakePool{}, row(lostExecID, "build-1"))
 	seedChildOn(c, "c_pinned", lostExecID, "ws-home", "pinned")
 	be := bindingOn(t, c, "c_pinned", lostExecID, true)
 
@@ -131,9 +145,7 @@ func TestHandleExecutorLostKeepsPinnedChildRunning(t *testing.T) {
 // live — so nothing at loss time provisions anywhere.
 func TestHandleExecutorLostKeepsEphemeralChildRunning(t *testing.T) {
 	ck := assert.NewAborting(t)
-	c, clk, cp := lostFixture(t, &fakePool{live: []execpool.LiveExecutor{
-		ex(lostExecID, map[string]string{"machine": "build-1"}, ""),
-	}})
+	c, clk, cp := lostFixture(t, &fakePool{}, row(lostExecID, "build-1"))
 	seedChildOn(c, "c_eph", lostExecID, "ws-home", "ephemeral")
 	be := bindingOn(t, c, "c_eph", lostExecID, true)
 
@@ -161,7 +173,7 @@ func TestHandleExecutorLostKeepsEphemeralChildRunning(t *testing.T) {
 func TestHandleExecutorLostReleasesNonHomeBinding(t *testing.T) {
 	ck := assert.NewAborting(t)
 	pool, rec := joinReleaseRecorder(t, ex(lostExecID, map[string]string{"machine": "build-1"}, "").Executor)
-	c, clk, cp := lostFixture(t, pool)
+	c, clk, cp := lostFixture(t, pool, row(lostExecID, "build-1"))
 
 	fb := newFakeBinder(&fakeExec{id: lostExecID}, &fakeExec{id: otherExecID})
 	be := newBoundExecutor("c_multi", fb)
@@ -215,9 +227,7 @@ func TestHandleExecutorLostReleasesNonHomeBinding(t *testing.T) {
 // not spend the rest of that turn believing it still has one).
 func TestHandleExecutorLostSteersChild(t *testing.T) {
 	ck := assert.NewAborting(t)
-	c, clk, cp := lostFixture(t, &fakePool{live: []execpool.LiveExecutor{
-		ex("exec-ci-runner-0003", map[string]string{"machine": "ci-runner-7"}, ""),
-	}})
+	c, clk, cp := lostFixture(t, &fakePool{}, row("exec-ci-runner-0003", "ci-runner-7"))
 	seedChildOn(c, "c_worker", "exec-ci-runner-0003", "ws-home", "pinned")
 
 	c.HandleExecutorLost("exec-ci-runner-0003")
@@ -229,6 +239,55 @@ func TestHandleExecutorLostSteersChild(t *testing.T) {
 	ck.Eq(string(inject.KindExecutor), batches[0].source, "source")
 	ck.Require().Len(batches[0].fragments, 1, "want one fragment, got %d", len(batches[0].fragments))
 	ck.Eq(lostSteerCiRunner7, batches[0].fragments[0], "steer text")
+}
+
+// The name must survive the executor leaving the live pool, because that is
+// exactly when it is needed: pkg/execpool removes an executor from Live() BEFORE
+// it parks it, so a name read from the live set would always be a short id by
+// the time a park expires. This executor is NOT in the pool — only its durable
+// row is — and the steer still names the machine.
+func TestHandleExecutorLostNamesAParkedExecutorsMachine(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cp := lostFixture(t, &fakePool{}, row(lostExecID, "build-1"))
+	ck.Empty(c.execPool.Live(), "test setup: a parked executor must not be in the live set")
+	seedChildOn(c, "c_parked", lostExecID, "ws-home", "pinned")
+
+	c.HandleExecutorLost(lostExecID)
+	clk.Advance(6 * time.Second)
+
+	batches := cp.batches()
+	ck.Require().Len(batches, 1, "want one steer, got %d: %+v", len(batches), batches)
+	ck.Require().Len(batches[0].fragments, 1, "want one fragment, got %d", len(batches[0].fragments))
+	ck.Eq(lostSteerBuild1, batches[0].fragments[0], "the steer must name the machine from the row, not the id; got")
+}
+
+// With no machine label to name, the steer falls back to a short id — never to
+// an empty name, which would leave a child told "executor  disconnected".
+func TestHandleExecutorLostFallsBackToAShortIDWithoutAMachineLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []executors.Executor
+	}{
+		{"row carries no machine label", []executors.Executor{{
+			ID: lostExecID, Enabled: true, Labels: map[string]string{"env": "home"},
+		}}},
+		{"row is gone", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, clk, cp := lostFixture(t, &fakePool{}, tc.rows...)
+			seedChildOn(c, "c_unnamed", lostExecID, "ws-home", "pinned")
+
+			c.HandleExecutorLost(lostExecID)
+			clk.Advance(6 * time.Second)
+
+			batches := cp.batches()
+			ck := assert.NewAborting(t)
+			ck.Require().Len(batches, 1, "want one steer, got %d: %+v", len(batches), batches)
+			ck.Require().Len(batches[0].fragments, 1, "want one fragment, got %d", len(batches[0].fragments))
+			ck.Eq(lostSteerShortID, batches[0].fragments[0], "steer text")
+		})
+	}
 }
 
 // --- executor-side plumbing for the release assertion ---

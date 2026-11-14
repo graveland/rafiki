@@ -240,17 +240,6 @@ func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspace
 	}
 }
 
-// executorDisplayName names an executor the way an operator and the model see
-// it: its machine label, else a short id.
-//
-// This is the binder's rule, and it goes through the binder rather than being
-// restated here so the two cannot drift. It needs no child's spawn request
-// because the naming rule does not consult one: a lost executor has to be named
-// to children that outlived whatever spawned them.
-func (c *Controller) executorDisplayName(executorID string) string {
-	return (&controllerBinder{c: c}).DisplayName(executorID)
-}
-
 // HandleExecutorLost is called by the exec pool when a parked executor's
 // timeout expires and it is declared permanently lost.
 //
@@ -262,7 +251,7 @@ func (c *Controller) executorDisplayName(executorID string) string {
 // ephemeral may re-provision anywhere on the child's next implicit call — so
 // nothing here re-selects a machine and nothing here kills.
 func (c *Controller) HandleExecutorLost(lostID string) {
-	name := c.executorDisplayName(lostID)
+	name := lostExecutorName(c, lostID)
 	slog.Warn("executor lost — handling children", "executorId", shortID(lostID), "executor", name)
 
 	// Children handled by the LABEL pass, so the binding pass below does not
