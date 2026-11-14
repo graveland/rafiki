@@ -135,10 +135,10 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, auto
 // the spawn path — where there is no stored snapshot yet to carry it. A resume
 // reads it back off the snapshot (agentRunner above), which is what makes the
 // node resolve ONCE: the record is the only source after spawn.
-func (c *Controller) agentRunnerFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string, snap *childstore.Snapshot, forkFromNodeID string) (child.Runner, error) {
+func (c *Controller) agentRunnerFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string, snap *childstore.Snapshot, forkFromNodeID string, warnOut ...*[]string) (child.Runner, error) {
 	switch req.Kind {
 	case protocol.KindFundi:
-		ro, err := c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, credentialOwnerUserID(ownerUserID, snap), forkFromNodeID)
+		ro, err := c.agentRuntimeOptionsFor(req, childID, autoResume, ownerName, ownerUserID, credentialOwnerUserID(ownerUserID, snap), forkFromNodeID, warnOut...)
 		if err != nil {
 			return nil, err
 		}
@@ -378,7 +378,14 @@ func (c *Controller) spawnAgentRuntimeOptions(req protocol.SpawnRequest, childID
 // source of per-child agent config) and then parsed back with parseAgentFlags
 // — see toRuntimeOptions' doc comment for why this is not a hand-written
 // SpawnRequest-to-RuntimeOptions mapping.
-func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID, credentialOwner, forkFromNodeID string) (fundi.RuntimeOptions, error) {
+//
+// warnOut is an optional spawn-scoped sink for the NON-FATAL diagnostics home
+// resolution produced (see home_executor.go). It is variadic so the resume and
+// recovery callers, which never surface warnings (a resumed child's go to the
+// daemon's log), stay unchanged — and so no package-level or Controller-level
+// map has to hold them. Controller.Spawn passes a slice and publishes it in
+// SpawnResponseData.Warnings.
+func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID, credentialOwner, forkFromNodeID string, warnOut ...*[]string) (fundi.RuntimeOptions, error) {
 	if agentSpawnHasExplicitDB(req.ExtraArgs) {
 		return fundi.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")
 	}
@@ -716,9 +723,13 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	// Non-nil also means tools[] is identical whether or not an executor is
 	// live right now, so a child that starts unbound and acquires an executor
 	// later needs no tools[] change and no prompt-cache break.
-	var exec tools.ExecutorClient
+	var (
+		exec     tools.ExecutorClient
+		serviceW []string // spawn-time warnings, handed back when the caller wants them
+	)
 	if c.execPool != nil {
-		be := newBoundExecutor(childID, c.binderFor(req, executorOwner{Name: ownerName, UserID: ownerUserID}))
+		owner := executorOwner{Name: ownerName, UserID: ownerUserID}
+		be := newBoundExecutor(childID, c.binderFor(req, owner))
 		exec = be
 		// Retain the binding so a per-call consumer (and the teardown that
 		// drops it) has a handle on the child's current binding. Job exits do
@@ -726,68 +737,72 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 		// routed to the child by owner, never polled through this binding.
 		c.noteBoundExecutor(childID, be)
 
-		// Bind eagerly: the project tier and skills below need a live
-		// workspace, and a child that CAN bind should start bound.
+		spawnCtx := context.Background()
+		reach, reachErr := be.binder.Reachable(childID)
+		if reachErr != nil {
+			// An unreadable reach is no reach. The diagnostic rides the unbound
+			// warning below, so the spawn still starts and says why.
+			reach = nil
+		}
+
+		// Resolve the child's HOME before binding anything: it is the executor
+		// whose filesystem holds the child's cwd, so it owns the project tier,
+		// the project skills, and the one workspace the labels name. A refusal
+		// here (an explicit home_executor outside this spawn's reachable set)
+		// starts no process.
+		homeID, homeWarnings, homeErr := c.resolveHomeExecutor(spawnCtx, req, be, reach)
+		if homeErr != nil {
+			return fundi.RuntimeOptions{}, homeErr
+		}
+		serviceW = append(serviceW, homeWarnings...)
+
+		// Bind eagerly ONLY a home: the project tier and skills need a live
+		// workspace, and a child with a home should start bound. A child with
+		// NO home starts unbound — with the whole workspace tier present — and
+		// lazy-binds on its first tool call once an executor it may use
+		// connects. Refusing the spawn instead was what made an MCP caller's
+		// selector miss look like a dead daemon; the child is told, in a
+		// warning and in its rafiki/executor-state label, that it is unbound.
 		//
-		// A failure is fatal for an interactive TOP-LEVEL spawn and tolerable
-		// for a parented spawn or an auto-resume (e.g. daemon restart recovery
-		// before executors reconnect). An agent-spawned or recovered child
-		// starts unbound and lazy-binds on its first tool call when its
-		// executor connects.
-		if bindErr := be.bindImplicit(context.Background()); bindErr != nil {
-			if req.ParentChildID == "" && !autoResume {
-				return fundi.RuntimeOptions{}, bindErr
+		// A probe that already made the home workspace left its binding in be,
+		// so this finds it and provisions nothing twice.
+		homeBound := false
+		if homeID != "" {
+			be.setHome(homeID)
+			if _, bindErr := be.clientFor(spawnCtx, homeID); bindErr == nil {
+				homeBound = true
+			} else {
+				slog.Warn("home executor could not be bound at spawn; project instructions were not loaded",
+					"child", childID, "executor", shortID(homeID), "error", bindErr)
 			}
-			slog.Warn("child starts with no executor bound; its workspace tools "+
-				"will fail until an executor its grant admits connects",
-				"child", childID, "selector", req.ExecutorSelector, "reason", bindErr)
+			// Recorded AFTER the bind on purpose: a successful provision calls
+			// NoteBinding, which REPLACES this child's pre-spawn stash struct
+			// (controllerBinder.NoteBinding), so a home recorded before it would
+			// be dropped and Spawn would write no rafiki/home-executor label.
+			c.noteHomeExecutor(childID, homeID)
+		}
+		if !homeBound {
 			c.markUnbound(childID)
+			serviceW = append(serviceW, c.unboundWarnings(be, reach, reachErr)...)
 		}
 
-		// The project tier belongs to the workspace. The pointer is set
-		// UNCONDITIONALLY for any child with a selector — bound or not.
-		// pkg/fundi/runtime.go treats a nil pointer as "no executor is bound"
-		// and falls back to reading the DAEMON's own cwd, so leaving it nil
-		// for an unbound child would silently feed it the daemon's project
-		// instructions.
-		project, pcErr := fetchProjectContext(context.Background(), exec)
-		if pcErr != nil {
-			slog.Warn("project context unavailable; agent gets global instructions only",
-				"child", childID, "error", pcErr)
-			project = ""
-		}
+		info := c.homeInfo(spawnCtx, req, owner, be, homeID, homeBound, reach)
+		serviceW = append(serviceW, info.Warnings...)
+
+		// The project tier belongs to the workspace, so it comes from the HOME
+		// and nowhere else. The pointer is set UNCONDITIONALLY for any child
+		// with a pool — bound or not. pkg/fundi/runtime.go treats a nil pointer
+		// as "no executor is bound" and falls back to reading the DAEMON's own
+		// cwd, so leaving it nil for an unbound child would silently feed it the
+		// daemon's project instructions.
+		project := info.Project
 		ro.ProjectContext = &project
-
-		remote, psErr := fetchProjectSkills(context.Background(), exec)
-		if psErr != nil {
-			slog.Warn("project skills unavailable", "child", childID, "error", psErr)
-		}
-		ro.RemoteSkills = remote
+		ro.RemoteSkills = info.ProjectSkills
+		ro.ExecutorTools = info.ExecutorTools
+		ro.Workspace = info.Workspace
 
 		ro.RemoteSkillBody = func(ctx context.Context, name string) (string, string, error) {
 			return be.SkillBody(ctx, name)
-		}
-
-		// The system prompt's "Your machine" block comes from the executor's
-		// ROW, never from the executor's own account of itself. The block is
-		// built even when nothing is bound yet: the system prompt is fixed
-		// for the child's lifetime, so omitting it now means never. Prefer
-		// the row the child actually bound to; fall back to the first live
-		// candidate its selector admits, which is the machine it will land
-		// on if one connects.
-		//
-		// Never from Describe. Isolation and workspace_mode gate where other
-		// people's children run and cannot be the executor's own claim.
-		var row executors.Executor
-		if execID, _, bound := be.Current(); bound {
-			row, _ = c.executorRow(execID)
-		} else if chosen, cErr := c.chooseExecutorCandidate(req, executorOwner{Name: ownerName, UserID: ownerUserID}); cErr == nil {
-			row = chosen
-		}
-		if row.ID != "" {
-			wsInfo := workspaceInfoFromRow(row)
-			wsInfo.ExecutorName = row.Labels["machine"]
-			ro.Workspace = wsInfo
 		}
 	}
 
@@ -855,11 +870,6 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	}
 
 	ro.Executor = exec
-	if be, ok := exec.(*boundExecutor); ok {
-		if execID, _, bound := be.Current(); bound {
-			ro.ExecutorTools = c.executorToolsFor(execID)
-		}
-	}
 	// Publish this child's native events onto its own bus. childID is the
 	// daemon-stamped id, captured here rather than passed as a parameter to
 	// anything the model can influence.
@@ -873,6 +883,13 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	// childID is captured here for the same reason NativeSink captures it: it
 	// is the daemon-stamped id, never something the model can influence.
 	ro.OnConsumed = func(frameIDs []string) { c.consumeFrames(frameIDs) }
+
+	// Hand the spawn-time warnings to the caller that asked for them. Only a
+	// successful build returns them: a refusal carries its own error text, and
+	// a warning about a child that never started is noise.
+	if len(warnOut) > 0 && warnOut[0] != nil {
+		*warnOut[0] = append(*warnOut[0], serviceW...)
+	}
 	return ro, nil
 }
 

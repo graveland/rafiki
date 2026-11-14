@@ -166,15 +166,25 @@ func TestEmptySelectorOnAPoolDaemonStillGetsABoundExecutor(t *testing.T) {
 }
 
 // And the loud counterpart: with the pool configured but nothing live, a
-// top-level spawn with no selector is REFUSED with explainNoMatch's
-// diagnostic instead of silently starting a toolless agent.
-func TestTopLevelSpawnWithNoSelectorAndNoLiveExecutorIsRefused(t *testing.T) {
+// top-level spawn with no selector STARTS UNBOUND — its workspace tools are
+// present and fail with the diagnostic until an executor connects — and
+// explainNoMatch's per-candidate text rides back as a spawn warning instead of
+// being swallowed.
+func TestTopLevelSpawnWithNoSelectorAndNoLiveExecutorStartsUnbound(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.execPool = &fakePool{}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest() // top-level, no selector
-	_, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
-	ck.Error(err, "a top-level spawn with no executor available must be refused, not started toolless")
-	ck.StrContains(err.Error(), "live executor", "the refusal must carry explainNoMatch's diagnostic: %v", err)
+	var warnings []string
+	ro, err := c.agentRuntimeOptionsFor(req, "c1", false, "brent", "", "", "", &warnings)
+	ck.NoError(err, "a top-level spawn with no executor available must start unbound, not be refused")
+	ck.NotNil(ro.Executor, "Executor must still be non-nil, or MaterializeAll drops the "+
+		"whole workspace tier and the child silently runs tools in the daemon")
+	ck.Require().Len(warnings, 1, "warnings = %v, want exactly the unbound diagnostic", warnings)
+	ck.StrContains(warnings[0], "no executor available yet; the child starts unbound: ", "warning prefix: %q", warnings[0])
+	ck.StrContains(warnings[0], "live executor(s)", "the warning must carry explainNoMatch's diagnostic: %v", warnings[0])
+	wl, ok := c.takeWorkspaceLabels("c1")
+	ck.True(ok, "the child must be marked unbound for Spawn's label merge")
+	ck.Eq("unbound", wl.executorState, "executorState")
 }

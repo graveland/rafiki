@@ -663,6 +663,10 @@ type workspaceLabels struct {
 	executorID    string
 	mode          string // "ephemeral" or "pinned"
 	executorState string // "unbound" until the first successful NoteBinding
+	// homeExecutorID is the child's resolved HOME executor, stashed by
+	// noteHomeExecutor before the child's record exists. Spawn merges it into
+	// rafiki/home-executor, which is what a later resume reproduces exactly.
+	homeExecutorID string
 	// pgid is set only by claudeRunner's stashDarajaBinding — the daraja
 	// process group's pid from the Launch result, recorded as
 	// rafiki/daraja-pgid. Zero for every fundi tool-binding use of this
@@ -2537,7 +2541,13 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		}
 	}
 
-	runner, err := c.agentRunnerFor(req, childID, false, ownerName, owner.UserID, nil, forkFromNodeID)
+	// spawnWarnings collects the NON-FATAL diagnostics the runtime build
+	// produced (no home, a home that would not bind, several machines holding
+	// the child's cwd). They ride SpawnResponseData.Warnings back to the caller
+	// and are logged here at WARN, which is how a PARENTED spawn's warnings
+	// become visible at all: agent_spawn's tool result carries none.
+	var spawnWarnings []string
+	runner, err := c.agentRunnerFor(req, childID, false, ownerName, owner.UserID, nil, forkFromNodeID, &spawnWarnings)
 	if err != nil {
 		return protocol.SpawnResponseData{}, agentRunnerError(err)
 	}
@@ -2677,6 +2687,11 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		if wl.executorState != "" {
 			initLabels["rafiki/executor-state"] = wl.executorState
 		}
+		// The home executor resolved before this record existed: durable from
+		// the child's first moment, so a resume rebuilds the same home.
+		if wl.homeExecutorID != "" {
+			initLabels[homeExecutorLabel] = wl.homeExecutorID
+		}
 		if wl.pgid != 0 {
 			initLabels["rafiki/daraja-pgid"] = strconv.Itoa(int(wl.pgid))
 		}
@@ -2815,7 +2830,19 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// activateLiveChild (baseSnap==nil selects the Spawn-specific branch).
 	// noSession/resumeSession/forkSession are unused by that branch (req is used
 	// instead); pass zero values for clarity.
-	return c.activateLiveChild(childID, ch, bin, req, nil, false, "", "")
+	res, err := c.activateLiveChild(childID, ch, bin, req, nil, false, "", "")
+	if err != nil {
+		return res, err
+	}
+	// The spawn-time warnings, on the response the caller reads and in this
+	// daemon's log. Logged HERE rather than where each is produced so a
+	// parented spawn (whose tool result carries no warnings) still leaves a
+	// WARN naming the child behind it.
+	res.Warnings = append(res.Warnings, spawnWarnings...)
+	for _, w := range spawnWarnings {
+		slog.Warn("spawn warning", "child", childID, "warning", w)
+	}
+	return res, nil
 }
 
 // activateLiveChild handles the post-spawn registration sequence. It waits for
@@ -3164,13 +3191,19 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		ExecutorSelector:   snap.ExecutorSelector,
-		SkipDerivedIndex:   snap.SkipDerivedIndex,
-		Notify:             snap.NotifyPolicy,
-		WorkspaceMode:      snap.WorkspaceMode,
-		RecordRequests:     snap.RecordRequests,
-		MaxDepth:           &snap.MaxDepth,
-		MaxCost:            &snap.MaxCost,
-		MaxChildren:        &snap.MaxChildren,
+		// The child's persisted home executor, carried into the request so home
+		// resolution REPRODUCES it exactly rather than re-running the rules and
+		// landing the child on a different machine than the one its cwd and
+		// CLAUDE.md came from. It is the only durable record of the home: the
+		// in-memory binding dies with the daemon.
+		HomeExecutor:     snap.Labels[homeExecutorLabel],
+		SkipDerivedIndex: snap.SkipDerivedIndex,
+		Notify:           snap.NotifyPolicy,
+		WorkspaceMode:    snap.WorkspaceMode,
+		RecordRequests:   snap.RecordRequests,
+		MaxDepth:         &snap.MaxDepth,
+		MaxCost:          &snap.MaxCost,
+		MaxChildren:      &snap.MaxChildren,
 	}
 	if snap.Kind == protocol.KindClaude {
 		req.ResumeSession = snap.SessionID

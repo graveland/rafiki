@@ -553,16 +553,26 @@ func baseRequest() protocol.SpawnRequest {
 // A human typing --executor-selector gets explainNoMatch's per-candidate
 // diagnostic immediately. Downgrading this to a slog.Warn produced a running,
 // billing agent whose every workspace tool errored, with nothing surfaced.
-func TestTopLevelSpawnWithAnUnmatchedSelectorIsRefused(t *testing.T) {
+// A human typing --executor-selector that matches nothing no longer kills the
+// spawn: the child starts unbound with the whole workspace tier present, and
+// explainNoMatch's per-candidate diagnostic rides back as a warning — the text
+// its workspace tools will also fail with until an executor connects. Refusing
+// outright read as a dead daemon and invited a retry loop.
+func TestTopLevelSpawnMatchingNothingStartsUnbound(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.execPool = &fakePool{}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest()
 	req.ExecutorSelector = "env=nowhere"
-	_, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
-	ck.Error(err, "a top-level spawn whose selector matches nothing must be refused")
-	ck.StrContains(err.Error(), "env=nowhere", "the refusal must carry explainNoMatch's diagnostic, got: %v", err)
+	var warnings []string
+	ro, err := c.agentRuntimeOptionsFor(req, "c1", false, "brent", "", "", "", &warnings)
+	ck.NoError(err, "a top-level spawn whose selector matches nothing must start unbound, not be refused")
+	ck.NotNil(ro.Executor, "Executor must still be non-nil, or MaterializeAll drops the "+
+		"whole workspace tier and the child silently runs tools in the daemon")
+	ck.Require().Len(warnings, 1, "warnings = %v, want exactly the unbound diagnostic", warnings)
+	ck.StrContains(warnings[0], "env=nowhere", "the warning must carry explainNoMatch's diagnostic, got: %v", warnings[0])
+	ck.StrContains(warnings[0], "no executor available yet; the child starts unbound: ", "warning prefix: %q", warnings[0])
 }
 
 // A child spawned by an agent may start unbound: an executor restart parks its
