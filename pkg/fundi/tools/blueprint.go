@@ -114,6 +114,18 @@ func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 			t = &executorProxy{tool: t, client: opts.Executor}
 		}
 
+		// Every workspace call may name the executor it runs on. The wrap is
+		// outermost so it covers the proxied tools AND the RPC-backed
+		// background-job verbs, which reach opts.Executor through the ctx they
+		// are given. A daemon-tier tool never gains the argument, and neither
+		// does an untiered one (a test blueprint): those run on no executor, so
+		// an argument naming one could only be refused.
+		if opts.Executor != nil {
+			if tier, known := TierOf(t.Name()); known && tier == TierWorkspace {
+				t = &executorTargeted{tool: t}
+			}
+		}
+
 		r.Register(t)
 	}
 	return r
