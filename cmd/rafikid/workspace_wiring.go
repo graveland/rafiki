@@ -53,17 +53,22 @@ func (c *Controller) executorToolsFor(executorID string) []string {
 // provisionWorkspace provisions a workspace on the executor. The ordering
 // matters: provision BEFORE the child is registered, so a provisioning failure
 // refuses the spawn with nothing to clean up.
+//
+// workdir is the directory the executor resolved for the workspace — the child's
+// cwd where it applies, else the executor's own root. It is what the caller can
+// honestly tell the model a workspace is "working from"; empty when no workspace
+// was made.
 func (c *Controller) provisionWorkspace(
 	ctx context.Context,
 	req protocol.SpawnRequest, executorID string,
-) (workspaceID string, wi *fundi.WorkspaceInfo, exec tools.ExecutorClient, err error) {
+) (workspaceID string, wi *fundi.WorkspaceInfo, exec tools.ExecutorClient, err error, workdir string) {
 	pool := c.execPool
 	if pool == nil {
-		return "", nil, nil, nil
+		return "", nil, nil, nil, ""
 	}
 	pp, ok := pool.(*execpool.Pool)
 	if !ok {
-		return "", nil, nil, fmt.Errorf("execpool: not a real pool")
+		return "", nil, nil, fmt.Errorf("execpool: not a real pool"), ""
 	}
 
 	// ChildId only, plus the one path-shaped field: Workdir.
@@ -90,23 +95,23 @@ func (c *Controller) provisionWorkspace(
 	// would refuse every tool call. Spawn rewrites req.Cwd for a spawn block,
 	// but a NAMED sandbox (`executor: "<name>"`) is created out of band and
 	// Spawn never sees its spec, so this is the one place both cases resolve.
-	workdir := req.Cwd
+	dir := req.Cwd
 	if wd, ok := c.sandboxWorkdirForExecutor(ctx, executorID); ok {
-		workdir = wd
+		dir = wd
 	}
 	resp, err := pp.Provision(ctx, executorID, &executorpb.ProvisionRequest{
 		ChildId: "",
-		Workdir: workdir,
+		Workdir: dir,
 	})
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", shortID(executorID), err)
+		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", shortID(executorID), err), ""
 	}
 
 	// Get a workspace-scoped client.
 	exec, err = pp.ClientForWorkspace(executorID, resp.WorkspaceId)
 	if err != nil {
 		_ = pp.Release(ctx, executorID, resp.WorkspaceId)
-		return "", nil, nil, fmt.Errorf("workspace client: %w", err)
+		return "", nil, nil, fmt.Errorf("workspace client: %w", err), ""
 	}
 
 	// Everything the child is TOLD about its machine comes from the row, not
@@ -129,7 +134,8 @@ func (c *Controller) provisionWorkspace(
 		"workspaceMode", workspaceModeOrPinned(row.WorkspaceMode),
 	)
 
-	return resp.WorkspaceId, workspaceInfoFromRow(row), exec, nil
+	workspaceID, wi, workdir = resp.WorkspaceId, workspaceInfoFromRow(row), resp.Workdir
+	return workspaceID, wi, exec, nil, workdir
 }
 
 // workspaceInfoFromRow builds what the child is TOLD about its machine.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/sandbox"
@@ -35,6 +36,12 @@ func (c *Controller) binderFor(req protocol.SpawnRequest, owner executorOwner) e
 	return &controllerBinder{c: c, req: req, owner: owner}
 }
 
+// homeExecutorLabel records, on the child's own row, the executor whose
+// workspace the child's cwd and project tier belong to. It is durable precisely
+// so a RESUMED child agrees with the daemon that migrated it: b.home is
+// in-memory and dies with the process.
+const homeExecutorLabel = "rafiki/home-executor"
+
 // ChooseFor re-runs full selection. It is NOT a cached decision: the effective
 // set is recomputed from the live pool every time, deliberately, so an
 // executor that connects after the child started is usable by it.
@@ -48,48 +55,12 @@ func (b *controllerBinder) ChooseFor(childID string) (string, error) {
 	// through to ordinary selection, which would run it natively on a host the
 	// operator never offered it (and, for a `subtree` descendant, let a whole
 	// subtree escape the block).
-	//
-	// A missing sandbox store (a DB-less daemon) skips the lookup entirely: there
-	// are no spawn-block sandboxes without one.
-	if b.c.sandboxStore != nil {
-		// The ancestry hint for a fresh descendant's eager bind. On a spawn the
-		// request carries the parent; on a rebind/recovery the request is rebuilt
-		// from the stored snapshot (resumeRequestFromSnapshot), which does NOT set
-		// ParentChildID, so fall back to the store's recorded parent — by then the
-		// child's own row exists (load_children inserts every recovered row before
-		// its runtime is built), so the lookup succeeds. An empty or missing hint
-		// is fail-closed: it can only fail to find an owned sandbox.
-		parent := b.req.ParentChildID
-		if parent == "" && b.c.st != nil {
-			parent, _ = b.c.st.ParentOf(childID)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), sandboxBindTimeout)
-		row, owned, err := b.c.ownedSandbox(ctx, childID, parent, b.owner.UserID)
-		cancel()
-		if err != nil {
-			// A store error is an error, never "not owned": treating it as
-			// unowned would let a sandboxed child silently rebind natively.
-			return "", err
-		}
-		if owned {
-			// Only a `ready` row is a FULLY live sandbox. A `removing` row is being
-			// torn down, a `lost` row has no container, and `creating` is an
-			// in-flight create with no container yet — binding any of them would
-			// hand the child a workspace that is going away. All take the same
-			// not-connected path, never a fall-through to ordinary selection.
-			if row.State == sandboxStateReady && b.c.execPool != nil {
-				for _, le := range b.c.execPool.Live() {
-					if le.Executor.ID == row.ExecutorID && le.Executor.Enabled && le.Executor.OwnerUserID == b.owner.UserID {
-						return le.Executor.ID, nil
-					}
-				}
-			}
-			// The row is not a fully live sandbox (or its executor is not live,
-			// disabled, or was re-owned). This NEVER falls through to
-			// chooseExecutor: falling through would let the child bind somewhere
-			// else instead of to its sandbox.
-			return "", fmt.Errorf("sandbox %q is not connected", sandboxDisplayName(row))
-		}
+	sandboxExec, err := b.ownedSandboxExecutor(childID)
+	if err != nil {
+		return "", err
+	}
+	if sandboxExec != nil {
+		return sandboxExec.ID, nil
 	}
 
 	chosen, err := b.c.chooseExecutor(b.req, b.owner)
@@ -97,6 +68,135 @@ func (b *controllerBinder) ChooseFor(childID string) (string, error) {
 		return "", err
 	}
 	return chosen.ID, nil
+}
+
+// ownedSandboxExecutor returns the executor of the spawn-block sandbox that
+// owns childID, or nil when the child owns no sandbox.
+//
+// A missing sandbox store (a DB-less daemon) skips the lookup entirely: there
+// are no spawn-block sandboxes without one.
+func (b *controllerBinder) ownedSandboxExecutor(childID string) (*executors.Executor, error) {
+	if b.c.sandboxStore == nil {
+		return nil, nil
+	}
+	// The ancestry hint for a fresh descendant's eager bind. On a spawn the
+	// request carries the parent; on a rebind/recovery the request is rebuilt
+	// from the stored snapshot (resumeRequestFromSnapshot), which does NOT set
+	// ParentChildID, so fall back to the store's recorded parent — by then the
+	// child's own row exists (load_children inserts every recovered row before
+	// its runtime is built), so the lookup succeeds. An empty or missing hint
+	// is fail-closed: it can only fail to find an owned sandbox.
+	parent := b.req.ParentChildID
+	if parent == "" && b.c.st != nil {
+		parent, _ = b.c.st.ParentOf(childID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxBindTimeout)
+	row, owned, err := b.c.ownedSandbox(ctx, childID, parent, b.owner.UserID)
+	cancel()
+	if err != nil {
+		// A store error is an error, never "not owned": treating it as
+		// unowned would let a sandboxed child silently rebind natively.
+		return nil, err
+	}
+	if !owned {
+		return nil, nil
+	}
+	// Only a `ready` row is a FULLY live sandbox. A `removing` row is being
+	// torn down, a `lost` row has no container, and `creating` is an in-flight
+	// create with no container yet — binding any of them would hand the child a
+	// workspace that is going away. All take the same not-connected path, never
+	// a fall-through to ordinary selection.
+	if row.State == sandboxStateReady && b.c.execPool != nil {
+		for _, le := range b.c.execPool.Live() {
+			if le.Executor.ID == row.ExecutorID && le.Executor.Enabled && le.Executor.OwnerUserID == b.owner.UserID {
+				e := le.Executor
+				return &e, nil
+			}
+		}
+	}
+	// The row is not a fully live sandbox (or its executor is not live,
+	// disabled, or was re-owned). This NEVER falls through to chooseExecutor:
+	// falling through would let the child bind somewhere else instead of to its
+	// sandbox.
+	return nil, fmt.Errorf("sandbox %q is not connected", sandboxDisplayName(row))
+}
+
+// Reachable is every executor childID may call RIGHT NOW, freshly computed from
+// the live pool — never a cached set. It is the same confinement-narrowed
+// candidate list chooseExecutor picks a winner from (parent's effective set ∩
+// this child's selector, child-owned sandboxes dropped, sorted), so "what I can
+// reach" and "what I would bind to" can never disagree.
+//
+// A spawn-block sandbox is exclusive: it is the only reachable executor, and a
+// sandbox that is not fully live is an ERROR rather than an empty set, so an
+// implicit call never wanders onto an ordinary machine (or onto a "none is
+// reachable, so I may bind anywhere" fall-through).
+func (b *controllerBinder) Reachable(childID string) ([]executors.Executor, error) {
+	sandboxExec, err := b.ownedSandboxExecutor(childID)
+	if err != nil {
+		return nil, err
+	}
+	if sandboxExec != nil {
+		return []executors.Executor{*sandboxExec}, nil
+	}
+
+	candidates, _, _, _, err := b.c.narrowedExecutorCandidates(b.req, b.owner)
+	if err != nil {
+		return nil, err
+	}
+	if b.req.ExecutorRef != "" {
+		// An explicit ref bypasses SEARCH, never confinement: the hit must come
+		// out of the narrowed set.
+		if hit, ok := matchExecutorRef(b.req.ExecutorRef, candidates); ok {
+			return []executors.Executor{hit}, nil
+		}
+		return nil, nil
+	}
+	// As in chooseExecutor: a caller that named neither a ref nor a selector
+	// has not asked for any particular machine, so a sandbox must never be an
+	// implicit choice.
+	if !hasExplicitSelector(b.req) {
+		candidates = dropSandboxCandidates(candidates)
+	}
+	return candidates, nil
+}
+
+// Home reads the child's recorded home executor.
+func (b *controllerBinder) Home(childID string) string {
+	if b.c.st == nil {
+		return ""
+	}
+	snap, ok := b.c.st.Get(childID)
+	if !ok {
+		return ""
+	}
+	return snap.Labels[homeExecutorLabel]
+}
+
+// SetHomeLabel writes the child's home executor onto its own row, so a resumed
+// child agrees with the daemon that migrated it. Best-effort: a child that
+// cannot record its home keeps working on the in-memory one.
+func (b *controllerBinder) SetHomeLabel(childID, executorID string) {
+	if b.c.st == nil {
+		return
+	}
+	if _, err := b.c.st.SetLabels(childID, map[string]string{homeExecutorLabel: executorID}, nil); err != nil {
+		slog.Warn("could not record the child's home executor; a resumed child will "+
+			"bind by selection instead",
+			"child", childID, "executor", shortID(executorID), "error", err)
+	}
+}
+
+// DisplayName names an executor the way an operator and the model see it: its
+// machine label, else a short id (a row without a machine label is an operator
+// error the enrollment flow warns about).
+func (b *controllerBinder) DisplayName(executorID string) string {
+	if row, ok := b.c.executorRow(executorID); ok {
+		if machine := row.Labels["machine"]; machine != "" {
+			return machine
+		}
+	}
+	return shortID(executorID)
 }
 
 // sandboxDisplayName names a sandbox row for an operator: its name when it has
@@ -109,12 +209,23 @@ func sandboxDisplayName(row sandbox.Row) string {
 	return sandboxSpawnMachineName(row.ID)
 }
 
-func (b *controllerBinder) ProvisionOn(ctx context.Context, executorID string) (string, tools.ExecutorClient, error) {
-	wsID, _, cl, err := b.c.provisionWorkspace(ctx, b.req, executorID)
-	if err != nil {
-		return "", nil, err
+// ProvisionOn creates a workspace on executorID.
+//
+// useCwd decides whether the child's cwd applies there. It does only on the
+// child's HOME executor: its cwd is a path in one machine's filesystem, and a
+// workspace at another machine's root is what makes a call addressed to that
+// machine land in ITS view of the world rather than in a directory that does
+// not exist there (Provision would refuse it outright).
+func (b *controllerBinder) ProvisionOn(ctx context.Context, executorID string, useCwd bool) (workspaceID, workdir string, cl tools.ExecutorClient, err error) {
+	req := b.req
+	if !useCwd {
+		req.Cwd = ""
 	}
-	return wsID, cl, nil
+	wsID, _, client, perr, wd := b.c.provisionWorkspace(ctx, req, executorID)
+	if perr != nil {
+		return "", "", nil, perr
+	}
+	return wsID, wd, client, nil
 }
 
 func (b *controllerBinder) ReleaseOn(ctx context.Context, executorID, workspaceID string) {
@@ -137,6 +248,11 @@ func (b *controllerBinder) IsLive(executorID string) bool {
 }
 
 // NoteBinding records where the child actually is.
+//
+// It is the HOME binding's call and nobody else's: the three labels name ONE
+// workspace, so a binding on another executor that wrote them would both lie
+// about where the child's tree is and overwrite the workspace teardown has to
+// release. boundExecutor's own clientFor enforces that.
 //
 // The childstore is the authority, not c.wsLabels: handleChildExit releases the
 // workspace by snap.Labels, and HandleExecutorLost finds affected children by

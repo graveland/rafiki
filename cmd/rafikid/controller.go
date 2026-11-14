@@ -5401,6 +5401,11 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// no longer be told anything. Close does this too, but Close is optional —
 	// a child that exits and is never closed would otherwise hold its binding,
 	// and the executor client it references, for the daemon's lifetime.
+	//
+	// Retained for the Release workspace block below FIRST: a child that called
+	// tools on two machines has workspaces the labels never name, and once this
+	// drop has run there is nothing left that knows them.
+	be := c.boundExecutorFor(childID)
 	c.forgetBoundExecutor(childID)
 
 	// Return this child's unconfirmed inbox rows to pending. A RESET, not a
@@ -5490,13 +5495,24 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 
 	// Release workspace. Best-effort under a short deadline: a docker hiccup
 	// must not wedge child teardown, exactly like the orphan sweep above.
+	//
+	// The labels name the HOME workspace only, so be.ReleaseOthers covers the
+	// rest: every workspace this child provisioned on another executor (a tool
+	// call naming a second machine) is a live workspace nothing else will ever
+	// release. Same goroutine, same deadline — the two are one teardown.
 	if snap, ok := c.st.Get(childID); ok {
-		if wID := snap.Labels["rafiki/workspace"]; wID != "" {
-			eID := snap.Labels["rafiki/executor"]
+		wID := snap.Labels["rafiki/workspace"]
+		eID := snap.Labels["rafiki/executor"]
+		if wID != "" || be != nil {
 			go func() {
 				rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer rcancel()
-				c.releaseWorkspace(rctx, eID, wID)
+				if wID != "" {
+					c.releaseWorkspace(rctx, eID, wID)
+				}
+				if be != nil {
+					be.ReleaseOthers(rctx, eID, wID)
+				}
 			}()
 		}
 	}

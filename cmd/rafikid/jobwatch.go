@@ -95,9 +95,7 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 		// flight) collapses on the (child, source, handle) key while the first
 		// fragment is still pending, so the child sees it once.
 		if c.jobDeliverable(ev.Owner) {
-			c.evbuf.Push(ev.Owner, jobEventSource, ev.Handle, fmt.Sprintf(
-				"background job %s (%s) finished with exit code %d. Read what it printed with bash_output {\"handle\":%q}.",
-				ev.Handle, ev.Command, ev.ExitCode, ev.Handle))
+			c.evbuf.Push(ev.Owner, jobEventSource, ev.Handle, c.jobExitNotice(ev))
 		}
 		c.ackJobExit(ev.ExecutorID, ev.Handle)
 
@@ -136,12 +134,56 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 			if !c.jobDeliverable(g.ref.owner) {
 				continue
 			}
-			c.evbuf.Push(g.ref.owner, jobEventSource, g.handle, fmt.Sprintf(
-				"background job %s (%s) is no longer on its executor: neither what it printed nor "+
-					"how it ended can be recovered. Re-run the command if you still need the result.",
-				g.handle, g.ref.command))
+			c.evbuf.Push(g.ref.owner, jobEventSource, g.handle, c.jobGoneNotice(g.ref.owner, ev.ExecutorID, g.handle, g.ref.command))
 		}
 	}
+}
+
+// jobExitNotice is the fragment for a finished job.
+//
+// A child that can reach several executors must be told WHICH one ran the job:
+// the follow-up bash_output has to name it, and a bare handle is ambiguous the
+// moment two machines are in play. A single-executor child's notice is unchanged
+// byte for byte — it has nothing to disambiguate.
+func (c *Controller) jobExitNotice(ev execpool.JobEvent) string {
+	if be := c.boundExecutorFor(ev.Owner); be != nil && be.Multi() {
+		return fmt.Sprintf(
+			"background job %s (%s) on %s finished with exit code %d. Read what it printed with bash_output {\"handle\":%q,\"executor\":%q}.",
+			ev.Handle, ev.Command, be.binder.DisplayName(ev.ExecutorID), ev.ExitCode,
+			ev.Handle, c.executorArgName(ev.ExecutorID))
+	}
+	return fmt.Sprintf(
+		"background job %s (%s) finished with exit code %d. Read what it printed with bash_output {\"handle\":%q}.",
+		ev.Handle, ev.Command, ev.ExitCode, ev.Handle)
+}
+
+// jobGoneNotice is the fragment for a job an executor restart lost.
+func (c *Controller) jobGoneNotice(owner, executorID, handle, command string) string {
+	if be := c.boundExecutorFor(owner); be != nil && be.Multi() {
+		return fmt.Sprintf(
+			"background job %s (%s) on %s is no longer on its executor: neither what it printed nor "+
+				"how it ended can be recovered. Re-run the command if you still need the result.",
+			handle, command, be.binder.DisplayName(executorID))
+	}
+	return fmt.Sprintf(
+		"background job %s (%s) is no longer on its executor: neither what it printed nor "+
+			"how it ended can be recovered. Re-run the command if you still need the result.",
+		handle, command)
+}
+
+// executorArgName names an executor the way a CALL can name it — its machine
+// label when it has one, else its FULL id.
+//
+// DisplayName's short-id fallback is fine for reading ("on box-1"), but a value
+// the model is told to pass as executor: must match exactly: matchExecutorRef
+// knows machine labels and whole ids, never a truncated one.
+func (c *Controller) executorArgName(executorID string) string {
+	if row, ok := c.executorRow(executorID); ok {
+		if machine := row.Labels["machine"]; machine != "" {
+			return machine
+		}
+	}
+	return executorID
 }
 
 // jobRunningForLocked returns the executor's running-jobs map, creating it if

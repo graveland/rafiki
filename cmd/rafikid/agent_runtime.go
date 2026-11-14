@@ -734,7 +734,7 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 		// before executors reconnect). An agent-spawned or recovered child
 		// starts unbound and lazy-binds on its first tool call when its
 		// executor connects.
-		if _, _, bindErr := be.clientFor(context.Background()); bindErr != nil {
+		if bindErr := be.bindImplicit(context.Background()); bindErr != nil {
 			if req.ParentChildID == "" && !autoResume {
 				return fundi.RuntimeOptions{}, bindErr
 			}

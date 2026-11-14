@@ -284,3 +284,85 @@ func TestExitDropsTheChildsBoundExecutor(t *testing.T) {
 
 	c.Nil(ctrl.boundExecutorFor(childID), "an exited child still holds its boundExecutor; nothing will ever drop it")
 }
+
+// A child that can reach SEVERAL executors has to be told which one ran the job:
+// the follow-up bash_output must name it, and a bare handle is ambiguous the
+// moment two machines are in play. A single-executor child's notice is unchanged
+// byte for byte — it has nothing to disambiguate.
+func TestJobExitNoticeNamesExecutorWhenMulti(t *testing.T) {
+	ck := assert.NewAborting(t)
+
+	multi, clk, cap, _ := jobEventFixture(t)
+	fb := newFakeBinder()
+	fb.reachableTo("ublk-s1", "ublk-c1")
+	fb.mu.Lock()
+	fb.machines["ublk-s1"] = "box-1"
+	fb.mu.Unlock()
+	multi.noteBoundExecutor("c_coord", newBoundExecutor("c_coord", fb))
+	// The live row is what names the machine in the bash_output argument.
+	multi.execPool = &fakePool{live: []execpool.LiveExecutor{nativeExec("ublk-s1", "box-1", "")}}
+	multi.handleJobEvent(jobExitedEvent("ublk-s1", "h1", "c_coord", "make check", 3))
+	clk.Advance(6 * time.Second)
+
+	batches := cap.batches()
+	ck.Len(batches, 1, "want one fragment, got %+v", batches)
+	ck.Eq(`background job h1 (make check) on box-1 finished with exit code 3. `+
+		`Read what it printed with bash_output {"handle":"h1","executor":"box-1"}.`,
+		batches[0].fragments[0], "the multi-executor notice must name the executor, both for reading and for the follow-up call")
+
+	single, clk2, cap2, _ := jobEventFixture(t)
+	fb2 := newFakeBinder()
+	fb2.reachableTo("ublk-s1")
+	single.noteBoundExecutor("c_coord", newBoundExecutor("c_coord", fb2))
+	single.handleJobEvent(jobExitedEvent("ublk-s1", "h1", "c_coord", "make check", 3))
+	clk2.Advance(6 * time.Second)
+
+	batches = cap2.batches()
+	ck.Len(batches, 1, "want one fragment, got %+v", batches)
+	ck.Eq(`background job h1 (make check) finished with exit code 3. `+
+		`Read what it printed with bash_output {"handle":"h1"}.`,
+		batches[0].fragments[0], "a single-executor child's notice is unchanged byte for byte")
+}
+
+// The same rule for a job an executor restart lost: name the machine when the
+// child can reach more than one, so "re-run it" is actionable.
+func TestJobGoneNoticeNamesExecutorWhenMulti(t *testing.T) {
+	ck := assert.NewAborting(t)
+
+	multi, clk, cap, _ := jobEventFixture(t)
+	fb := newFakeBinder()
+	fb.reachableTo("ublk-s1", "ublk-c1")
+	fb.mu.Lock()
+	fb.machines["ublk-s1"] = "box-1"
+	fb.mu.Unlock()
+	multi.noteBoundExecutor("c_coord", newBoundExecutor("c_coord", fb))
+
+	multi.handleJobEvent(jobReplayStartEvent("ublk-s1"))
+	multi.handleJobEvent(jobRunningEvent("ublk-s1", "h1", "c_coord", "make check"))
+	multi.handleJobEvent(replayCompleteEvent("ublk-s1"))
+	multi.handleJobEvent(jobReplayStartEvent("ublk-s1"))
+	multi.handleJobEvent(replayCompleteEvent("ublk-s1"))
+	clk.Advance(6 * time.Second)
+
+	batches := cap.batches()
+	ck.Len(batches, 1, "want one gone fragment, got %+v", batches)
+	ck.StrContains(batches[0].fragments[0], "on box-1 is no longer on its executor",
+		"the gone notice must name the executor; got %q", batches[0].fragments[0])
+
+	single, clk2, cap2, _ := jobEventFixture(t)
+	fb2 := newFakeBinder()
+	fb2.reachableTo("ublk-s1")
+	single.noteBoundExecutor("c_coord", newBoundExecutor("c_coord", fb2))
+	single.handleJobEvent(jobReplayStartEvent("ublk-s1"))
+	single.handleJobEvent(jobRunningEvent("ublk-s1", "h1", "c_coord", "make check"))
+	single.handleJobEvent(replayCompleteEvent("ublk-s1"))
+	single.handleJobEvent(jobReplayStartEvent("ublk-s1"))
+	single.handleJobEvent(replayCompleteEvent("ublk-s1"))
+	clk2.Advance(6 * time.Second)
+
+	batches = cap2.batches()
+	ck.Len(batches, 1, "want one gone fragment, got %+v", batches)
+	ck.Eq(`background job h1 (make check) is no longer on its executor: neither what it printed nor `+
+		`how it ended can be recovered. Re-run the command if you still need the result.`,
+		batches[0].fragments[0], "a single-executor child's gone notice is unchanged byte for byte")
+}
