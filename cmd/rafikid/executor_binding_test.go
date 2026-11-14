@@ -1967,16 +1967,10 @@ func assertNoWorkspaceLeaked(t *testing.T, be *boundExecutor, fb *fakeBinder) {
 // onNoteBinding), which is where a migration publishes its target's labels and
 // before it claims the home. The loss cannot take the transition slot — the
 // migration holds it, and the migration cannot make progress while this hook
-// runs — so its bounded wait expires and the migration loses its claim, which is
-// the branch that has to roll its own write back.
+// runs — so the loss proceeds without it and the migration loses its claim,
+// which is the branch that has to roll its own write back.
 func TestLostExecutorCannotClearTheHomeAMigrationHasNotClaimed(t *testing.T) {
 	c := assert.NewAborting(t)
-
-	// Spend the wait rather than sleep through it: the loss has to give up, and
-	// the migration has to lose its claim, for the rollback to be exercised.
-	prevWait := homeTransitionWait
-	homeTransitionWait = 20 * time.Millisecond
-	t.Cleanup(func() { homeTransitionWait = prevWait })
 
 	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
 	be := newBoundExecutor("c1", fb)
@@ -2025,19 +2019,21 @@ func TestLostExecutorCannotClearTheHomeAMigrationHasNotClaimed(t *testing.T) {
 	assertNoWorkspaceLeaked(t, be, fb)
 }
 
-// The loss takes the same transition slot a migration does, so it cannot land in
-// the middle of one: it waits for the migration to settle and then acts on the
-// home that migration established. Without the wait, the loss clears the home
-// the migration is about to claim — the same disagreement from the other side.
-func TestForgetWaitsForAnInFlightHomeMigration(t *testing.T) {
+// A loss NEVER waits for the home-transition slot: Forget runs on the executor
+// pool's park-sweep goroutine for every affected child in sequence, so a wait
+// behind one child's provision RPC would delay every other child's teardown.
+// The loss therefore proceeds WITHOUT the slot and takes the documented loser
+// side: the migration it collided with finds the home cleared, loses its claim,
+// and rolls its own label write back.
+func TestForgetOutrunsAnInFlightHomeMigrationAndRollsItBack(t *testing.T) {
 	c := assert.NewAborting(t)
 	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
 	be := newBoundExecutor("c1", fb)
 	bindTestHome(t, be, "a")
 	fb.reachableTo("b")
 
-	// Hold the migration inside its provision RPC: it holds the transition slot
-	// and the loss below can only wait for it.
+	// Hold the migration inside its provision RPC: it holds the transition slot,
+	// and the loss below must not wait for it.
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
 	var once sync.Once
@@ -2065,30 +2061,30 @@ func TestForgetWaitsForAnInFlightHomeMigration(t *testing.T) {
 	forgetDone := make(chan struct{})
 	go func() {
 		defer close(forgetDone)
-		if ws, ok := be.Forget("a"); ok {
+		if ws, ok := be.Forget("a"); ok && ws != "" {
 			// Releasing the forgotten workspace is the loss handler's job.
 			fb.ReleaseOn(context.Background(), "a", ws)
 		}
 	}()
 	select {
 	case <-forgetDone:
-		t.Fatal("Forget returned while a home migration was still running: it can clear the home " +
-			"between that migration's label write and its claim")
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(2 * time.Second):
+		t.Fatal("Forget blocked on the home-transition slot: a loss must never wait for one")
 	}
+	c.Eq("", be.homeExecutor(), "the loss cleared the home while the migration provisioned; home =")
 
 	close(proceed)
-	<-forgetDone
 	res := <-callDone
 	c.NoError(res.err, "the call must still be served")
 	c.Eq("b:read", res.text, "on the executor the migration resolved; got")
-	c.Eq("b", be.homeExecutor(), "the migration claimed the home before the loss could act; home =")
+	c.Eq("", be.homeExecutor(), "the migration lost its claim to the loss, so the child has no home; home =")
 	assertHomeAndLabelsAgree(t, be, fb)
 	fb.mu.Lock()
-	migrations := fb.migrations
+	migrations, undos := fb.migrations, fb.undos
 	fb.mu.Unlock()
-	c.Eq(1, migrations, "the migration kept its claim, so the child is told its tree moved once; migrations")
-	waitForReleases(t, fb, 1)
+	c.Eq(0, migrations, "a migration that lost the home must not claim it or steer the child; migrations")
+	c.Eq(1, undos, "it must roll its own label write back instead; undos")
+	waitForReleases(t, fb, 2)
 	assertNoWorkspaceLeaked(t, be, fb)
 }
 
@@ -2101,11 +2097,6 @@ func TestForgetWaitsForAnInFlightHomeMigration(t *testing.T) {
 // rewrite has already cleared.
 func TestLostExecutorCannotOutrunAnAdoption(t *testing.T) {
 	c := assert.NewAborting(t)
-
-	// Spend the wait: the adoption holds the slot, so the loss gives up on it.
-	prevWait := homeTransitionWait
-	homeTransitionWait = 20 * time.Millisecond
-	t.Cleanup(func() { homeTransitionWait = prevWait })
 
 	fb := newFakeBinder(&fakeExec{id: "a"})
 	be := newBoundExecutor("c1", fb)
@@ -2150,17 +2141,18 @@ func TestLostExecutorCannotOutrunAnAdoption(t *testing.T) {
 	assertNoWorkspaceLeaked(t, be, fb)
 }
 
-// The mirror of the migration case: a loss must not act while an ADOPTION holds
-// the slot either. It waits, then acts on the home the adoption established —
-// clearing it, because its machine is the one that was lost — and the labels its
-// caller rewrites agree with that empty home.
-func TestForgetWaitsForAnInFlightAdoption(t *testing.T) {
+// The mirror of the migration case: a loss does not wait for an ADOPTION either.
+// It forgets the placeholder the adoption published, so the adoption's own
+// publish is superseded and no home is ever recorded — the decline by another
+// route. The labels stay empty, so a resume has nothing to bind.
+func TestForgetOutrunsAnInFlightAdoption(t *testing.T) {
 	c := assert.NewAborting(t)
 	fb := newFakeBinder(&fakeExec{id: "a"})
 	be := newBoundExecutor("c1", fb)
 	fb.reachableTo("a")
 
-	// Hold the adoption inside its provision RPC.
+	// Hold the adoption inside its provision RPC: the placeholder exists and has
+	// no workspace yet.
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
 	var once sync.Once
@@ -2185,44 +2177,38 @@ func TestForgetWaitsForAnInFlightAdoption(t *testing.T) {
 	forgetDone := make(chan struct{})
 	go func() {
 		defer close(forgetDone)
-		ws, ok := be.Forget("a")
-		if !ok {
-			return
+		if ws, ok := be.Forget("a"); ok && ws != "" {
+			fb.ReleaseOn(context.Background(), "a", ws)
 		}
-		// The loss handler's job: release, then rewrite the labels.
-		fb.ReleaseOn(context.Background(), "a", ws)
-		fb.mu.Lock()
-		delete(fb.labels, "rafiki/workspace")
-		fb.mu.Unlock()
 	}()
 	select {
 	case <-forgetDone:
-		t.Fatal("Forget returned while an adoption was still running: it can forget the binding the " +
-			"adoption is about to claim")
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(2 * time.Second):
+		t.Fatal("Forget blocked on the home-transition slot: a loss must never wait for one")
 	}
+	c.Eq("", be.homeExecutor(), "the loss leaves the child with no home; home =")
 
 	close(proceed)
-	<-forgetDone
 	r := <-callDone
-	c.NoError(r.err, "the call must still be served")
-	c.Eq("a:read", r.text, "served on; got")
-	c.Eq("", be.homeExecutor(), "the adoption claimed the home and the loss then cleared it; home =")
+	c.ErrorIs(r.err, errBindingSuperseded,
+		"the adoption's publish was superseded by the loss, so the call reports it; got")
+	c.Eq("", be.homeExecutor(), "no home may be claimed for a binding the loss forgot; home =")
 	assertHomeAndLabelsAgree(t, be, fb)
 	fb.mu.Lock()
 	homeLabels := append([]string(nil), fb.homeLabels...)
 	fb.mu.Unlock()
-	c.EqDeep([]string{"c1|a"}, homeLabels, "the adoption recorded the home it claimed; got")
+	c.Empty(homeLabels, "an adoption whose binding was forgotten must record no home label; homeLabels %v", homeLabels)
+	waitForReleases(t, fb, 1)
 	assertNoWorkspaceLeaked(t, be, fb)
 }
 
-// The loss handler reads its snapshots BEFORE it acts and rewrites the labels
-// last, by which time a migration it waited for may have run. That rewrite is
-// pinned here, beside the migration tests it is the other half of: the labels it
-// would otherwise clobber name the LIVE workspace of the home the child moved to,
-// and clearing them leaves rafiki/executor naming neither that machine nor the
-// home a resume binds. (It lives in this file, not workspace_wiring_test.go, so
-// the loss protocol and its tests stay one change.)
+// A home that moved off the lost machine BEFORE the loss was handled owns the
+// labels now: pass 1 skips the child (rafiki/executor names the new home) and
+// pass 2 forgets the leftover binding on the dead machine. The labels must be
+// left alone — clearing rafiki/workspace would delete the LIVE new home's only
+// label and leave rafiki/executor naming neither machine nor the home a resume
+// binds. (It lives in this file, not workspace_wiring_test.go, so the loss
+// protocol and its tests stay one change.)
 func TestExecutorLostLeavesTheLabelsOfAHomeThatMoved(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := &fakePool{}
@@ -2238,23 +2224,10 @@ func TestExecutorLostLeavesTheLabelsOfAHomeThatMoved(t *testing.T) {
 	ctrl.noteBoundExecutor("c_race", be)
 	seedChildOn(ctrl, "c_race", lostExecID, lostWS, "ephemeral")
 
-	// An implicit call migrates the home to the one reachable executor, and is
-	// held inside that provision until the loss below is waiting on it.
-	fb.reachableTo(otherExecID)
-	entered := make(chan struct{})
-	proceed := make(chan struct{})
-	var once sync.Once
-	fb.mu.Lock()
-	fb.onProvision = func(id string) {
-		if id != otherExecID {
-			return
-		}
-		once.Do(func() { close(entered) })
-		<-proceed
-	}
 	// The migration's label write, mirrored into the CHILD'S ROW the way the
 	// controller's binder does it: this test asserts on the durable labels the
 	// loss handler would clobber, not on the fake's own copy.
+	fb.mu.Lock()
 	fb.onNoteBinding = func() {
 		fb.mu.Lock()
 		execID, wsID := fb.labels["rafiki/executor"], fb.labels["rafiki/workspace"]
@@ -2267,28 +2240,16 @@ func TestExecutorLostLeavesTheLabelsOfAHomeThatMoved(t *testing.T) {
 	}
 	fb.mu.Unlock()
 
-	callDone := make(chan error, 1)
-	go func() {
-		_, err := be.Execute(context.Background(), "read", nil)
-		callDone <- err
-	}()
-	<-entered
-
-	lostDone := make(chan struct{})
-	go func() {
-		defer close(lostDone)
-		ctrl.HandleExecutorLost(lostExecID)
-	}()
-	select {
-	case <-lostDone:
-		t.Fatal("the loss handler must wait for the in-flight migration before it acts on the labels")
-	case <-time.After(50 * time.Millisecond):
+	// The home moves to the one reachable executor and is CLAIMED before the
+	// loss is handled.
+	fb.reachableTo(otherExecID)
+	if _, err := be.Execute(context.Background(), "read", nil); err != nil {
+		t.Fatalf("the call that migrates must be served: %v", err)
 	}
-	close(proceed)
-	<-lostDone
-	c.NoError(<-callDone, "the call that migrated must still be served")
-
 	c.Eq(otherExecID, be.homeExecutor(), "the migration claimed the home; home =")
+
+	ctrl.HandleExecutorLost(lostExecID)
+
 	snap, ok := ctrl.st.Get("c_race")
 	c.Require().True(ok, "the child's row survives")
 	c.Eq(otherExecID, snap.Labels["rafiki/executor"], "the labels must still name the home the migration established; =")
@@ -2703,8 +2664,8 @@ func TestNoteHomeBindingRemovedWhenTheChildExitsMidWrite(t *testing.T) {
 }
 
 // A re-provision of the HOME binding REPLACES the workspace the child's labels
-// name, so it is a home transition like a migration: it takes the slot, and when
-// a loss that could not take it still gets through (its bounded wait expired) the
+// name, so it is a home transition like a migration: it takes the slot, and a
+// loss that cannot take it still proceeds without it (it never waits), so the
 // label write must undo itself rather than leave the durable labels naming a
 // workspace the loss already released while b.home names nothing.
 //
@@ -2714,13 +2675,6 @@ func TestNoteHomeBindingRemovedWhenTheChildExitsMidWrite(t *testing.T) {
 // outlived the daemon.
 func TestReprovisionOfTheHomeBindingRacingForgetNamesNothing(t *testing.T) {
 	c := assert.NewAborting(t)
-
-	// Spend the loss's wait rather than sleep through it: the re-provision holds
-	// the slot, so the loss gives up on it and goes ahead — the branch whose
-	// compensation this test is about.
-	prevWait := homeTransitionWait
-	homeTransitionWait = 20 * time.Millisecond
-	t.Cleanup(func() { homeTransitionWait = prevWait })
 
 	fb := newFakeBinder(&fakeExec{id: "a"})
 	fb.reachableTo("a")

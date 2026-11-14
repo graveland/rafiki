@@ -1434,11 +1434,36 @@ wrong machine is worse than none.
 `SpawnResponse.warnings` carries the non-fatal diagnostics, one string each;
 `Controller.Spawn` also logs every one at WARN, which is how a PARENTED spawn's
 warning becomes visible at all (`agent_spawn`'s tool result carries none).
-There are three cases: the selector matched no live executor, so the child
-starts unbound and the warning is selection's `explainNoMatch` text; no home
-executor resolved (a multi-executor spawn with no `cwd` to probe); and a home
-executor that is not connected, so the project instructions were not loaded.
-None of them fails the spawn — the child exists and is usable.
+`Resume` and `RespawnChild` have no caller response to carry them, so they log
+each one at WARN as well. The texts, and what triggers each:
+
+- `home executor <name> is not connected; project instructions were not
+  loaded` — a named home (rule 1) that is no longer reachable (a resumed child's
+  persisted home: no home is chosen and the child never moves to another
+  machine), a home that resolved but could not be bound (the cause is appended
+  as ` (bind error: …)`), or a bound home whose project tier could not be
+  fetched.
+- `no home executor: project instructions (CLAUDE.md) were not loaded; pass
+  home_executor` — a multi-executor spawn with no `cwd` to probe, or a spawn
+  with no reachable executor and no selection diagnostic to quote.
+- `no executor available yet; the child starts unbound: <diagnostic>` — the
+  selector matched no live executor (or the reachable set could not be read);
+  the suffix is selection's `explainNoMatch` text, the same error the child's
+  workspace tools report until one connects.
+- `could not check cwd on: <reports>` — rule 5's probe found no home and at
+  least one candidate failed for a reason other than a missing workdir (a
+  transport or availability failure is not evidence the `cwd` is wrong).
+- `cwd <path> exists on <names>; pass home_executor to choose where project
+  instructions come from` — more than one executor holds the `cwd`; none
+  becomes home and the probe's workspaces are released.
+
+None of these fails the spawn — the child exists and is usable. Two related
+behaviours are NOT warnings: a `cwd` the resolved home cannot see REFUSES the
+spawn under rules 1–4 (the bind's `CodeInvalidArgument`, byte-identical to the
+probe's refusal), and rule 5 refuses with the provision diagnostic when every
+candidate failed for a missing workdir. `home_executor` is read only for
+`fundi` children: a `claude` or `script` child that carries it ignores it (a
+claude child's home is its launch executor's).
 
 A model switch carries the source child's `rafiki/home-executor` label into the
 fork (`switchSpawnRequest`, `cmd/rafiki/cmd_models_switch.go`; the cockpit's

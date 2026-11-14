@@ -122,13 +122,16 @@ func agentSpawnHasExplicitDB(extraArgs []string) bool {
 // which leaves SpawnSpec on the local-subprocess path unchanged. autoResume
 // asks the engine to call agentloop.Resume before accepting inbound prompts.
 // snap is non-nil for Resume/RespawnChild, nil for a fresh Spawn — see
-// darajaLaunchExecutor's doc comment for why that distinction matters.
-func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string, snap *childstore.Snapshot) (child.Runner, error) {
+// darajaLaunchExecutor's doc comment for why that distinction matters. warnOut
+// (optional) collects the spawn-time diagnostics home resolution produced; a
+// resume and a respawn pass one and log it, since neither has a caller to put
+// them on a response.
+func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string, snap *childstore.Snapshot, warnOut ...*[]string) (child.Runner, error) {
 	forkFromNodeID := ""
 	if snap != nil {
 		forkFromNodeID = snap.ForkFromNodeID
 	}
-	return c.agentRunnerFor(req, childID, autoResume, ownerName, ownerUserID, snap, forkFromNodeID)
+	return c.agentRunnerFor(req, childID, autoResume, ownerName, ownerUserID, snap, forkFromNodeID, warnOut...)
 }
 
 // agentRunnerFor is agentRunner with the fork node passed in explicitly, for
@@ -379,12 +382,13 @@ func (c *Controller) spawnAgentRuntimeOptions(req protocol.SpawnRequest, childID
 // — see toRuntimeOptions' doc comment for why this is not a hand-written
 // SpawnRequest-to-RuntimeOptions mapping.
 //
-// warnOut is an optional spawn-scoped sink for the NON-FATAL diagnostics home
-// resolution produced (see home_executor.go). It is variadic so the resume and
-// recovery callers, which never surface warnings (a resumed child's go to the
-// daemon's log), stay unchanged — and so no package-level or Controller-level
-// map has to hold them. Controller.Spawn passes a slice and publishes it in
-// SpawnResponseData.Warnings.
+// warnOut is an optional collector for the NON-FATAL diagnostics home
+// resolution produced (see home_executor.go). It is variadic so a caller with
+// nowhere to surface them (recovery) can leave it out, and so no package-level
+// or Controller-level map has to hold them. Controller.Spawn passes a slice and
+// publishes it in SpawnResponseData.Warnings; Resume and RespawnChild pass one
+// too and log each entry at WARN, the only place a resumed child's warnings can
+// surface (it has no live spawn caller to answer).
 func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID, credentialOwner, forkFromNodeID string, warnOut ...*[]string) (fundi.RuntimeOptions, error) {
 	if agentSpawnHasExplicitDB(req.ExtraArgs) {
 		return fundi.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")

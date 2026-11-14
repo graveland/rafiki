@@ -251,25 +251,35 @@ var homeTransitionWait = 5 * time.Second
 // nothing had claimed — rafiki/executor/rafiki/workspace on one machine,
 // rafiki/home-executor on another, and b.home empty — and no next call or
 // migration is guaranteed before a daemon restart, which resumes onto exactly
-// those labels. Taking the slot makes a loss happen entirely BEFORE a migration
-// (which then claims the home it finds) or entirely AFTER one (and then the home
-// it clears is the one that migration established, consistently with the labels
-// its caller then rewrites).
+// those labels. When the loss takes the slot it therefore happens entirely
+// BEFORE a migration (which then claims the home it finds) or entirely AFTER
+// one, clearing the home that migration established.
 //
-// The wait is BOUNDED (homeTransitionWait) and never unbounded: the slot's holder is doing an RPC
-// that can hang, while this runs on the loss path where the caller must still
-// reach the release it owes the dead machine. When the budget expires with a
-// transition still running, Forget goes ahead WITHOUT the slot and says so; the
-// migration then loses its claim and rolls its own label write back
-// (migrateHomeNow), and a re-provision's label write compensates itself
-// (noteHomeBinding). It cannot deadlock: the slot is only ever waited on with
-// b.mu released, and nothing that holds it waits on a Forget.
+// The wait is NON-BLOCKING (homeWaitNone), deliberately: Forget's only caller is
+// HandleExecutorLost, which runs on the executor pool's park-sweep goroutine and
+// handles every affected child in sequence, so a per-child wait would delay every
+// other child's teardown in that sweep. The slot's holder is doing an RPC that
+// can hang, so a loss declines to wait for it and takes the protocol's recorded
+// loser side instead: it still forgets the binding, the migration loses its claim
+// and rolls its own label write back (migrateHomeNow), an adoption refuses the
+// home because the binding it published was forgotten (adoptHomeNow's `mine`
+// check), and a re-provision's label write compensates itself (noteHomeBinding).
+// It cannot deadlock: nothing that holds the slot waits on a Forget.
+//
+// RESIDUAL (A1, partially-enforced invariant): Forget releases the slot before
+// HandleExecutorLost rewrites the child's labels. A lazy adoption landing in that
+// window can establish a live home binding, and the handler's later write then
+// removes rafiki/workspace and sets executor-state=unbound on a bound child. The
+// home is still labelled (rafiki/home-executor and rafiki/executor survive), so a
+// restart resolves onto the labelled executor and provisions a fresh home there;
+// the workspace the live binding held is orphaned on that executor until it
+// restarts. Narrow, recorded rather than claimed impossible.
 func (b *boundExecutor) Forget(executorID string) (workspaceID string, ok bool) {
-	_ = b.withHomeTransition(context.Background(), homeWaitBounded, func(held bool) error {
+	_ = b.withHomeTransition(context.Background(), homeWaitNone, func(held bool) error {
 		if !held {
-			slog.Warn("a home transition did not settle before the wait expired; forgetting the "+
-				"binding without its slot — the migration rolls its label write back if it loses the home",
-				"child", b.childID, "executor", shortID(executorID), "waited", homeTransitionWait)
+			slog.Warn("a home transition was in flight; forgetting the binding without its slot — "+
+				"the migration rolls its label write back if it loses the home",
+				"child", b.childID, "executor", shortID(executorID))
 		}
 		workspaceID, ok = b.forget(executorID)
 		return nil
@@ -303,12 +313,11 @@ type homeWaitPolicy int
 const (
 	// homeWaitBounded is the LOSER-side wait: at most homeTransitionWait, then the
 	// caller runs WITHOUT the slot and covers it with its own half of the
-	// protocol — Forget proceeds and lets a migration roll its label write back,
-	// an adoption declines the claim, a re-provision undoes its own label write.
-	// It ignores the caller's context on purpose: a loss has no context to
-	// honour, and an adoption that gave up on a cancelled call would be the same
-	// decline by another route. The time budget is the only bound, so this wait
-	// can never be unbounded.
+	// protocol — an adoption declines the claim (adoptHomeNow's `mine` check) and
+	// a re-provision undoes its own label write. The only user is adoptHome; it
+	// ignores the caller's context on purpose, because an adoption that gave up on
+	// a cancelled call would be the same decline by another route. The time budget
+	// is the only bound, so this wait can never be unbounded.
 	homeWaitBounded homeWaitPolicy = iota
 
 	// homeWaitCaller is a MIGRATION's wait: the caller's own context bounds it, so
@@ -317,14 +326,14 @@ const (
 	// provision or write labels as if it had.
 	homeWaitCaller
 
-	// homeWaitNone never waits. It is a PROVISION's policy: a provision publishes
-	// the placeholder other callers wait on, and a transition holder can be one of
-	// them (a migration or adoption that finds this executor's half-built
-	// binding), so a provision blocking for the slot would let a holder wait on
-	// the very goroutine waiting for it. When the slot is busy the provision goes
-	// ahead without it; the label write compensates itself (noteHomeBinding), and
-	// its outcome is unchanged — a home provision is never failed for losing a
-	// race it does not need to win.
+	// homeWaitNone never waits, and it is used by the two callers that must not:
+	// a PROVISION (which publishes the placeholder other callers wait on — a
+	// transition holder can be one of them, so waiting for the slot would let a
+	// holder wait on the very goroutine waiting for it) and a LOSS (Forget, which
+	// runs on the pool's park-sweep goroutine for every affected child in
+	// sequence). When the slot is busy they go ahead without it; the loser side
+	// is the protocol's recorded fallback, and a home provision is never failed
+	// for losing a race it does not need to win.
 	homeWaitNone
 )
 
@@ -795,9 +804,9 @@ func (b *boundExecutor) publishWorkspace(ctx context.Context, bd *binding, execI
 //     is gone with a workspace the sweep has already released. Removal is
 //     confined to b.closed, which stops every later publish, so nothing
 //     legitimate can be writing these labels once it is set.
-//   - the binding was FORGOTTEN under it. Forget's wait for the slot is bounded
-//     (homeTransitionWait), so while this transition holds the slot a loss may
-//     still run its state change and its caller rewrite the labels it owns
+//   - the binding was FORGOTTEN under it. Forget never waits for the slot
+//     (homeWaitNone), so while this transition holds the slot a loss can still
+//     run its state change and its caller rewrite the labels it owns
 //     (HandleExecutorLost). Writing ours afterwards would leave the durable
 //     labels naming a workspace the loss already released while b.home names
 //     nothing — the disagreement a resume reads. UndoBinding restores them only
@@ -958,17 +967,27 @@ func (b *boundExecutor) failFirstProvision(bd *binding, execID string, err error
 // one most likely to collide with a loss, not the least: a loss landing between
 // this provision's label write and the claim below forgot the binding and
 // rewrote the labels, leaving the child with a home whose workspace the daemon
-// had just released. With the slot held, a loss happens either BEFORE the
-// adoption — which then adopts onto a home it finds empty, with the labels that
-// loss's caller already cleared — or AFTER it, where it clears the home the
-// adoption established, consistently with the labels its caller then rewrites.
+// had just released. With the slot held, a loss colliding with the adoption
+// either forgets the binding under it (the claim below then sees `!mine` and
+// declines the home) or happens after the adoption, clearing the home it
+// established.
+//
+// The slot does NOT cover the loss handler's own label rewrite, which runs after
+// Forget releases it (HandleExecutorLost, workspace_wiring.go): an adoption that
+// lands in that window can leave a live home binding whose rafiki/workspace label
+// the handler has just removed and whose executor-state it has just set to
+// `unbound`. That is a recorded residual of a partially-enforced invariant, not
+// an ordering this slot makes impossible — the home label survives, so a restart
+// resolves onto it, and the live workspace is orphaned on that executor until it
+// restarts.
 //
 // Nothing that holds the slot can reach here, so the slot is never re-entered:
 // migrateHomeNow only provisions and claims, Forget only mutates under b.mu,
 // and neither calls resolve — which is the one path to adoptHome. Adoption
 // waiting behind a migration is therefore bounded work, not a cycle; it waits
-// with b.mu released, exactly as Forget does. The held flag is threaded down to
-// the provision so it writes the labels without trying to take the slot again.
+// with b.mu released, exactly as every other waiter does. The held flag is
+// threaded down to the provision so it writes the labels without trying to take
+// the slot again.
 //
 // The durable home label is written here too. Until this path wrote it, a child
 // adopted lazily kept rafiki/home-executor naming the machine it used to be on —
@@ -1066,10 +1085,11 @@ func (b *boundExecutor) adoptHomeNow(ctx context.Context, execID string, held bo
 //
 // A LOSS takes the same slot (Forget), for the same reason and the mirror image
 // of it: Forget clears the home, which would otherwise land between this
-// migration's label write and its claim. Forget's wait is bounded, so a
-// provision that outlasts it still lets the home be cleared — and then
-// migrateHomeNow rolls its own label write back rather than leaving the durable
-// labels naming a home nothing claimed.
+// migration's label write and its claim. Forget never WAITS for the slot
+// (homeWaitNone), so a migration already holding it can have the home cleared
+// under a provision that is still running — and then migrateHomeNow rolls its own
+// label write back rather than leaving the durable labels naming a home nothing
+// claimed.
 func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error {
 	return b.withHomeTransition(ctx, homeWaitCaller, func(held bool) error {
 		b.mu.Lock()
@@ -1091,12 +1111,12 @@ func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error 
 // fact, threaded down so the provision's label write does not re-take a slot
 // this goroutine already holds).
 //
-// It can still LOSE the home it set out to claim: Forget clears the home when
-// the migration's target provision outlasts its bounded wait (see Forget). Losing
-// is not an error — the caller's call proceeds on the executor it resolved — but
-// the provision already published the target's labels, so this migration has to
-// roll its own write back, or the durable labels name a workspace nothing claims
-// while b.home names nothing at all.
+// It can still LOSE the home it set out to claim: a loss clears the home without
+// waiting for the slot when the migration's target provision is still running
+// (see Forget). Losing is not an error — the caller's call proceeds on the
+// executor it resolved — but the provision already published the target's
+// labels, so this migration has to roll its own write back, or the durable labels
+// name a workspace nothing claims while b.home names nothing at all.
 func (b *boundExecutor) migrateHomeNow(ctx context.Context, from, to string, held bool) error {
 	bd, err := b.ensureBindingHeld(ctx, to, true, held, true)
 	if err != nil {

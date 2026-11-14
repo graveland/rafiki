@@ -3506,7 +3506,13 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 	// from resumeOwnerUserID: snap.OwnerUserID when the row carries it, else
 	// the Labels["owner"] username resolved through the users store — which
 	// is what attributes the resumed conversation and feeds quota_status.
-	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap)
+	// resumeWarnings collects the same NON-FATAL home-resolution diagnostics a
+	// fresh spawn surfaces on SpawnResponseData.Warnings. A resume has no live
+	// caller to hand them to, so they are logged below at WARN: a persisted
+	// home that is offline must not silently cost the child its project
+	// context.
+	var resumeWarnings []string
+	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap, &resumeWarnings)
 	if err != nil {
 		return protocol.SpawnResponseData{}, agentRunnerError(err)
 	}
@@ -3552,8 +3558,15 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 	// old exited entry, builds the full Session from snap with Resume's
 	// session-continuity values, inserts it,
 	// adds to cm, persists, announces the spawn, starts monitorChild.
-	return c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
+	res, err := c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
 		snap.NoSession, snap.SessionFile, snap.ForkSession)
+	if err != nil {
+		return res, err
+	}
+	for _, w := range resumeWarnings {
+		slog.Warn("resume warning", "child", childID, "warning", w)
+	}
+	return res, nil
 }
 
 // RespawnChild kills the existing child (the caller must have already done so
@@ -3639,8 +3652,11 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	// See Resume's identical call: the owner was attested at the child's
 	// original spawn and lives on in snap.Labels; the USER ID comes from
 	// resumeOwnerUserID (snap.OwnerUserID, else the label resolved through
-	// the users store).
-	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap)
+	// the users store). respawnWarnings is the same home-resolution diagnostic
+	// sink Resume uses, logged below because a respawn has no caller response
+	// to carry it.
+	var respawnWarnings []string
+	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap, &respawnWarnings)
 	if err != nil {
 		return protocol.SpawnResponseData{}, agentRunnerError(err)
 	}
@@ -3686,8 +3702,15 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	// session-continuity values (fresh
 	// start: noSession=false, resumeSession=sessionPath, forkSession=""),
 	// inserts, adds to cm, persists, announces the spawn, starts monitorChild.
-	return c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
+	res, err := c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
 		false, sessionPath, "")
+	if err != nil {
+		return res, err
+	}
+	for _, w := range respawnWarnings {
+		slog.Warn("respawn warning", "child", childID, "warning", w)
+	}
+	return res, nil
 }
 
 // exitPersistDeadline bounds the wait for handleChildExit to finish after a

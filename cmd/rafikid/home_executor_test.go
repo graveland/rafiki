@@ -355,6 +355,38 @@ func TestHomeExecutorResumeFallsBackToTheBindingLabel(t *testing.T) {
 	ck.Eq(0, fb.provisions, "no probe: the record already answered")
 }
 
+// A resume's home warning must reach the runtime's warning sink, not be
+// discarded: Resume and RespawnChild pass the same collector Spawn does and log
+// each entry at WARN, because neither has a caller response to carry it. Without
+// that, a resumed child whose persisted home was offline came back without its
+// CLAUDE.md and nothing said so anywhere.
+func TestResumeRuntimeCollectsTheOfflineHomeWarning(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.execPool = &fakePool{}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	c.st.Insert(&childstore.Session{
+		ChildID:  "c1",
+		Status:   protocol.StatusExited,
+		Kind:     protocol.KindFundi,
+		Cwd:      "/tmp",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Labels:   map[string]string{homeExecutorLabel: "gone"},
+	})
+	snap, ok := c.st.Get("c1")
+	ck.Require().True(ok, "seeded child")
+	req := resumeRequestFromSnapshot(snap, "")
+	ck.Eq("gone", req.HomeExecutor, "the resume request must carry the persisted home")
+
+	var warnings []string
+	_, err := c.agentRuntimeOptionsFor(req, "c1", true, "brent", "", "", "", &warnings)
+	ck.NoError(err, "an offline persisted home must still build a runtime")
+	ck.Require().NotEmpty(warnings, "the offline-home diagnostic must reach the sink, not be dropped")
+	ck.StrContains(warnings[0],
+		"home executor gone is not connected; project instructions were not loaded")
+}
+
 // Field 35 is child-allowed on the strength of rule 1's refusal, so the refusal
 // must survive the CHILD-CREDENTIAL boundary: this spawns as a
 // server.ProvenanceChildToken caller through the same connectLifecycle adapter

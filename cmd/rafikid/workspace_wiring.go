@@ -323,15 +323,22 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 		// which is where a pinned child is re-provisioned when it comes back, and
 		// dropping the mode would silently turn a pinned child ephemeral.
 		//
-		// WITHOUT a home of its own any more, though. Forget waits for an in-flight
-		// home migration (see boundExecutor.Forget), so this loss may land AFTER the
-		// child's home moved to another machine, whose labels the migration wrote and
-		// whose workspace the resident binding still holds. Clearing rafiki/workspace
-		// then would delete a LIVE workspace's only label, and rafiki/executor would
-		// name neither the machine that workspace is on nor the home a resume binds.
-		// Those labels belong to the migration's home and are left alone; everything
-		// this handler owns — the releases above, the binding's removal, the steer
-		// below — still happens.
+		// WITHOUT a home of its own any more, though. A home that moved to another
+		// machine (a migration that ran before this loss took the slot) owns the
+		// labels now, and clearing rafiki/workspace would delete a LIVE workspace's
+		// only label while rafiki/executor named neither that machine nor the home
+		// a resume binds. Those labels belong to the migration's home and are left
+		// alone; everything this handler owns — the releases above, the binding's
+		// removal, the steer below — still happens.
+		//
+		// RESIDUAL (A1, partially-enforced invariant): this read-and-rewrite runs
+		// AFTER Forget released the home transition slot, so a lazy adoption can
+		// claim a home in the window between them. The write below then removes
+		// rafiki/workspace and sets executor-state=unbound while that adoption's
+		// binding is live. The home labels survive, so a restart resolves onto that
+		// executor and provisions a fresh home there; the workspace the live binding
+		// held is orphaned on it until that executor restarts. This is recorded, not
+		// claimed impossible — do not reword it back into a guarantee.
 		home := ""
 		if be != nil {
 			home = be.homeExecutor()
