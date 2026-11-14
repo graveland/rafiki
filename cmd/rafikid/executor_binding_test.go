@@ -167,6 +167,12 @@ type fakeBinder struct {
 	// exit sweep can land in: a test drives teardown from here.
 	onNoteBinding func()
 
+	// beforeNoteBinding, when set, runs synchronously inside NoteBinding -- with
+	// the fake's lock released, BEFORE the labels are written. It is the window
+	// between a home binding's workspace publication and its label write, where a
+	// loss can land after the publish and before the labels name the workspace.
+	beforeNoteBinding func()
+
 	// onWorkspaceMode, when set, runs synchronously inside WorkspaceMode with
 	// the fake's lock released; execID is the executor whose mode is asked for.
 	// It is the last binder call before a migration starts, so a test uses it to
@@ -445,7 +451,13 @@ func (f *fakeBinder) IsLive(id string) bool {
 
 func (f *fakeBinder) NoteBinding(_, execID, wsID string) {
 	f.mu.Lock()
-	hook := f.onNoteBinding
+	before, hook := f.beforeNoteBinding, f.onNoteBinding
+	f.mu.Unlock()
+	if before != nil {
+		before()
+	}
+
+	f.mu.Lock()
 	f.noted = append(f.noted, execID+"/"+wsID)
 	if f.labels == nil {
 		f.labels = map[string]string{}
@@ -2676,4 +2688,74 @@ func TestNoteHomeBindingRemovedWhenTheChildExitsMidWrite(t *testing.T) {
 	fb2.mu.Unlock()
 	c.Eq(1, clears, "removed exactly once; clears")
 	c.Eq(1, noted, "the write did happen — this is a compensation, not a skipped write; noted")
+}
+
+// A re-provision of the HOME binding REPLACES the workspace the child's labels
+// name, so it is a home transition like a migration: it takes the slot, and when
+// a loss that could not take it still gets through (its bounded wait expired) the
+// label write must undo itself rather than leave the durable labels naming a
+// workspace the loss already released while b.home names nothing.
+//
+// This is the path the earlier three fixes left open: reprovisionInPlace wrote
+// the home pair outside the slot, and noteHomeBinding compensated only a child
+// EXIT (b.closed), not a Forget. A resume reads those labels, so the disagreement
+// outlived the daemon.
+func TestReprovisionOfTheHomeBindingRacingForgetNamesNothing(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	// Spend the loss's wait rather than sleep through it: the re-provision holds
+	// the slot, so the loss gives up on it and goes ahead — the branch whose
+	// compensation this test is about.
+	prevWait := homeTransitionWait
+	homeTransitionWait = 20 * time.Millisecond
+	t.Cleanup(func() { homeTransitionWait = prevWait })
+
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	fb.reachableTo("a")
+	be := newBoundExecutor("c1", fb)
+	be.setHome("a")
+	if _, err := be.ensureBinding(context.Background(), "a", true); err != nil {
+		t.Fatalf("home binding: %v", err)
+	}
+	be.mu.Lock()
+	bd, homeWS := be.bindings["a"], be.bindings["a"].wsID
+	be.mu.Unlock()
+	c.NotEq("", homeWS, "test setup: the home binding names a workspace")
+
+	var (
+		forgotWS string
+		forgot   bool
+	)
+	// The loss lands between the re-provision's publication and its label write:
+	// the last moment the binding still exists and the labels do not yet name the
+	// workspace this re-provision made.
+	fb.mu.Lock()
+	fb.beforeNoteBinding = func() {
+		forgotWS, forgot = be.Forget("a")
+		if !forgot {
+			return
+		}
+		// HandleExecutorLost's half of a loss: release the workspace it was handed,
+		// then stop the labels claiming one.
+		fb.ReleaseOn(context.Background(), "a", forgotWS)
+		fb.mu.Lock()
+		delete(fb.labels, "rafiki/workspace")
+		fb.mu.Unlock()
+	}
+	fb.mu.Unlock()
+
+	be.reprovisionInPlace(context.Background(), bd, "a", homeWS)
+
+	c.True(forgot, "the loss must forget the home binding the re-provision had published")
+	c.Eq("", be.homeExecutor(), "the loss wins the home, so the child has none; home =")
+	labels := fb.bindingLabels()
+	c.Eq("", labels["rafiki/workspace"],
+		"the label write that landed after the loss must be undone, not left naming a workspace the "+
+			"loss released: a resume would bind it; labels %v", labels)
+	fb.mu.Lock()
+	undos := fb.undos
+	fb.mu.Unlock()
+	c.Eq(1, undos, "exactly one compensation — the write did happen and was then taken back; undos")
+	assertHomeAndLabelsAgree(t, be, fb)
+	assertNoWorkspaceLeaked(t, be, fb)
 }

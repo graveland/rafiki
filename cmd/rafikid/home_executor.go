@@ -303,6 +303,13 @@ func (c *Controller) bindHome(ctx context.Context, be *boundExecutor, homeID str
 // so it must never be usable before it is findable — and, through the same
 // helper, an exit that lands in that gap removes them again rather than
 // leaving them naming a workspace the sweep already released.
+//
+// Publish and label are one step under the home-transition slot, like every other
+// home-label write: the slot is uncontested at spawn (nothing else can reach a
+// fresh boundExecutor), but taking it here means no home binding is ever labelled
+// outside it, so there is no second ordering to reason about. Like provision, it
+// does not WAIT for the slot — it has already published the placeholder another
+// caller may be waiting on (homeWaitNone).
 func (b *boundExecutor) adopt(execID, wsID string, cl tools.ExecutorClient) error {
 	if execID == "" || wsID == "" {
 		return errors.New("adopt: a home binding needs an executor id and a workspace id")
@@ -327,18 +334,18 @@ func (b *boundExecutor) adopt(execID, wsID string, cl tools.ExecutorClient) erro
 	b.bindings[execID] = bd
 	b.mu.Unlock()
 
-	if perr := b.publishWorkspace(context.Background(), bd, execID, wsID, cl, true); perr != nil {
-		b.mu.Lock()
-		if b.bindings[execID] == bd {
-			delete(b.bindings, execID)
+	perr := b.withHomeTransition(context.Background(), homeWaitNone, func(bool) error {
+		if perr := b.publishWorkspace(context.Background(), bd, execID, wsID, cl, true); perr != nil {
+			return perr
 		}
-		bd.err = perr
-		b.mu.Unlock()
-		close(bd.ready)
+		b.noteHomeBinding(bd, execID, wsID)
+		return nil
+	})
+	if perr != nil {
+		b.failFirstProvision(bd, execID, perr)
 		return perr
 	}
 
-	b.noteHomeBinding(execID, wsID)
 	b.setHome(execID)
 	close(bd.ready)
 	return nil
