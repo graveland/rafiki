@@ -1277,7 +1277,8 @@ func TestBoundExecutorEphemeralMigratesImplicitOnly(t *testing.T) {
 	fb.mu.Lock()
 	labels := append([]string(nil), fb.homeLabels...)
 	fb.mu.Unlock()
-	c.EqDeep([]string{"c1|b"}, labels, "the durable home label must follow the migration, or a resumed child disagrees")
+	c.EqDeep([]string{"c1|a", "c1|b"}, labels,
+		"the durable home label must record the adoption AND follow the migration, or a resumed child disagrees; got")
 	execID, _, bound := b.Current()
 	c.True(bound, "bound")
 	c.Eq("b", execID, "home")
@@ -1770,7 +1771,8 @@ func TestBoundExecutorConcurrentImplicitCallersMigrateOnce(t *testing.T) {
 	fb.mu.Lock()
 	labels := append([]string(nil), fb.homeLabels...)
 	fb.mu.Unlock()
-	c.EqDeep([]string{"c1|b"}, labels, "one durable home label; got")
+	c.EqDeep([]string{"c1|a", "c1|b"}, labels,
+		"the adoption records its home and the migration moves it, once each; got")
 }
 
 // Two concurrent implicit callers whose live sets have flipped to DIFFERENT
@@ -1869,7 +1871,8 @@ func TestBoundExecutorConcurrentMigrationsToOneHome(t *testing.T) {
 	fb.mu.Unlock()
 	labels := fb.bindingLabels()
 
-	c.EqDeep([]string{"c1|b"}, homeLabels, "exactly ONE migration recorded its home; a second would move a home the labels do not name")
+	c.EqDeep([]string{"c1|a", "c1|b"}, homeLabels,
+		"the spawn's adoption records a, exactly ONE migration moves it to b, and no second migration writes a home the labels do not name; got")
 	c.Eq(1, migrations, "the child is told its workspace moved once; migrations")
 	c.Len(noted, 2, "exactly one label write for the migration (the spawn's home bind is the other); noted %v", noted)
 	c.Eq("b/"+wsID, noted[len(noted)-1], "the labels must name the HOME binding's executor and workspace; noted %v", noted)
@@ -1947,9 +1950,9 @@ func TestLostExecutorCannotClearTheHomeAMigrationHasNotClaimed(t *testing.T) {
 
 	// Spend the wait rather than sleep through it: the loss has to give up, and
 	// the migration has to lose its claim, for the rollback to be exercised.
-	prevWait := forgetMigrationWait
-	forgetMigrationWait = 20 * time.Millisecond
-	t.Cleanup(func() { forgetMigrationWait = prevWait })
+	prevWait := homeTransitionWait
+	homeTransitionWait = 20 * time.Millisecond
+	t.Cleanup(func() { homeTransitionWait = prevWait })
 
 	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
 	be := newBoundExecutor("c1", fb)
@@ -2062,6 +2065,130 @@ func TestForgetWaitsForAnInFlightHomeMigration(t *testing.T) {
 	fb.mu.Unlock()
 	c.Eq(1, migrations, "the migration kept its claim, so the child is told its tree moved once; migrations")
 	waitForReleases(t, fb, 1)
+	assertNoWorkspaceLeaked(t, be, fb)
+}
+
+// An adoption is the LAZIEST home transition — it runs mid-child, on a live
+// binding, the moment a call finds no home — so it is the one most likely to
+// meet a loss, and it takes the same slot a migration and a loss take. A loss
+// that cannot take the slot (the adoption is inside its provision RPC) forgets
+// the binding the adoption published and its caller rewrites the labels; the
+// adoption must then DECLINE the home rather than record one over labels that
+// rewrite has already cleared.
+func TestLostExecutorCannotOutrunAnAdoption(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	// Spend the wait: the adoption holds the slot, so the loss gives up on it.
+	prevWait := homeTransitionWait
+	homeTransitionWait = 20 * time.Millisecond
+	t.Cleanup(func() { homeTransitionWait = prevWait })
+
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	be := newBoundExecutor("c1", fb)
+	// No home at all — the child a loss left unbound — and one executor it can
+	// reach, which the call below adopts.
+	fb.reachableTo("a")
+
+	var (
+		forgetWS string
+		forgot   bool
+	)
+	fb.mu.Lock()
+	fb.onNoteBinding = func() {
+		// The window: the adoption has published the labels for a, and has not
+		// recorded the home yet.
+		forgetWS, forgot = be.Forget("a")
+		if forgot {
+			// The loss handler's job: release the forgotten workspace, then stop
+			// the labels claiming one.
+			fb.ReleaseOn(context.Background(), "a", forgetWS)
+		}
+		fb.mu.Lock()
+		delete(fb.labels, "rafiki/workspace")
+		fb.mu.Unlock()
+	}
+	fb.mu.Unlock()
+
+	// The adoption transition itself, with nothing after it: the follow-up call
+	// would re-provision on the (in this fixture still reachable) executor and
+	// paper over exactly the state being asserted.
+	err := be.adoptHome(context.Background(), "a")
+	c.NoError(err, "losing its binding to a loss is not a failure for the adoption")
+	c.True(forgot, "the loss must forget the binding the adoption published")
+	c.Eq("", be.homeExecutor(), "the adoption lost its binding, so it must claim NO home; home =")
+	assertHomeAndLabelsAgree(t, be, fb)
+
+	fb.mu.Lock()
+	releases, homeLabels := fb.releases, append([]string(nil), fb.homeLabels...)
+	fb.mu.Unlock()
+	c.Eq(1, releases, "the loss releases the workspace it was handed, once — the adoption must not release it again; releases")
+	c.Empty(homeLabels, "and an adoption that never claimed must record no home label; homeLabels %v", homeLabels)
+	assertNoWorkspaceLeaked(t, be, fb)
+}
+
+// The mirror of the migration case: a loss must not act while an ADOPTION holds
+// the slot either. It waits, then acts on the home the adoption established —
+// clearing it, because its machine is the one that was lost — and the labels its
+// caller rewrites agree with that empty home.
+func TestForgetWaitsForAnInFlightAdoption(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	be := newBoundExecutor("c1", fb)
+	fb.reachableTo("a")
+
+	// Hold the adoption inside its provision RPC.
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(string) {
+		once.Do(func() { close(entered) })
+		<-proceed
+	}
+	fb.mu.Unlock()
+
+	type callResult struct {
+		text string
+		err  error
+	}
+	callDone := make(chan callResult, 1)
+	go func() {
+		res, err := be.Execute(context.Background(), "read", nil)
+		callDone <- callResult{text: res.Text, err: err}
+	}()
+	<-entered
+
+	forgetDone := make(chan struct{})
+	go func() {
+		defer close(forgetDone)
+		ws, ok := be.Forget("a")
+		if !ok {
+			return
+		}
+		// The loss handler's job: release, then rewrite the labels.
+		fb.ReleaseOn(context.Background(), "a", ws)
+		fb.mu.Lock()
+		delete(fb.labels, "rafiki/workspace")
+		fb.mu.Unlock()
+	}()
+	select {
+	case <-forgetDone:
+		t.Fatal("Forget returned while an adoption was still running: it can forget the binding the " +
+			"adoption is about to claim")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(proceed)
+	<-forgetDone
+	r := <-callDone
+	c.NoError(r.err, "the call must still be served")
+	c.Eq("a:read", r.text, "served on; got")
+	c.Eq("", be.homeExecutor(), "the adoption claimed the home and the loss then cleared it; home =")
+	assertHomeAndLabelsAgree(t, be, fb)
+	fb.mu.Lock()
+	homeLabels := append([]string(nil), fb.homeLabels...)
+	fb.mu.Unlock()
+	c.EqDeep([]string{"c1|a"}, homeLabels, "the adoption recorded the home it claimed; got")
 	assertNoWorkspaceLeaked(t, be, fb)
 }
 

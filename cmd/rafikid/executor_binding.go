@@ -226,12 +226,17 @@ func (b *boundExecutor) Bindings() map[string]string {
 	return out
 }
 
-// forgetMigrationWait bounds how long a home-CLEARING path waits for a home
-// transition already in flight before going ahead without the slot.
+// homeTransitionWait bounds how long a path that needs the home-transition slot
+// waits for the transition already in flight before going ahead without it.
+//
+// Every home transition — a migration, a loss, an adoption — takes the same
+// slot (claimHomeTransition), and each one's fallback on expiry is the loser's
+// half of the protocol: the migration rolls back its label write, the loss
+// proceeds and lets the migration roll back, the adoption declines to claim.
 //
 // A var rather than a const so a test can spend the wait instead of sleeping
 // through it: the interesting branch is what happens when it expires.
-var forgetMigrationWait = 5 * time.Second
+var homeTransitionWait = 5 * time.Second
 
 // Forget removes one binding WITHOUT releasing its workspace — the caller owns
 // the release. Used when an executor's connection is known to be gone and the
@@ -250,7 +255,7 @@ var forgetMigrationWait = 5 * time.Second
 // home it clears is the one that migration established, consistently with the
 // labels its caller then rewrites).
 //
-// The wait is BOUNDED and never unbounded: the slot's holder is doing an RPC
+// The wait is BOUNDED (homeTransitionWait) and never unbounded: the slot's holder is doing an RPC
 // that can hang, while this runs on the loss path where the caller must still
 // reach the release it owes the dead machine. When the budget expires with a
 // migration still running, Forget goes ahead WITHOUT the slot and says so; the
@@ -263,7 +268,7 @@ func (b *boundExecutor) Forget(executorID string) (workspaceID string, ok bool) 
 	if !held {
 		slog.Warn("a home transition did not settle before the wait expired; forgetting the "+
 			"binding without its slot — the migration rolls its label write back if it loses the home",
-			"child", b.childID, "executor", shortID(executorID), "waited", forgetMigrationWait)
+			"child", b.childID, "executor", shortID(executorID), "waited", homeTransitionWait)
 	}
 
 	b.mu.Lock()
@@ -282,15 +287,17 @@ func (b *boundExecutor) Forget(executorID string) (workspaceID string, ok bool) 
 	return bd.wsID, true
 }
 
-// claimHomeTransition reserves the home-transition slot for a loss, waiting for
-// the transition in flight to settle first.
+// claimHomeTransition reserves the home-transition slot for a migration's
+// competitor — a loss (Forget) or an adoption (adoptHome) — waiting for the
+// transition in flight to settle first.
 //
-// held is false when forgetMigrationWait expires with a transition still
-// running: the caller then proceeds WITHOUT the slot, which is safe only
-// because a migration that loses its claim rolls its own label write back —
-// see Forget and rollbackLostMigration.
+// held is false when homeTransitionWait expires with a transition still
+// running: the caller then proceeds WITHOUT the slot, and covers it with the
+// loser's half of the protocol — a migration rolls its own label write back
+// (rollbackLostMigration), an adoption declines to claim the home
+// (adoptHome). See Forget for the loss's side.
 func (b *boundExecutor) claimHomeTransition() (release func(), held bool) {
-	deadline := time.Now().Add(forgetMigrationWait)
+	deadline := time.Now().Add(homeTransitionWait)
 	for {
 		b.mu.Lock()
 		wait := b.migrating
@@ -798,16 +805,76 @@ func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID strin
 // and only then is the home recorded, so a failed first provision leaves the
 // child WITH NO HOME rather than with one that has no workspace behind it.
 //
-// (N6, accepted: in the window between that provision and the setHome below, a
+// IT TAKES THE SAME HOME-TRANSITION SLOT as a migration and a loss
+// (claimHomeTransition). Adoption is the LAZIEST of the three — it runs
+// mid-child, on a live binding, the moment a call finds no home — so it is the
+// one most likely to collide with a loss, not the least: a loss landing between
+// this provision's label write and the claim below forgot the binding and
+// rewrote the labels, leaving the child with a home whose workspace the daemon
+// had just released. With the slot held, a loss happens either BEFORE the
+// adoption — which then adopts onto a home it finds empty, with the labels that
+// loss's caller already cleared — or AFTER it, where it clears the home the
+// adoption established, consistently with the labels its caller then rewrites.
+//
+// Nothing that holds the slot can reach here, so the slot is never re-entered:
+// migrateHomeNow only provisions and claims, Forget only mutates under b.mu,
+// and neither calls resolve — which is the one path to adoptHome. Adoption
+// waiting behind a migration is therefore bounded work, not a cycle; it waits
+// with b.mu released, exactly as Forget does.
+//
+// The durable home label is written here too. Until this path wrote it, a child
+// adopted lazily kept rafiki/home-executor naming the machine it used to be on —
+// after a loss, the machine just declared gone — and a restart resumed onto that
+// one while the labels named the adopted one. noteHomeExecutor's "never move a
+// persisted home" rule governs the SPAWN resolver; this is the one place that
+// decides a home for a child that has none, so memory and the label must agree
+// on the decision.
+//
+// (N6, accepted: in the window between that provision and the claim below, a
 // concurrent NAMED call to the same executor can provision a root-level
 // workspace there, which this adoption then promotes. Narrow, and self-healing
 // now that promotion is provision-then-release: the root workspace survives
 // until its replacement exists.)
 func (b *boundExecutor) adoptHome(ctx context.Context, execID string) error {
-	if _, err := b.ensureBinding(ctx, execID, true); err != nil {
+	release, held := b.claimHomeTransition()
+	defer release()
+	if !held {
+		slog.Warn("a home transition did not settle before the wait expired; adopting without its "+
+			"slot — this adoption declines the home if its binding is forgotten under it",
+			"child", b.childID, "executor", shortID(execID), "waited", homeTransitionWait)
+	}
+	if home := b.homeExecutor(); home != "" {
+		// Another caller made a home while this one waited for the slot. Its home
+		// stands; this call proceeds on the executor it resolved, without one.
+		return nil
+	}
+
+	bd, err := b.ensureBinding(ctx, execID, true)
+	if err != nil {
 		return err
 	}
-	b.setHome(execID)
+
+	b.mu.Lock()
+	exited := b.closed
+	// The claim is conditional on the binding this adoption published still being
+	// the child's: a loss that could not take the slot (see claimHomeTransition)
+	// forgets it and its caller rewrites the labels, so recording a home here
+	// would name a workspace that rewrite has already removed.
+	mine := b.bindings[execID] == bd
+	if mine && !exited {
+		b.home, b.homeSeeded = execID, true
+	}
+	b.mu.Unlock()
+	switch {
+	case exited:
+		return errChildExited
+	case !mine:
+		slog.Info("an adoption lost its binding to a concurrent loss; the child stays unbound",
+			"child", b.childID, "executor", shortID(execID))
+		return nil
+	}
+
+	b.binder.SetHomeLabel(b.childID, execID)
 	return nil
 }
 
