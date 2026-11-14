@@ -1100,6 +1100,22 @@ func matchModelRow(rows []*rafikiv1.ModelRow, model string) *rafikiv1.ModelRow {
 	return suffix
 }
 
+// printSpawnWarnings reports a Spawn response's non-fatal diagnostics, one
+// `warning: <text>` line each, in the daemon's order: an unbound selector, an
+// unresolved or disconnected home. The child exists and is usable, so these are
+// advisories rather than a refusal — and stderr keeps them out of a --detached
+// record's stdout.
+//
+// Every verb that reads a Spawn response reports them through here (`rafiki
+// create`, `rafiki models switch`), so the wording and the shape are one
+// function's, not a copy's. A create spawned through compactfork reports none:
+// that path returns an id only, so it has no response to read.
+func printSpawnWarnings(w io.Writer, warnings []string) {
+	for _, warn := range warnings {
+		fmt.Fprintf(w, "warning: %s\n", warn)
+	}
+}
+
 func runCreate(cmd *cobra.Command, args []string) error {
 	// Resolve the mode before doing anything: -j and -J together is a
 	// user-input error and must not spawn a child first.
@@ -1298,9 +1314,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		// Non-fatal spawn diagnostics — an unbound selector, an unresolved or
 		// disconnected home. The child exists and is usable, so these are
 		// advisories; stderr keeps them out of a --detached record's stdout.
-		for _, w := range resp.Msg.GetWarnings() {
-			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-		}
+		printSpawnWarnings(os.Stderr, resp.Msg.GetWarnings())
 	}
 
 	// The child set changed, so whatever a TAB answered a moment ago is stale.

@@ -1497,3 +1497,30 @@ func TestInteractiveWithHomeIsRefusedAtParseTime(t *testing.T) {
 	c.StrContains(err.Error(), "interactive", "the refusal names the flag group")
 	c.StrContains(err.Error(), "home", "the refusal names the flag group")
 }
+
+// printSpawnWarnings is the ONE place the wording lives: a `warning: <text>`
+// line per entry, in the daemon's order, and nothing at all for no entries.
+// Both verbs that read a Spawn response (create and models switch) call it, so
+// the switch path is guarded by this function rather than by a copy of it.
+func TestPrintSpawnWarnings(t *testing.T) {
+	cases := []struct {
+		name     string
+		warnings []string
+		want     string
+	}{
+		{"no warnings writes nothing", nil, ""},
+		{"one warning is one line", []string{"no home executor resolved"},
+			"warning: no home executor resolved\n"},
+		{"two warnings keep the daemon's order", []string{
+			"selector matches no live executor",
+			"home executor not connected",
+		}, "warning: selector matches no live executor\nwarning: home executor not connected\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printSpawnWarnings(&buf, tc.warnings)
+			assert.NewCollecting(t).Eq(tc.want, buf.String(), "written")
+		})
+	}
+}
