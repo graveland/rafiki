@@ -4,7 +4,7 @@
 See the package docstring in rafiki/client.py and sdk/python/README.md.
 """
 
-from .client import Client, Settle, SETTLED_STATES
+from .client import Client, RafikiSpawnWarning, Settle, SETTLED_STATES
 from .connect import Backoff, ConnectClient
 from .errors import ClientSetupError, ConnectError
 
@@ -14,6 +14,7 @@ __all__ = [
     "ClientSetupError",
     "ConnectClient",
     "ConnectError",
+    "RafikiSpawnWarning",
     "Settle",
     "SETTLED_STATES",
 ]

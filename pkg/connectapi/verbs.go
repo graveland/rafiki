@@ -342,7 +342,7 @@ func (s *Server) GetChild(
 }
 
 // childAllowedSpawnFields is the set of SpawnRequest field numbers a caller
-// with child provenance may set (fields 1-14, 30-34: the child-reachable
+// with child provenance may set (fields 1-14, 30-35: the child-reachable
 // shape of SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any
 // other set field — including one added in the future — is refused to a child
 // credential by default: firstOperatorOnlySet fails CLOSED on everything not
@@ -366,6 +366,9 @@ var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
 	// 34 (notify) is child-allowed: it only reduces what wakes the spawner and
 	// grants no authority.
 	34: true,
+	// 35 (home_executor) is child-allowed: it can only name an executor already
+	// in the caller's reachable set; the daemon refuses anything else.
+	35: true,
 }
 
 // firstOperatorOnlySet returns the wire name of the lowest-numbered field req
@@ -480,7 +483,7 @@ func (s *Server) Spawn(
 			}
 		}
 	}
-	id, err := (*p).Spawn(ctx, sp)
+	res, err := (*p).Spawn(ctx, sp)
 	if err != nil {
 		var ce *ControllerError
 		// A ControllerError is an AUTHORED refusal (a bad model, a bad cwd, a
@@ -500,7 +503,7 @@ func (s *Server) Spawn(
 		}
 		return nil, ConnectErr(err)
 	}
-	return connect.NewResponse(&rafikiv1.SpawnResponse{ChildId: id}), nil
+	return connect.NewResponse(&rafikiv1.SpawnResponse{ChildId: res.ChildID, Warnings: res.Warnings}), nil
 }
 
 // connectapiSpawnParams maps the wire request onto SpawnParams, preserving
@@ -522,6 +525,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		SkipDerivedIndex: m.GetSkipDerivedIndex(),
 		Notify:           m.GetNotify(),
 		ExecutorRef:      m.GetExecutorRef(),
+		HomeExecutor:     m.GetHomeExecutor(),
 		Labels:           m.GetLabels(),
 
 		ConfigDir:          m.GetConfigDir(),

@@ -104,6 +104,15 @@ result, a pending question, a turn error, the child's own budget cap, or
 exit/failure. Anything else is refused `invalid_argument`. Set `notify` on the
 generated `SpawnRequest` (`notify: "result".into()`); no wrapper is added.
 
+`SpawnRequest.home_executor` names (machine label or id) the executor where
+`cwd` applies and project context (CLAUDE.md/AGENTS.md) and project skills are
+read from — not a default for tool calls, and it must be in the child's
+reachable set or the spawn is refused; empty lets the daemon resolve a home
+itself. `SpawnResponse.warnings` carries the non-fatal spawn diagnostics (a
+selector matching no live executor yet, no home executor resolved, a home
+executor not connected): the child still started, so surface them rather than
+treating them as a failure.
+
 `tag` / `untag` / `list_tags` manage the calling connection OWNER's tags. A tag
 is a named, scoped handle to a node: naming it is the grant to fork from it,
 and `scope` says who holds it — lineage (the default), tree or owner. Anyone

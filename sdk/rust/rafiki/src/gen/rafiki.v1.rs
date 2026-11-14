@@ -1171,6 +1171,14 @@ pub struct SpawnRequest {
     /// value is InvalidArgument. Child-allowed: it only reduces notifications.
     #[prost(string, tag = "34")]
     pub notify: ::prost::alloc::string::String,
+    /// home_executor names (machine label or id) the executor where cwd applies
+    /// and project context (CLAUDE.md/AGENTS.md) and project skills are read
+    /// from. It is NOT a default for tool calls. It must be in the child's
+    /// reachable set or the spawn is refused. Empty: the daemon resolves a
+    /// home itself (executor_ref, the parent's home, a single reachable
+    /// executor, or the one executor where cwd exists) — or the child has none.
+    #[prost(string, tag = "35")]
+    pub home_executor: ::prost::alloc::string::String,
     /// The three budgets are optional because zero and unset differ, in OPPOSITE
     /// directions per field: unset max_depth means 1 and zero means "may not
     /// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
@@ -1218,6 +1226,11 @@ pub mod spawn_request {
 pub struct SpawnResponse {
     #[prost(string, tag = "1")]
     pub child_id: ::prost::alloc::string::String,
+    /// warnings are non-fatal spawn diagnostics: a selector matching no live
+    /// executor yet (the child starts unbound), no home executor resolved, a
+    /// home executor not connected.
+    #[prost(string, repeated, tag = "2")]
+    pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct KillRequest {

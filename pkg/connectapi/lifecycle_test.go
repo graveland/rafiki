@@ -18,15 +18,18 @@ import (
 )
 
 type fakeLifecycle struct {
-	got        connectapi.SpawnParams
-	spawnErr   error
-	killOut    connectapi.KillOutcome
-	killErr    error
-	killedID   string
-	gotShutdow time.Duration
-	gotKill    time.Duration
-	closedID   string
-	closeErr   error
+	got      connectapi.SpawnParams
+	spawnErr error
+	// spawnWarnings is what a successful Spawn reports as its non-fatal
+	// diagnostics, so a test can drive SpawnResponse.warnings.
+	spawnWarnings []string
+	killOut       connectapi.KillOutcome
+	killErr       error
+	killedID      string
+	gotShutdow    time.Duration
+	gotKill       time.Duration
+	closedID      string
+	closeErr      error
 
 	budgetChildID string
 	budgetMaxCost float64
@@ -41,12 +44,12 @@ type fakeLifecycle struct {
 	routingErr     error
 }
 
-func (f *fakeLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) (string, error) {
+func (f *fakeLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) (connectapi.SpawnResult, error) {
 	f.got = p
 	if f.spawnErr != nil {
-		return "", f.spawnErr
+		return connectapi.SpawnResult{}, f.spawnErr
 	}
-	return "c_new", nil
+	return connectapi.SpawnResult{ChildID: "c_new", Warnings: f.spawnWarnings}, nil
 }
 
 func (f *fakeLifecycle) Kill(_ context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (connectapi.KillOutcome, error) {

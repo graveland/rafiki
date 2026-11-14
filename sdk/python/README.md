@@ -59,6 +59,15 @@ quiet = c.spawn("audit this", kind="fundi", skip_derived_index=True)
 # spawn and not inherited; anything else raises ValueError.
 coordinator = c.spawn("run the plan", kind="fundi", notify="result")
 
+# `home_executor` names (machine label or id) the executor where `cwd` applies
+# and project context (CLAUDE.md/AGENTS.md) and project skills are read from —
+# NOT a default for tool calls; it must be in the child's reachable set or the
+# spawn is refused. Unset lets the daemon resolve a home itself.
+# Non-fatal spawn diagnostics (a selector matching no live executor yet, no
+# home executor resolved, a home executor not connected) come back as
+# `RafikiSpawnWarning` warnings, never as an exception.
+on_workstation = c.spawn("check the build", kind="fundi", home_executor="greyshift")
+
 c.send(child, "and a second turn")        # prompt (queues), "steer", "abort"
 kids = c.list(labels={"team": "infra"})   # status-filtered server-side,
                                           # label-filtered client-side

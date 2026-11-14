@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import time
+import warnings
 from typing import Iterable, Literal
 
 from . import _gen
@@ -176,6 +177,14 @@ class Settle:
         return "Settle(child_id=%r, state=%r, exit_code=%r)" % (self.child_id, self.state, self.exit_code)
 
 
+class RafikiSpawnWarning(UserWarning):
+    """A non-fatal spawn diagnostic (``SpawnResponse.warnings``): the child
+    started, but something the caller asked for could not be honoured — a
+    selector matching no live executor yet (the child starts unbound), no home
+    executor resolved, or a home executor that is not connected.
+    :meth:`Client.spawn` emits one of these per warning the daemon reports."""
+
+
 class Client:
     """A Connect client for rafiki's control plane. See the module docstring
     for the three constructors."""
@@ -288,6 +297,7 @@ class Client:
         parent_child_id: "str | None" = None,
         executor: "str | None" = None,
         executor_ref: "str | None" = None,
+        home_executor: "str | None" = None,
         script: "dict | _gen.control_pb.SpawnRequest.ScriptSpec | None" = None,
         prefill: "Iterable | None" = None,
         max_cost: "float | None" = None,
@@ -333,6 +343,16 @@ class Client:
         exiting or failing; plain turn ends and heartbeats are dropped. It
         matters to anything with a parent link or an MCP session, since that
         is who is woken. Any other value raises ``ValueError``.
+
+        ``home_executor`` names (machine label or id) the executor where
+        ``cwd`` applies and project context (CLAUDE.md/AGENTS.md) and project
+        skills are read from. It is NOT a default for tool calls, and it must
+        be in the child's reachable set or the daemon refuses the spawn.
+        ``None`` lets the daemon resolve a home itself — or leaves the child
+        without one. Non-fatal spawn diagnostics (a selector matching no live
+        executor yet, no home executor resolved, a home executor not
+        connected) arrive as :class:`RafikiSpawnWarning` warnings rather than
+        raising.
         """
         if notify is not None and notify not in ("all", "result"):
             raise ValueError('notify must be "all" or "result"')
@@ -345,6 +365,7 @@ class Client:
             parent_child_id=parent_child_id or "",
             executor_selector=executor or "",
             executor_ref=executor_ref or "",
+            home_executor=home_executor or "",
             preset=preset or "",
             max_depth=max_depth,
             max_cost=max_cost,
@@ -370,6 +391,8 @@ class Client:
             req.notify = notify
         resp = self._call("Spawn", req, _gen.control_pb.SpawnResponse)
         child_id = resp.child_id
+        for w in resp.warnings:
+            warnings.warn(w, RafikiSpawnWarning, stacklevel=2)
         if prompt:
             self.send(child_id, prompt)
         return child_id

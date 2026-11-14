@@ -977,6 +977,7 @@ class SpawnRequest:
     fork_from: Optional[SpawnRequest.ForkFrom] = None
     from_tag: str = ""
     notify: str = ""
+    home_executor: str = ""
     max_depth: Optional[int] = None
     max_cost: Optional[float] = None
     max_children: Optional[int] = None
@@ -1045,6 +1046,8 @@ class SpawnRequest:
             out["fromTag"] = self.from_tag
         if self.notify != "":
             out["notify"] = self.notify
+        if self.home_executor != "":
+            out["homeExecutor"] = self.home_executor
         if self.max_depth is not None:
             out["maxDepth"] = self.max_depth
         if self.max_cost is not None:
@@ -1148,6 +1151,9 @@ class SpawnRequest:
         _v = _d.get("notify")
         if _v is not None:
             obj.notify = _v
+        _v = _d.get("homeExecutor")
+        if _v is not None:
+            obj.home_executor = _v
         _v = _d.get("maxDepth")
         if _v is not None:
             obj.max_depth = _int_in(_v)
@@ -1220,11 +1226,14 @@ class SpawnRequest:
 @dataclasses.dataclass
 class SpawnResponse:
     child_id: str = ""
+    warnings: list[str] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
         if self.child_id != "":
             out["childId"] = self.child_id
+        if self.warnings:
+            out["warnings"] = [x for x in self.warnings]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "SpawnResponse":
@@ -1232,6 +1241,9 @@ class SpawnResponse:
         _v = _d.get("childId")
         if _v is not None:
             obj.child_id = _v
+        _v = _d.get("warnings")
+        if _v is not None:
+            obj.warnings = [x for x in _v]
         return obj
 
 @dataclasses.dataclass

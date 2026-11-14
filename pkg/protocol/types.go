@@ -430,6 +430,15 @@ type SpawnRequest struct {
 	// by ref first (see chooseExecutor/chooseLaunchExecutor).
 	ExecutorRef string `json:"executorRef,omitempty"`
 
+	// HomeExecutor names (machine label or id) the executor where Cwd applies
+	// and project context (CLAUDE.md/AGENTS.md) and project skills are read
+	// from. It is NOT a default for tool calls. It must be in the child's
+	// reachable set or the spawn is refused. Empty: the daemon resolves a home
+	// itself (ExecutorRef, the parent's home, a single reachable executor, or
+	// the one executor where Cwd exists) — or the child has none.
+	// Child-allowed on the Connect wire (SpawnRequest.home_executor = 35).
+	HomeExecutor string `json:"homeExecutor,omitempty"`
+
 	// WorkspaceMode selects how the child's workspace is provisioned:
 	// "ephemeral" (reschedulable) or "pinned" (existing tree).
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
@@ -583,6 +592,10 @@ type SpawnResponseData struct {
 	SessionID   string `json:"sessionId,omitempty"`
 	SessionFile string `json:"sessionFile,omitempty"`
 	Model       string `json:"model,omitempty"`
+	// Warnings are non-fatal spawn diagnostics: a selector matching no live
+	// executor yet (the child starts unbound), no home executor resolved, a
+	// home executor not connected. Empty on a clean spawn.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // KillResponseData is the data payload of a Kill answer (§6.5).

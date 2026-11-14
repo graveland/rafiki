@@ -82,9 +82,9 @@ func (s oneUserStore) RevokeToken(context.Context, string) (users.Token, error) 
 // request context by the time a Connect handler reached the lifecycle seam.
 type identityLifecycle struct{ saw *server.Identity }
 
-func (l *identityLifecycle) Spawn(ctx context.Context, _ connectapi.SpawnParams) (string, error) {
+func (l *identityLifecycle) Spawn(ctx context.Context, _ connectapi.SpawnParams) (connectapi.SpawnResult, error) {
 	l.saw = server.IdentityFromContext(ctx)
-	return "c_new", nil
+	return connectapi.SpawnResult{ChildID: "c_new"}, nil
 }
 
 func (l *identityLifecycle) Kill(context.Context, string, time.Duration, time.Duration) (connectapi.KillOutcome, error) {

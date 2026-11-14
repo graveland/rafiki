@@ -62,8 +62,8 @@ func emptyScopeServer(t *testing.T) *connectapi.Server {
 
 type emptyLifecycle struct{}
 
-func (emptyLifecycle) Spawn(context.Context, connectapi.SpawnParams) (string, error) {
-	return "c_spawned", nil
+func (emptyLifecycle) Spawn(context.Context, connectapi.SpawnParams) (connectapi.SpawnResult, error) {
+	return connectapi.SpawnResult{ChildID: "c_spawned"}, nil
 }
 
 func (emptyLifecycle) Rename(context.Context, string, string) error { return nil }

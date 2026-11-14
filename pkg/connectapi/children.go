@@ -122,7 +122,10 @@ type SpawnParams struct {
 	// Notify: see SpawnRequest.notify; child-allowed.
 	Notify      string
 	ExecutorRef string
-	Labels      map[string]string
+	// HomeExecutor: see SpawnRequest.home_executor; child-allowed. Empty means
+	// the daemon resolves a home itself, or the child has none.
+	HomeExecutor string
+	Labels       map[string]string
 
 	// Prefill is the pre-fill list: files (or globs) the child reads through
 	// its own Read tool before its first turn. Nil = none. Validated by the
@@ -177,8 +180,9 @@ type SpawnParams struct {
 // ChildLifecycle is the narrow slice of the daemon's Controller needed to
 // create and end children.
 type ChildLifecycle interface {
-	// Spawn creates a child and returns its id.
-	Spawn(ctx context.Context, p SpawnParams) (string, error)
+	// Spawn creates a child and reports its id plus any non-fatal spawn
+	// diagnostics (SpawnResponse.warnings).
+	Spawn(ctx context.Context, p SpawnParams) (SpawnResult, error)
 	// Kill ends a child and reports how it ended.
 	Kill(ctx context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (KillOutcome, error)
 	// Close finalizes an exited child: it leaves the daemon's store and can
@@ -200,6 +204,15 @@ type ChildLifecycle interface {
 	// per-child credential it is bounded to the caller's subtree and may set
 	// only prefer/sort/quant — never only= (see SetRoutingRequest).
 	SetRouting(ctx context.Context, childID, delta string) (string, error)
+}
+
+// SpawnResult is what a successful spawn reports: the new child's id, plus
+// any NON-FATAL diagnostics the caller should see (SpawnResponse.warnings).
+// Warnings never fail a spawn — a child whose selector matches no live
+// executor yet still starts, unbound.
+type SpawnResult struct {
+	ChildID  string
+	Warnings []string
 }
 
 // KillOutcome mirrors protocol.KillResponseData, which is what the daemon's

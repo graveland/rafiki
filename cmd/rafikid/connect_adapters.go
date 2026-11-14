@@ -398,7 +398,7 @@ func containsString(haystack []string, needle string) bool {
 // would touch every existing caller for no gain.
 type connectLifecycle struct{ c *Controller }
 
-func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (string, error) {
+func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (connectapi.SpawnResult, error) {
 	// The policy interceptor (connect_policy.go) admits a per-child credential
 	// here since wave 1 — Spawn is childScoped — and the handler has already
 	// forced p.ParentChildID to the caller's own child id (see
@@ -410,9 +410,9 @@ func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (
 	// mount authenticated.
 	res, err := l.c.Spawn(ctx, buildProtocolSpawnRequest(p), spawnOwner(ctx))
 	if err != nil {
-		return "", err
+		return connectapi.SpawnResult{}, err
 	}
-	return res.ChildID, nil
+	return connectapi.SpawnResult{ChildID: res.ChildID, Warnings: res.Warnings}, nil
 }
 
 // buildProtocolSpawnRequest maps the Connect-plane params onto the framed
@@ -439,6 +439,7 @@ func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 		SkipDerivedIndex: p.SkipDerivedIndex,
 		Notify:           p.Notify,
 		ExecutorRef:      p.ExecutorRef,
+		HomeExecutor:     p.HomeExecutor,
 		MaxDepth:         p.MaxDepth,
 		MaxCost:          p.MaxCost,
 		MaxChildren:      p.MaxChildren,

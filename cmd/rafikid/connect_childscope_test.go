@@ -79,9 +79,9 @@ type recordingLifecycle struct {
 	closes []string
 }
 
-func (l *recordingLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) (string, error) {
+func (l *recordingLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) (connectapi.SpawnResult, error) {
 	l.spawns = append(l.spawns, p)
-	return "c_new", nil
+	return connectapi.SpawnResult{ChildID: "c_new"}, nil
 }
 
 func (l *recordingLifecycle) Kill(_ context.Context, childID string, _, _ time.Duration) (connectapi.KillOutcome, error) {

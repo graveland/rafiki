@@ -77,10 +77,10 @@ const (
 )
 
 // childAllowedFieldNumbers mirrors verbs.go's childAllowedSpawnFields (fields
-// 1-14, 30-34: cwd through script, the three budget fields,
-// skip_derived_index, sandbox, the two fork fields, and notify). It is kept as its own
-// copy, not an import of the unexported production set, because this file is
-// package connectapi_test --
+// 1-14, 30-35: cwd through script, the three budget fields,
+// skip_derived_index, sandbox, the two fork fields, notify, and
+// home_executor). It is kept as its own copy, not an import of the
+// unexported production set, because this file is package connectapi_test --
 // and duplicating it here is the point: TestSpawnRequestFieldsAreClassified
 // fails the moment a field number exists that this list and
 // operatorOnlyFieldMin/Max don't between them cover, forcing a conscious
@@ -93,6 +93,7 @@ var childAllowedFieldNumbers = map[protoreflect.FieldNumber]bool{
 	32: true,
 	33: true,
 	34: true,
+	35: true,
 }
 
 // TestSpawnRefusesEveryOperatorOnlyFieldToAChildCaller walks SpawnRequest's
@@ -178,6 +179,36 @@ func TestSpawnAdmitsSkipDerivedIndexFromAChild(t *testing.T) {
 	_, err := s.Spawn(context.Background(), connect.NewRequest(req))
 	c.Require().NoError(err, "child Spawn with only skip_derived_index refused")
 	c.Eq(true, f.got.SkipDerivedIndex, "skip_derived_index did not reach SpawnParams: %+v", f.got)
+}
+
+// TestSpawnPassesHomeExecutor pins field 35 through the proto->SpawnParams
+// mapping: home_executor reaches the lifecycle's SpawnParams unchanged. It dies
+// if the field is dropped from connectapiSpawnParams, which would leave the
+// daemon unable to resolve the executor whose cwd and project context apply.
+func TestSpawnPassesHomeExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeLifecycle{}
+
+	_, err := childScopedServer(f).Spawn(context.Background(),
+		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/tmp", HomeExecutor: "greyshift"}))
+	c.Require().NoError(err, "child Spawn with home_executor refused")
+	c.Eq("greyshift", f.got.HomeExecutor, "home_executor did not reach SpawnParams: %+v", f.got)
+}
+
+// TestSpawnReturnsWarnings pins the response half of the spawn wire: the
+// lifecycle's non-fatal diagnostics reach SpawnResponse.warnings verbatim, so a
+// client can show them instead of the daemon having nowhere to say "your
+// selector matches no live executor yet". It dies if the handler stops copying
+// SpawnResult.Warnings onto the response.
+func TestSpawnReturnsWarnings(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeLifecycle{spawnWarnings: []string{"w1"}}
+
+	resp, err := childScopedServer(f).Spawn(context.Background(),
+		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/tmp"}))
+	c.Require().NoError(err, "Spawn")
+	c.EqDeep([]string{"w1"}, resp.Msg.GetWarnings(), "warnings")
+	c.Eq("c_new", resp.Msg.GetChildId(), "ChildId")
 }
 
 // TestSpawnCarriesForkFieldsToSpawnParams pins fields 32 and 33 through the
