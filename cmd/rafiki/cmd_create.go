@@ -972,6 +972,10 @@ func fillHomeExecutor(ctx context.Context, list listExecutorsFunc, req *protocol
 // reachable set. Sending such a home would be refused outright after the
 // request was built. An unparseable selector excludes too — the daemon refuses
 // that request anyway, and it must not gain a home on the way there.
+//
+// Staying narrow is deliberate even if the daemon later computes eligibility per
+// selector: this clause can only narrow the fill, never widen it, and the
+// client's job here is to never send a home the daemon will refuse.
 func homeMatchesSelector(selector string, labels map[string]string) bool {
 	if selector == "" {
 		return true

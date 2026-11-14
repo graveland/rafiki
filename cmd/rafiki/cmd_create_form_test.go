@@ -35,6 +35,10 @@ func TestShapingFlagsSuppressTheForm(t *testing.T) {
 		{"--kind", "claude"},
 		{"--detached"},
 		{"--cwd", "/tmp"},
+		// --home decides WHERE the child runs, so it must spawn directly: the
+		// form has no home row, and a shaping flag the form cannot carry would
+		// be silently dropped.
+		{"--home", "greyshift"},
 	} {
 		cmd, args := createCmdFor(t, argv...)
 		assert.NewCollecting(t).False(wantsCreateForm(cmd, args, true), "%v should spawn directly, not open the form", argv)
