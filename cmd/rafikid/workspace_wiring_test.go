@@ -362,6 +362,49 @@ func TestLostExecutorReleasesAWorkspaceOnlyTheBindingNames(t *testing.T) {
 	ck.Len(cp.batches(), 1, "and the child is told once, as for any other loss; got %d", len(cp.batches()))
 }
 
+// The skip must key on BOTH things this handler owns: a binding and the
+// rafiki/workspace label. A row can be unbound and still label a workspace — a
+// first loss whose label write failed, a recovered row that kept it — and
+// skipping it leaked that workspace and left a stale label naming a workspace on
+// a machine that is gone. Such a row is handled exactly as a first loss would:
+// released, label cleared, steered. The second notice then finds nothing left
+// and is a no-op, so the skip stays idempotent without becoming a leak.
+func TestLostExecutorReleasesAStaleLabelOnAnUnboundChild(t *testing.T) {
+	ck := assert.NewAborting(t)
+	pool := &fakePool{}
+	c, clk, cp := lostFixture(t, pool, row(lostExecID, "build-1"))
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_stalelabel", Status: protocol.StatusStreaming, StartedAt: time.Now(),
+		Kind: protocol.KindFundi,
+		Labels: map[string]string{
+			"rafiki/executor":       lostExecID,
+			"rafiki/executor-state": "unbound",
+			"rafiki/workspace":      "ws-stale",
+			"rafiki/workspace-mode": "pinned",
+			"rafiki/home-executor":  lostExecID,
+		},
+	})
+
+	c.HandleExecutorLost(lostExecID)
+	clk.Advance(6 * time.Second)
+
+	ck.EqDeep([]wsRelease{{executorID: lostExecID, workspaceID: "ws-stale"}}, pool.releases(),
+		"an unbound row that still labels a workspace on the lost machine must have it released, or it leaks; got")
+	snap, ok := c.st.Get("c_stalelabel")
+	ck.Require().True(ok, "the row survives")
+	_, stale := snap.Labels["rafiki/workspace"]
+	ck.False(stale, "the label must be cleared: it named a workspace on a machine that is gone, and rafiki list must stop showing it")
+	ck.Eq("unbound", snap.Labels["rafiki/executor-state"], "and the state it already carried is unchanged; =")
+	ck.Len(cp.batches(), 1, "it is told once, as any other loss; got %d", len(cp.batches()))
+
+	// With the label cleared and no binding, the second notice finds nothing
+	// left on the lost machine and does nothing.
+	c.HandleExecutorLost(lostExecID)
+	clk.Advance(6 * time.Second)
+	ck.Len(pool.releases(), 1, "a repeat notice must not ask for the same workspace again; got %d", len(pool.releases()))
+	ck.Len(cp.batches(), 1, "nor steer again; got %d", len(cp.batches()))
+}
+
 // execpool can declare the SAME executor id lost more than once: sweepParkedOnce
 // drops the park entry as it fires, but a machine that reconnects is parked
 // again on its next departure and expires again. The handler must be idempotent

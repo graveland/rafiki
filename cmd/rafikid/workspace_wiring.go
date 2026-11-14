@@ -280,6 +280,7 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 		}
 
 		be := c.boundExecutorFor(snap.ChildID)
+		labelWS := snap.Labels["rafiki/workspace"]
 
 		// Already unbound with nothing left on the lost machine: this is a
 		// REPEAT loss notice for the same executor id — the pool can declare an
@@ -289,7 +290,21 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 		// on news it already has. A child that re-bound on the lost machine is
 		// NOT in this state: NoteBinding clears rafiki/executor-state and
 		// restores rafiki/workspace, so it is handled below like any other.
-		if snap.Labels["rafiki/executor-state"] == "unbound" && !holdsBindingOn(be, lostID) {
+		//
+		// "Nothing left" is BOTH things this handler owns: a binding, and a
+		// rafiki/workspace label. Testing only the binding leaked a workspace —
+		// a row that is unbound but still labels a workspace (a first loss whose
+		// label write failed, a recovered row that kept the label) was skipped,
+		// so that workspace was never released and the stale label outlived the
+		// machine, leaving rafiki list naming a workspace that no longer exists.
+		// The label's workspace is the LOST machine's: NoteBinding writes
+		// rafiki/workspace and rafiki/executor together, and pass 1 has already
+		// matched rafiki/executor to lostID — a child whose tree lives on another
+		// machine carries that machine's id in rafiki/executor, so it never
+		// reaches this branch (its workspace is either its home, released by its
+		// own executor's loss, or a named-call binding, which pass 2 owns).
+		if snap.Labels["rafiki/executor-state"] == "unbound" &&
+			!holdsBindingOn(be, lostID) && labelWS == "" {
 			continue
 		}
 		handled[snap.ChildID] = true
@@ -299,7 +314,6 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 		// when the labels and the binding were last written by different paths
 		// (a stash carried over the spawn, a failed label write), and then the
 		// binding's workspace is the one nothing else would ever release.
-		labelWS := snap.Labels["rafiki/workspace"]
 		if labelWS != "" {
 			c.releaseWorkspace(context.Background(), lostID, labelWS)
 		}
