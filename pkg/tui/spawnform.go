@@ -1065,11 +1065,11 @@ func (c *Cockpit) applySpawned(m spawnedMsg) tea.Cmd {
 		// its routing. The source's history is borrowed, so nothing is lost
 		// by the close; a failure midway is reported by applySwitched with
 		// both ids, and finishing by hand is safe.
-		c.setNotice(fmt.Sprintf("created %s; closing %s…", m.childID, m.switchSource))
+		c.setNotice(withWarnings(fmt.Sprintf("created %s; closing %s…", m.childID, m.switchSource), m.warnings))
 		return tea.Batch(cmd, c.leaveRail(),
 			c.switchFinishCmd(m.switchSource, m.childID, m.sourceName, m.sourceRouting))
 	}
-	c.setNotice("created " + m.childID)
+	c.setNotice(withWarnings("created "+m.childID, m.warnings))
 	return tea.Batch(cmd, c.leaveRail())
 }
 

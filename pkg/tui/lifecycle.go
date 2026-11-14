@@ -15,7 +15,9 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/compactfork"
+	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
@@ -52,6 +54,10 @@ const statusShuttingDown = "shutting_down"
 type spawnedMsg struct {
 	childID string
 	err     error
+	// warnings are the daemon's non-fatal spawn diagnostics (an unbound
+	// selector, no home executor resolved, a home not connected). They ride the
+	// status line, never the form's error field: the child exists and is usable.
+	warnings []string
 	// switchSource, when set, marks this spawn as a model SWITCH's first step:
 	// the follow-up closes that child and renames childID into its name.
 	switchSource string
@@ -60,6 +66,19 @@ type spawnedMsg struct {
 	// spec to replay onto the new child).
 	sourceName    string
 	sourceRouting string
+}
+
+// withWarnings appends the daemon's spawn warnings to a status line, as ONE
+// line: the first warning, then a count of the rest so a long list cannot push
+// the rail's notice out of the pane. No warnings leaves the notice untouched.
+func withWarnings(notice string, warnings []string) string {
+	if len(warnings) == 0 {
+		return notice
+	}
+	if len(warnings) == 1 {
+		return notice + "; warning: " + warnings[0]
+	}
+	return fmt.Sprintf("%s; warning: %s (+%d more)", notice, warnings[0], len(warnings)-1)
 }
 
 type killedMsg struct {
@@ -232,8 +251,48 @@ func (c *Cockpit) buildSpawnRequest(p spawnParams) *rafikiv1.SpawnRequest {
 		req.ExecutorRef = p.executor
 	case p.kind == protocol.KindFundi || c.executorSelectorFromFlag:
 		req.ExecutorSelector = c.executorSelector
+		// Home is the CLI's rule over the rows this form already fetched: only a
+		// fundi child, only a selector the CALLER declared (a session executor's
+		// selector names exactly this machine, so the daemon resolves the same
+		// home from it), and only a machine the daemon already listed as
+		// eligible and inside that selector.
+		if p.kind == protocol.KindFundi && c.executorSelectorFromFlag {
+			req.HomeExecutor = c.resolvedHome(p.kind, c.executorSelector)
+		}
 	}
 	return req
+}
+
+// resolvedHome is this machine's executor name when the daemon's cached rows
+// for kind list it eligible AND its labels satisfy selector; "" otherwise.
+//
+// It reads only what fetchExecutorsCmd already fetched, so it costs no round
+// trip and never blocks Update. The eligible flag alone is not enough: the
+// daemon computes it for a SELECTORLESS spawn, so a machine can be eligible in
+// general and still be outside this child's reachable set — and Spawn refuses
+// an unreachable home outright.
+func (c *Cockpit) resolvedHome(kind, selector string) string {
+	if selector == "" {
+		return ""
+	}
+	rows, loaded := c.executorsFor(kind)
+	if !loaded {
+		return ""
+	}
+	name, _, err := paths.MachineName()
+	if err != nil || name == "" {
+		return ""
+	}
+	sel, err := executors.ParseSelector(selector)
+	if err != nil {
+		return ""
+	}
+	for _, r := range rows {
+		if r.GetMachine() == name && r.GetEligible() && sel.Matches(r.GetLabels()) {
+			return name
+		}
+	}
+	return ""
 }
 
 // spawnCmd creates a child and reports the id the daemon assigned.
@@ -250,7 +309,7 @@ func (c *Cockpit) spawnCmd(p spawnParams) tea.Cmd {
 		if err != nil {
 			return spawnedMsg{err: err}
 		}
-		return spawnedMsg{childID: resp.Msg.GetChildId()}
+		return spawnedMsg{childID: resp.Msg.GetChildId(), warnings: resp.Msg.GetWarnings()}
 	}
 }
 
@@ -298,6 +357,12 @@ func (c *Cockpit) switchRequest(ctx context.Context, p spawnParams) (*rafikiv1.S
 	if pname := src.GetLabels()["rafiki/preset"]; pname != "" {
 		req.Preset = pname
 	}
+	// A switch continues the same work on the same machine, so the fork keeps
+	// the source's home: cwd and CLAUDE.md only exist there, and a re-resolved
+	// home could land the continuation elsewhere.
+	if home := src.GetLabels()["rafiki/home-executor"]; home != "" {
+		req.HomeExecutor = home
+	}
 	labels := map[string]string{}
 	for k, v := range src.GetLabels() {
 		// Only USER labels carry over: rafiki/ and fundi/ are daemon
@@ -334,6 +399,7 @@ func (c *Cockpit) switchSpawnCmd(p spawnParams) tea.Cmd {
 		}
 		return spawnedMsg{
 			childID:       resp.Msg.GetChildId(),
+			warnings:      resp.Msg.GetWarnings(),
 			switchSource:  p.tailSource(),
 			sourceName:    src.GetName(),
 			sourceRouting: src.GetRouting(),

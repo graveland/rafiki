@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1162,4 +1163,184 @@ func TestForkOverflowRefusesCompactWithATagFork(t *testing.T) {
 	c.NoError(compactRefusal(true, protocol.SpawnRequest{
 		ForkFrom: &protocol.ForkFrom{ChildID: "c_01ABC"},
 	}), "a child-id fork with --compact")
+}
+
+// ── home executor ────────────────────────────────────────────────────────────
+
+// listExecutorsFake is the one Control RPC home resolution calls, so a test
+// drives the rule with a fake client and no socket. The embedded interface
+// supplies the unimportant methods.
+type listExecutorsFake struct {
+	rafikiv1connect.ControlClient
+
+	rows  []*rafikiv1.ExecutorRow
+	err   error
+	calls int
+	got   *rafikiv1.ListExecutorsRequest
+}
+
+func (f *listExecutorsFake) ListExecutors(
+	_ context.Context, req *connect.Request[rafikiv1.ListExecutorsRequest],
+) (*connect.Response[rafikiv1.ListExecutorsResponse], error) {
+	f.calls++
+	f.got = req.Msg
+	if f.err != nil {
+		return nil, f.err
+	}
+	return connect.NewResponse(&rafikiv1.ListExecutorsResponse{Rows: f.rows}), nil
+}
+
+// executorRow is what the daemon lists: a machine label is the row's own
+// Labels["machine"], so a selector can match it like any other label.
+func executorRow(machine string, eligible bool, labels map[string]string) *rafikiv1.ExecutorRow {
+	l := map[string]string{"machine": machine}
+	for k, v := range labels {
+		l[k] = v
+	}
+	return &rafikiv1.ExecutorRow{Id: "e_" + machine, Machine: machine, Labels: l, Eligible: eligible}
+}
+
+// homeMachine isolates the profile and names this machine, the two pieces of
+// the environment the rule reads.
+func homeMachine(t *testing.T, name string) {
+	t.Helper()
+	isolateProfiles(t)
+	t.Setenv(paths.ExecutorName, name)
+}
+
+// The client names this machine as the child's home only when the daemon has
+// just listed it eligible under the selector the spawn carries: the daemon
+// REFUSES a home outside the child's reachable set, so naming an executor it
+// did not confirm would turn a spawn into a refusal.
+func TestHomeExecutorFilledWhenLocalEligible(t *testing.T) {
+	c := assert.NewAborting(t)
+	homeMachine(t, "greyshift")
+
+	fake := &listExecutorsFake{rows: []*rafikiv1.ExecutorRow{
+		executorRow("silvershift", true, map[string]string{"owner": "brent"}),
+		executorRow("greyshift", true, map[string]string{"owner": "brent"}),
+	}}
+	req := &protocol.SpawnRequest{Kind: protocol.KindFundi, ExecutorSelector: "owner=brent"}
+
+	fillHomeExecutor(context.Background(), fake.ListExecutors, req, false)
+
+	c.Eq("greyshift", req.HomeExecutor, "this machine's eligible row is the child's home")
+	c.Eq(1, fake.calls, "ListExecutors calls")
+	c.Eq(protocol.KindFundi, fake.got.GetKind(), "the listing must be scoped to the child's kind")
+	c.Eq("owner=brent", fake.got.GetSelector(), "the listing must ask about the selector the spawn carries")
+}
+
+// An ineligible row, a lister failure and a machine with no name all leave the
+// field empty: empty means "the daemon resolves a home", and a pre-flight that
+// cannot answer must never fail a spawn.
+func TestHomeExecutorNotFilledWhenIneligible(t *testing.T) {
+	c := assert.NewAborting(t)
+	homeMachine(t, "greyshift")
+
+	fake := &listExecutorsFake{rows: []*rafikiv1.ExecutorRow{
+		executorRow("greyshift", false, map[string]string{"owner": "brent"}),
+	}}
+	ineligible := &protocol.SpawnRequest{Kind: protocol.KindFundi, ExecutorSelector: "owner=brent"}
+	fillHomeExecutor(context.Background(), fake.ListExecutors, ineligible, false)
+	c.Eq("", ineligible.HomeExecutor, "an ineligible machine must never be named; the daemon would refuse it")
+
+	failing := &listExecutorsFake{err: errors.New("daemon unreachable")}
+	failed := &protocol.SpawnRequest{Kind: protocol.KindFundi, ExecutorSelector: "owner=brent"}
+	fillHomeExecutor(context.Background(), failing.ListExecutors, failed, false)
+	c.Eq("", failed.HomeExecutor, "a lister failure must leave the home to the daemon")
+	c.Eq(1, failing.calls, "a lister failure is not retried")
+
+	t.Setenv(paths.ExecutorName, "")
+	unnamed := &protocol.SpawnRequest{Kind: protocol.KindFundi, ExecutorSelector: "owner=brent"}
+	fillHomeExecutor(context.Background(), fake.ListExecutors, unnamed, false)
+	c.Eq("", unnamed.HomeExecutor, "a machine with no name has no home to name")
+}
+
+// --home is the caller's decision: it rides the request verbatim (the daemon
+// is the authority that refuses an unreachable one) and the eligibility fill
+// never touches it.
+func TestHomeExecutorFlagWins(t *testing.T) {
+	c := assert.NewAborting(t)
+	homeMachine(t, "greyshift")
+
+	cmd := newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("home", "silvershift"))
+	req, err := buildSpawnRequest(cmd, nil)
+	c.Require().NoError(err, "buildSpawnRequest")
+	c.Eq("silvershift", req.HomeExecutor, "--home must ride the request verbatim")
+	c.Eq("silvershift", connectSpawnRequest(req).GetHomeExecutor(), "connectSpawnRequest must carry the home field")
+
+	fake := &listExecutorsFake{rows: []*rafikiv1.ExecutorRow{
+		executorRow("greyshift", true, map[string]string{"owner": "brent"}),
+	}}
+	spawn := &protocol.SpawnRequest{
+		Kind:             protocol.KindFundi,
+		ExecutorSelector: "owner=brent",
+		HomeExecutor:     "silvershift",
+	}
+	fillHomeExecutor(context.Background(), fake.ListExecutors, spawn, false)
+	c.Eq("silvershift", spawn.HomeExecutor, "a declared home must never be replaced by an inferred one")
+	c.Eq(0, fake.calls, "a declared home needs no listing at all")
+}
+
+// The paths that must not infer a home: an explicit executor (the daemon
+// resolves home from the ref), the session executor (its selector already
+// names exactly this machine), a kind that is not fundi, and a spawn with no
+// selector at all.
+func TestHomeExecutorSkippedForRefAndSessionExecutor(t *testing.T) {
+	homeMachine(t, "greyshift")
+
+	cases := []struct {
+		name            string
+		req             *protocol.SpawnRequest
+		sessionExecutor bool
+	}{
+		{
+			name: "a named executor",
+			req:  &protocol.SpawnRequest{Kind: protocol.KindFundi, ExecutorRef: "greyshift", ExecutorSelector: "owner=brent"},
+		},
+		{
+			name:            "the session executor",
+			req:             &protocol.SpawnRequest{Kind: protocol.KindFundi, ExecutorSelector: "owner=brent"},
+			sessionExecutor: true,
+		},
+		{
+			name: "a claude child",
+			req:  &protocol.SpawnRequest{Kind: protocol.KindClaude, ExecutorSelector: "owner=brent"},
+		},
+		{
+			name: "no selector",
+			req:  &protocol.SpawnRequest{Kind: protocol.KindFundi},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
+			fake := &listExecutorsFake{rows: []*rafikiv1.ExecutorRow{
+				executorRow("greyshift", true, map[string]string{"owner": "brent"}),
+			}}
+			fillHomeExecutor(context.Background(), fake.ListExecutors, tc.req, tc.sessionExecutor)
+			ck.Eq("", tc.req.HomeExecutor, "this path must not infer a home")
+			ck.Eq(0, fake.calls, "this path must not spend a round trip")
+		})
+	}
+}
+
+// The daemon's eligible flag is computed for a SELECTORLESS spawn, so a machine
+// eligible in general can still be outside this child's reachable set. Naming
+// it would be refused after the request was built, which is worse than leaving
+// home empty for the daemon.
+func TestHomeExecutorNotFilledWhenSelectorExcludesThisMachine(t *testing.T) {
+	c := assert.NewAborting(t)
+	homeMachine(t, "greyshift")
+
+	fake := &listExecutorsFake{rows: []*rafikiv1.ExecutorRow{
+		executorRow("greyshift", true, map[string]string{"env": "home"}),
+	}}
+	req := &protocol.SpawnRequest{Kind: protocol.KindFundi, ExecutorSelector: "env=prod"}
+
+	fillHomeExecutor(context.Background(), fake.ListExecutors, req, false)
+
+	c.Eq("", req.HomeExecutor, "a machine outside the selector must not be named as the home")
+	c.Eq(1, fake.calls, "the row set was still read; only this machine's match failed")
 }

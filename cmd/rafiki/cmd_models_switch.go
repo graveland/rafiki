@@ -110,6 +110,62 @@ func completeSwitchArgs(cmd *cobra.Command, args []string, toComplete string) ([
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
+// switchSpawnRequest shapes the fork a switch spawns: the source's cwd,
+// parent, home and labels, on the new model. Extracted from runModelsSwitch so
+// the carrying rules are testable without a daemon — an inlined copy in a test
+// passes no matter what the command actually sends.
+//
+// A switch continues the same work on the same machine, so the fork keeps the
+// source's home: --cwd and CLAUDE.md only exist there, and letting the daemon
+// re-resolve home could land the continuation elsewhere (or, with a warning,
+// nowhere). An unlabelled source leaves it empty for the daemon.
+//
+// The parent is carried so a SUBAGENT's switch stays under the same
+// coordinator: dropping it would move the switch out of the coordinator's
+// lineage (budget, tag scopes, reports) and rename it against the wrong sibling
+// set. A top-level source has no parent label and stays top-level. ParentLabel
+// honours the pre-rename fundi/parent spelling, the same fallback Rename and
+// the lineage reads use.
+//
+// The source's preset re-resolves on the switch spawn: its tool, skill and MCP
+// allowlists and its prompt are part of "the same conversation", and the
+// preset's own model is overridden by the switch's explicit model (preset
+// resolves first, explicit fields win). A preset DELETED since the source
+// spawned refuses the switch — a safe failure, both conversations remain. Plain
+// --fork-from does NOT carry the preset: pass -p yourself.
+func switchSpawnRequest(src *rafikiv1.ChildSummary, sourceChildID, model string) *rafikiv1.SpawnRequest {
+	parent, _ := childstore.ParentLabel(src.GetLabels())
+	req := &rafikiv1.SpawnRequest{
+		ParentChildId: parent,
+		// The source's cwd: a switch continues the same work, and Spawn
+		// refuses a cwd its machine cannot see.
+		Cwd:          src.GetCwd(),
+		Kind:         protocol.KindFundi,
+		Model:        model,
+		HomeExecutor: src.GetLabels()["rafiki/home-executor"],
+		ForkFrom: &rafikiv1.SpawnRequest_ForkFrom{
+			// Empty cursor: the source's last completed turn — the newest
+			// point a fork may legally start after.
+			ChildId: sourceChildID,
+		},
+	}
+	if pname := src.GetLabels()["rafiki/preset"]; pname != "" {
+		req.Preset = pname
+	}
+	labels := map[string]string{}
+	for k, v := range src.GetLabels() {
+		// Only USER labels carry over: rafiki/ and fundi/ are daemon
+		// namespaces, and "owner" is reserved outright (it feeds executor
+		// admission selectors) — spawning with any of them is refused.
+		if strings.HasPrefix(k, "rafiki/") || strings.HasPrefix(k, "fundi/") || k == "owner" {
+			continue
+		}
+		labels[k] = v
+	}
+	req.Labels = labels
+	return req
+}
+
 func runModelsSwitch(cmd *cobra.Command, args []string) error {
 	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
@@ -166,39 +222,7 @@ func runModelsSwitch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// The source's parent, so a SUBAGENT's switch stays under the same
-	// coordinator: dropping it would move the switch out of the coordinator's
-	// lineage (budget, tag scopes, reports) and rename it against the wrong
-	// sibling set. A top-level source has no parent label and stays top-level.
-	// ParentLabel honours the pre-rename fundi/parent spelling, the same
-	// fallback Rename and the lineage reads use.
-	parent, _ := childstore.ParentLabel(src.GetLabels())
-
-	req := &rafikiv1.SpawnRequest{
-		ParentChildId: parent,
-		// The source's cwd: a switch continues the same work, and Spawn
-		// refuses a cwd its machine cannot see.
-		Cwd:  src.GetCwd(),
-		Kind: protocol.KindFundi,
-		// Model may be slash-free: the daemon resolves an owner alias.
-		Model: model,
-		ForkFrom: &rafikiv1.SpawnRequest_ForkFrom{
-			// Empty cursor: the source's last completed turn — the newest
-			// point a fork may legally start after.
-			ChildId: childID,
-		},
-	}
-	labels := map[string]string{}
-	for k, v := range src.GetLabels() {
-		// Only USER labels carry over: rafiki/ and fundi/ are daemon
-		// namespaces, and "owner" is reserved outright (it feeds executor
-		// admission selectors) — spawning with any of them is refused.
-		if strings.HasPrefix(k, "rafiki/") || strings.HasPrefix(k, "fundi/") || k == "owner" {
-			continue
-		}
-		labels[k] = v
-	}
-	req.Labels = labels
+	req := switchSpawnRequest(src, childID, model)
 	if cmd.Flags().Changed("max-cost") {
 		v, _ := cmd.Flags().GetFloat64("max-cost")
 		if v < 0 {
@@ -215,16 +239,6 @@ func runModelsSwitch(cmd *cobra.Command, args []string) error {
 		req.MaxCost = &usd
 	} else if src.MaxCost != nil {
 		req.MaxCost = src.MaxCost
-	}
-
-	// The source's preset re-resolves on the switch spawn: its tool, skill and
-	// MCP allowlists and its prompt are part of "the same conversation", and
-	// the preset's own model is overridden by the switch's explicit model
-	// (preset resolves first, explicit fields win). A preset DELETED since the
-	// source spawned refuses the switch — a safe failure, both conversations
-	// remain. Plain --fork-from does NOT carry the preset: pass -p yourself.
-	if pname := src.GetLabels()["rafiki/preset"]; pname != "" {
-		req.Preset = pname
 	}
 
 	var newID string

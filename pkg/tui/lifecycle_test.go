@@ -3,7 +3,9 @@
 package tui
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	rafikiv1connect "go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
 
@@ -585,4 +589,156 @@ func TestAppliedRenameUpdatesRailAndDismissesModal(t *testing.T) {
 	n, _ := c.rail.Get("c_1")
 	ck.Eq("gamma", n.Name, "rail name")
 	ck.Nil(c.renameForm, "modal still up after a successful rename")
+}
+
+// ── home executor and spawn warnings ─────────────────────────────────────────
+
+// executorRowFor is a ListExecutors row: Machine mirrors Labels["machine"], as
+// the daemon builds it.
+func executorRowFor(machine string, eligible bool, labels map[string]string) *rafikiv1.ExecutorRow {
+	l := map[string]string{"machine": machine}
+	for k, v := range labels {
+		l[k] = v
+	}
+	return &rafikiv1.ExecutorRow{Id: "e_" + machine, Machine: machine, Labels: l, Eligible: eligible}
+}
+
+// The form fills home from the rows it already fetched — never by asking the
+// daemon again — and only from an eligible machine inside a selector the
+// CALLER declared. The daemon refuses a home outside the child's reachable set,
+// so naming one from a stale guess would turn a spawn into a refusal.
+func TestBuildSpawnRequestFillsHomeFromAnEligibleRow(t *testing.T) {
+	ck := assert.NewAborting(t)
+	t.Setenv(paths.ExecutorName, "greyshift")
+	c := &Cockpit{
+		executorSelector:         "owner=brent",
+		executorSelectorFromFlag: true,
+		executors: map[string][]*rafikiv1.ExecutorRow{
+			protocol.KindFundi: {
+				executorRowFor("silvershift", true, map[string]string{"owner": "brent"}),
+				executorRowFor("greyshift", true, map[string]string{"owner": "brent"}),
+			},
+		},
+	}
+
+	req := c.buildSpawnRequest(spawnParams{kind: protocol.KindFundi, cwd: "/tmp"})
+	ck.Eq("greyshift", req.GetHomeExecutor(), "this machine's eligible row must become the home")
+	ck.Eq("owner=brent", req.GetExecutorSelector(), "the declared selector still rides along")
+
+	// An ineligible row, a row outside the selector, and a not-yet-fetched
+	// answer all leave home empty — "the daemon resolves a home".
+	c.executors[protocol.KindFundi] = []*rafikiv1.ExecutorRow{
+		executorRowFor("greyshift", false, map[string]string{"owner": "brent"}),
+	}
+	ck.Eq("", c.buildSpawnRequest(spawnParams{kind: protocol.KindFundi, cwd: "/tmp"}).GetHomeExecutor(),
+		"an ineligible machine must not be named")
+
+	c.executors[protocol.KindFundi] = []*rafikiv1.ExecutorRow{
+		executorRowFor("greyshift", true, map[string]string{"env": "home"}),
+	}
+	c.executorSelector = "env=prod"
+	ck.Eq("", c.buildSpawnRequest(spawnParams{kind: protocol.KindFundi, cwd: "/tmp"}).GetHomeExecutor(),
+		"a machine outside the selector must not be named")
+
+	c.executors = map[string][]*rafikiv1.ExecutorRow{}
+	c.executorSelector = "owner=brent"
+	ck.Eq("", c.buildSpawnRequest(spawnParams{kind: protocol.KindFundi, cwd: "/tmp"}).GetHomeExecutor(),
+		"an answer that has not arrived is not a match")
+}
+
+// A session executor's selector already names exactly this machine, so the
+// daemon resolves the same home from it and the field would only add a name to
+// get wrong. An explicit executor field likewise leaves home to the daemon.
+func TestBuildSpawnRequestLeavesHomeToTheDaemonForASessionExecutor(t *testing.T) {
+	ck := assert.NewAborting(t)
+	t.Setenv(paths.ExecutorName, "greyshift")
+	c := &Cockpit{
+		executorSelector: "owner=brent",
+		executors: map[string][]*rafikiv1.ExecutorRow{
+			protocol.KindFundi: {executorRowFor("greyshift", true, map[string]string{"owner": "brent"})},
+		},
+	}
+
+	ck.Eq("", c.buildSpawnRequest(spawnParams{kind: protocol.KindFundi, cwd: "/tmp"}).GetHomeExecutor(),
+		"a session executor needs no explicit home")
+
+	req := c.buildSpawnRequest(spawnParams{kind: protocol.KindFundi, cwd: "/tmp", executor: "greyshift"})
+	ck.Eq("greyshift", req.GetExecutorRef(), "the form's executor field")
+	ck.Eq("", req.GetHomeExecutor(), "a named executor leaves home to the daemon")
+}
+
+// switchHomeClient answers the source read and records the spawn, so the switch
+// request can be inspected without a daemon.
+type switchHomeClient struct {
+	rafikiv1connect.ControlClient
+
+	labels map[string]string
+	spawn  *rafikiv1.SpawnRequest
+}
+
+func (f *switchHomeClient) GetChild(_ context.Context, req *connect.Request[rafikiv1.GetChildRequest]) (*connect.Response[rafikiv1.GetChildResponse], error) {
+	return connect.NewResponse(&rafikiv1.GetChildResponse{Child: &rafikiv1.ChildSummary{
+		ChildId: req.Msg.GetChildId(),
+		Cwd:     "/work/proj",
+		Labels:  f.labels,
+	}}), nil
+}
+
+// A switch continues the same work on the same machine, so its fork carries the
+// source's home: cwd and CLAUDE.md only exist there.
+func TestSwitchRequestCarriesTheSourceHome(t *testing.T) {
+	ck := assert.NewAborting(t)
+	t.Setenv(paths.ExecutorName, "greyshift")
+	client := &switchHomeClient{labels: map[string]string{"rafiki/home-executor": "silvershift"}}
+	c := &Cockpit{client: client}
+
+	req, _, err := c.switchRequest(context.Background(), spawnParams{
+		kind: protocol.KindFundi, cwd: "/work/proj", switchSource: "c_src",
+	})
+	ck.Require().NoError(err, "switchRequest")
+	ck.Eq("silvershift", req.GetHomeExecutor(), "the source's home must ride the fork")
+
+	client.labels = map[string]string{}
+	req, _, err = c.switchRequest(context.Background(), spawnParams{
+		kind: protocol.KindFundi, cwd: "/work/proj", switchSource: "c_src",
+	})
+	ck.Require().NoError(err, "switchRequest")
+	ck.Eq("", req.GetHomeExecutor(), "an unlabelled source leaves the home to the daemon")
+}
+
+// The daemon's warnings are non-fatal: the child spawned and is usable, so
+// they belong on the status line rather than in the form's error field — one
+// line, the first warning plus a count of the rest.
+func TestSpawnWarningsShownInStatus(t *testing.T) {
+	t.Run("one warning", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		c := formCockpit(t)
+		c.applySpawned(spawnedMsg{childID: "c_new", warnings: []string{"no home executor resolved"}})
+
+		ck.Nil(c.form, "a warning must not keep the form open")
+		ck.StrContains(c.notice, "warning: no home executor resolved", "notice")
+		ck.False(strings.Contains(c.notice, "more"), "a single warning needs no count: %q", c.notice)
+	})
+
+	t.Run("several warnings", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		c := formCockpit(t)
+		c.applySpawned(spawnedMsg{childID: "c_new", warnings: []string{
+			"selector matches no live executor",
+			"no home executor resolved",
+			"home executor not connected",
+		}})
+
+		ck.StrContains(c.notice, "created c_new", "the created id still names the child")
+		ck.StrContains(c.notice, "warning: selector matches no live executor", "notice")
+		ck.StrContains(c.notice, "(+2 more)", "the remaining warnings collapse into a count")
+	})
+
+	t.Run("no warnings", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		c := formCockpit(t)
+		c.applySpawned(spawnedMsg{childID: "c_new"})
+
+		ck.Eq("created c_new", c.notice, "a clean spawn says only what it made")
+	})
 }

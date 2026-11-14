@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/compactfork"
 	"go.graveland.dev/rafiki/pkg/costfmt"
+	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/modelquery"
@@ -106,6 +107,10 @@ Set these defaults on a profile, not an environment variable: see
 	// refuse through the form branch with a "pass --pymodule" the caller had
 	// already passed. Refuse at parse time instead, like --prefill-files above.
 	cmd.MarkFlagsMutuallyExclusive("interactive", "pymodule")
+	// The form has no home row and cannot show what a --home would send, so
+	// accepting both would parse the flag and then silently drop it on the form
+	// path. Refuse at parse time instead, like --prefill-files above.
+	cmd.MarkFlagsMutuallyExclusive("interactive", "home")
 	cmd.Flags().String("prefill-files", "",
 		"File listing files the child reads before its first turn (one per line; path[:N-M] or a glob; '-' for stdin, only with --detached). fundi: read before turn 1; claude: added to its system prompt as files to read first.")
 	// The create form cannot carry a pre-fill (pkg/tui's SpawnRequest has no
@@ -184,6 +189,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.MarkFlagsMutuallyExclusive("executor", "executor-selector")
 	cmd.Flags().Bool("no-local-executor", false,
 		"do not offer this machine as a workspace; nothing here joins the daemon's executor pool for this session")
+	cmd.Flags().String("home", "",
+		"executor where --cwd applies and CLAUDE.md is read from; defaults to this machine when it is eligible")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -561,6 +568,12 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	// gating on it makes a computed default unreachable.
 	req.ExecutorSelector, _ = cmd.Flags().GetString("executor-selector")
 
+	// Read unconditionally, like the selector above: an explicit --home rides
+	// the wire VERBATIM, even for an executor this client cannot see as
+	// eligible. The daemon is the authority that refuses an unreachable home,
+	// and a client that pre-validated it would hide that refusal.
+	req.HomeExecutor, _ = cmd.Flags().GetString("home")
+
 	// A script spawn carries its pymodule spec client-side: --pymodule is
 	// REQUIRED here, because the daemon's own refusal for a script kind
 	// without a spec describes a request this CLI should never have built,
@@ -610,6 +623,7 @@ func connectSpawnRequest(req protocol.SpawnRequest) *rafikiv1.SpawnRequest {
 		ParentChildId:      req.ParentChildID,
 		ExecutorSelector:   req.ExecutorSelector,
 		ExecutorRef:        req.ExecutorRef,
+		HomeExecutor:       req.HomeExecutor,
 		Preset:             req.Preset,
 		ConfigDir:          req.ConfigDir,
 		AppendSystemPrompt: req.AppendSystemPrompt,
@@ -904,6 +918,71 @@ func promptForExecutorSetup(ctx context.Context, cmd *cobra.Command, profileName
 	return createResolveLaunchExecutor(ctx, cmd, profileName, kind)
 }
 
+// listExecutorsFunc is the one Control RPC home resolution needs, so the rule
+// is testable with a fake client and no socket. rafikiv1connect.ControlClient's
+// ListExecutors method value satisfies it exactly.
+type listExecutorsFunc func(context.Context, *connect.Request[rafikiv1.ListExecutorsRequest]) (*connect.Response[rafikiv1.ListExecutorsResponse], error)
+
+// fillHomeExecutor sets req.HomeExecutor to this machine's executor name when
+// the daemon lists that machine as eligible under the request's selector.
+//
+// Home is where --cwd applies and CLAUDE.md is read from, and the daemon
+// REFUSES a home outside the child's reachable set — so the client only fills
+// it when the daemon itself just said this machine is in that set, under the
+// same selector the spawn carries. Every path that cannot answer leaves the
+// field EMPTY, which means "the daemon resolves a home": an explicit --home is
+// never overwritten (it is the caller's decision, sent verbatim), a named
+// executor needs no help (the daemon resolves home from the ref), a claude
+// child's home is its launch executor's, and the session executor's selector
+// already names exactly this machine.
+//
+// Best effort by construction: a spawn must never fail because this pre-flight
+// could not answer.
+func fillHomeExecutor(ctx context.Context, list listExecutorsFunc, req *protocol.SpawnRequest, sessionExecutor bool) {
+	if req.HomeExecutor != "" {
+		return
+	}
+	if req.Kind != protocol.KindFundi || req.ExecutorRef != "" || req.ExecutorSelector == "" || sessionExecutor {
+		return
+	}
+	name, _, err := paths.MachineName()
+	if err != nil || name == "" {
+		return
+	}
+	resp, err := list(ctx, connect.NewRequest(&rafikiv1.ListExecutorsRequest{
+		Selector: req.ExecutorSelector,
+		Kind:     req.Kind,
+	}))
+	if err != nil {
+		return
+	}
+	for _, row := range resp.Msg.GetRows() {
+		if row.GetMachine() == name && row.GetEligible() && homeMatchesSelector(req.ExecutorSelector, row.GetLabels()) {
+			req.HomeExecutor = name
+			return
+		}
+	}
+}
+
+// homeMatchesSelector reports whether a row's labels satisfy selector.
+//
+// The row's own eligible flag is not enough: the daemon computes it for a
+// SELECTORLESS spawn (ListExecutorRows builds an empty SpawnRequest), so a
+// machine can be eligible in general and still be outside this child's
+// reachable set. Sending such a home would be refused outright after the
+// request was built. An unparseable selector excludes too — the daemon refuses
+// that request anyway, and it must not gain a home on the way there.
+func homeMatchesSelector(selector string, labels map[string]string) bool {
+	if selector == "" {
+		return true
+	}
+	sel, err := executors.ParseSelector(selector)
+	if err != nil {
+		return false
+	}
+	return sel.Matches(labels)
+}
+
 // forkOverflow reports the source's borrowed size against the destination's
 // window. known is false when either side is unknown — no completed turn yet,
 // or a model the daemon cannot price — and unknown never refuses: a fork whose
@@ -1166,12 +1245,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// skip the session-executor fallback this task must not change.
 	ref, selector := resolveExecutor(flagExecutor, req.ExecutorSelector, "", false)
 	req.ExecutorRef, req.ExecutorSelector = ref, selector
+	sessionExecutorRan := false
 
 	if req.ExecutorRef == "" && req.ExecutorSelector == "" && req.Kind == protocol.KindFundi && !noLocalExecutor {
 		selector, stop, err := startSessionExecutor(cmdCtx(cmd), req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
 		}
+		sessionExecutorRan = true
 		req.ExecutorSelector = selector
 		// A detached spawn returns right after this, ending the process; a
 		// deferred stop would kill the executor before the child has used it.
@@ -1181,6 +1262,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			defer stop()
 		}
 	}
+
+	// Home is filled only from what the daemon just listed as eligible for this
+	// SELECTOR, so the request can never name a home the daemon would refuse. A
+	// session executor is excluded by construction: its selector already names
+	// exactly this machine, so the daemon resolves the same home from it.
+	fillHomeExecutor(cmdCtx(cmd), ctrl.ListExecutors, &req, sessionExecutorRan)
 
 	var childID string
 	if compacting {
@@ -1198,6 +1285,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			return diagnoseConnectError(err, ep.describe)
 		}
 		childID = resp.Msg.GetChildId()
+		// Non-fatal spawn diagnostics — an unbound selector, an unresolved or
+		// disconnected home. The child exists and is usable, so these are
+		// advisories; stderr keeps them out of a --detached record's stdout.
+		for _, w := range resp.Msg.GetWarnings() {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
 	}
 
 	// The child set changed, so whatever a TAB answered a moment ago is stale.
