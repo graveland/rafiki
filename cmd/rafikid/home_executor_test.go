@@ -8,10 +8,12 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sandbox"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -250,7 +252,7 @@ func TestHomeExecutorOfflineHomeWarnsNoContext(t *testing.T) {
 	reach, err := fb.Reachable("c1")
 	ck.Require().NoError(err, "Reachable")
 
-	info := c.homeInfo(context.Background(), protocol.SpawnRequest{}, executorOwner{}, be, "b", true, reach)
+	info := c.homeInfo(context.Background(), protocol.SpawnRequest{}, executorOwner{}, be, "b", true, nil, reach)
 	ck.Eq("", info.Project, "an unreachable home must not yield project instructions")
 	ck.Require().Len(info.Warnings, 1, "warnings = %v", info.Warnings)
 	ck.Eq("home executor b is not connected; project instructions were not loaded",
@@ -272,7 +274,7 @@ func TestHomeExecutorProjectContextFromHomeOnly(t *testing.T) {
 	ck.Eq("b", home, "homeID")
 	be.setHome(home)
 
-	info := c.homeInfo(context.Background(), protocol.SpawnRequest{}, executorOwner{}, be, home, true, reach)
+	info := c.homeInfo(context.Background(), protocol.SpawnRequest{}, executorOwner{}, be, home, true, nil, reach)
 	ck.Eq("b:ctx", info.Project, "project context must come from the home executor")
 	ck.Eq(1, fb.provisionsOn("b"), "the home was read once")
 	ck.Eq(0, fb.provisionsOn("a"), "the non-home executor must never be read for project context")
@@ -280,7 +282,8 @@ func TestHomeExecutorProjectContextFromHomeOnly(t *testing.T) {
 
 // A resumed child comes back to the home recorded on its row, never to a
 // different reachable machine — and when that machine is offline it has NO home
-// plus the not-connected warning, rather than becoming unresumable.
+// plus the not-connected warning, no machine block naming the executor that IS
+// there, and it stays resumable.
 func TestHomeExecutorResumeKeepsPersistedHome(t *testing.T) {
 	ck := assert.NewAborting(t)
 	snap := childstore.Snapshot{
@@ -292,7 +295,9 @@ func TestHomeExecutorResumeKeepsPersistedHome(t *testing.T) {
 	ck.Eq("a", req.HomeExecutor, "the resume request must carry the child's persisted home")
 
 	c, fb, be, reach := homeFixture(t, "a", "b")
-	fb.homeLabel = "a" // the child's own row, which is what Home reads
+	// The child's own row is what tells the resolver this home is PERSISTED
+	// rather than a caller's declaration, so it must exist.
+	c.st.Insert(&childstore.Session{ChildID: "c1", Status: protocol.StatusExited, Labels: snap.Labels})
 
 	home, warnings, err := c.resolveHomeExecutor(context.Background(), req, be, reach)
 	ck.Require().NoError(err, "resolveHomeExecutor")
@@ -309,12 +314,54 @@ func TestHomeExecutorResumeKeepsPersistedHome(t *testing.T) {
 	ck.Eq("home executor a is not connected; project instructions were not loaded",
 		warnings[0], "warning text")
 	ck.Eq(0, fb.provisionsOn("b"), "the child must not be moved onto the machine that is there")
+
+	// And the prompt names no machine: the sole executor that IS reachable is
+	// not where this child's cwd and CLAUDE.md came from, so a "Your machine"
+	// block for it would be a lie the child repeats for its whole life. The
+	// executor is LIVE (a real pool row), because that is what makes the
+	// suppressed fallback able to name it at all. The resolver already warned,
+	// so homeInfo adds nothing.
+	c.execPool = &fakePool{live: []execpool.LiveExecutor{ex("b", map[string]string{"machine": "b"}, "")}}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	info := c.homeInfo(context.Background(), req, executorOwner{}, be, home, false, nil, reach)
+	ck.Nil(info.Workspace, "no machine block may name the one executor that is still there")
+	ck.Eq("", info.Project, "and no project tier may be read from it")
+	ck.Len(info.Warnings, 0, "no second warning: the resolver's already said why")
 }
 
-// Field 35 is child-allowed on the strength of rule 1's refusal, so it must
-// refuse at the CHILD-provenance boundary too: a child caller naming a home
-// outside its reachable set gets the refusal, not a silently-ignored home that
-// leaves it reading somebody else's project tree.
+// A child with no rafiki/home-executor label — everything spawned before it
+// existed, or a child that started unbound and bound lazily — must still come
+// back to its recorded rafiki/executor on resume. Resolving rules 2–5 instead
+// would let it land on another reachable machine, whose cwd and CLAUDE.md are
+// not the ones its conversation reads.
+func TestHomeExecutorResumeFallsBackToTheBindingLabel(t *testing.T) {
+	ck := assert.NewAborting(t)
+	snap := childstore.Snapshot{
+		ChildID: "c1",
+		Kind:    protocol.KindFundi,
+		Labels:  map[string]string{"rafiki/executor": "b"}, // no home label at all
+	}
+	req := resumeRequestFromSnapshot(snap, "")
+	ck.Eq("b", req.HomeExecutor, "the resume request must fall back to rafiki/executor")
+
+	c, fb, be, reach := homeFixture(t, "a", "b")
+	c.st.Insert(&childstore.Session{ChildID: "c1", Status: protocol.StatusExited, Labels: snap.Labels})
+	ck.Require().Len(reach, 2, "b must not be the only reachable executor, or rules 4/5 would agree by accident")
+
+	home, warnings, err := c.resolveHomeExecutor(context.Background(), req, be, reach)
+	ck.Require().NoError(err, "resolveHomeExecutor")
+	ck.Eq("b", home, "the child's recorded binding executor is its home, not the other reachable machine")
+	ck.Len(warnings, 0, "warnings")
+	ck.Eq(0, fb.provisions, "no probe: the record already answered")
+}
+
+// Field 35 is child-allowed on the strength of rule 1's refusal, so the refusal
+// must survive the CHILD-CREDENTIAL boundary: this spawns as a
+// server.ProvenanceChildToken caller through the same connectLifecycle adapter
+// the Control plane mounts, so a lost field mapping or a provenance-dependent
+// refusal would fail here. A child naming a home outside its reachable set gets
+// the refusal, never a silently-ignored home that leaves it reading somebody
+// else's project tree.
 func TestHomeExecutorChildSpawnOutsideSetRefused(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestController(t)
@@ -323,17 +370,27 @@ func TestHomeExecutorChildSpawnOutsideSetRefused(t *testing.T) {
 		ex("exec-2", map[string]string{"machine": "two"}, ""),
 	}}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
-	parentID := seedChild(t, c)
+	parent := seedChild(t, c)
+	_ = c.st.Update(parent, func(s *childstore.Session) {
+		s.Kind = protocol.KindFundi
+		s.MaxChildren = 8
+		s.MaxDepth = 3
+	})
 
-	req := baseRequest()
-	req.ParentChildID = parentID // the shape a child-credential spawn arrives in
-	req.HomeExecutor = "nowhere"
-	var warnings []string
-	_, err := c.agentRuntimeOptionsFor(req, "c1", false, "brent", "u-1", "u-1", "", &warnings)
-	ck.Require().Error(err, "a child spawn naming a home outside its reachable set must be refused")
+	// The child-credential identity the rest of this package's tests use for a
+	// per-child secret, acting as the parent child.
+	ctx := childTokenCtx(parent)
+	_, err := connectLifecycle{c: c}.Spawn(ctx, connectapi.SpawnParams{
+		Cwd:           t.TempDir(),
+		Kind:          protocol.KindFundi,
+		Model:         "anthropic/claude-x",
+		NoSession:     true,
+		ParentChildID: parent,
+		HomeExecutor:  "nowhere",
+	})
+	ck.Require().Error(err, "a child caller naming a home outside its reachable set must be refused")
 	ck.StrContains(err.Error(), `home executor "nowhere" is not in this spawn's reachable executors`,
 		"the child gets the rule-1 refusal, not a silent fallback: %v", err)
-	ck.Len(warnings, 0, "a refused spawn reports no warning")
 }
 
 // The home recorded at spawn must survive the other half of the pre-spawn
@@ -374,4 +431,199 @@ func TestHomeExecutorNoteNeverRewritesADifferentHome(t *testing.T) {
 	c.noteHomeExecutor(childID, "a") // the same home is fine, and idempotent
 	snap, _ = c.st.Get(childID)
 	ck.Eq("a", snap.Labels[homeExecutorLabel], "writing the same home changes nothing")
+}
+
+// A sandbox is never a probe candidate. It provisions at its own container
+// workdir rather than the requested cwd, so it cannot answer "does this cwd
+// exist here" — and it always succeeds, which would turn a clean single hit on a
+// native executor into a false ambiguity and deny the child a home.
+func TestHomeExecutorProbeSkipsASandbox(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	native := &fakeExec{id: "native"}
+	box := &fakeExec{id: "sbx"}
+	fb := newFakeBinder(native, box)
+	be := newBoundExecutor("c1", fb)
+	// A selector that admits a sandbox plus one native, both able to answer:
+	// without the skip this is two hits and no home.
+	reach := []executors.Executor{
+		{ID: "sbx", Enabled: true, Labels: map[string]string{"machine": "box", sandbox.RowLabelSandbox: "1"}},
+		{ID: "native", Enabled: true, Labels: map[string]string{"machine": "native"}},
+	}
+
+	home, warnings, err := c.resolveHomeExecutor(context.Background(), protocol.SpawnRequest{Cwd: "/tmp"}, be, reach)
+	ck.Require().NoError(err, "resolveHomeExecutor")
+	ck.Eq("native", home, "the native executor holding the cwd is home")
+	ck.Len(warnings, 0, "one hit needs no warning")
+	ck.Eq(0, fb.provisionsOn("sbx"), "a sandbox must never be probed")
+	ck.Eq(1, fb.provisionsOn("native"), "the native executor is probed once")
+}
+
+// Machines that cannot ANSWER are not evidence the child's cwd is wrong: a
+// failure that is not a refused workdir yields the "could not check" warning
+// naming each failure, and never a refusal or a guessed home.
+func TestHomeExecutorProbeMixedFailuresWarn(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	be := newBoundExecutor("c1", &probeBinder{fakeBinder: fb, provErr: map[string]error{
+		"a": connect.NewError(connect.CodeUnavailable, errors.New("executor link reset")),
+		"b": missingWorkdir("/tmp"),
+	}})
+	reach, err := fb.Reachable("c1")
+	ck.Require().NoError(err, "Reachable")
+
+	home, warnings, err := c.resolveHomeExecutor(context.Background(), protocol.SpawnRequest{Cwd: "/tmp"}, be, reach)
+	ck.Require().NoError(err, "a machine that could not answer must not refuse the spawn")
+	ck.Eq("", home, "no home from machines that could not answer")
+	ck.Require().Len(warnings, 1, "warnings = %v", warnings)
+	ck.StrContains(warnings[0], "could not check cwd on:", "warning: %q", warnings[0])
+	ck.StrContains(warnings[0], "a: ", "the warning must name every failing machine: %q", warnings[0])
+	ck.StrContains(warnings[0], "b: ", "the warning must name every failing machine: %q", warnings[0])
+	ck.StrContains(warnings[0], "executor link reset", "the real cause must survive: %q", warnings[0])
+	ck.Require().Len(fb.released, 0, "neither probe made a workspace, so there is nothing to release")
+}
+
+// A probe whose budget is already spent cannot claim the cwd exists anywhere: it
+// degrades to the "could not check" warning with no home — never a refusal, and
+// never an adoption of a workspace whose id never arrived.
+//
+// NOTE on a REAL expired budget: the executor mints and registers the workspace
+// BEFORE it answers, and pkg/executor has no reaper (Release is the only end of
+// a workspace's retention — see Server.Release's comment). A Provision whose
+// response is lost to the deadline therefore leaves one entry in the executor's
+// in-memory registry, with its job set, until that executor process exits. It
+// consumes no files of its own (the workdir is the child's cwd or the root), and
+// the daemon holds no reference to it, so it is an orphan of bounded size per
+// abandoned probe, not a disk leak. This test pins the DAEMON's half: no home, a
+// warning, and nothing adopted.
+func TestHomeExecutorProbeExpiredBudgetWarns(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	be := newBoundExecutor("c1", fb)
+	reach, err := fb.Reachable("c1")
+	ck.Require().NoError(err, "Reachable")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the budget is spent before the first candidate is asked
+	home, warnings, err := c.resolveHomeExecutor(ctx, protocol.SpawnRequest{Cwd: "/tmp"}, be, reach)
+	ck.Require().NoError(err, "a spent budget must not refuse the spawn")
+	ck.Eq("", home, "a spent budget names no home")
+	ck.Require().Len(warnings, 1, "warnings = %v", warnings)
+	ck.StrContains(warnings[0], "could not check cwd on:", "warning: %q", warnings[0])
+	ck.StrContains(warnings[0], "context canceled", "warning: %q", warnings[0])
+	ck.Eq(0, fb.provisions, "a cancelled probe never made a workspace")
+	if execID, _, bound := be.Current(); bound {
+		t.Fatalf("nothing may be adopted on a spent budget; home binding is %q", execID)
+	}
+}
+
+// A cwd the HOME cannot see REFUSES the spawn, with the SAME text the
+// multi-executor probe gives a cwd no machine holds. It must not start unbound:
+// that path does not heal, and every workspace call would then fail on a
+// directory the child's prompt names as its own.
+func TestHomeExecutorBadCwdOnTheHomeRefuses(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+
+	// The probe's refusal for the same underlying error (a cwd no machine sees).
+	probeFB := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	probeBE := newBoundExecutor("c1", &probeBinder{fakeBinder: probeFB, provErr: map[string]error{
+		"a": missingWorkdir("/tmp"),
+		"b": missingWorkdir("/tmp"),
+	}})
+	reach, err := probeFB.Reachable("c1")
+	ck.Require().NoError(err, "Reachable")
+	_, _, probeErr := c.resolveHomeExecutor(context.Background(), protocol.SpawnRequest{Cwd: "/tmp"}, probeBE, reach)
+	ck.Require().Error(probeErr, "the probe refuses a cwd no machine holds")
+
+	// The eager bind of a single reachable home, same error: it refuses too, and
+	// with byte-identical text — one failure, one refusal message.
+	bindFB := newFakeBinder(&fakeExec{id: "a"})
+	bindBE := newBoundExecutor("c1", &probeBinder{fakeBinder: bindFB, provErr: map[string]error{
+		"a": missingWorkdir("/tmp"),
+	}})
+	homeBound, cause, refusal := c.bindHome(context.Background(), bindBE, "a")
+	ck.False(homeBound, "an unbindable home must not report bound")
+	ck.Nil(cause, "a cwd refusal is not a connectivity cause")
+	ck.Require().Error(refusal, "a cwd the home cannot see must refuse the spawn")
+	ck.Eq(probeErr.Error(), refusal.Error(), "one refusal text for one failure, whichever rule found it")
+	ck.StrContains(refusal.Error(), "workspace on executor a:", "refusal: %v", refusal)
+}
+
+// Every OTHER bind failure starts the child unbound, and the not-connected
+// warning carries the reason so the diagnostic is not left in the daemon log.
+func TestHomeExecutorBindFailureKeepsTheCause(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	fb := newFakeBinder(&fakeExec{id: "a"})
+	be := newBoundExecutor("c1", &probeBinder{fakeBinder: fb, provErr: map[string]error{
+		"a": connect.NewError(connect.CodeUnavailable, errors.New("executor link reset")),
+	}})
+	be.setHome("a")
+
+	homeBound, bindErr, refusal := c.bindHome(context.Background(), be, "a")
+	ck.False(homeBound, "a transport failure is not a bind")
+	ck.Nil(refusal, "a transport failure must not refuse the spawn: it may heal")
+	ck.Require().Error(bindErr, "the cause must be reported")
+
+	info := c.homeInfo(context.Background(), protocol.SpawnRequest{}, executorOwner{}, be, "a", false, bindErr, nil)
+	ck.Require().Len(info.Warnings, 1, "warnings = %v", info.Warnings)
+	ck.StrContains(info.Warnings[0], "home executor a is not connected", "warning: %q", info.Warnings[0])
+	ck.StrContains(info.Warnings[0], "executor link reset",
+		"the underlying reason must survive into the warning: %q", info.Warnings[0])
+	ck.Eq("", info.Project, "no project tier from an unbindable home")
+}
+
+// The spawn path must ACT on bindHome's refusal: a single reachable home that
+// cannot see the child's cwd refuses the spawn (the same text the probe gives a
+// cwd no machine holds), and leaves no retained binding behind for a child that
+// will never exist.
+func TestHomeExecutorBadCwdStartsNoChild(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.execPool = &fakePool{}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	c.binderForOverride = func(protocol.SpawnRequest, executorOwner) executorBinder {
+		return &probeBinder{fakeBinder: newFakeBinder(&fakeExec{id: "a"}), provErr: map[string]error{
+			"a": missingWorkdir("/tmp"),
+		}}
+	}
+
+	var warnings []string
+	_, err := c.agentRuntimeOptionsFor(baseRequest(), "c1", false, "brent", "", "", "", &warnings)
+	ck.Require().Error(err, "a home that cannot see the cwd must refuse the spawn, not start it unbound")
+	ck.StrContains(err.Error(), "workspace on executor a:", "refusal: %v", err)
+	ck.StrContains(err.Error(), `workdir "/tmp" does not exist`, "refusal: %v", err)
+	ck.Len(warnings, 0, "a refused spawn reports no warning")
+	ck.Nil(c.boundExecutorFor("c1"), "no child will exist, so the retained binding must be dropped")
+}
+
+// The other half: a bind failure that may heal starts the child unbound, and its
+// warning carries the reason into the operator's view and the caller's.
+func TestHomeExecutorBindFailureStartsUnboundWithCause(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.execPool = &fakePool{}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	c.binderForOverride = func(protocol.SpawnRequest, executorOwner) executorBinder {
+		return &probeBinder{fakeBinder: newFakeBinder(&fakeExec{id: "a"}), provErr: map[string]error{
+			"a": connect.NewError(connect.CodeUnavailable, errors.New("executor link reset")),
+		}}
+	}
+
+	var warnings []string
+	ro, err := c.agentRuntimeOptionsFor(baseRequest(), "c1", false, "brent", "", "", "", &warnings)
+	ck.Require().NoError(err, "a transport failure must not refuse the spawn: it may heal")
+	ck.NotNil(ro.Executor, "the whole workspace tier must stay present so the child can lazy-bind")
+	ck.NotNil(ro.ProjectContext, "the pointer stays non-nil so the daemon's own cwd is never used")
+	ck.Eq("", *ro.ProjectContext, "an unbindable home yields no project tier")
+	ck.Require().Len(warnings, 1, "warnings = %v", warnings)
+	ck.StrContains(warnings[0], "home executor a is not connected", "warning: %q", warnings[0])
+	ck.StrContains(warnings[0], "executor link reset", "the cause must reach the caller: %q", warnings[0])
+	wl, ok := c.takeWorkspaceLabels("c1")
+	ck.True(ok, "the child must be marked unbound for Spawn's label merge")
+	ck.Eq("unbound", wl.executorState, "executorState")
+	ck.Eq("a", wl.homeExecutorID, "the resolved home is still recorded for a later resume")
 }

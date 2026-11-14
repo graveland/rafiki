@@ -80,7 +80,7 @@ func (c *Controller) resolveHomeExecutor(ctx context.Context, req protocol.Spawn
 		// The child's OWN persisted home arriving on a resume/respawn — the
 		// request is rebuilt from its record, so this is not a caller
 		// declaration and must not be able to strand the child.
-		persisted := be.binder.Home(be.childID) == req.HomeExecutor
+		persisted := c.persistedHome(be.childID) == req.HomeExecutor
 		if match, ok := matchExecutorRef(req.HomeExecutor, reach); ok {
 			return match.ID, nil, nil
 		}
@@ -155,6 +155,14 @@ func (c *Controller) probeHomeExecutor(ctx context.Context, req protocol.SpawnRe
 	)
 
 	for _, e := range reach {
+		if isSandboxRow(e) {
+			// A sandbox provisions at ITS OWN workdir (its container root), not
+			// the requested cwd, so a probe there can never answer "does this
+			// child's cwd exist here" — and it always succeeds, which would turn
+			// one clean hit on a native executor into a false ambiguity. It is
+			// also never an implicit home choice: `executor` must name it.
+			continue
+		}
 		wsID, _, cl, perr := be.binder.ProvisionOn(ctx10s, e.ID, true)
 		if perr == nil && wsID == "" {
 			// A provision that reports no workspace did not make one; treating
@@ -212,8 +220,71 @@ func (c *Controller) probeHomeExecutor(ctx context.Context, req protocol.SpawnRe
 // executor_binding.go). The home probe reuses that exact shape rather than
 // inventing a new one, so a cwd that exists nowhere refuses with the text an
 // eager bind produced.
+//
+// The eager home bind refuses with the SAME text without calling this: its error
+// comes out of boundExecutor.provision, which already applies this wrap, so
+// bindHome returns it unchanged rather than wrapping it twice.
 func provisionRefusal(execID string, err error) error {
 	return fmt.Errorf("workspace on executor %s: %w", shortID(execID), err)
+}
+
+// persistedHome is the home executor a child's OWN record carries: the
+// rafiki/home-executor label, or — for a child that predates that label, or one
+// that started unbound and bound lazily — rafiki/executor, which NoteBinding
+// writes only for the HOME binding.
+//
+// It is what tells a RESUMED home from a caller's declaration when a request
+// arrives with HomeExecutor set, and it is the durable answer a resume must
+// reproduce. The binder's Home is the same first label; this reads the record
+// directly because the fallback label is not part of the binder's contract.
+func (c *Controller) persistedHome(childID string) string {
+	if c == nil || c.st == nil || childID == "" {
+		return ""
+	}
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return ""
+	}
+	return persistedHomeLabel(snap.Labels)
+}
+
+// persistedHomeLabel is the one reading of a child's own labels for its home:
+// rafiki/home-executor, else rafiki/executor. The resume path and the resolver's
+// persisted-home check share it, so the value a resume CARRIES cannot disagree
+// with the value that tells the resolver it is persisted.
+func persistedHomeLabel(labels map[string]string) string {
+	if home := labels[homeExecutorLabel]; home != "" {
+		return home
+	}
+	return labels["rafiki/executor"]
+}
+
+// bindHome provisions the child's HOME workspace at spawn and decides what a
+// failure MEANS. It is the one place the three outcomes are told apart:
+//
+//   - nil: the home is bound, and the project tier can be read there.
+//   - a CodeInvalidArgument refusal (the executor cannot see the child's cwd):
+//     returned as refuseErr, and the spawn must be REFUSED with it. This is the
+//     one class of bind failure that does not heal, and it is exactly what the
+//     multi-executor probe refuses with — a cwd the home cannot see would leave
+//     a running child failing every workspace call on a path its prompt names.
+//   - anything else (transport, unavailable, the executor departing between
+//     resolution and the bind): homeBound=false with the error as cause, so the
+//     child starts unbound and the not-connected warning carries the reason.
+//
+// The refusal text is byte-identical to the probe's: boundExecutor.provision
+// already wraps the executor's message with provisionRefusal's exact format, so
+// it is returned unchanged rather than wrapped again.
+func (c *Controller) bindHome(ctx context.Context, be *boundExecutor, homeID string) (homeBound bool, cause, refuseErr error) {
+	_, err := be.clientFor(ctx, homeID)
+	switch {
+	case err == nil:
+		return true, nil, nil
+	case connect.CodeOf(err) == connect.CodeInvalidArgument:
+		return false, nil, err
+	default:
+		return false, err, nil
+	}
 }
 
 // adopt installs a workspace the probe already made as the child's HOME
@@ -321,14 +392,19 @@ func (c *Controller) noteHomeExecutor(childID, execID string) {
 // believes instructions apply that were written for somebody else's tree.
 //
 // homeBound says the home's workspace already exists. When it does not (the
-// provision was refused, or the machine left between resolution and the bind)
-// the project tier is empty and the caller is told why — never silently
-// replaced by another machine's.
-func (c *Controller) homeInfo(ctx context.Context, req protocol.SpawnRequest, owner executorOwner, be *boundExecutor, homeID string, homeBound bool, reach []executors.Executor) spawnHomeInfo {
+// machine left between resolution and the bind, or the bind failed for a reason
+// that may heal) the project tier is empty and the caller is told why — never
+// silently replaced by another machine's. bindErr, when set, is the bind
+// failure's own reason, carried in the warning so the diagnostic is not lost.
+func (c *Controller) homeInfo(ctx context.Context, req protocol.SpawnRequest, owner executorOwner, be *boundExecutor, homeID string, homeBound bool, bindErr error, reach []executors.Executor) spawnHomeInfo {
 	var info spawnHomeInfo
 	switch {
 	case homeID != "" && !homeBound:
-		info.Warnings = append(info.Warnings, fmt.Sprintf(homeNotConnectedWarning, be.binder.DisplayName(homeID)))
+		w := fmt.Sprintf(homeNotConnectedWarning, be.binder.DisplayName(homeID))
+		if bindErr != nil {
+			w += fmt.Sprintf(" (bind error: %v)", bindErr)
+		}
+		info.Warnings = append(info.Warnings, w)
 	case homeID != "":
 		project, pcErr := fetchProjectContext(ctx, be)
 		if pcErr != nil {
@@ -347,15 +423,23 @@ func (c *Controller) homeInfo(ctx context.Context, req protocol.SpawnRequest, ow
 	}
 
 	// The "Your machine" block comes from the executor's ROW, never from the
-	// executor's own account of itself. Home first; with NO home, the
-	// first-reachable candidate is kept ONLY when there is exactly one, because
-	// with several the daemon has no idea which machine the child will use and
-	// naming one would be a lie the prompt then repeats for its lifetime.
+	// executor's own account of itself.
+	//
+	// A request that CARRIED a home never falls back to another machine: an
+	// unreachable persisted home must leave the child with no block, not a block
+	// naming the one executor that happened to still be there — that machine is
+	// not where its cwd and CLAUDE.md came from, and the prompt would repeat the
+	// lie for the child's whole life.
+	//
+	// With no carried home, the first reachable candidate is kept only when
+	// there is exactly one. A fresh spawn cannot reach that branch (the resolver
+	// names a home for every single-reachable set), so it is a guard for a
+	// resolver that one day returns no home there.
 	var row executors.Executor
 	switch {
 	case homeID != "":
 		row, _ = c.executorRow(homeID)
-	case len(reach) == 1:
+	case req.HomeExecutor == "" && len(reach) == 1:
 		if chosen, cErr := c.chooseExecutorCandidate(req, owner); cErr == nil {
 			row = chosen
 		}

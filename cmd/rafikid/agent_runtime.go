@@ -729,7 +729,15 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	)
 	if c.execPool != nil {
 		owner := executorOwner{Name: ownerName, UserID: ownerUserID}
-		be := newBoundExecutor(childID, c.binderFor(req, owner))
+		// binder is the production binder unless a test installed an override:
+		// provisionWorkspace type-asserts a real *execpool.Pool, so no fake pool
+		// can drive a home bind's refusal or its cause through the controller
+		// binder, and those two outcomes are what this block decides.
+		binder := c.binderFor(req, owner)
+		if c.binderForOverride != nil {
+			binder = c.binderForOverride(req, owner)
+		}
+		be := newBoundExecutor(childID, binder)
 		exec = be
 		// Retain the binding so a per-call consumer (and the teardown that
 		// drops it) has a handle on the child's current binding. Job exits do
@@ -752,6 +760,10 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 		// starts no process.
 		homeID, homeWarnings, homeErr := c.resolveHomeExecutor(spawnCtx, req, be, reach)
 		if homeErr != nil {
+			// No child row will exist, so nothing would ever release what this
+			// binding might still make or report it gone: drop the retained entry
+			// (noteBoundExecutor keeps one per executor id) before refusing.
+			c.forgetBoundExecutor(childID)
 			return fundi.RuntimeOptions{}, homeErr
 		}
 		serviceW = append(serviceW, homeWarnings...)
@@ -766,14 +778,29 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 		//
 		// A probe that already made the home workspace left its binding in be,
 		// so this finds it and provisions nothing twice.
-		homeBound := false
+		//
+		// The bind's failure is classified by bindHome: a cwd the home cannot
+		// see REFUSES the spawn (a path problem does not heal, and the
+		// multi-executor probe already refuses the same thing), while every
+		// other failure starts the child unbound with the cause in the warning.
+		var (
+			homeBound   bool
+			homeBindErr error
+		)
 		if homeID != "" {
 			be.setHome(homeID)
-			if _, bindErr := be.clientFor(spawnCtx, homeID); bindErr == nil {
-				homeBound = true
-			} else {
+			bound, cause, refusal := c.bindHome(spawnCtx, be, homeID)
+			if refusal != nil {
+				// The home cannot see the child's cwd. No child row exists yet,
+				// so nothing would ever release the binding retained above or
+				// report the problem to an operator: drop it and refuse.
+				c.forgetBoundExecutor(childID)
+				return fundi.RuntimeOptions{}, refusal
+			}
+			homeBound, homeBindErr = bound, cause
+			if homeBindErr != nil {
 				slog.Warn("home executor could not be bound at spawn; project instructions were not loaded",
-					"child", childID, "executor", shortID(homeID), "error", bindErr)
+					"child", childID, "executor", shortID(homeID), "error", homeBindErr)
 			}
 			// Recorded AFTER the bind on purpose: a successful provision calls
 			// NoteBinding, which REPLACES this child's pre-spawn stash struct
@@ -786,7 +813,7 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 			serviceW = append(serviceW, c.unboundWarnings(be, reach, reachErr)...)
 		}
 
-		info := c.homeInfo(spawnCtx, req, owner, be, homeID, homeBound, reach)
+		info := c.homeInfo(spawnCtx, req, owner, be, homeID, homeBound, homeBindErr, reach)
 		serviceW = append(serviceW, info.Warnings...)
 
 		// The project tier belongs to the workspace, so it comes from the HOME

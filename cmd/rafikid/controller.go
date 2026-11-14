@@ -626,6 +626,13 @@ type Controller struct {
 	wsLabels   map[string]workspaceLabels
 	wsLabelsMu sync.Mutex
 
+	// binderForOverride, when non-nil, replaces the spawn path's executor binder
+	// (agentRuntimeOptionsFor). It exists only for tests: provisionWorkspace
+	// type-asserts a real *execpool.Pool, so a fake pool cannot drive a home
+	// bind's refusal or its failure cause, and those are decisions the spawn
+	// path makes. Nil in production; nothing else reads it.
+	binderForOverride func(protocol.SpawnRequest, executorOwner) executorBinder
+
 	// sessionExecMu guards sessionExecs, keyed by an opaque session key:
 	// Connect's ExecutorSession stream uses its own per-call context, which is
 	// unique already and needs no separate lookup table.
@@ -3196,7 +3203,14 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		// landing the child on a different machine than the one its cwd and
 		// CLAUDE.md came from. It is the only durable record of the home: the
 		// in-memory binding dies with the daemon.
-		HomeExecutor:     snap.Labels[homeExecutorLabel],
+		//
+		// rafiki/executor is the fallback for a child that predates
+		// rafiki/home-executor (or started unbound and bound lazily): that label
+		// names the HOME binding's executor, because NoteBinding is the only
+		// writer of the three binding labels and only the home binding calls it.
+		// Without the fallback a legacy child re-runs rules 2–5 and can land
+		// somewhere other than its recorded machine.
+		HomeExecutor:     persistedHomeLabel(snap.Labels),
 		SkipDerivedIndex: snap.SkipDerivedIndex,
 		Notify:           snap.NotifyPolicy,
 		WorkspaceMode:    snap.WorkspaceMode,
