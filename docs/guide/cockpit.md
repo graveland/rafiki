@@ -272,6 +272,13 @@ more than `quotaStaleAfter`, and hides entirely for an account that has never
 made a passthrough call. `rafiki claude --limits` prints the same data
 verbosely.
 
+A spawn's non-fatal diagnostics land on the status line too: the daemon's first
+`SpawnResponse.warnings` entry is appended as `warning: <text>`, and the rest
+collapse into a count — `warning: <first> (+N more)` — so a long list cannot
+push the rail's notice out of the pane (`withWarnings`, `pkg/tui/lifecycle.go`).
+A child that spawned unbound, or without a home, therefore says so where you
+spawned it rather than leaving you to wonder why its tools are missing.
+
 The footer's right edge is, in order: scroll position, context usage, spend,
 and the focused agent's model. The model is disambiguated by KIND, because a
 model id alone does not name the runtime — `anthropic/claude-opus-5-5` is a

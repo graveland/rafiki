@@ -108,7 +108,9 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"one spawned via MCP) gets any live executor that admits it. You " +
 					"can only ever narrow: naming a machine you cannot reach is " +
 					"refused, and the refusal says which machine and why. On a daemon " +
-					"with no executor pool the agent has no filesystem tools."},
+					"with no executor pool the agent has no filesystem tools. " +
+					"A selector matching several executors lets the agent reach all " +
+					"of them; its workspace tools then take an executor argument."},
 			{Name: "workspace", Type: "string",
 				Description: "Which executors may serve this agent, by the workspace_mode their " +
 					"operator declared, and what happens if that executor is lost. " +
@@ -116,7 +118,9 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"reconstructible, e.g. disposable containers each carrying their own " +
 					"checkout); if its executor is lost the daemon re-binds the agent onto " +
 					"another one. \"pinned\": only executors marked pinned (the default); if " +
-					"its executor is lost the agent fails where it stood. Neither mode " +
+					"its executor is lost the agent KEEPS RUNNING — calls to that machine fail " +
+					"until it reconnects, and the workspace there is re-provisioned when it " +
+					"does, so anything uncommitted on that machine may be gone. Neither mode " +
 					"creates a fresh or isolated checkout — every workspace on an executor " +
 					"serves that executor's single root. For an isolated tree, create a git " +
 					"worktree yourself and pass it as cwd. Omit to inherit yours."},

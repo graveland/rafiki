@@ -1348,7 +1348,7 @@ winner, so rename that row by hand and boot again. Pinned by
 
 #### Spawn's operator-only fields (15–29)
 
-`SpawnRequest` fields 1–14 and 30–34 are the child-ALLOWED set
+`SpawnRequest` fields 1–14 and 30–35 are the child-ALLOWED set
 (`childAllowedSpawnFields`, `pkg/connectapi/verbs.go`): a caller with child
 provenance may set them, and `Spawn` forces `parent_child_id` to the caller's
 own id. Fields 15–29 (`config_dir`, `append_system_prompt`, `thinking`,
@@ -1401,6 +1401,50 @@ It never gates exit, failure or restart settles, budget breach steering,
 executor-loss or job-exit fragments, or the child's own task-residue nudge,
 and it does not change the display state: a launcher of a quiet child still
 shows `waiting` on `children`.
+
+Field 35 (`home_executor`) is child-ALLOWED: it can only name an executor
+already in the caller's reachable set, and the daemon refuses anything else.
+`home_executor` is where `cwd` applies and where project context
+(`CLAUDE.md`/`AGENTS.md`) and project skills are read from. It is NOT a default
+for tool calls — with 2+ reachable, calls still name an executor, home included.
+The daemon resolves a home at spawn, first match wins
+(`resolveHomeExecutor`, `cmd/rafikid/home_executor.go`):
+
+1. the request's `home_executor`. A miss REFUSES the spawn — naming the
+   request's value and the reachable set — EXCEPT for a RESUMED child, whose
+   `home_executor` is its own persisted label: that yields no home plus the
+   not-connected warning instead, so a machine briefly offline never makes a
+   child unresumable and never moves it to another machine silently.
+2. `executor_ref`, when that executor is reachable.
+3. the parent's `rafiki/home-executor` label, when that executor is reachable.
+4. the single reachable executor.
+5. the executor where the child's `cwd` exists, probed by provisioning a home
+   workspace on each candidate in turn: exactly one hit becomes home (its probe
+   workspace is adopted, so nothing provisions twice); several means no honest
+   answer, so none becomes home and a warning names them; none refuses with the
+   provision diagnostic when every failure was a missing workdir.
+
+A candidate from rules 2–3 outside the reachable set is SKIPPED, never used:
+reach is the confinement-narrowed live set and home is a choice within it. The
+chosen home is written to the child's row as `rafiki/home-executor`; a child
+with no home starts unbound, with the warning below. Nothing about the
+project tier is ever read from a non-home executor — a project file from the
+wrong machine is worse than none.
+
+`SpawnResponse.warnings` carries the non-fatal diagnostics, one string each;
+`Controller.Spawn` also logs every one at WARN, which is how a PARENTED spawn's
+warning becomes visible at all (`agent_spawn`'s tool result carries none).
+There are three cases: the selector matched no live executor, so the child
+starts unbound and the warning is selection's `explainNoMatch` text; no home
+executor resolved (a multi-executor spawn with no `cwd` to probe); and a home
+executor that is not connected, so the project instructions were not loaded.
+None of them fails the spawn — the child exists and is usable.
+
+A model switch carries the source child's `rafiki/home-executor` label into the
+fork (`switchSpawnRequest`, `cmd/rafiki/cmd_models_switch.go`; the cockpit's
+switch does the same), so the continuation keeps the machine its `cwd` and
+`CLAUDE.md` came from. The value is sent VERBATIM: a carried home the fork
+cannot reach is refused by the daemon, naming the executor, rather than dropped.
 
 The guard is enforced as the child-allowed SET, not a literal list of 15 —
 so a NEW `SpawnRequest` field is operator-only by default. Adding one

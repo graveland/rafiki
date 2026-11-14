@@ -468,7 +468,8 @@ the question for every kind in one vocabulary:
 | Flag | Env default | Meaning |
 |------|-------------|---------|
 | `--executor <ref>` | `$RAFIKI_EXECUTOR` | Target ONE specific executor by its machine name (e.g. `greyshift`) or raw id. Sent as `SpawnRequest.ExecutorRef`; resolved by the daemon against the same confinement checks any candidate must pass, so a pin bypasses search, never confinement. **Mutually exclusive with `--executor-selector`** — passing both is a usage error, not a silent precedence rule |
-| `--executor-selector <sel>` | `$RAFIKI_EXECUTOR_SELECTOR` | A label selector choosing from the daemon's pool (e.g. `owner=brent,env=home`). A selector matching several executors keeps the documented silent-first-match behavior |
+| `--executor-selector <sel>` | `$RAFIKI_EXECUTOR_SELECTOR` | A label selector choosing from the daemon's pool (e.g. `owner=brent,env=home`). A selector matching several executors lets the agent reach all of them; its workspace tools then take an executor argument |
+| `--home <executor>` | — | The executor where `--cwd` applies and where `CLAUDE.md`/`AGENTS.md` and project skills are read from, by machine name or id. It is NOT a default for tool calls: with 2+ reachable, a call still names an executor. It must be in the child's reachable set, or the daemon refuses the spawn. Empty (the default): the client fills in this machine when the spawn's selector matches it, and otherwise the daemon resolves a home itself — `--executor`, the spawner's home, a single reachable executor, or the one executor where `--cwd` exists — or the child has none. Mutually exclusive with `-i`, whose form has no home row |
 | `--no-local-executor` | — | Do not offer this machine as a workspace at all |
 | `--notify <all\|result>` | — | Spawn with `SpawnRequest.notify` (field 34, child-allowed): `all` (the default) wakes the spawner on every settle and heartbeat; `result` wakes it only for a recorded result, a pending question, a turn error, the child's own budget cap, or exit/failure. Any other value is `InvalidArgument`. Fixed at spawn, not inherited, not a preset field |
 | `--skip-derived-index` | — | Spawn with `SpawnRequest.skip_derived_index` (field 30, child-allowed) true: the recall indexer then does not embed or summarise this child's conversations or any descendant's, while windows and keyword (BM25) search still work. OR-inherited down the subtree at spawn and never clearable beneath a parent that set it; a resumed child keeps its stored value |
@@ -496,6 +497,14 @@ The default depends on the kind:
 Passing any of these (or any other shaping flag) spawns directly; `-i` opens
 the interactive form anyway, prefilled — where the executor field, `⌥E`'s
 picker, and the same kind-aware default apply.
+
+A spawn that cannot bind an executor is never refused: the child starts
+**unbound** and its workspace tools bind on first use once a machine it may use
+connects. The daemon reports that, and every other non-fatal spawn diagnostic,
+on `SpawnResponse.warnings`, which `rafiki create` (and `rafiki models switch`)
+print to stderr one per line as `warning: <text>` — an unbound selector, no home
+resolved, or a home that is not connected. The child exists and is usable; the
+warnings name what it is missing.
 
 ### Remembered spawn values
 
@@ -744,13 +753,15 @@ with the survivor naming it in `rafiki/forked-from`. A source that is
 mid-turn when the switch lands loses that in-flight turn and any tool side
 effects it caused — the fork starts from the last completed turn.
 
-What the switch does NOT carry, because `GetChild` does not expose it: the
-source's executor binding or sandbox block (a SANDBOXED source refuses the
-switch outright rather than continue unconfined — fork it by hand with an
-explicit `--sandbox` block; a machine-pinned source lands on the default
-executor resolution, and the daemon refuses a cwd the new executor cannot
-see), and the fan-out grants (`max-depth`/`max-children` reset to their
-defaults — a switched coordinator's subtree shrinks, it does not widen). A
+It DOES carry the source's `rafiki/home-executor` label, verbatim: the
+continuation keeps the machine where its cwd and `CLAUDE.md` came from, and the
+daemon refuses a carried home the fork cannot reach (naming the executor)
+rather than silently dropping it. What the switch does NOT carry, because
+`GetChild` does not expose it: the source's executor SELECTOR or sandbox block
+(a SANDBOXED source refuses the switch outright rather than continue
+unconfined — fork it by hand with an explicit `--sandbox` block), and the
+fan-out grants (`max-depth`/`max-children` reset to their defaults — a
+switched coordinator's subtree shrinks, it does not widen). A
 top-level child's `--skip-derived-index` opt-out is lost and its history is
 indexed again; a SUBAGENT's re-inherits from the copied parent at spawn. A
 step failing after the spawn says which: both conversations exist, and the

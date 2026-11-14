@@ -74,10 +74,10 @@ func TestParkedExecutorLeavesTasksUntouched(t *testing.T) {
 	c.Eq("c_abc", rows[0].Assignee, "assignee")
 }
 
-// 3. EXECUTOR LOST — terminal. The child ends, and phase 02's sweep in
-// handleChildExit runs normally. Nothing special is needed here, which is the
-// point of putting the sweep on the EXIT path rather than on the kill verb —
-// so this test exists to prove no special case was added.
+// 3. EXECUTOR LOST — not terminal: losing an executor never ends a child, so
+// nothing orphans at loss time. The orphan sweep belongs to handleChildExit and
+// runs only when the child EXITS, which is why this test proves no
+// executor-specific orphan path was added.
 func TestLostExecutorOrphansThroughTheOrdinaryExitPath(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := &Controller{st: childstore.New(), cm: newChildManager(), execPool: &fakePool{}}
@@ -106,11 +106,10 @@ func TestLostExecutorOrphansThroughTheOrdinaryExitPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The lost handler does NOT orphan directly: it schedules a kill (deferred
-	// 10s via failChild, a no-op here with no live child), and the orphan
-	// sweep runs on the ordinary EXIT path in handleChildExit. The task must
-	// still read in_progress immediately after — proving no executor-specific
-	// orphan path was introduced.
+	// The lost handler does NOT orphan directly — losing an executor never ends
+	// a child — and the orphan sweep belongs to the ordinary EXIT path in
+	// handleChildExit. The task must still read in_progress immediately after,
+	// proving no executor-specific orphan path was introduced.
 	c.HandleExecutorLost(lostID)
 	rows, err := store.List(ctx, tasks.ListFilter{ConversationID: "conv"})
 	ck.NoError(err)

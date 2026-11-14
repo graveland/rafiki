@@ -15,12 +15,12 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// TestProductionKillGracePeriods pins the exact spans the four production
-// Controller.Kill call sites intend: the respawn path, the claude abort path,
-// the lease-loss stop and failChild's force-kill. Controller.Kill takes a
-// time.Duration, so these were once bare millisecond literals that silently
-// became nanoseconds; the named constants make the intent explicit and this
-// test keeps their values from drifting.
+// TestProductionKillGracePeriods pins the exact spans the three production
+// Controller.Kill call sites intend: the respawn path, the claude abort path
+// and the lease-loss stop. Controller.Kill takes a time.Duration, so these were
+// once bare millisecond literals that silently became nanoseconds; the named
+// constants make the intent explicit and this test keeps their values from
+// drifting.
 func TestProductionKillGracePeriods(t *testing.T) {
 	c := assert.NewAborting(t)
 	for _, tc := range []struct {
@@ -34,8 +34,6 @@ func TestProductionKillGracePeriods(t *testing.T) {
 		{"abort kill", abortKillGrace, 500 * time.Millisecond},
 		{"lease-loss shutdown", leaseLossShutdownGrace, 2 * time.Second},
 		{"lease-loss kill", leaseLossKillGrace, 2500 * time.Millisecond},
-		{"failChild shutdown", failChildShutdownGrace, 2 * time.Second},
-		{"failChild kill", failChildKillGrace, 2500 * time.Millisecond},
 	} {
 		c.Eq(tc.want, tc.got, "%s grace", tc.name)
 	}

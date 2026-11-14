@@ -6176,8 +6176,6 @@ const (
 	abortKillGrace         = 500 * time.Millisecond
 	leaseLossShutdownGrace = agentShutdownGrace
 	leaseLossKillGrace     = agentKillGrace
-	failChildShutdownGrace = agentShutdownGrace
-	failChildKillGrace     = agentKillGrace
 )
 
 func framePassesTypeFilter(frame []byte, include, exclude []string) bool {

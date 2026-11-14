@@ -175,6 +175,69 @@ container start are separate calls, so the TOCTOU window is create→start
 (wider than check→create); the accepted posture is that the daemon is trusted
 on this link.
 
+## Reaching several executors
+
+A child's workspace tools can reach more than one machine. Which machines is
+decided at spawn by the shape of the request, and it is re-evaluated on every
+call — never cached, so an executor that connects after the child started is
+usable on the next call and one that has gone is not usable on this one.
+
+| Spawn shape | Reachable set | `executor` argument |
+|---|---|---|
+| A name (`ExecutorRef`) | exactly that executor, if it is inside the child's confinement | optional |
+| A label selector | every executor it matches, inside the child's confinement | required when 2+ are live |
+| Empty | every executor the child is admitted to | required when 2+ are live |
+
+The set is always the parent's effective set intersected with this child's
+selector and the operator's `workspace_mode`: a descendant can narrow what it
+reaches, never widen it.
+
+`Admits`, on the executor's row, is how an operator keeps a special-purpose
+machine out of unscoped agents: it narrows what a selector can match, so an
+executor declared `admits=env=lab` is reached only by a child whose grant
+carries that selector and never by an empty-selector spawn.
+
+Every `TierWorkspace` tool takes an optional `executor` property — a machine
+name or executor id — added once by the registry
+(`pkg/fundi/tools/executor_target.go`) and identical for every child, because
+the tool schema sits in the cached prompt prefix and must not vary. The wrapper
+strips the key before the tool or the executor sees the input. It applies to the
+background-job tools too: `bash_start`, `bash_output` and `bash_kill` all take
+it, so `bash_output` names the executor that started the job.
+
+A call that names no executor when the child can reach 2+ is refused, listing
+them:
+
+```
+this agent can reach 2 executors (build-1, ci-runner-7); pass executor: "<name>"
+```
+
+Home is not a default: with 2+ reachable a call still names a machine, its home
+included. When the child can reach 2+ executors every result is prefixed
+`[<machine>]` (and so is an error), so a multi-machine transcript says which one
+acted. The first call on a NON-home binding is prefixed
+`[<machine>] working from <workdir>`: a non-home workspace starts at the
+executor's own `--root`, never the child's cwd, and the model is told before it
+writes into a tree it assumed.
+
+**Losing an executor never fails a child.** The daemon releases what it held
+there, marks the child `rafiki/executor-state: unbound`, forgets the binding and
+steers it with `EXECUTOR LOST: …` naming the machine from its durable row
+(`HandleExecutorLost`, `cmd/rafikid/workspace_wiring.go`;
+`executorLostSteer`, `cmd/rafikid/executor_lost.go`). Workspace mode is then
+purely a rebinding rule: `pinned` re-provisions only on that same executor when
+it returns, `ephemeral` may rebind an implicit call on the single reachable
+executor. Calls to the lost machine fail until it reconnects, which is what the
+steer says — it is not a sentence about the child ending.
+
+The home executor itself is chosen by the daemon at spawn, and the probe that
+picks it has two bounds: it SKIPS sandboxes (a sandbox provisions at its own
+workdir, so a probe there can never answer "does this child's cwd exist here"),
+and a probe workspace whose id is lost to the probe deadline is a known orphan
+of bounded size — `pkg/executor` has no reaper, so it stays in that executor's
+in-memory registry until the process exits, holding no files and no daemon
+reference.
+
 ## Reaching the daemon
 
 The reverse-dial transports are reached at a **path** on the daemon's shared

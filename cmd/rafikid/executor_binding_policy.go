@@ -9,9 +9,11 @@ import (
 // mayMigrate reports whether a child bound to an executor in the given
 // workspace mode may be re-bound to a DIFFERENT executor.
 //
-// Pinned means the child fails where it stood; ephemeral means the daemon may
-// move it. An unknown or absent mode is pinned -- moving a child onto a machine
-// no operator marked interchangeable is worse than failing it.
+// Pinned means the child may only be re-provisioned on that SAME executor;
+// ephemeral means the daemon may rebind it onto any reachable one. Losing an
+// executor never fails a child either way. An unknown or absent mode is pinned
+// -- moving a child onto a machine no operator marked interchangeable is worse
+// than holding it where it was put.
 //
 // This does not gate re-provisioning on the SAME executor: the executor keeps
 // its workspace registry in memory, so a restart loses every id while the
