@@ -667,13 +667,14 @@ func TestBuildSpawnRequestLeavesHomeToTheDaemonForASessionExecutor(t *testing.T)
 	ck.Eq("", req.GetHomeExecutor(), "a named executor leaves home to the daemon")
 }
 
-// switchHomeClient answers the source read and records the spawn, so the switch
-// request can be inspected without a daemon.
+// switchHomeClient answers the source read, so the switch request can be built
+// and inspected without a daemon. The request it returns IS what the switch
+// would spawn (switchSpawnCmd hands it straight to Spawn), so a fake Spawn would
+// only restate it.
 type switchHomeClient struct {
 	rafikiv1connect.ControlClient
 
 	labels map[string]string
-	spawn  *rafikiv1.SpawnRequest
 }
 
 func (f *switchHomeClient) GetChild(_ context.Context, req *connect.Request[rafikiv1.GetChildRequest]) (*connect.Response[rafikiv1.GetChildResponse], error) {
