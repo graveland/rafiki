@@ -328,7 +328,25 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 		// rafiki/workspace-mode: they name the machine the child's cwd lives on,
 		// which is where a pinned child is re-provisioned when it comes back, and
 		// dropping the mode would silently turn a pinned child ephemeral.
-		if _, err := c.st.SetLabels(snap.ChildID, map[string]string{
+		//
+		// WITHOUT a home of its own any more, though. Forget waits for an in-flight
+		// home migration (see boundExecutor.Forget), so this loss may land AFTER the
+		// child's home moved to another machine, whose labels the migration wrote and
+		// whose workspace the resident binding still holds. Clearing rafiki/workspace
+		// then would delete a LIVE workspace's only label, and rafiki/executor would
+		// name neither the machine that workspace is on nor the home a resume binds.
+		// Those labels belong to the migration's home and are left alone; everything
+		// this handler owns — the releases above, the binding's removal, the steer
+		// below — still happens.
+		home := ""
+		if be != nil {
+			home = be.homeExecutor()
+		}
+		if home != "" && home != lostID {
+			slog.Info("the child's home moved while this loss was being handled; leaving its "+
+				"labels to the migration that established it",
+				"childId", snap.ChildID, "lostExecutorId", shortID(lostID), "home", shortID(home))
+		} else if _, err := c.st.SetLabels(snap.ChildID, map[string]string{
 			"rafiki/executor-state": "unbound",
 		}, []string{"rafiki/workspace"}); err != nil {
 			slog.Warn("could not mark the child unbound after losing its executor",

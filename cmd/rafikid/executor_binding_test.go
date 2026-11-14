@@ -155,6 +155,12 @@ type fakeBinder struct {
 	// them.
 	labels map[string]string
 	clears int
+	undos  int
+
+	// provisioned records every workspace id ProvisionOn ever handed out, in call
+	// order, so a test can assert that each one was either released or is still
+	// named by a live binding — nothing leaked.
+	provisioned []string
 
 	// onNoteBinding, when set, runs synchronously inside NoteBinding -- with the
 	// fake's lock released, AFTER the labels are written. It is the window the
@@ -361,13 +367,11 @@ func (f *fakeBinder) ProvisionOn(ctx context.Context, id string, useCwd bool) (s
 		workdir = "/cwd"
 	}
 	if f.clientOverride != nil {
-		ws := fmt.Sprintf("ws-%s-%d", id, f.provisions)
-		f.lastWorkspace = ws
+		ws := f.mintLocked(id)
 		return ws, workdir, f.clientOverride, nil
 	}
 	if override, ok := f.clientByExec[id]; ok {
-		ws := fmt.Sprintf("ws-%s-%d", id, f.provisions)
-		f.lastWorkspace = ws
+		ws := f.mintLocked(id)
 		return ws, workdir, override, nil
 	}
 	e, ok := f.execs[id]
@@ -379,9 +383,17 @@ func (f *fakeBinder) ProvisionOn(ctx context.Context, id string, useCwd bool) (s
 	// deterministic "ws-"+id here would make an in-place re-provision look
 	// like it returned the SAME workspace, hiding the old one never having
 	// been released.
+	ws := f.mintLocked(id)
+	return ws, workdir, e, nil
+}
+
+// mintLocked records the workspace id this provision hands out. Caller holds
+// f.mu.
+func (f *fakeBinder) mintLocked(id string) string {
 	ws := fmt.Sprintf("ws-%s-%d", id, f.provisions)
 	f.lastWorkspace = ws
-	return ws, workdir, e, nil
+	f.provisioned = append(f.provisioned, ws)
+	return ws
 }
 
 // waitForReleases polls until the fake has recorded at least n releases, or the
@@ -453,6 +465,25 @@ func (f *fakeBinder) ClearBinding(string) {
 	f.clears++
 	delete(f.labels, "rafiki/executor")
 	delete(f.labels, "rafiki/workspace")
+}
+
+// UndoBinding restores the labels a lost migration wrote, and only while they
+// still name the pair it wrote — a blind clear would delete a live binding's
+// only handle.
+func (f *fakeBinder) UndoBinding(_, wroteExec, wroteWS, priorExec string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.labels["rafiki/executor"] != wroteExec || f.labels["rafiki/workspace"] != wroteWS {
+		return false
+	}
+	delete(f.labels, "rafiki/workspace")
+	if priorExec == "" {
+		delete(f.labels, "rafiki/executor")
+	} else {
+		f.labels["rafiki/executor"] = priorExec
+	}
+	f.undos++
+	return true
 }
 
 // bindingLabels is a copy of the child's durable binding labels.
@@ -1844,6 +1875,281 @@ func TestBoundExecutorConcurrentMigrationsToOneHome(t *testing.T) {
 	c.Eq("b/"+wsID, noted[len(noted)-1], "the labels must name the HOME binding's executor and workspace; noted %v", noted)
 	c.Eq("b", labels["rafiki/executor"], "rafiki/executor must agree with b.home and rafiki/home-executor; labels %v", labels)
 	c.Eq(wsID, labels["rafiki/workspace"], "rafiki/workspace must name the home binding's workspace; labels %v", labels)
+}
+
+// assertHomeAndLabelsAgree is the invariant the migration/loss protocol exists
+// to keep: the durable labels and b.home name the SAME executor and workspace,
+// or they name no workspace at all. A resume reads those labels, so a
+// disagreement outlives the daemon that made it.
+func assertHomeAndLabelsAgree(t *testing.T, be *boundExecutor, fb *fakeBinder) {
+	t.Helper()
+	home := be.homeExecutor()
+	labels := fb.bindingLabels()
+	wsLabel := labels["rafiki/workspace"]
+	if home == "" {
+		if wsLabel != "" {
+			t.Fatalf("b.home names no executor, but the labels name workspace %q (labels %v): a "+
+				"resume would bind a home nothing claimed", wsLabel, labels)
+		}
+		return
+	}
+	if execLabel := labels["rafiki/executor"]; execLabel != home {
+		t.Fatalf("b.home is %q but rafiki/executor is %q (labels %v)", home, execLabel, labels)
+	}
+	if wsLabel == "" {
+		t.Fatalf("b.home is %q but rafiki/workspace names nothing (labels %v)", home, labels)
+	}
+	if bound := be.Bindings()[home]; bound != wsLabel {
+		t.Fatalf("the labels name workspace %q but the home binding on %q names %q", wsLabel, home, bound)
+	}
+}
+
+// assertNoWorkspaceLeaked checks that every workspace the fake provisioned is
+// either released, or still named by a live binding (which the exit sweep
+// releases).
+func assertNoWorkspaceLeaked(t *testing.T, be *boundExecutor, fb *fakeBinder) {
+	t.Helper()
+	held := make(map[string]bool, len(be.Bindings()))
+	for _, ws := range be.Bindings() {
+		held[ws] = true
+	}
+	fb.mu.Lock()
+	provisioned := append([]string(nil), fb.provisioned...)
+	released := fb.releasedWorkspaces()
+	fb.mu.Unlock()
+	for _, ws := range provisioned {
+		ok := held[ws]
+		for _, rel := range released {
+			if rel == ws {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Fatalf("workspace %q was provisioned and is neither released nor held by a binding "+
+				"(provisioned %v, released %v, held %v)", ws, provisioned, released, held)
+		}
+	}
+}
+
+// A loss that lands in the ONE window between a migration's label write and its
+// home claim must not leave the durable labels naming the migration's target
+// while the daemon's home is empty: those labels are what a resume reads, so the
+// disagreement survives a restart onto a home the daemon never claimed.
+//
+// The window is opened from inside the label write itself (fakeBinder's
+// onNoteBinding), which is where a migration publishes its target's labels and
+// before it claims the home. The loss cannot take the transition slot — the
+// migration holds it, and the migration cannot make progress while this hook
+// runs — so its bounded wait expires and the migration loses its claim, which is
+// the branch that has to roll its own write back.
+func TestLostExecutorCannotClearTheHomeAMigrationHasNotClaimed(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	// Spend the wait rather than sleep through it: the loss has to give up, and
+	// the migration has to lose its claim, for the rollback to be exercised.
+	prevWait := forgetMigrationWait
+	forgetMigrationWait = 20 * time.Millisecond
+	t.Cleanup(func() { forgetMigrationWait = prevWait })
+
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	be := newBoundExecutor("c1", fb)
+	bindTestHome(t, be, "a")
+	// One reachable executor that is not the home: that is what an implicit call
+	// migrates to.
+	fb.reachableTo("b")
+	homeWS, hadHome := be.Bindings()["a"]
+	c.Require().True(hadHome, "test setup: the spawn bound a home workspace on a")
+
+	var (
+		forgetWS string
+		forgot   bool
+	)
+	fb.mu.Lock()
+	fb.onNoteBinding = func() {
+		// The window: the migration has published the target's labels and has not
+		// claimed the home yet.
+		forgetWS, forgot = be.Forget("a")
+		if forgot {
+			// Releasing the forgotten workspace is the loss handler's job.
+			fb.ReleaseOn(context.Background(), "a", forgetWS)
+		}
+	}
+	fb.mu.Unlock()
+
+	res, err := be.Execute(context.Background(), "read", nil)
+	c.NoError(err, "losing the race must not fail the call: it proceeds on the executor it resolved")
+	c.Eq("b:read", res.Text, "the call must run on the executor the migration resolved; got")
+	c.True(forgot, "the loss must forget the home binding")
+	c.Eq(homeWS, forgetWS, "and hand its workspace to the caller for release; got")
+
+	assertHomeAndLabelsAgree(t, be, fb)
+	c.Eq("", be.homeExecutor(), "the migration never claimed the home, so the child has none; got")
+	_, claims := fb.bindingLabels()["rafiki/workspace"]
+	c.False(claims, "and no label may keep naming the workspace it provisioned")
+	fb.mu.Lock()
+	undos := fb.undos
+	fb.mu.Unlock()
+	c.Eq(1, undos, "the lost migration must roll its own label write back; undos")
+
+	// The rollback releases its workspace on its own goroutine (each release has
+	// its own deadline by contract), so the release record is read after it lands.
+	released := waitForReleases(t, fb, 2)
+	c.Len(released, 2, "the loss AND the rollback must release their workspaces; released %v", released)
+	assertNoWorkspaceLeaked(t, be, fb)
+}
+
+// The loss takes the same transition slot a migration does, so it cannot land in
+// the middle of one: it waits for the migration to settle and then acts on the
+// home that migration established. Without the wait, the loss clears the home
+// the migration is about to claim — the same disagreement from the other side.
+func TestForgetWaitsForAnInFlightHomeMigration(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	be := newBoundExecutor("c1", fb)
+	bindTestHome(t, be, "a")
+	fb.reachableTo("b")
+
+	// Hold the migration inside its provision RPC: it holds the transition slot
+	// and the loss below can only wait for it.
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(id string) {
+		if id != "b" {
+			return
+		}
+		once.Do(func() { close(entered) })
+		<-proceed
+	}
+	fb.mu.Unlock()
+
+	type callResult struct {
+		text string
+		err  error
+	}
+	callDone := make(chan callResult, 1)
+	go func() {
+		res, err := be.Execute(context.Background(), "read", nil)
+		callDone <- callResult{text: res.Text, err: err}
+	}()
+	<-entered
+
+	forgetDone := make(chan struct{})
+	go func() {
+		defer close(forgetDone)
+		if ws, ok := be.Forget("a"); ok {
+			// Releasing the forgotten workspace is the loss handler's job.
+			fb.ReleaseOn(context.Background(), "a", ws)
+		}
+	}()
+	select {
+	case <-forgetDone:
+		t.Fatal("Forget returned while a home migration was still running: it can clear the home " +
+			"between that migration's label write and its claim")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(proceed)
+	<-forgetDone
+	res := <-callDone
+	c.NoError(res.err, "the call must still be served")
+	c.Eq("b:read", res.text, "on the executor the migration resolved; got")
+	c.Eq("b", be.homeExecutor(), "the migration claimed the home before the loss could act; home =")
+	assertHomeAndLabelsAgree(t, be, fb)
+	fb.mu.Lock()
+	migrations := fb.migrations
+	fb.mu.Unlock()
+	c.Eq(1, migrations, "the migration kept its claim, so the child is told its tree moved once; migrations")
+	waitForReleases(t, fb, 1)
+	assertNoWorkspaceLeaked(t, be, fb)
+}
+
+// The loss handler reads its snapshots BEFORE it acts and rewrites the labels
+// last, by which time a migration it waited for may have run. That rewrite is
+// pinned here, beside the migration tests it is the other half of: the labels it
+// would otherwise clobber name the LIVE workspace of the home the child moved to,
+// and clearing them leaves rafiki/executor naming neither that machine nor the
+// home a resume binds. (It lives in this file, not workspace_wiring_test.go, so
+// the loss protocol and its tests stay one change.)
+func TestExecutorLostLeavesTheLabelsOfAHomeThatMoved(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := &fakePool{}
+	ctrl, clk, _ := lostFixture(t, pool, row(lostExecID, "build-1"))
+
+	fb := newFakeBinder(&fakeExec{id: lostExecID}, &fakeExec{id: otherExecID})
+	be := newBoundExecutor("c_race", fb)
+	be.setHome(lostExecID)
+	if _, err := be.ensureBinding(context.Background(), lostExecID, true); err != nil {
+		t.Fatalf("home binding on the lost executor: %v", err)
+	}
+	lostWS := be.Bindings()[lostExecID]
+	ctrl.noteBoundExecutor("c_race", be)
+	seedChildOn(ctrl, "c_race", lostExecID, lostWS, "ephemeral")
+
+	// An implicit call migrates the home to the one reachable executor, and is
+	// held inside that provision until the loss below is waiting on it.
+	fb.reachableTo(otherExecID)
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(id string) {
+		if id != otherExecID {
+			return
+		}
+		once.Do(func() { close(entered) })
+		<-proceed
+	}
+	// The migration's label write, mirrored into the CHILD'S ROW the way the
+	// controller's binder does it: this test asserts on the durable labels the
+	// loss handler would clobber, not on the fake's own copy.
+	fb.onNoteBinding = func() {
+		fb.mu.Lock()
+		execID, wsID := fb.labels["rafiki/executor"], fb.labels["rafiki/workspace"]
+		fb.mu.Unlock()
+		_, _ = ctrl.st.SetLabels("c_race", map[string]string{
+			"rafiki/executor":       execID,
+			"rafiki/workspace":      wsID,
+			"rafiki/workspace-mode": "ephemeral",
+		}, nil)
+	}
+	fb.mu.Unlock()
+
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := be.Execute(context.Background(), "read", nil)
+		callDone <- err
+	}()
+	<-entered
+
+	lostDone := make(chan struct{})
+	go func() {
+		defer close(lostDone)
+		ctrl.HandleExecutorLost(lostExecID)
+	}()
+	select {
+	case <-lostDone:
+		t.Fatal("the loss handler must wait for the in-flight migration before it acts on the labels")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(proceed)
+	<-lostDone
+	c.NoError(<-callDone, "the call that migrated must still be served")
+
+	c.Eq(otherExecID, be.homeExecutor(), "the migration claimed the home; home =")
+	snap, ok := ctrl.st.Get("c_race")
+	c.Require().True(ok, "the child's row survives")
+	c.Eq(otherExecID, snap.Labels["rafiki/executor"], "the labels must still name the home the migration established; =")
+	c.Eq(be.Bindings()[otherExecID], snap.Labels["rafiki/workspace"],
+		"and the workspace that home binding holds — a loss that clears it leaves a live workspace unnamed "+
+			"and unreleasable; =")
+	_, unbound := snap.Labels["rafiki/executor-state"]
+	c.False(unbound, "a child whose home moved is not unbound")
+	c.EqDeep([]wsRelease{{executorID: lostExecID, workspaceID: lostWS}}, pool.releases(),
+		"the workspace on the lost machine is still released, exactly once; got")
+
+	clk.Advance(6 * time.Second)
 }
 
 // A dead executor's workspace release must not starve the live ones: teardown

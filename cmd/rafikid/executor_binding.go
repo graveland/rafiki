@@ -70,6 +70,16 @@ type executorBinder interface {
 	// resumed child plus teardown both read those labels.
 	ClearBinding(childID string)
 
+	// UndoBinding restores the labels NoteBinding wrote for (wroteExecID,
+	// wroteWSID) to priorExecID with no workspace, and reports whether it did.
+	//
+	// It is the rollback half of a home migration that lost its claim (see
+	// boundExecutor.rollbackLostMigration), and it writes NOTHING unless the
+	// labels still name exactly what that migration wrote: another path may have
+	// published a workspace in the meantime, and a blind clear would delete a
+	// live binding's only handle.
+	UndoBinding(childID, wroteExecID, wroteWSID, priorExecID string) bool
+
 	// DisplayName names an executor for an operator and for the model: its
 	// machine label, else a short id.
 	DisplayName(executorID string) string
@@ -134,11 +144,13 @@ type boundExecutor struct {
 	// provisioner checks this after its RPC and releases what it made.
 	closed bool
 
-	// migrating is non-nil while ONE migrateHome is running its provision and
-	// label write, and is closed when it has settled. It is what keeps two
-	// concurrent migrations from interleaving a winner's home claim with a
-	// loser's label write -- see migrateHome. A channel rather than a lock
-	// because b.mu is never held across an RPC or a store write.
+	// migrating is non-nil while ONE home transition is in flight, and is closed
+	// when it has settled: a migration's provision + label write + home claim
+	// (see migrateHome), or a loss clearing the home (see Forget). It keeps two
+	// migrations from interleaving a winner's home claim with a loser's label
+	// write, and keeps a loss from clearing the home between a migration's label
+	// write and its claim. A channel rather than a lock because b.mu is never
+	// held across an RPC or a store write.
 	migrating chan struct{}
 }
 
@@ -214,11 +226,46 @@ func (b *boundExecutor) Bindings() map[string]string {
 	return out
 }
 
+// forgetMigrationWait bounds how long a home-CLEARING path waits for a home
+// transition already in flight before going ahead without the slot.
+//
+// A var rather than a const so a test can spend the wait instead of sleeping
+// through it: the interesting branch is what happens when it expires.
+var forgetMigrationWait = 5 * time.Second
+
 // Forget removes one binding WITHOUT releasing its workspace — the caller owns
 // the release. Used when an executor's connection is known to be gone and the
 // next call must not find a stale client. If the binding was home, the home
 // pointer is cleared too (rewriting the labels is the caller's job).
+//
+// CLEARING THE HOME IS SERIALIZED WITH THE MIGRATION CLAIM, because the two
+// write the same thing from opposite directions. A migration publishes its
+// target's labels INSIDE its provision and claims the home only afterwards, so
+// a loss that cleared the home in that window left the labels naming a target
+// nothing had claimed — rafiki/executor/rafiki/workspace on one machine,
+// rafiki/home-executor on another, and b.home empty — and no next call or
+// migration is guaranteed before a daemon restart, which resumes onto exactly
+// those labels. Taking the slot makes a loss happen entirely BEFORE a migration
+// (which then claims the home it finds) or entirely AFTER one (and then the
+// home it clears is the one that migration established, consistently with the
+// labels its caller then rewrites).
+//
+// The wait is BOUNDED and never unbounded: the slot's holder is doing an RPC
+// that can hang, while this runs on the loss path where the caller must still
+// reach the release it owes the dead machine. When the budget expires with a
+// migration still running, Forget goes ahead WITHOUT the slot and says so; the
+// migration then loses its claim and rolls its own label write back
+// (migrateHomeNow). It cannot deadlock: the slot is only ever waited on with
+// b.mu released, and nothing that holds it waits on a Forget.
 func (b *boundExecutor) Forget(executorID string) (workspaceID string, ok bool) {
+	release, held := b.claimHomeTransition()
+	defer release()
+	if !held {
+		slog.Warn("a home transition did not settle before the wait expired; forgetting the "+
+			"binding without its slot — the migration rolls its label write back if it loses the home",
+			"child", b.childID, "executor", shortID(executorID), "waited", forgetMigrationWait)
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	bd, ok := b.bindings[executorID]
@@ -233,6 +280,45 @@ func (b *boundExecutor) Forget(executorID string) (workspaceID string, ok bool) 
 		b.homeSeeded = true
 	}
 	return bd.wsID, true
+}
+
+// claimHomeTransition reserves the home-transition slot for a loss, waiting for
+// the transition in flight to settle first.
+//
+// held is false when forgetMigrationWait expires with a transition still
+// running: the caller then proceeds WITHOUT the slot, which is safe only
+// because a migration that loses its claim rolls its own label write back —
+// see Forget and rollbackLostMigration.
+func (b *boundExecutor) claimHomeTransition() (release func(), held bool) {
+	deadline := time.Now().Add(forgetMigrationWait)
+	for {
+		b.mu.Lock()
+		wait := b.migrating
+		if wait == nil {
+			done := make(chan struct{})
+			b.migrating = done
+			b.mu.Unlock()
+			return func() {
+				b.mu.Lock()
+				b.migrating = nil
+				b.mu.Unlock()
+				close(done)
+			}, true
+		}
+		b.mu.Unlock()
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return func() {}, false
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-wait:
+			timer.Stop()
+		case <-timer.C:
+			return func() {}, false
+		}
+	}
 }
 
 // Multi reports whether the child can reach 2+ executors right now, i.e.
@@ -756,6 +842,13 @@ func (b *boundExecutor) adoptHome(ctx context.Context, execID string) error {
 // set, and it is never failed for losing the race. The leader never waits on a
 // waiter, and b.mu is never held across either the wait or the RPCs, so no
 // arrangement of these calls can deadlock.
+//
+// A LOSS takes the same slot (Forget), for the same reason and the mirror image
+// of it: Forget clears the home, which would otherwise land between this
+// migration's label write and its claim. Forget's wait is bounded, so a
+// provision that outlasts it still lets the home be cleared — and then
+// migrateHomeNow rolls its own label write back rather than leaving the durable
+// labels naming a home nothing claimed.
 func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error {
 	for {
 		b.mu.Lock()
@@ -791,20 +884,40 @@ func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error 
 }
 
 // migrateHomeNow is one migration, run with b.migrating held.
+//
+// It can still LOSE the home it set out to claim: Forget clears the home when
+// the migration's target provision outlasts its bounded wait (see Forget). Losing
+// is not an error — the caller's call proceeds on the executor it resolved — but
+// the provision already published the target's labels, so this migration has to
+// roll its own write back, or the durable labels name a workspace nothing claims
+// while b.home names nothing at all.
 func (b *boundExecutor) migrateHomeNow(ctx context.Context, from, to string) error {
-	if _, err := b.ensureBinding(ctx, to, true); err != nil {
+	bd, err := b.ensureBinding(ctx, to, true)
+	if err != nil {
 		return err
 	}
 
 	b.mu.Lock()
 	won := b.home == from
-	if won {
+	homeAfter := b.home
+	// ours is the binding THIS migration published; a caller that replaced it
+	// owns whatever is there now, labels included.
+	ours := b.bindings[to] == bd && bd.wsID != ""
+	undoWS := ""
+	switch {
+	case won:
 		b.home, b.homeSeeded = to, true
+	case ours && homeAfter != to:
+		// The home was cleared while this provision ran, or another path moved it
+		// somewhere else entirely. Either way nothing claims this workspace: undo
+		// it now rather than leaving a workspace whose cwd semantics nothing
+		// records for the exit sweep to find.
+		undoWS = bd.wsID
+		delete(b.bindings, to)
 	}
 	b.mu.Unlock()
 	if !won {
-		// The home was cleared (a loss) while this provision ran: nothing to
-		// move, and the labels belong to whoever binds next.
+		b.rollbackLostMigration(ctx, from, to, undoWS, homeAfter)
 		return nil
 	}
 
@@ -813,6 +926,77 @@ func (b *boundExecutor) migrateHomeNow(ctx context.Context, from, to string) err
 	slog.Info("migrated the child's home workspace",
 		"child", b.childID, "from", shortID(from), "to", shortID(to))
 	return nil
+}
+
+// rollbackLostMigration undoes exactly what a migration that lost its home claim
+// wrote, and nothing else.
+//
+// homeAfter is the home the losing migration found instead of `from`: "" when a
+// loss cleared it (the labels are then still the migration's own, and are put
+// back to the home that was lost), or another executor when something else moved
+// the home and owns the labels by now (they are left strictly alone). wsID is the
+// workspace this migration provisioned and has already dropped; empty means the
+// binding was replaced under it, so there is nothing of its own left at all.
+func (b *boundExecutor) rollbackLostMigration(ctx context.Context, from, to, wsID, homeAfter string) {
+	if wsID == "" {
+		return
+	}
+	if homeAfter == "" {
+		if b.binder.UndoBinding(b.childID, to, wsID, from) {
+			slog.Warn("a home migration lost the home to a concurrent loss; restored the labels it "+
+				"had written and released the workspace it had provisioned",
+				"child", b.childID, "from", shortID(from), "to", shortID(to), "workspace", wsID)
+		} else {
+			// The labels name something this migration did not write: another path
+			// rewrote them first, so they are left where that path put them.
+			slog.Info("a home migration lost the home to a concurrent loss; its labels were "+
+				"already rewritten by another path",
+				"child", b.childID, "from", shortID(from), "to", shortID(to))
+		}
+	} else {
+		slog.Info("another path moved the child's home while a migration provisioned; "+
+			"released the workspace that migration had made",
+			"child", b.childID, "from", shortID(from), "to", shortID(to),
+			"home", shortID(homeAfter), "workspace", wsID)
+	}
+	b.releaseAsync(ctx, to, wsID)
+}
+
+// UndoBinding is the DURABLE half of rollbackLostMigration, which is why it sits
+// here beside the migration protocol rather than with the rest of the
+// Controller's binder in executor_binder_impl.go.
+//
+// The read-then-write is not one store transaction, and the ordering it can lose
+// is a cost taken deliberately: a writer that publishes a new pair between the
+// check and the write is publishing a workspace it holds live, so losing there
+// leaves a label set that names NO workspace — a resume binds priorExecID and
+// provisions a fresh home — never one naming a workspace nothing will release.
+func (b *controllerBinder) UndoBinding(childID, wroteExecID, wroteWSID, priorExecID string) bool {
+	if b.c.st == nil {
+		return false
+	}
+	snap, ok := b.c.st.Get(childID)
+	if !ok {
+		return false
+	}
+	if snap.Labels["rafiki/executor"] != wroteExecID || snap.Labels["rafiki/workspace"] != wroteWSID {
+		return false
+	}
+	set := map[string]string{}
+	remove := []string{"rafiki/workspace"}
+	if priorExecID == "" {
+		remove = append(remove, "rafiki/executor")
+	} else {
+		set["rafiki/executor"] = priorExecID
+	}
+	if _, err := b.c.st.SetLabels(childID, set, remove); err != nil {
+		slog.Warn("could not roll back a lost home migration's labels; a resumed child "+
+			"would bind the home it moved to",
+			"child", childID, "executor", shortID(wroteExecID),
+			"workspace", wroteWSID, "error", err)
+		return false
+	}
+	return true
 }
 
 // retryBinding returns the CLIENT and the executor a retry should run on after
