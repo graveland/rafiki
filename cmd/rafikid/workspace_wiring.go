@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -155,11 +154,13 @@ func workspaceInfoFromRow(row executors.Executor) *fundi.WorkspaceInfo {
 
 // workspaceModeOrPinned resolves an unset workspace_mode to "pinned".
 //
-// Pinned is the conservative reading in both places this is used. In the
-// system prompt it promises the child less (its tree stays put); on the
-// rafiki/workspace-mode label it means an executor loss FAILS the child rather
-// than silently moving it onto a machine the operator never marked as
-// interchangeable.
+// Pinned is the conservative reading in both places this is used. In the system
+// prompt it promises the child less (its tree stays put); on the
+// rafiki/workspace-mode label it means the child is only ever re-provisioned on
+// THAT machine, never moved onto one the operator never marked as
+// interchangeable. Losing an executor fails nothing either way: an ephemeral
+// child re-binds on its next call, and a pinned one waits for its machine to
+// come back.
 func workspaceModeOrPinned(mode string) string {
 	if mode == "" {
 		return "pinned"
@@ -239,63 +240,94 @@ func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspace
 	}
 }
 
+// executorDisplayName names an executor the way an operator and the model see
+// it: its machine label, else a short id.
+//
+// This is the binder's rule, and it goes through the binder rather than being
+// restated here so the two cannot drift. It needs no child's spawn request
+// because the naming rule does not consult one: a lost executor has to be named
+// to children that outlived whatever spawned them.
+func (c *Controller) executorDisplayName(executorID string) string {
+	return (&controllerBinder{c: c}).DisplayName(executorID)
+}
+
 // HandleExecutorLost is called by the exec pool when a parked executor's
-// timeout expires and it is declared permanently lost. For each child on the
-// lost executor, it either re-provisions (ephemeral) or fails (pinned).
+// timeout expires and it is declared permanently lost.
+//
+// Losing an executor NEVER fails a child, whatever its workspace mode. The
+// child keeps running, its bindings on the lost machine are forgotten so the
+// next call re-binds instead of calling a corpse, and it is steered to re-check
+// what it believes is on that machine. Workspace mode is only a REBINDING rule
+// from here on — pinned re-provisions on that same executor once it returns,
+// ephemeral may re-provision anywhere on the child's next implicit call — so
+// nothing here re-selects a machine and nothing here kills.
 func (c *Controller) HandleExecutorLost(lostID string) {
-	slog.Warn("executor lost — handling children", "executorId", lostID[:12])
+	name := c.executorDisplayName(lostID)
+	slog.Warn("executor lost — handling children", "executorId", shortID(lostID), "executor", name)
 
-	children := c.st.List()
+	// Children handled by the LABEL pass, so the binding pass below does not
+	// steer one of them twice.
+	handled := make(map[string]bool)
 
-	for _, snap := range children {
-		if snap.Labels["rafiki/executor"] != lostID {
+	// 1. The children whose HOME binding was on the lost machine. Their labels
+	// name its workspace, which is the only workspace the daemon can release
+	// without asking the child's binding.
+	//
+	// EXITED children are skipped: their exit sweep already released the
+	// workspace by these same labels, and a steer pushed now would park a row in
+	// an inbox nothing reads until a resume — waking that child for news about a
+	// machine it is not using.
+	for _, snap := range c.st.List() {
+		if snap.Labels["rafiki/executor"] != lostID || snap.Status == protocol.StatusExited {
 			continue
 		}
-		wsID := snap.Labels["rafiki/workspace"]
-		if wsID == "" {
-			continue
+		handled[snap.ChildID] = true
+
+		if wsID := snap.Labels["rafiki/workspace"]; wsID != "" {
+			c.releaseWorkspace(context.Background(), lostID, wsID)
 		}
 
-		// Check the workspace mode from the child's labels. The label is
-		// daemon-written from the executor's row at provision time; an absent
-		// one means a child from before the label existed, and PINNED is the
-		// conservative reading — moving a child onto a machine no operator
-		// marked interchangeable is worse than failing it where it stood.
-		mode := workspaceModeOrPinned(snap.Labels["rafiki/workspace-mode"])
-
-		// Release the dead workspace first.
-		c.releaseWorkspace(context.Background(), lostID, wsID)
-
-		if mode == "pinned" {
-			// Pinned children cannot move — fail them.
-			slog.Warn("pinned child lost with executor",
-				"childId", snap.ChildID, "executorId", lostID[:12])
-			c.failChild(snap.ChildID, "executor lost — pinned workspace cannot be rescheduled")
-			continue
+		// The binding is gone with the machine; the labels must stop claiming
+		// one. rafiki/executor and rafiki/home-executor STAY, and so does
+		// rafiki/workspace-mode: they name the machine the child's cwd lives on,
+		// which is where a pinned child is re-provisioned when it comes back, and
+		// dropping the mode would silently turn a pinned child ephemeral.
+		if _, err := c.st.SetLabels(snap.ChildID, map[string]string{
+			"rafiki/executor-state": "unbound",
+		}, []string{"rafiki/workspace"}); err != nil {
+			slog.Warn("could not mark the child unbound after losing its executor",
+				"childId", snap.ChildID, "executorId", shortID(lostID), "error", err)
 		}
 
-		// Ephemeral: try to re-provision on another matching executor.
-		if !c.tryReschedule(snap) {
-			slog.Error("ephemeral child cannot be rescheduled — no matching executor",
-				"childId", snap.ChildID)
-			c.failChild(snap.ChildID, "executor lost — no matching executor available for reschedule")
+		if be := c.boundExecutorFor(snap.ChildID); be != nil {
+			be.Forget(lostID)
 		}
+		c.sendSteer(snap.ChildID, executorLostSteer(name))
 	}
-}
 
-// executorAcceptsReschedule reports whether a child may be moved onto le.
-func executorAcceptsReschedule(le execpool.LiveExecutor) bool {
-	return le.Executor.WorkspaceMode == "ephemeral"
-}
+	// 2. Every other child holding a binding on the lost machine: a workspace
+	// the agent named for a call, which the labels never mention. Best-effort
+	// release and forget, so the next call to that machine re-provisions rather
+	// than reusing a client whose transport is dead.
+	c.boundMu.Lock()
+	bound := make(map[string]*boundExecutor, len(c.bound))
+	for childID, be := range c.bound {
+		bound[childID] = be
+	}
+	c.boundMu.Unlock()
 
-// tryReschedule is now a no-op that always succeeds: an ephemeral child re-binds
-// itself on its next tool call, through chooseExecutor, so it stays confined by
-// its own stored selector -- which is exactly what the old body never did. A
-// PINNED child never reaches here; HandleExecutorLost fails it above.
-func (c *Controller) tryReschedule(snap childstore.Snapshot) bool {
-	slog.Info("executor lost; the child will re-bind on its next tool call",
-		"childId", snap.ChildID)
-	return true
+	for childID, be := range bound {
+		if handled[childID] {
+			continue
+		}
+		if _, ok := be.Bindings()[lostID]; !ok {
+			continue
+		}
+		if wsID, ok := be.Forget(lostID); ok {
+			c.releaseWorkspace(context.Background(), lostID, wsID)
+		}
+		c.sendSteer(childID, executorLostSteer(name))
+	}
 }
 
 // rescheduleSteer is injected into a child whose workspace was rebuilt on a
@@ -304,18 +336,6 @@ func (c *Controller) tryReschedule(snap childstore.Snapshot) bool {
 const rescheduleSteer = `YOUR WORKSPACE WAS REBUILT on a different machine. The previous one is gone.
 Anything you had NOT committed is lost. Re-check the state of the working tree
 before continuing, and do not report as done anything you cannot now see.`
-
-// failChild sends a fatal steer to the child and transitions it to failed.
-func (c *Controller) failChild(childID, reason string) {
-	c.sendSteer(childID, reason)
-	// Best-effort: the steer tells the child it's done.
-	// Force-kill after a short grace period.
-	time.AfterFunc(10*time.Second, func() {
-		if _, err := c.Kill(context.Background(), childID, failChildShutdownGrace, failChildKillGrace); err != nil {
-			slog.Warn("failChild force-kill failed", "childId", childID, "error", err)
-		}
-	})
-}
 
 // sendSteer injects a steer message into the child's event stream.
 func (c *Controller) sendSteer(childID, message string) {

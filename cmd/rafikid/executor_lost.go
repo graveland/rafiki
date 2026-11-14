@@ -1,41 +1,17 @@
 package main
 
-import (
-	"encoding/json"
-	"log/slog"
-
-	"go.graveland.dev/rafiki/pkg/protocol"
-)
-
-// labelExecutorID is the label key recording which executor a child landed on.
-// Phase 09 needs this for prompt visibility; add it here so phase 09 consumes it.
+// executorLostSteer is the steer a child gets when an executor it was using
+// disconnects for good.
 //
-//nolint:unused // wired by full daemon integration (plan-07 task 5)
-const labelExecutorID = "rafiki/executor"
-
-// notifyExecutorLost sends a prompt to every child assigned to the given
-// executor, telling them their machine is gone. The frame type is "prompt" —
-// the one the fundi frontend accepts on stdin (pkg/fundi/frontend.go); the
-// submit spelling this used to send is not a type any receiver parses.
+// It deliberately does NOT say "stop what you are doing": losing a machine
+// never fails a child. Calls to that machine fail until it reconnects, and when
+// it does the workspace there is rebuilt from the child's cwd — so anything the
+// child never committed on that machine can be gone, which is what it has to be
+// told before it reports work as done.
 //
-// An executor that is gone for good invalidates the turn its children are
-// in the middle of, so this uses a direct send rather than a queued prompt —
-// a worker must not spend another 40 seconds believing it still has an executor.
-//
-//nolint:unused // wired by full daemon integration (plan-07 task 5)
-func (c *Controller) notifyExecutorLost(executorID string) {
-	for _, snap := range c.st.List() {
-		if snap.Labels[labelExecutorID] != executorID || snap.Status == protocol.StatusExited {
-			continue
-		}
-		msg := map[string]any{
-			"type":    "prompt",
-			"message": "EXECUTOR LOST: the machine running your file and shell tools is gone and is not coming back. Every read, write, edit and bash call will now fail. Stop what you are doing and report what you had completed.",
-		}
-		if b, err := json.Marshal(msg); err == nil {
-			if err := c.Send(snap.ChildID, b); err != nil {
-				slog.Warn("notifyExecutorLost: could not send to child", "childId", snap.ChildID, "executorId", executorID, "error", err)
-			}
-		}
-	}
+// name is DisplayName's: the machine label where the row is known, else a short
+// id. It is the only variable part, so the text stays one reviewable sentence
+// set rather than a format string assembled at each call site.
+func executorLostSteer(name string) string {
+	return "EXECUTOR LOST: executor " + name + " disconnected. Calls to it fail until it reconnects; when it does, your workspace there is rebuilt and anything not committed on that machine may be gone. Your other tools, and any other executors, still work."
 }

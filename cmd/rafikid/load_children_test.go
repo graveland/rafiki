@@ -87,9 +87,10 @@ func TestScriptNeedsRestartSettle(t *testing.T) {
 }
 
 // TestRecoveryActionWorkspaceMode pins design §3.1. A pinned child must NOT be
-// moved to another machine by the restart path — HandleExecutorLost fails a
-// pinned child where it stood, and boundExecutor.recover refuses to re-select
-// for one. But a pinned child CAN resume on the SAME machine when it restarts
+// moved to another machine by the restart path: losing an executor never fails
+// a child, and a pinned one is only ever re-provisioned on its own machine, so
+// boundExecutor.recover refuses to re-select for one. But a pinned child CAN
+// resume on the SAME machine when it restarts
 // alongside the daemon — planResumeBound strips only the stale workspace id
 // while keeping the executor identity so doRecover can re-provision in place.
 // An unknown mode is pinned.

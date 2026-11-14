@@ -198,10 +198,11 @@ func recoveryOwnership(rec childstore.ChildRecord, me string, live map[string]bo
 // binding is stale by construction — an executor's workspace registry is in
 // memory, so a restart loses every workspace id.
 //
-// A PINNED child is never MOVED to a different machine. HandleExecutorLost
-// fails a pinned child where it stood and boundExecutor.recover refuses to
-// re-select for one; recovery must not become the single path that quietly
-// migrates one. But a pinned child CAN resume when its machine restarts
+// A PINNED child is never MOVED to a different machine: losing an executor
+// never fails a child, it leaves it running and unbound, and a pinned one is
+// only ever re-provisioned on its OWN executor. boundExecutor.recover refuses
+// to re-select for one, and recovery must not become the single path that
+// quietly migrates one. But a pinned child CAN resume when its machine restarts
 // alongside the daemon — boundExecutor.doRecover already re-provisions on the
 // same executor when IsLive returns true. An unknown mode is pinned, matching
 // workspaceModeOrPinned.

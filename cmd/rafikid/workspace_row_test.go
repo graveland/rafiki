@@ -46,9 +46,10 @@ func TestTheChildIsToldWhatTheRowSaysNotWhatTheExecutorClaims(t *testing.T) {
 // An unset workspace_mode on the row resolves to pinned, never to ephemeral.
 //
 // The same helper writes the rafiki/workspace-mode label, which decides whether
-// losing an executor FAILS a child or moves it. Defaulting the other way — as
-// HandleExecutorLost once did — reschedules children onto machines no operator
-// ever marked interchangeable.
+// a child that loses its executor may ever be re-provisioned on another
+// machine. Defaulting the other way would move children onto machines no
+// operator ever marked interchangeable — an unset mode is pinned, and losing an
+// executor fails nothing either way.
 func TestAnUnsetWorkspaceModeIsPinned(t *testing.T) {
 	if got := workspaceModeOrPinned(""); got != "pinned" {
 		t.Fatalf("workspaceModeOrPinned(%q) = %q; an unknown mode must not be treated as disposable", "", got)
