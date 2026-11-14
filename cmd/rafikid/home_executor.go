@@ -334,11 +334,11 @@ func (b *boundExecutor) adopt(execID, wsID string, cl tools.ExecutorClient) erro
 	b.bindings[execID] = bd
 	b.mu.Unlock()
 
-	perr := b.withHomeTransition(context.Background(), homeWaitNone, func(bool) error {
+	perr := b.withHomeTransition(context.Background(), homeWaitNone, func(held bool) error {
 		if perr := b.publishWorkspace(context.Background(), bd, execID, wsID, cl, true); perr != nil {
 			return perr
 		}
-		b.noteHomeBinding(bd, execID, wsID)
+		b.noteHomeBinding(bd, execID, wsID, held)
 		return nil
 	})
 	if perr != nil {

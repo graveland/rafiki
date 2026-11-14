@@ -207,6 +207,12 @@ type fakeBinder struct {
 	// serialise them.
 	onRelease func(execID string)
 
+	// onNotifyMigrated, when set, runs synchronously inside NotifyMigrated -- with
+	// f.mu NOT held -- so a test can hold a migration open AFTER it claimed the
+	// home and while it still holds the home-transition slot. That is the window
+	// an ordinary first provision writes its labels in without the slot.
+	onNotifyMigrated func()
+
 	// onProvision, when set, runs synchronously inside ProvisionOn -- with
 	// f.mu NOT held -- before it does anything else. It lets a test hold a
 	// Provision RPC open to prove a caller (recover) isn't holding
@@ -523,6 +529,12 @@ func (f *fakeBinder) WorkspaceMode(execID string) string {
 }
 
 func (f *fakeBinder) NotifyMigrated(_, from, to string) {
+	f.mu.Lock()
+	hook := f.onNotifyMigrated
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.migrations++
@@ -2757,5 +2769,87 @@ func TestReprovisionOfTheHomeBindingRacingForgetNamesNothing(t *testing.T) {
 	fb.mu.Unlock()
 	c.Eq(1, undos, "exactly one compensation — the write did happen and was then taken back; undos")
 	assertHomeAndLabelsAgree(t, be, fb)
+	assertNoWorkspaceLeaked(t, be, fb)
+}
+
+// An ORDINARY home first provision writes its labels with the NON-BLOCKING policy
+// (homeWaitNone): it must never block for the home-transition slot, because a
+// transition holder can be waiting on the placeholder this provision published.
+// So it can write its pair while another transition holds the slot — and be
+// overtaken by the home having MOVED to another executor by the time the write
+// returns.
+//
+// A resumed child has HOME a and no binding; a call provisions a as the home
+// binding while a migration moves the home a -> b and claims it. The provision's
+// write then lands after that claim, and its binding is still the live one on a,
+// so nothing about the binding itself says it lost: only the home does. The
+// durable pair must end up naming the MIGRATION's executor — anything else is the
+// disagreement a resume reads, and no next call is guaranteed before a restart.
+func TestFirstHomeProvisionRacingMigrationLeavesTheMigrationExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	be := newBoundExecutor("c1", fb)
+	be.setHome("a")
+
+	// Hold the first provision inside its Provision RPC: it has published its
+	// placeholder but has not tried to take the slot yet.
+	provisioning := make(chan struct{})
+	releaseProvision := make(chan struct{})
+	var provisionOnce sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(id string) {
+		if id != "a" {
+			return
+		}
+		provisionOnce.Do(func() { close(provisioning) })
+		<-releaseProvision
+	}
+	fb.mu.Unlock()
+
+	provisionResult := make(chan error, 1)
+	go func() {
+		_, err := be.ensureBinding(context.Background(), "a", true)
+		provisionResult <- err
+	}()
+	<-provisioning
+
+	// The migration claims b, then holds the slot open through its steer: that is
+	// the window this provision's label write runs in, WITHOUT the slot.
+	migrated := make(chan struct{})
+	releaseMigration := make(chan struct{})
+	var migrateOnce sync.Once
+	fb.mu.Lock()
+	fb.onNotifyMigrated = func() {
+		migrateOnce.Do(func() { close(migrated) })
+		<-releaseMigration
+	}
+	fb.mu.Unlock()
+
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- be.migrateHome(context.Background(), "a", "b")
+	}()
+	<-migrated
+	c.Eq("b", be.homeExecutor(), "test setup: the migration claimed the home before the provision wrote")
+
+	// Let the provision finish. Its slot attempt must NOT wait (it publishes the
+	// placeholder the holder could be waiting on), so it writes unheld.
+	close(releaseProvision)
+	c.NoError(<-provisionResult, "losing the home to a migration is not the provision's failure")
+
+	close(releaseMigration)
+	c.NoError(<-migrationResult, "the migration keeps its claim, so it reports no error")
+
+	labels := fb.bindingLabels()
+	c.Eq("b", be.homeExecutor(), "the migration's executor is the home; home =")
+	c.Eq("b", labels["rafiki/executor"],
+		"the unheld write lost the home, so the durable pair must name the MIGRATION's executor, not "+
+			"the one it labelled: a resume reads these labels; labels %v", labels)
+	c.Eq("", labels["rafiki/workspace"],
+		"and the losing write's workspace must be taken back rather than left as the home's; labels %v", labels)
+	fb.mu.Lock()
+	undos := fb.undos
+	fb.mu.Unlock()
+	c.Eq(1, undos, "exactly one compensation — the write did happen and was then taken back; undos")
 	assertNoWorkspaceLeaked(t, be, fb)
 }

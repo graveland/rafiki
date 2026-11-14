@@ -772,13 +772,15 @@ func (b *boundExecutor) publishWorkspace(ctx context.Context, bd *binding, execI
 }
 
 // noteHomeBinding is the ONE place a home binding's durable pair —
-// rafiki/executor + rafiki/workspace — is written. It is ALWAYS called with the
-// home-transition slot held (provision takes it around publish+label when its
-// caller does not hold it; adoptHome, adopt, migrateHomeNow and
-// reprovisionInPlace pass it down), so no Forget can slip between the
-// publication of a workspace and the labels naming it.
+// rafiki/executor + rafiki/workspace — is written. holder says whether the
+// caller HOLDS the home-transition slot: adoptHomeNow, migrateHomeNow and
+// reprovisionInPlace all do, and provision takes it around publish+label when it
+// is free. A provision that finds a transition in flight writes WITHOUT it on
+// purpose (homeWaitNone) — it publishes the placeholder that transition may be
+// waiting on, so it must never block for the slot — and that unheld write is the
+// one carrier of the third way below.
 //
-// It compensates the two ways that write can still lose, and nothing else:
+// It compensates the three ways that write can still lose, and nothing else:
 //
 //   - the child EXITED under it. publishWorkspace makes a workspace visible
 //     atomically under b.mu, but this write is store I/O after the lock is
@@ -796,6 +798,20 @@ func (b *boundExecutor) publishWorkspace(ctx context.Context, bd *binding, execI
 //     while they still name exactly this write's pair, so a replacement's labels
 //     are never touched. The workspace needs no release here: Forget returned it
 //     to the caller that owns the release.
+//   - the HOME MOVED to another executor under it, and this write did not hold
+//     the slot. A migration publishes its target's labels INSIDE its own
+//     provision and claims the home only afterwards, so its target write
+//     legitimately lands while b.home still names the executor it is leaving —
+//     which is why a write made WHILE holding the slot is never judged here. An
+//     unheld write cannot tell that window apart from its own loss, but it does
+//     not have to: the settled state is the contract. Once its write returns, the
+//     home must be empty or name THIS executor. If it names a different one,
+//     another transition established that home — and this write just overwrote
+//     its labels — so the loser takes back exactly its own pair and leaves the
+//     winning home's claim alone (UndoBinding puts rafiki/executor back to that
+//     home and removes rafiki/workspace, which is what a resumed child
+//     provisions a fresh home from). The workspace needs no release: the binding
+//     is still live in b.bindings, so the exit sweep releases it.
 //
 // Best-effort throughout: a failed removal is a warning, never a failure of the
 // call that made the workspace.
@@ -804,12 +820,17 @@ func (b *boundExecutor) publishWorkspace(ctx context.Context, bd *binding, execI
 // after it, this check does not see it. That window is narrower than the one
 // closed by this compensation and ends the same way — labels naming a released
 // workspace — so it is recorded here rather than pretended away.)
-func (b *boundExecutor) noteHomeBinding(bd *binding, execID, wsID string) {
+func (b *boundExecutor) noteHomeBinding(bd *binding, execID, wsID string, holder bool) {
 	b.binder.NoteBinding(b.childID, execID, wsID)
 
+	// ONE critical section for the whole judgement: b.home and the binding's
+	// identity are read together, so a transition that completes between two
+	// separate reads can neither make a moved home look unchanged nor make an
+	// unchanged one look moved.
 	b.mu.Lock()
 	closed := b.closed
 	mine := b.bindings[execID] == bd
+	home := b.home
 	b.mu.Unlock()
 	switch {
 	case closed:
@@ -822,6 +843,13 @@ func (b *boundExecutor) noteHomeBinding(bd *binding, execID, wsID string) {
 			slog.Warn("labelled a home workspace whose binding a concurrent loss had forgotten; "+
 				"removed the labels again so nothing resumes onto a workspace the loss released",
 				"child", b.childID, "executor", shortID(execID), "workspace", wsID)
+		}
+	case !holder && home != "" && home != execID:
+		if b.binder.UndoBinding(b.childID, execID, wsID, home) {
+			slog.Warn("labelled a home workspace without the transition slot while another transition "+
+				"moved the home; took this write back so the durable pair names the home that won",
+				"child", b.childID, "executor", shortID(execID), "workspace", wsID,
+				"home", shortID(home))
 		}
 	}
 }
@@ -854,25 +882,27 @@ func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID strin
 	// executor and the child is still running, and releases the workspace itself
 	// when either is false — the exit sweep has already taken its snapshot, so
 	// nothing else knows this workspace exists.
-	publish := func() error {
+	publish := func(holder bool) error {
 		if perr := b.publishWorkspace(ctx, bd, execID, wsID, cl, wantCwd); perr != nil {
 			return perr
 		}
 		// The labels name the HOME workspace; another executor's workspace is none
 		// of the daemon's business (handleChildExit releases that one by label).
 		// Written before ready closes: a home binding must never be usable before
-		// teardown can find it.
+		// teardown can find it. holder is the state actually in effect — the slot
+		// is taken below only when it was free — so an unheld write judges the
+		// home it leaves behind (noteHomeBinding).
 		if wantCwd {
-			b.noteHomeBinding(bd, execID, wsID)
+			b.noteHomeBinding(bd, execID, wsID, holder)
 		}
 		return nil
 	}
 
 	var perr error
 	if wantCwd && !held {
-		perr = b.withHomeTransition(ctx, homeWaitNone, func(bool) error { return publish() })
+		perr = b.withHomeTransition(ctx, homeWaitNone, publish)
 	} else {
-		perr = publish()
+		perr = publish(held)
 	}
 	if perr != nil {
 		b.failFirstProvision(bd, execID, perr)
@@ -1310,16 +1340,16 @@ func (b *boundExecutor) doRecover(ctx context.Context, bd *binding, execID, stal
 // never block behind a home transition on another machine.
 func (b *boundExecutor) reprovisionInPlace(ctx context.Context, bd *binding, execID, staleWS string) bool {
 	if b.homeExecutor() != execID {
-		return b.reprovisionBinding(ctx, bd, execID, staleWS, false)
+		return b.reprovisionBinding(ctx, bd, execID, staleWS, false, false)
 	}
 
 	ok := false
-	if err := b.withHomeTransition(ctx, homeWaitCaller, func(bool) error {
+	if err := b.withHomeTransition(ctx, homeWaitCaller, func(held bool) error {
 		// Re-decide under the slot. A transition this one waited for may have moved
 		// the home off execID, and then this rebuild is an ordinary root-level one
 		// that writes no labels: provisioning it as HOME would re-label an executor
 		// that no longer owns the child's tree.
-		ok = b.reprovisionBinding(ctx, bd, execID, staleWS, b.homeExecutor() == execID)
+		ok = b.reprovisionBinding(ctx, bd, execID, staleWS, b.homeExecutor() == execID, held)
 		return nil
 	}); err != nil {
 		slog.Warn("re-provision could not take the home-transition slot; the call is not retried on this executor",
@@ -1331,8 +1361,8 @@ func (b *boundExecutor) reprovisionInPlace(ctx context.Context, bd *binding, exe
 
 // reprovisionBinding performs one in-place re-provision. home says the rebuilt
 // workspace is the child's HOME workspace: its cwd applies and the labels name
-// it, which is only true when this caller holds the home-transition slot.
-func (b *boundExecutor) reprovisionBinding(ctx context.Context, bd *binding, execID, staleWS string, home bool) bool {
+// it, which is only true when this caller holds the home-transition slot (held).
+func (b *boundExecutor) reprovisionBinding(ctx context.Context, bd *binding, execID, staleWS string, home, held bool) bool {
 	wsID, _, cl, err := b.binder.ProvisionOn(ctx, execID, home)
 	if err != nil {
 		slog.Warn("re-provision on the same executor failed; re-selecting",
@@ -1354,7 +1384,7 @@ func (b *boundExecutor) reprovisionBinding(ctx context.Context, bd *binding, exe
 		// The ONE home-label writer, inside the slot this caller holds. It undoes
 		// its own write if a loss that could not take the slot forgot this binding
 		// while the write was in flight (noteHomeBinding).
-		b.noteHomeBinding(bd, execID, wsID)
+		b.noteHomeBinding(bd, execID, wsID, held)
 	}
 
 	// The old workspace is still registered on a LIVE executor, so unlike the
