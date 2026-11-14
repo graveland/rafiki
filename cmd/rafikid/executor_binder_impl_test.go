@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -145,4 +146,21 @@ func TestReachableExecutorRefNarrowsToOne(t *testing.T) {
 	got, err = b.Reachable("c1")
 	ck.Require().NoError(err, "Reachable")
 	ck.Empty(got, "an unreachable ref reaches nothing")
+}
+
+// A store error is an ERROR, never "not owned" and never an empty set: reading
+// it as "no sandbox" would let a sandboxed child rebind onto an ordinary host
+// the operator never offered it.
+func TestReachableSandboxStoreErrorIsAnError(t *testing.T) {
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{nativeExec("exec-a", "a", owner.UserID)}
+	env.store.listErr = errors.New("sandbox store is down")
+	b := env.ctrl.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: owner.UserID})
+
+	got, err := b.Reachable("c1")
+	ck.Error(err, "a store error must be reported, not swallowed")
+	ck.StrContains(err.Error(), "sandbox store is down", "the store's error must reach the caller; got %q", err)
+	ck.Empty(got, "and never a fall-through to the ordinary executors")
 }

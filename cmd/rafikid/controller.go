@@ -5500,21 +5500,26 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// rest: every workspace this child provisioned on another executor (a tool
 	// call naming a second machine) is a live workspace nothing else will ever
 	// release. Same goroutine, same deadline — the two are one teardown.
+	//
+	// The label pair is read best-effort: a child whose row is already gone
+	// still holds bindings, and those must not leak just because there is
+	// nothing left to read the labels from.
+	var wID, eID string
 	if snap, ok := c.st.Get(childID); ok {
-		wID := snap.Labels["rafiki/workspace"]
-		eID := snap.Labels["rafiki/executor"]
-		if wID != "" || be != nil {
-			go func() {
-				rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer rcancel()
-				if wID != "" {
-					c.releaseWorkspace(rctx, eID, wID)
-				}
-				if be != nil {
-					be.ReleaseOthers(rctx, eID, wID)
-				}
-			}()
-		}
+		wID = snap.Labels["rafiki/workspace"]
+		eID = snap.Labels["rafiki/executor"]
+	}
+	if wID != "" || be != nil {
+		go func() {
+			rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer rcancel()
+			if wID != "" {
+				c.releaseWorkspace(rctx, eID, wID)
+			}
+			if be != nil {
+				be.ReleaseOthers(rctx, eID, wID)
+			}
+		}()
 	}
 
 	c.releaseLease(childID)

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -127,12 +128,37 @@ type binding struct {
 	wsID string
 	cl   tools.ExecutorClient
 
+	// cwd records that this workspace was provisioned as the child's HOME
+	// workspace (its cwd applies, the labels name it). A binding made for a
+	// named call is a root-level workspace and can never be PROMOTED: the
+	// child's cwd would not apply there, so a promotion re-provisions.
+	cwd bool
+
+	// ready is closed once this binding's FIRST provision has settled --
+	// successfully or not. It is what lets provisioning happen OUTSIDE b.mu
+	// while still guaranteeing one provision per executor and that no caller
+	// ever observes a half-built binding.
+	ready chan struct{}
+	// err is set (before ready is closed) when the first provision failed. The
+	// placeholder is dropped from the map, so the NEXT call tries again; every
+	// caller already waiting on this one gets this error rather than a second
+	// provision attempt.
+	err error
+
 	// inflight is non-nil while a recover() is running its RPCs for THIS
 	// binding. A second caller that fails against the same stale binding waits
 	// on inflight.done instead of starting its own Provision -- this is what
 	// coalesces N concurrent failures into ONE re-provision, without holding
 	// b.mu across the RPCs that a rebind requires.
 	inflight *recovery
+}
+
+// newBinding returns a binding whose first provision has already settled. Used
+// for a binding built outside the provisioning path (a re-provision in place).
+func newBinding(wsID string, cl tools.ExecutorClient, cwd bool) *binding {
+	ready := make(chan struct{})
+	close(ready)
+	return &binding{wsID: wsID, cl: cl, cwd: cwd, ready: ready}
 }
 
 // recovery is one in-flight recover() call, shared by every goroutine that
@@ -153,11 +179,12 @@ func (b *boundExecutor) Current() (executorID, workspaceID string, bound bool) {
 		return "", "", false
 	}
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	bd := b.bindings[home]
-	b.mu.Unlock()
 	if bd == nil {
 		return home, "", false
 	}
+	// Snapshotted under the lock: a reprovision rewrites wsID in place.
 	return home, bd.wsID, true
 }
 
@@ -218,33 +245,30 @@ func (b *boundExecutor) setHome(execID string) {
 
 // homeExecutor returns the child's home executor id, seeding it once from the
 // child's own rafiki/home-executor label. "" means the child has no home yet.
+//
+// The label read is a STORE read and deliberately happens with b.mu released:
+// this runs on every path that provisions, and a wedged store must not hold up
+// an unrelated executor's binding.
 func (b *boundExecutor) homeExecutor() string {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.homeLocked()
-}
-
-// homeLocked is homeExecutor for a caller that already holds b.mu.
-func (b *boundExecutor) homeLocked() string {
-	if !b.homeSeeded {
-		b.homeSeeded = true
-		if b.home == "" {
-			b.home = b.binder.Home(b.childID)
-		}
+	home, seeded := b.home, b.homeSeeded
+	b.mu.Unlock()
+	if seeded || home != "" {
+		return home
 	}
-	return b.home
-}
 
-// stale returns the home binding's key, for tests that then simulate a failure
-// against it.
-func (b *boundExecutor) stale() (execID, wsID string) {
-	home := b.homeExecutor()
+	labeled := b.binder.Home(b.childID)
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if bd := b.bindings[home]; bd != nil {
-		return home, bd.wsID
+	// Mark the seeding even when the label was empty: a home the daemon already
+	// cleared (Forget) or adopted in memory must not be re-derived from a stale
+	// label a moment later.
+	b.homeSeeded = true
+	if b.home == "" {
+		b.home = labeled
 	}
-	return home, ""
+	return b.home
 }
 
 // resolve decides which executor a call goes to: the one it names, or the only
@@ -286,10 +310,13 @@ func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool,
 		if id == "" {
 			return "", false, errors.New("no executor is reachable and none could be selected")
 		}
-		// The only executor this child can use becomes home for the binding
-		// being created: it is where the child's cwd and project tier live.
+		// The only executor this child can use becomes home: it is where the
+		// child's cwd and project tier live. Adopted only once its workspace
+		// exists (see adoptHome).
 		if b.homeExecutor() == "" {
-			b.setHome(id)
+			if aerr := b.adoptHome(ctx, id); aerr != nil {
+				return "", false, aerr
+			}
 		}
 		setTarget(t, b.binder.DisplayName(id), false)
 		return id, false, nil
@@ -299,7 +326,12 @@ func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool,
 		home := b.homeExecutor()
 		switch {
 		case home == "":
-			b.setHome(e.ID)
+			// Adopted only once its workspace exists: a failed first provision
+			// must leave NO home, not a home with nothing behind it that the
+			// next call reports as "pinned there".
+			if aerr := b.adoptHome(ctx, e.ID); aerr != nil {
+				return "", false, aerr
+			}
 		case home != e.ID:
 			if !mayMigrate(b.binder.WorkspaceMode(home)) {
 				return "", false, fmt.Errorf("executor %s is not connected; this agent's workspace is pinned there, so calls fail until it reconnects", b.binder.DisplayName(home))
@@ -362,20 +394,32 @@ func (b *boundExecutor) unreachableName(requested string, reach []executors.Exec
 // namesABoundExecutor reports whether requested names an executor this child
 // was bound to, or its home — i.e. a machine it knows that is not reachable now.
 func (b *boundExecutor) namesABoundExecutor(requested string) bool {
+	// homeExecutor, not b.home: a child resumed from a row has its home ONLY in
+	// the label until something seeds it, and that label is exactly what makes
+	// "the machine I used to be on" a connectivity answer. Seeded before the
+	// lock, because seeding is a store read.
+	home := b.homeExecutor()
 	b.mu.Lock()
 	ids := make([]string, 0, len(b.bindings)+1)
 	for id := range b.bindings {
 		ids = append(ids, id)
 	}
-	// homeLocked, not b.home: a child resumed from a row has its home ONLY in
-	// the label until something seeds it, and that label is exactly what makes
-	// "the machine I used to be on" a connectivity answer.
-	if home := b.homeLocked(); home != "" {
+	if home != "" {
 		ids = append(ids, home)
 	}
 	b.mu.Unlock()
 	for _, id := range ids {
 		if id == requested || b.binder.DisplayName(id) == requested {
+			return true
+		}
+	}
+	return false
+}
+
+// reachableID reports whether id is in a reachable set.
+func reachableID(reach []executors.Executor, id string) bool {
+	for _, e := range reach {
+		if e.ID == id {
 			return true
 		}
 	}
@@ -390,39 +434,8 @@ func implicitCall(ctx context.Context) bool {
 }
 
 // clientFor returns the binding for execID, provisioning it on first use.
-//
-// Only the first bind of a GIVEN executor runs under b.mu, exactly as the
-// single-binding version did: at that point there is no binding to hold other
-// callers away from, so there is nothing to wedge. Every later call is a map
-// lookup.
 func (b *boundExecutor) clientFor(ctx context.Context, execID string) (*binding, error) {
-	if execID == "" {
-		return nil, errors.New("no executor to bind to")
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if bd := b.bindings[execID]; bd != nil {
-		return bd, nil
-	}
-
-	useCwd := b.homeLocked() == execID
-	wsID, workdir, cl, err := b.binder.ProvisionOn(ctx, execID, useCwd)
-	if err != nil {
-		return nil, fmt.Errorf("workspace on executor %s: %w", shortID(execID), err)
-	}
-	bd := &binding{wsID: wsID, cl: cl}
-	b.bindings[execID] = bd
-	if useCwd {
-		// The labels name the HOME workspace; another executor's workspace is
-		// none of the daemon's business (see handleChildExit).
-		b.binder.NoteBinding(b.childID, execID, wsID)
-	} else if t := tools.ExecutorTargetFrom(ctx); t != nil {
-		// One-time note, on the first provision of a non-home binding: the
-		// child's cwd does NOT apply here, and a model that assumes it does
-		// writes into the wrong tree.
-		t.Note = fmt.Sprintf("[%s] working from %s", b.binder.DisplayName(execID), workdir)
-	}
-	return bd, nil
+	return b.ensureBinding(ctx, execID, b.homeExecutor() == execID)
 }
 
 // callTarget snapshots a binding's client and workspace BEFORE a call is
@@ -432,11 +445,120 @@ func (b *boundExecutor) clientFor(ctx context.Context, execID string) (*binding,
 // (same *binding, new wsID/cl), so reading either back after the call would
 // attribute the failure to a workspace that was never called -- which turns one
 // coalesced recovery into a fresh one per caller -- and reading them without
-// the lock is a data race.
+// the lock is a data race. Every read of a binding's client goes through here
+// or through retryBinding, which takes the same snapshot.
 func (b *boundExecutor) callTarget(bd *binding) (tools.ExecutorClient, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return bd.cl, bd.wsID
+}
+
+// ensureBinding returns execID's binding, provisioning it on first use as (or
+// not as) the child's HOME workspace.
+//
+// Provisioning happens OUTSIDE b.mu, through a placeholder published under it.
+// The placeholder is what keeps the two invariants of a map of bindings: exactly
+// one provision per executor, and no caller ever observing a half-built
+// binding. A map-wide lock would have bought the same thing at the cost of
+// every healthy executor on the child waiting out one slow provision (and
+// NoteBinding, and the label read) on an unrelated machine.
+//
+// wantCwd promotes: a binding that exists as a root-level workspace cannot
+// serve as HOME (the child's cwd would never apply), so it is replaced by a
+// freshly provisioned home workspace.
+func (b *boundExecutor) ensureBinding(ctx context.Context, execID string, wantCwd bool) (*binding, error) {
+	if execID == "" {
+		return nil, errors.New("no executor to bind to")
+	}
+
+	for {
+		b.mu.Lock()
+		bd := b.bindings[execID]
+		if bd == nil {
+			bd = &binding{ready: make(chan struct{})}
+			b.bindings[execID] = bd
+			b.mu.Unlock()
+			return b.provision(ctx, bd, execID, wantCwd)
+		}
+		ready := bd.ready
+		b.mu.Unlock()
+
+		<-ready
+		if bd.err != nil {
+			// This placeholder's first provision failed. Its error is the
+			// answer; a later call (or a concurrent caller that has not yet
+			// captured it) provisions afresh.
+			return nil, bd.err
+		}
+		b.mu.Lock()
+		current := b.bindings[execID] == bd
+		// cwd and wsID are read under the lock: a reprovisioning recovery
+		// rewrites both in place.
+		promotedWS, promote := "", false
+		if current && wantCwd && !bd.cwd {
+			promote = true
+			// Promotion: a root-level workspace cannot serve as home, because
+			// the child's cwd would never apply there. Take it out of the map
+			// and release it; the loop then provisions the home workspace.
+			delete(b.bindings, execID)
+			promotedWS = bd.wsID
+		}
+		b.mu.Unlock()
+		if promote {
+			b.releaseAsync(ctx, execID, promotedWS)
+			continue
+		}
+		if !current {
+			continue // replaced while we waited: use the winner's binding
+		}
+		return bd, nil
+	}
+}
+
+// provision performs one binding's first provision. Called with no lock held;
+// bd is the placeholder already published under it.
+//
+// The binding becomes visible to a caller only when ready is closed, so nothing
+// can use a workspace whose labels are not yet written, and a failed provision
+// is reported to every caller already waiting rather than to one of them.
+func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID string, wantCwd bool) (*binding, error) {
+	wsID, workdir, cl, err := b.binder.ProvisionOn(ctx, execID, wantCwd)
+	if err != nil {
+		err = fmt.Errorf("workspace on executor %s: %w", shortID(execID), err)
+		b.mu.Lock()
+		if b.bindings[execID] == bd {
+			// Dropped, so the NEXT call gets a fresh attempt. Callers already
+			// waiting on this placeholder read bd.err below instead.
+			delete(b.bindings, execID)
+		}
+		bd.err = err
+		b.mu.Unlock()
+		close(bd.ready)
+		return nil, err
+	}
+
+	// The labels name the HOME workspace; another executor's workspace is none
+	// of the daemon's business (handleChildExit releases that one by label).
+	// Written BEFORE the binding is published: a home binding must never be
+	// visible to a caller before teardown can find it.
+	if wantCwd {
+		b.binder.NoteBinding(b.childID, execID, wsID)
+	}
+
+	b.mu.Lock()
+	bd.wsID, bd.cl, bd.cwd = wsID, cl, wantCwd
+	b.mu.Unlock()
+	close(bd.ready)
+
+	if !wantCwd {
+		// One-time note, on the first provision of a non-home binding: the
+		// child's cwd does NOT apply here, and a model that assumes it does
+		// writes into the wrong tree.
+		if t := tools.ExecutorTargetFrom(ctx); t != nil {
+			t.Note = fmt.Sprintf("[%s] working from %s", b.binder.DisplayName(execID), workdir)
+		}
+	}
+	return bd, nil
 }
 
 // bindImplicit resolves a call that names no executor and binds it, which is
@@ -466,40 +588,56 @@ func (b *boundExecutor) bindImplicit(ctx context.Context) error {
 		}
 		// The machine selection landed on is the child's workspace, exactly as
 		// it was when this was the only binding there could be: it carries the
-		// child's cwd and owns the labels.
-		b.setHome(picked)
-		execID = picked
+		// child's cwd and owns the labels. Recorded only once that workspace
+		// exists (adoptHome), so a failed first provision leaves no home.
+		return b.adoptHome(ctx, picked)
 	}
 	_, err = b.clientFor(ctx, execID)
 	return err
 }
 
-// migrateHome moves the child's home binding to execID: it provisions a
-// workspace there as the HOME workspace (so the child's cwd applies), rewrites
-// the labels, and tells the child its tree moved.
-//
-// Concurrent implicit calls can all decide to migrate at once. Only the one
-// that WINS the home transition (under b.mu) provisions as home and writes the
-// labels; the rest find the binding clientFor just made and return quietly, so
-// the child is told once and no second workspace is minted.
-func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error {
-	b.mu.Lock()
-	won := b.homeLocked() == from
-	b.home = to
-	b.homeSeeded = true
-	b.mu.Unlock()
-
-	bd, err := b.clientFor(ctx, to)
-	if err != nil {
-		if won {
-			b.setHome(from)
-		}
+// adoptHome makes execID the child's home. The workspace is provisioned AS a
+// home workspace first — the child's cwd applies there and the labels name it —
+// and only then is the home recorded, so a failed first provision leaves the
+// child WITH NO HOME rather than with one that has no workspace behind it.
+func (b *boundExecutor) adoptHome(ctx context.Context, execID string) error {
+	if _, err := b.ensureBinding(ctx, execID, true); err != nil {
 		return err
 	}
+	b.setHome(execID)
+	return nil
+}
+
+// migrateHome moves the child's home binding to execID: it provisions (or
+// promotes) a workspace there as the HOME workspace, so the child's cwd applies,
+// and then tells the child its tree moved.
+//
+// The order is the interesting part. Home is claimed LAST, under b.mu, and only
+// by a caller that still sees the home it set out to move:
+//
+//   - a failed provision leaves the home exactly where it was, so there is no
+//     rollback that could clobber a move another caller completed meanwhile;
+//   - concurrent implicit callers all reach ensureBinding, which provisions ONCE
+//     per executor, and exactly one of them wins the claim and does the
+//     bookkeeping — one label write, one steer;
+//   - NoteBinding belongs to the provision (a home workspace is labelled when it
+//     is made), so a migration must not write it again.
+func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error {
+	if _, err := b.ensureBinding(ctx, to, true); err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	won := b.home == from
+	if won {
+		b.home, b.homeSeeded = to, true
+	}
+	b.mu.Unlock()
 	if !won {
+		// Another caller already moved the home (here, or somewhere else).
 		return nil
 	}
-	b.binder.NoteBinding(b.childID, to, bd.wsID)
+
 	b.binder.SetHomeLabel(b.childID, to)
 	b.binder.NotifyMigrated(b.childID, from, to)
 	slog.Info("migrated the child's home workspace",
@@ -507,18 +645,26 @@ func (b *boundExecutor) migrateHome(ctx context.Context, from, to string) error 
 	return nil
 }
 
-// retryBinding returns the binding a retry should run on after a recovery:
-// the failed binding if it was rebuilt in place, else the home binding a
-// migration installed. ok is false when nothing serves the call any more.
-func (b *boundExecutor) retryBinding(execID string) (bd *binding, servedExec string, ok bool) {
+// retryBinding returns the CLIENT and the executor a retry should run on after
+// a recovery, as a snapshot taken under b.mu: a binding can be rebuilt IN PLACE
+// while the retry is being decided, and reading its client afterwards would both
+// race with that rebuild and run the call on a workspace it never named.
+//
+// ok is false when nothing serves the call any more. allowMigrated permits the
+// fallback to the home binding, and exists for exactly ONE case: an IMPLICIT
+// call whose recovery migrated the child to a new home. A NAMED call never
+// follows home — it either retries on the executor it named or fails, which is
+// what "a named call never migrates" has to mean when a concurrent implicit
+// caller is the one that moved the home.
+func (b *boundExecutor) retryBinding(execID string, allowMigrated bool) (cl tools.ExecutorClient, servedExec string, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if cur := b.bindings[execID]; cur != nil {
-		return cur, execID, true
+	if cur := b.bindings[execID]; cur != nil && cur.cl != nil {
+		return cur.cl, execID, true
 	}
-	if b.home != "" && b.home != execID {
-		if cur := b.bindings[b.home]; cur != nil {
-			return cur, b.home, true
+	if allowMigrated && b.home != "" && b.home != execID {
+		if cur := b.bindings[b.home]; cur != nil && cur.cl != nil {
+			return cur.cl, b.home, true
 		}
 	}
 	return nil, "", false
@@ -567,9 +713,10 @@ func (b *boundExecutor) recover(ctx context.Context, execID, staleWS string, cal
 	if bd == nil {
 		// The binding is already gone: a concurrent recovery dropped it, and
 		// either rebuilt it elsewhere or gave up. Retry only if something else
-		// now serves this call.
+		// now serves this call — and for a NAMED call that means the executor it
+		// named, never the home another caller migrated to.
 		b.mu.Unlock()
-		_, _, ok := b.retryBinding(execID)
+		_, _, ok := b.retryBinding(execID, implicitCall(ctx))
 		return ok
 	}
 
@@ -642,9 +789,9 @@ func (b *boundExecutor) reprovisionInPlace(ctx context.Context, execID, staleWS 
 	}
 	b.mu.Lock()
 	if bd := b.bindings[execID]; bd != nil {
-		bd.wsID, bd.cl = wsID, cl
+		bd.wsID, bd.cl, bd.cwd = wsID, cl, useCwd
 	} else {
-		b.bindings[execID] = &binding{wsID: wsID, cl: cl}
+		b.bindings[execID] = newBinding(wsID, cl, useCwd)
 	}
 	b.mu.Unlock()
 	if useCwd {
@@ -660,9 +807,27 @@ func (b *boundExecutor) reprovisionInPlace(ctx context.Context, execID, staleWS 
 	return true
 }
 
-// dropBinding forgets one binding and releases its workspace best-effort in a
-// goroutine: the executor it lived on is usually unreachable, and the child
-// must not wait on it.
+// releaseTimeout bounds ONE best-effort workspace release. Each release gets
+// its own: a dead executor must never spend the budget a live one needs.
+const releaseTimeout = 5 * time.Second
+
+// releaseAsync tears a workspace down best-effort, on its own deadline and
+// detached from the caller's cancellation. A tool call that failed has already
+// returned by the time this runs, and its context is dead with it.
+func (b *boundExecutor) releaseAsync(ctx context.Context, execID, wsID string) {
+	if wsID == "" {
+		return
+	}
+	go func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+		defer cancel()
+		b.binder.ReleaseOn(rctx, execID, wsID)
+	}()
+}
+
+// dropBinding forgets one binding and releases its workspace best-effort: the
+// executor it lived on is usually unreachable, and the child must not wait on
+// it.
 func (b *boundExecutor) dropBinding(ctx context.Context, execID, wsID string) {
 	b.mu.Lock()
 	if bd := b.bindings[execID]; bd != nil && bd.wsID != wsID {
@@ -672,10 +837,7 @@ func (b *boundExecutor) dropBinding(ctx context.Context, execID, wsID string) {
 	}
 	delete(b.bindings, execID)
 	b.mu.Unlock()
-	if wsID == "" {
-		return
-	}
-	go b.binder.ReleaseOn(ctx, execID, wsID)
+	b.releaseAsync(ctx, execID, wsID)
 }
 
 // isLivenessFailure reports whether err means "this executor cannot serve
@@ -735,15 +897,16 @@ func callBound[T any](ctx context.Context, b *boundExecutor, idempotent bool, fn
 }
 
 // retryCall re-dispatches fn once against whatever binding now serves the
-// call: the same executor if recover rebuilt it in place, else the home
-// binding a migration installed. There is no second recover.
+// call: the same executor if recover rebuilt it in place, else — for an IMPLICIT
+// call only — the home binding a migration installed. There is no second
+// recover.
 func retryCall[T any](ctx context.Context, b *boundExecutor, execID string, callErr error, fn func(context.Context, tools.ExecutorClient) (T, error)) (T, error) {
 	var zero T
-	bd, _, ok := b.retryBinding(execID)
+	cl, _, ok := b.retryBinding(execID, implicitCall(ctx))
 	if !ok {
 		return zero, callErr
 	}
-	return fn(ctx, bd.cl)
+	return fn(ctx, cl)
 }
 
 // callHome is callBound for the daemon's own fetches.
@@ -751,14 +914,28 @@ func retryCall[T any](ctx context.Context, b *boundExecutor, execID string, call
 // They carry no tool target, because they are not tool calls: the project tier,
 // the skill bodies and the skill files all describe the workspace the child's
 // cwd lives in, which is the HOME binding and only ever the home binding.
+//
+// Home is subject to the SAME live set as every tool call. The home can go
+// stale in ways the child's own record cannot show — a narrowed grant, a
+// re-owned executor, a label written before the grant moved — and a binding
+// made on that machine would put the child's project instructions and skill
+// files on an executor it is no longer admitted to. An unreachable home is
+// therefore "not connected": an error, never a provision target.
 func callHome[T any](ctx context.Context, b *boundExecutor, idempotent bool, fn func(context.Context, tools.ExecutorClient) (T, error)) (T, error) {
 	var zero T
 	home := b.homeExecutor()
 	if home == "" {
 		return zero, errors.New("this agent has no home executor")
 	}
+	reach, err := b.binder.Reachable(b.childID)
+	if err != nil {
+		return zero, err
+	}
+	if !reachableID(reach, home) {
+		return zero, fmt.Errorf("executor %s is not connected; this agent's home workspace is unreachable, so its project context and skills cannot be read", b.binder.DisplayName(home))
+	}
 	ctx = execpool.WithOwner(ctx, b.childID)
-	bd, err := b.clientFor(ctx, home)
+	bd, err := b.ensureBinding(ctx, home, true)
 	if err != nil {
 		return zero, err
 	}
@@ -818,12 +995,12 @@ func (b *boundExecutor) KillJob(ctx context.Context, handle string) error {
 		if !b.recover(ctx, served, staleWS, kerr, false) {
 			return kerr
 		}
-		rebuilt, rebuiltOn, ok := b.retryBinding(served)
+		rebuilt, rebuiltOn, ok := b.retryBinding(served, false)
 		if !ok {
 			return kerr
 		}
 		served = rebuiltOn
-		kerr = rebuilt.cl.KillJob(ctx, handle)
+		kerr = rebuilt.KillJob(ctx, handle)
 	}
 	if kerr == nil {
 		b.binder.ForgetRunningJob(served, handle)
@@ -904,6 +1081,12 @@ func (b *boundExecutor) MaterializeSkill(ctx context.Context, treeHash string, f
 //
 // Called on exit: a child with bindings on two machines has workspaces the
 // labels never name, and a release that stops at the labels strands them.
+//
+// The releases run CONCURRENTLY, each on its own deadline. Sequentially they
+// shared one budget in map order, so a single dead executor's release could eat
+// the whole deadline and starve every live machine behind it — the exact leak
+// this sweep exists to close. It waits for them, so a caller that returns has
+// released what it could.
 func (b *boundExecutor) ReleaseOthers(ctx context.Context, keepExec, keepWS string) {
 	type pair struct{ execID, wsID string }
 	b.mu.Lock()
@@ -915,7 +1098,16 @@ func (b *boundExecutor) ReleaseOthers(ctx context.Context, keepExec, keepWS stri
 		extra = append(extra, pair{execID, bd.wsID})
 	}
 	b.mu.Unlock()
+
+	var wg sync.WaitGroup
 	for _, p := range extra {
-		b.binder.ReleaseOn(ctx, p.execID, p.wsID)
+		wg.Add(1)
+		go func(p pair) {
+			defer wg.Done()
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+			defer cancel()
+			b.binder.ReleaseOn(rctx, p.execID, p.wsID)
+		}(p)
 	}
+	wg.Wait()
 }

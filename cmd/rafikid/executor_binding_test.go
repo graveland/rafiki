@@ -167,6 +167,11 @@ type fakeBinder struct {
 	lastWorkspace string
 	released      map[string]bool
 
+	// onRelease, when set, runs synchronously inside ReleaseOn -- with f.mu NOT
+	// held -- so a test can hold one release open and prove teardown does not
+	// serialise them.
+	onRelease func(execID string)
+
 	// onProvision, when set, runs synchronously inside ProvisionOn -- with
 	// f.mu NOT held -- before it does anything else. It lets a test hold a
 	// Provision RPC open to prove a caller (recover) isn't holding
@@ -339,7 +344,13 @@ func (f *fakeBinder) ProvisionOn(_ context.Context, id string, useCwd bool) (str
 	return ws, workdir, e, nil
 }
 
-func (f *fakeBinder) ReleaseOn(_ context.Context, _, workspaceID string) {
+func (f *fakeBinder) ReleaseOn(_ context.Context, executorID, workspaceID string) {
+	f.mu.Lock()
+	hook := f.onRelease
+	f.mu.Unlock()
+	if hook != nil {
+		hook(executorID)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releases++
@@ -1277,4 +1288,409 @@ func TestBoundExecutorUnnamedSpawnFallsBackToSelection(t *testing.T) {
 	err := b2.bindImplicit(context.Background())
 	c.Error(err, "no executor at all must still refuse the bind")
 	c.Eq(`spawn refused: no executor satisfies ""`, err.Error(), "ChooseFor's refusal text")
+}
+
+// stale returns the home binding's key, for tests that then simulate a failure
+// against it. Test-only: no production path asks a binding where it is.
+func (b *boundExecutor) stale() (execID, wsID string) {
+	home := b.homeExecutor()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if bd := b.bindings[home]; bd != nil {
+		return home, bd.wsID
+	}
+	return home, ""
+}
+
+// --- the review's gaps ------------------------------------------------------
+
+// gatedExec fails every Execute after a per-CLASS gate opens, classifying each
+// call the way the registry wrapper does: named when the call carries an
+// executor argument, implicit otherwise. It is how a test can hold one class of
+// caller at the call site while another is released.
+type gatedExec struct {
+	mu         sync.Mutex
+	gates      map[string]chan struct{}
+	calls      map[string]int
+	dispatched chan string
+}
+
+func newGatedExec() *gatedExec {
+	return &gatedExec{
+		gates:      map[string]chan struct{}{"implicit": make(chan struct{}), "named": make(chan struct{})},
+		calls:      map[string]int{},
+		dispatched: make(chan string, 8),
+	}
+}
+
+// permit opens one class's gate. Callers already parked proceed; later callers
+// of that class fail immediately instead of parking again.
+func (e *gatedExec) permit(class string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	select {
+	case <-e.gates[class]:
+	default:
+		close(e.gates[class])
+	}
+}
+
+func (e *gatedExec) callsIn(class string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls[class]
+}
+
+func (e *gatedExec) Execute(ctx context.Context, _ string, _ json.RawMessage) (toolmeta.Result, error) {
+	class := "implicit"
+	if t := tools.ExecutorTargetFrom(ctx); t != nil && t.Requested != "" {
+		class = "named"
+	}
+	e.mu.Lock()
+	e.calls[class]++
+	gate := e.gates[class]
+	e.mu.Unlock()
+	e.dispatched <- class
+	<-gate
+	return toolmeta.Result{}, fmt.Errorf("gone: %w", execpool.ErrExecutorGone)
+}
+
+func (e *gatedExec) StartJob(context.Context, string) (string, error) { return "job", nil }
+func (e *gatedExec) JobOutput(context.Context, string, int64) (tools.JobSnapshot, error) {
+	return tools.JobSnapshot{Found: true}, nil
+}
+func (e *gatedExec) KillJob(context.Context, string) error { return nil }
+func (e *gatedExec) Ping(context.Context) error            { return nil }
+
+// A NAMED call is never retried on another executor, even when a concurrent
+// IMPLICIT caller is the one whose recovery migrated the child's home.
+//
+// The named caller waits on the same binding's recovery, so it is handed the
+// implicit caller's `ok` — and a retry that followed home would run the model's
+// call on a machine it never named, which is precisely what "a named call never
+// migrates" forbids.
+func TestBoundExecutorNamedCallNeverRetriedElsewhere(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	fb.reachableTo("a")
+	gated := newGatedExec()
+	fb.mu.Lock()
+	fb.clientByExec["a"] = gated
+	fb.mu.Unlock()
+
+	be := newBoundExecutor("c1", fb)
+	c.NoError(be.bindImplicit(context.Background()), "bind home a")
+
+	// Hold b's provision open so the migration is provably in flight when the
+	// named caller's failure arrives.
+	migrating := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(execID string) {
+		if execID != "b" {
+			return
+		}
+		once.Do(func() { close(migrating) })
+		<-release
+	}
+	fb.mu.Unlock()
+
+	type outcome struct {
+		res toolmeta.Result
+		err error
+	}
+	namedOut := make(chan outcome, 1)
+	go func() {
+		res, err := be.Execute(namedCall("a"), "read", nil)
+		namedOut <- outcome{res, err}
+	}()
+	implicitOut := make(chan outcome, 1)
+	go func() {
+		res, err := be.Execute(context.Background(), "read", nil)
+		implicitOut <- outcome{res, err}
+	}()
+	// Both calls must be IN FLIGHT on the binding before a departs: a call
+	// dispatched afterwards would be refused by resolution instead, which is a
+	// different (and already tested) path.
+	for range 2 {
+		select {
+		case <-gated.dispatched:
+		case <-time.After(2 * time.Second):
+			t.Fatal("a call never reached the executor")
+		}
+	}
+
+	// a departs while the two calls are in flight; b is the only machine left.
+	fb.reachableTo("b")
+	fb.mu.Lock()
+	fb.liveByID["a"] = false
+	fb.mu.Unlock()
+
+	// The implicit caller fails first, leads the recovery, and blocks migrating
+	// to b; the named caller then fails and becomes a waiter.
+	gated.permit("implicit")
+	<-migrating
+	gated.permit("named")
+	close(release)
+
+	// Both outcomes first: the implicit caller's retry may still be in flight,
+	// and its call on b is part of what the count below means.
+	named := <-namedOut
+	implicit := <-implicitOut
+
+	c.Error(named.err, "a named call must not be retried on another executor")
+	c.ErrorIs(named.err, execpool.ErrExecutorGone, "the named call's own failure must surface, got")
+	c.Eq(1, gated.callsIn("named"), "the named call ran exactly once, on the executor it named; got %d")
+
+	bExec := fb.execs["b"]
+	bExec.mu.Lock()
+	bCalls := bExec.calls
+	bExec.mu.Unlock()
+	// Exactly one call reaches b: the implicit caller's retry. A named retry
+	// that followed home would make it two.
+	c.Eq(1, bCalls, "the named call must never run on the executor the implicit caller migrated to; b ran %d time(s)")
+
+	c.NoError(implicit.err, "the implicit call follows its work to the new home")
+	c.Eq("b:read", implicit.res.Text, "served on")
+	c.Eq(1, fb.provisionsOn("b"), "provisions on the new home")
+}
+
+// The home fetches obey the SAME live set as every tool call: a home the child
+// is no longer admitted to is not a provision target, however it became stale.
+func TestBoundExecutorHomeOutsideReachableIsNotProvisioned(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	fb.homeLabel = "a" // the durable home, from a grant the child has since lost
+	fb.reachableTo("b")
+	be := newBoundExecutor("c1", fb)
+
+	_, err := be.ProjectContext(context.Background())
+	c.Error(err, "a home outside the live set must refuse")
+	c.StrContains(err.Error(), "not connected", "the refusal must read as a lost machine; got %q", err)
+	c.Eq(0, fb.provisionsOn("a"), "no workspace may be made on an executor outside the live set; got %d")
+	c.Eq(0, fb.provisions, "and none anywhere else; got %d")
+
+	_, err = be.MaterializeSkill(context.Background(), "treehash", nil)
+	c.Error(err, "the skill files are read on the same home, so the same refusal")
+	c.StrContains(err.Error(), "not connected", "got %q", err)
+	c.Eq(0, fb.provisionsOn("a"), "provisions on the unreachable home; got %d")
+}
+
+// A slow FIRST provision on one executor must not block the child's other
+// bindings. With one binding a map-wide lock was harmless; with a map it means a
+// hung executor stalls every healthy call on the child for the full RPC timeout.
+func TestBoundExecutorSlowFirstBindDoesNotBlockAnotherBinding(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	be := newBoundExecutor("c1", fb)
+
+	fb.mu.Lock()
+	fb.homeLabel = "a"
+	fb.mu.Unlock()
+	if _, err := be.ensureBinding(context.Background(), "a", true); err != nil {
+		t.Fatalf("bind a: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fb.mu.Lock()
+	fb.onProvision = func(execID string) {
+		if execID != "b" {
+			return
+		}
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	fb.mu.Unlock()
+
+	go func() { _, _ = be.Execute(namedCall("b"), "read", nil) }()
+	<-entered
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := be.Execute(namedCall("a"), "read", nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		c.NoError(err, "a call on a healthy binding must not wait behind another executor's first provision")
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("a call on a healthy binding blocked behind an unrelated first provision; the provision is holding a lock it must not")
+	}
+	close(release)
+}
+
+// A first provision that FAILS must leave the child without a home: a home with
+// nothing behind it makes a later call report "pinned there" (or migrate) for a
+// child that never bound anywhere.
+func TestBoundExecutorFailedFirstProvisionLeavesNoHome(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "b"})
+	fb.reachableTo("a") // reachable, but ProvisionOn("a") has no such executor
+	fb.mode = "pinned"
+	be := newBoundExecutor("c1", fb)
+
+	_, err := be.Execute(context.Background(), "read", nil)
+	c.Error(err, "the provision fails")
+	c.Eq("", be.homeExecutor(), "a failed first provision must leave NO home; got")
+	_, _, bound := be.Current()
+	c.False(bound, "unbound")
+
+	// The consequence: the next call must simply adopt the machine that is
+	// there, not inherit a home it never had a workspace on.
+	fb.reachableTo("b")
+	res, err := be.Execute(context.Background(), "read", nil)
+	c.NoError(err, "a child that never bound must adopt the reachable machine, not be pinned to a phantom home")
+	c.Eq("b:read", res.Text, "served on")
+	c.Eq("b", be.homeExecutor(), "home")
+}
+
+// A migration onto a machine the child already used for a NAMED call must
+// RE-PROVISION that workspace: it was made at that machine's root, so promoting
+// it as home would silently leave the child's cwd unapplied. And the new home is
+// labelled exactly once.
+func TestBoundExecutorMigrationPromotesARootWorkspace(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	fb.reachableTo("a", "b")
+	be := newBoundExecutor("c1", fb)
+	be.setHome("a")
+	if _, err := be.ensureBinding(context.Background(), "a", true); err != nil {
+		t.Fatalf("bind home a: %v", err)
+	}
+
+	// A named call on b makes a ROOT-level workspace there.
+	if _, err := be.Execute(namedCall("b"), "read", nil); err != nil {
+		t.Fatalf("named call on b: %v", err)
+	}
+	rootWS := be.Bindings()["b"]
+	c.EqDeep([]bool{false}, fb.useCwdFor("b"), "the named call's workspace starts at b's root")
+	fb.mu.Lock()
+	notedBefore := len(fb.noted)
+	fb.mu.Unlock()
+	c.Eq(1, notedBefore, "only the home binding is labelled so far; noted")
+
+	// a departs; the implicit call migrates home onto b.
+	fb.reachableTo("b")
+	fb.mu.Lock()
+	fb.liveByID["a"] = false
+	fb.mu.Unlock()
+	res, err := be.Execute(context.Background(), "read", nil)
+	c.NoError(err, "an ephemeral child migrates")
+	c.Eq("b:read", res.Text, "served on")
+	c.EqDeep([]bool{false, true}, fb.useCwdFor("b"), "the promoted workspace must be re-provisioned WITH the child's cwd")
+	c.Eq(2, fb.provisionsOn("b"), "provisions on b")
+
+	fb.mu.Lock()
+	noted := len(fb.noted)
+	fb.mu.Unlock()
+	c.Eq(2, noted, "the new home is labelled exactly once (the migration must not write the labels again); noted")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fb.mu.Lock()
+		released := fb.released[rootWS]
+		fb.mu.Unlock()
+		if released {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the root-level workspace %q was never released after the promotion", rootWS)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Concurrent implicit callers all decide to migrate at once, and the child must
+// still end up with ONE home workspace, one label write and one steer.
+func TestBoundExecutorConcurrentImplicitCallersMigrateOnce(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+	fb.reachableTo("a")
+	be := newBoundExecutor("c1", fb)
+	c.NoError(be.bindImplicit(context.Background()), "bind home a")
+
+	fb.reachableTo("b")
+	fb.mu.Lock()
+	fb.liveByID["a"] = false
+	fb.mu.Unlock()
+
+	const n = 4
+	start := make(chan struct{})
+	results := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			res, err := be.Execute(context.Background(), "read", nil)
+			if err != nil {
+				results[i] = "ERR: " + err.Error()
+				return
+			}
+			results[i] = res.Text
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	want := make([]string, n)
+	for i := range want {
+		want[i] = "b:read"
+	}
+	c.EqDeep(want, results, "every implicit caller follows the child to the new home")
+	c.Eq(1, fb.provisionsOn("b"), "one home workspace, however many callers raced; got %d")
+	c.Eq(1, fb.migrations, "the child is told once; migrations")
+	fb.mu.Lock()
+	labels := append([]string(nil), fb.homeLabels...)
+	fb.mu.Unlock()
+	c.EqDeep([]string{"c1|b"}, labels, "one durable home label; got")
+}
+
+// A dead executor's workspace release must not starve the live ones: teardown
+// releases them concurrently, each on its own deadline. Sequentially they shared
+// one budget in map order, so one hung machine could eat it all.
+func TestReleaseOthersReleasesConcurrently(t *testing.T) {
+	c := assert.NewAborting(t)
+	fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"}, &fakeExec{id: "c"})
+	be := newBoundExecutor("c1", fb)
+	for _, id := range []string{"a", "b", "c"} {
+		if _, err := be.ensureBinding(context.Background(), id, false); err != nil {
+			t.Fatalf("bind %s: %v", id, err)
+		}
+	}
+
+	entered := make(chan string, 3)
+	release := make(chan struct{})
+	fb.mu.Lock()
+	fb.onRelease = func(execID string) {
+		entered <- execID
+		<-release
+	}
+	fb.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		be.ReleaseOthers(context.Background(), "", "")
+	}()
+
+	seen := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		select {
+		case id := <-entered:
+			seen[id] = true
+		case <-time.After(2 * time.Second):
+			close(release)
+			<-done
+			t.Fatalf("only %d of 3 releases started within the deadline; teardown is serialising them behind each other", len(seen))
+		}
+	}
+	close(release)
+	<-done
+	c.Len(seen, 3, "released executors")
 }

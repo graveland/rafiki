@@ -146,6 +146,11 @@ func (c *Controller) handleJobEvent(ev execpool.JobEvent) {
 // moment two machines are in play. A single-executor child's notice is unchanged
 // byte for byte — it has nothing to disambiguate.
 func (c *Controller) jobExitNotice(ev execpool.JobEvent) string {
+	// Multi() is a live Reachable read (a store query for a sandbox child) on
+	// this per-connection handler goroutine. Accepted: no lock is held and
+	// nothing recurses, and a store error degrades to the single-executor text
+	// byte for byte, which is the documented form for a child that cannot say
+	// which machine ran the job.
 	if be := c.boundExecutorFor(ev.Owner); be != nil && be.Multi() {
 		return fmt.Sprintf(
 			"background job %s (%s) on %s finished with exit code %d. Read what it printed with bash_output {\"handle\":%q,\"executor\":%q}.",
