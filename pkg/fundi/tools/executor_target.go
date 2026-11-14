@@ -123,7 +123,8 @@ func (p *executorTargeted) Execute(ctx context.Context, input ToolInput) (ToolRe
 //
 // Input that is empty, not a JSON object, or carries no `executor` key is
 // returned byte-identical: the wrapper is invisible to every call that does
-// not use the argument.
+// not use the argument. A value that is present but is not a JSON string —
+// `null` included — is REFUSED rather than read as omitted.
 func splitExecutorArg(input ToolInput) (requested string, rest json.RawMessage, err error) {
 	if len(input) == 0 {
 		return "", json.RawMessage(input), nil
@@ -136,9 +137,14 @@ func splitExecutorArg(input ToolInput) (requested string, rest json.RawMessage, 
 	if !ok {
 		return "", json.RawMessage(input), nil
 	}
-	if err := json.Unmarshal(raw, &requested); err != nil {
+	// A JSON null is NOT a JSON string: it unmarshals cleanly into "" and
+	// would pass as "omitted", hiding a caller that meant to name a machine.
+	// Decoding through a pointer is what keeps the two distinguishable.
+	var value *string
+	if err := json.Unmarshal(raw, &value); err != nil || value == nil {
 		return "", nil, errors.New("executor must be a string (a machine name or executor id)")
 	}
+	requested = *value
 	delete(obj, executorArgName)
 	stripped, err := json.Marshal(obj)
 	if err != nil {

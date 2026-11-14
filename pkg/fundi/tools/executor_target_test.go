@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/multigres/testkit/assert"
 
 	"go.graveland.dev/rafiki/pkg/msg"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // workspaceOpts is the ToolOpts under which every workspace tool materializes,
@@ -106,8 +108,15 @@ func TestExecutorArgAddedToEveryWorkspaceTool(t *testing.T) {
 		}
 	}
 
-	// A vacuous pass would hide the whole tier declining.
-	c.True(present >= 10, "only %d workspace tools materialized; the assertion above proves nothing", present)
+	// A vacuous pass would hide the whole tier declining. The job verbs are the
+	// ones most likely to be missed: they are RPC-backed and never appear in the
+	// executor's own registry, so nothing else would notice them dropping out.
+	// Name them, then require the whole tier.
+	for _, name := range []string{"bash_start", "bash_output", "bash_kill"} {
+		_, has := defs[name]
+		c.True(has, "%q did not materialize, so its %q coverage silently vanished", name, executorArgName)
+	}
+	c.Eq(len(WorkspaceTools()), present, "workspace tools materialized; want the whole tier under workspaceOpts")
 }
 
 // TestExecutorArgAbsentOnDaemonTools keeps the argument off the tools that
@@ -204,20 +213,140 @@ func TestExecutorArgStrippedBeforeExecution(t *testing.T) {
 	}
 }
 
-// TestExecutorArgNonStringRefused: a non-string executor is a malformed call,
-// refused before the tool runs — never silently coerced or passed through.
-func TestExecutorArgNonStringRefused(t *testing.T) {
-	c := assert.NewAborting(t)
-	probe := newProbe()
+// execRecord is one call the executor client was handed, so a test can assert
+// on what crossed the boundary rather than on what the tool returned.
+type execRecord struct {
+	tool   string
+	input  string
+	handle string
+	target *ExecutorTarget
+}
 
-	_, err := (&executorTargeted{tool: probe}).Execute(
-		context.Background(), ToolInput(`{"path":"x","executor":3}`))
+// recordingExecClient is an ExecutorClient that records every call it is
+// handed — the input bytes and the ExecutorTarget on the context — and answers
+// successfully.
+type recordingExecClient struct {
+	stubExecutorClient
+	mu    sync.Mutex
+	calls []execRecord
+}
 
-	c.Error(err, "a non-string executor was accepted")
-	if err != nil {
-		c.Eq("executor must be a string (a machine name or executor id)", err.Error(), "error =")
+func (r *recordingExecClient) Execute(ctx context.Context, tool string, input json.RawMessage) (toolmeta.Result, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, execRecord{tool: tool, input: string(input), target: ExecutorTargetFrom(ctx)})
+	return toolmeta.Result{Text: "from executor"}, nil
+}
+
+func (r *recordingExecClient) JobOutput(ctx context.Context, handle string, _ int64) (JobSnapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, execRecord{tool: "bash_output", handle: handle, target: ExecutorTargetFrom(ctx)})
+	return JobSnapshot{Data: "out", Total: 3, Found: true}, nil
+}
+
+// record returns the first call for tool.
+func (r *recordingExecClient) record(tool string) (execRecord, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, call := range r.calls {
+		if call.tool == tool {
+			return call, true
+		}
 	}
-	c.Eq(0, probe.calls, "the inner tool ran on a refused call")
+	return execRecord{}, false
+}
+
+// all returns every recorded call.
+func (r *recordingExecClient) all() []execRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]execRecord(nil), r.calls...)
+}
+
+// TestExecutorArgStrippedBeforeTheExecutorProxy pins the WRAP ORDER in
+// MaterializeAll: executorTargeted must sit OUTSIDE executorProxy.
+//
+// executorProxy.Execute forwards the raw input straight to the executor client
+// without ever calling the inner tool, so with the two wraps swapped the
+// `executor` key would travel to the executor's tool input — and the
+// ExecutorTarget would never reach the client at all, because the inner
+// wrapper would be the one thing the proxy skips. Asserting on the schema
+// cannot see this; only a call through both layers can.
+func TestExecutorArgStrippedBeforeTheExecutorProxy(t *testing.T) {
+	c := assert.NewAborting(t)
+	fake := &recordingExecClient{}
+	reg := DefaultBlueprint.MaterializeAll(workspaceOpts(t, fake))
+
+	// read is proxied: the client receives the tool call itself.
+	_, err := reg.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"/x","executor":"ublk-s2"}`))
+	c.NoError(err)
+
+	// bash_output is RPC-backed and never proxied: the client receives
+	// JobOutput, and the target must have reached it all the same.
+	_, err = reg.Execute(context.Background(), "bash_output", json.RawMessage(`{"handle":"h1","executor":"ublk-s2"}`))
+	c.NoError(err)
+
+	call, ok := fake.record("read")
+	c.True(ok, "the proxied call never reached the executor client")
+	if ok {
+		c.Eq(`{"file_path":"/x"}`, call.input,
+			"the executor was handed the wrapper's own argument; it must be stripped BEFORE the proxy forwards the input")
+		c.NotNil(call.target, "the executor client got no ExecutorTarget; the wrapper must be outside the proxy")
+		if call.target != nil {
+			c.Eq("ublk-s2", call.target.Requested, "ExecutorTarget.Requested =")
+		}
+	}
+
+	call, ok = fake.record("bash_output")
+	c.True(ok, "the job call never reached the executor client")
+	if ok {
+		c.Eq("h1", call.handle, "job handle =")
+		c.NotNil(call.target, "bash_output's client call got no ExecutorTarget; the wrap must cover the RPC-backed job verbs")
+		if call.target != nil {
+			c.Eq("ublk-s2", call.target.Requested, "ExecutorTarget.Requested =")
+		}
+	}
+
+	// Belt and braces: no input the executor ever sees carries the key.
+	for _, call := range fake.all() {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal([]byte(call.input), &obj) != nil || obj == nil {
+			continue
+		}
+		_, leaked := obj[executorArgName]
+		c.False(leaked, "%s: the executor's input carries %q", call.tool, executorArgName)
+	}
+}
+
+// TestExecutorArgNonStringRefused: a value that is present but is not a JSON
+// string is a malformed call, refused before the tool runs — never silently
+// coerced or passed through. `null` is the case that matters most: it decodes
+// cleanly into "" and would otherwise be read as "omitted", hiding a caller
+// that meant to name a machine.
+func TestExecutorArgNonStringRefused(t *testing.T) {
+	const want = "executor must be a string (a machine name or executor id)"
+
+	for _, input := range []string{
+		`{"path":"x","executor":3}`,
+		`{"path":"x","executor":null}`,
+		`{"path":"x","executor":true}`,
+		`{"path":"x","executor":{"machine":"ublk-s2"}}`,
+		`{"path":"x","executor":["ublk-s2"]}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			probe := newProbe()
+
+			_, err := (&executorTargeted{tool: probe}).Execute(context.Background(), ToolInput(input))
+
+			c.Error(err, "a non-string executor was accepted")
+			if err != nil {
+				c.Eq(want, err.Error(), "error =")
+			}
+			c.Eq(0, probe.calls, "the inner tool ran on a refused call")
+		})
+	}
 }
 
 // TestExecutorArgOmittedPassesThrough: a call that does not use the argument
@@ -299,6 +428,51 @@ func TestExecutorTargetPrefixesWhenMulti(t *testing.T) {
 		}
 		c.Eq("", res.Text, "Text must stay empty when Blocks carry the result")
 	})
+
+	// Multi with no resolved name is a broken client, and it is left VISIBLE:
+	// the literal "[] " prefix is the brief's rule, not an accident to be
+	// smoothed over by a fallback that would hide which executor was unnamed.
+	t.Run("multi with no resolved name", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		probe := newProbe()
+		probe.res = NewTextResult("out")
+		probe.fill = func(t *ExecutorTarget) { t.Multi = true }
+
+		res, err := (&executorTargeted{tool: probe}).Execute(context.Background(), ToolInput(`{}`))
+		c.NoError(err)
+		c.Eq("[] out", res.Text, "result text =")
+	})
+}
+
+// TestExecutorTargetNoteWithoutMulti pins the Note clause on its own: a
+// one-time binding note reaches the model whether or not several executors
+// were reachable, and it never implies a machine tag the call did not get.
+func TestExecutorTargetNoteWithoutMulti(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	probe := newProbe()
+	probe.res = NewTextResult("out")
+	probe.fill = func(t *ExecutorTarget) {
+		t.Resolved = "ublk-s2"
+		t.Note = "[ublk-s2] working from /srv"
+	}
+
+	res, err := (&executorTargeted{tool: probe}).Execute(context.Background(), ToolInput(`{}`))
+	c.NoError(err)
+	c.Eq("[ublk-s2] working from /srv\nout", res.Text,
+		"a note must be emitted on its own, with no [machine] tag after it")
+
+	// The note goes on a Blocks result too, and nowhere else.
+	blocks := newProbe()
+	blocks.res = ToolResult{Blocks: []ContentBlock{TextBlock{Text: "out"}}}
+	blocks.fill = func(t *ExecutorTarget) { t.Note = "note" }
+
+	res, err = (&executorTargeted{tool: blocks}).Execute(context.Background(), ToolInput(`{}`))
+	c.NoError(err)
+	c.Len(res.Blocks, 2, "blocks =")
+	if len(res.Blocks) == 2 {
+		c.Eq("note\n", res.Blocks[0].(TextBlock).Text, "leading block text =")
+	}
 }
 
 // TestExecutorTargetUntouchedWhenSingle: a single reachable executor is the
