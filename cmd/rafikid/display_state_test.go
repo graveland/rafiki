@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 
@@ -98,7 +99,7 @@ func TestComputeDisplayStateBudgetHaltTopLevelOnly(t *testing.T) {
 }
 
 // TestComputeDisplayStatePrecedence: the idle-state rules are ordered
-// operator > failed > children > events > job > schedule > idle. For each
+// operator > rate-limit resume > failed > children > events > job > schedule > idle. For each
 // adjacent pair, setting both facts must yield the higher-priority one.
 func TestComputeDisplayStatePrecedence(t *testing.T) {
 	pairs := []struct {
@@ -109,6 +110,20 @@ func TestComputeDisplayStatePrecedence(t *testing.T) {
 		wantD  protocol.DisplayState
 		wantO  protocol.WaitingOn
 	}{
+		{
+			name:   "operator over rate-limit resume",
+			lower:  func(f *displayFacts) { f.RateLimitResumeAt = time.Now().Add(time.Hour) },
+			higher: func(f *displayFacts) { f.TopLevel, f.PendingQuestion = true, "proceed?" },
+			wantD:  protocol.DisplayWaiting,
+			wantO:  protocol.WaitingOnOperator,
+		},
+		{
+			name:   "rate-limit resume over failed",
+			lower:  func(f *displayFacts) { f.LastTurnError = "upstream status 429" },
+			higher: func(f *displayFacts) { f.RateLimitResumeAt = time.Now().Add(time.Hour) },
+			wantD:  protocol.DisplayWaiting,
+			wantO:  protocol.WaitingOnSchedule,
+		},
 		{
 			name:   "operator over failed",
 			lower:  func(f *displayFacts) { f.LastTurnError = "boom" },
@@ -268,4 +283,15 @@ func TestDisplayMessage(t *testing.T) {
 	f = displayFacts{Status: protocol.StatusStreaming}
 	ds, on = computeDisplayState(f)
 	a.Eq("", displayMessage(f, ds, on), "working has no message")
+}
+
+// TestDisplayMessageNamesTheRateLimitResume: a child parked on a rate-limit
+// auto-resume says so and names the fire instant in UTC, rather than repeating
+// the 429 as a failure.
+func TestDisplayMessageNamesTheRateLimitResume(t *testing.T) {
+	a := assert.NewCollecting(t)
+	at := time.Date(2026, 11, 14, 6, 50, 30, 0, time.FixedZone("MST", -7*3600))
+	f := displayFacts{Status: protocol.StatusIdle, LastTurnError: "upstream status 429", RateLimitResumeAt: at}
+	ds, on := computeDisplayState(f)
+	a.Eq("rate limited (HTTP 429); auto-resume at 2026-11-14T13:50:30Z", displayMessage(f, ds, on), "message names the UTC fire instant")
 }

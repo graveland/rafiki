@@ -45,6 +45,13 @@ func (c *Controller) displayFacts(childID string) (displayFacts, bool) {
 		PendingQuestion: snap.PendingQuestion,
 		LastTurnError:   snap.LastTurnError,
 	}
+	if raw := snap.Labels[rateLimitResumeLabel]; raw != "" {
+		if at, err := time.Parse(time.RFC3339, raw); err == nil {
+			f.RateLimitResumeAt = at
+		} else {
+			slog.Warn("display state: unparseable rate-limit resume label", "childId", childID, "value", raw, "error", err)
+		}
+	}
 	// TopLevel is "no parent": ParentOf reports false for a root, and an empty
 	// parent label is the same thing. A budget halt is only the OPERATOR's to
 	// answer for a root, so the (ancestor-walking) budgetHalted call is skipped

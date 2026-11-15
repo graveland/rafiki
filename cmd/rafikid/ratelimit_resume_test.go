@@ -554,3 +554,34 @@ func TestRateLimitResumeAbandonmentIsVisibleAndAnnouncedOnce(t *testing.T) {
 	c.Eq(1, nc.abandonedNotices(), "the abandonment resolution must be published once, not once per trigger")
 	c.Eq(maxRateLimitResumes, waitForResumePrompts(t, ctrl, childID, maxRateLimitResumes+1, 300*time.Millisecond), "a prompt was delivered past the attempt cap")
 }
+
+// An armed auto-resume is a scheduled wake, not a failure: while the row owes a
+// resume the child reads waiting/schedule even though its last turn failed with
+// the 429, and once the label clears the stored turn error shows again. Clients
+// that stop "failed" children (a review swarm's collector) depend on this.
+func TestRateLimitResumeLabelDrivesTheDisplayState(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	shrinkRateWatch(t, ctrl)
+
+	childID := spawnTestChild(t, ctrl, nil)
+	c.NoError(ctrl.st.Update(childID, func(s *childstore.Session) {
+		s.LastTurnError = "upstream status 429: rate_limit_error"
+	}), "record the failed turn")
+	ctrl.RateLimited(childID, time.Now().Add(time.Hour))
+	c.NotEq("", labelOf(ctrl, childID), "the resume was not stamped on the row")
+
+	ctrl.drainDisplayRefresh()
+	last, ok := displayLastOf(ctrl, childID)
+	c.True(ok, "stamping the resume published no display state")
+	c.Eq(protocol.DisplayWaiting, last.state, "a child owed a rate-limit resume is waiting, not failed")
+	c.Eq(protocol.WaitingOnSchedule, last.on, "it waits on the scheduled resume")
+	c.True(strings.HasPrefix(last.msg, "rate limited (HTTP 429); auto-resume at "), "message: %q", last.msg)
+
+	ctrl.TurnSucceeded(childID)
+	c.Eq("", labelOf(ctrl, childID), "a success must clear the label")
+	ctrl.drainDisplayRefresh()
+	last, _ = displayLastOf(ctrl, childID)
+	c.Eq(protocol.DisplayFailed, last.state, "with no resume owed the stored turn error shows again")
+}

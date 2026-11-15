@@ -478,6 +478,9 @@ func (c *Controller) stampRateLimitResumeAt(childID string, at time.Time) {
 	}
 	if changed {
 		c.writeRateLimitResumeRow(childID)
+		// The label is a display fact (waiting on the scheduled resume rather
+		// than failed); refreshDisplayState is a non-blocking enqueue.
+		c.refreshDisplayState(childID)
 	}
 }
 
@@ -497,6 +500,9 @@ func (c *Controller) clearRateLimitResumeAt(childID string) {
 	}
 	if changed {
 		c.writeRateLimitResumeRow(childID)
+		// The label is a display fact (waiting on the scheduled resume rather
+		// than failed); refreshDisplayState is a non-blocking enqueue.
+		c.refreshDisplayState(childID)
 	}
 }
 

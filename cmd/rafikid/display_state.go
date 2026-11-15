@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -15,11 +16,16 @@ type displayFacts struct {
 	TopLevel        bool // no parent
 	PendingQuestion string
 	LastTurnError   string
-	BudgetHalted    bool
-	PendingEvents   bool // news queued in the event buffer, not yet delivered
-	OpenSchedules   int
-	RunningJobs     int
-	LiveDescendants int
+	// RateLimitResumeAt is the fire instant of an armed claude rate-limit
+	// auto-resume (the child row's rateLimitResumeLabel); zero when none is
+	// owed. It outranks LastTurnError: the 429 that set the error is the very
+	// thing the resume will retry, so the child is waiting, not failed.
+	RateLimitResumeAt time.Time
+	BudgetHalted      bool
+	PendingEvents     bool // news queued in the event buffer, not yet delivered
+	OpenSchedules     int
+	RunningJobs       int
+	LiveDescendants   int
 }
 
 // computeDisplayState folds a child's facts into one display value. The rules
@@ -31,8 +37,8 @@ type displayFacts struct {
 //     unrecognised or empty status; the test is "not idle and not exited",
 //     not a membership check, so a new status never silently reads as idle.
 //  3. idle: the child is settled, and what (if anything) it waits on is
-//     decided by precedence operator > failed > children > events > job >
-//     schedule > idle.
+//     decided by precedence operator > rate-limit resume (schedule) > failed >
+//     children > events > job > schedule > idle.
 //
 // It always returns a non-empty DisplayState; DisplayState("") is never
 // returned. WaitingOn is non-empty exactly when the state is DisplayWaiting.
@@ -45,6 +51,9 @@ func computeDisplayState(f displayFacts) (protocol.DisplayState, protocol.Waitin
 	}
 	if f.TopLevel && (f.PendingQuestion != "" || f.BudgetHalted) {
 		return protocol.DisplayWaiting, protocol.WaitingOnOperator
+	}
+	if !f.RateLimitResumeAt.IsZero() {
+		return protocol.DisplayWaiting, protocol.WaitingOnSchedule
 	}
 	if f.LastTurnError != "" {
 		return protocol.DisplayFailed, ""
@@ -68,8 +77,9 @@ func computeDisplayState(f displayFacts) (protocol.DisplayState, protocol.Waitin
 // or "" when there is nothing useful to say (idle, working, exited).
 //
 // The operator message is the child's own pending question when it has one,
-// and only otherwise the budget-halt sentence; a failure message is the last
-// turn's error. Both question and error are single lines: the first line is
+// and only otherwise the budget-halt sentence; a rate-limit resume names its
+// fire instant (UTC — the daemon's zone is arbitrary); a failure message is the
+// last turn's error. Both question and error are single lines: the first line is
 // taken, trimmed, and truncated to 200 runes.
 func displayMessage(f displayFacts, ds protocol.DisplayState, on protocol.WaitingOn) string {
 	switch ds {
@@ -81,6 +91,9 @@ func displayMessage(f displayFacts, ds protocol.DisplayState, on protocol.Waitin
 			if f.BudgetHalted {
 				return "over budget: raise the cap to continue"
 			}
+		}
+		if on == protocol.WaitingOnSchedule && !f.RateLimitResumeAt.IsZero() {
+			return "rate limited (HTTP 429); auto-resume at " + f.RateLimitResumeAt.UTC().Format(time.RFC3339)
 		}
 	case protocol.DisplayFailed:
 		if f.LastTurnError != "" {

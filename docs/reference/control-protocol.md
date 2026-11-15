@@ -2532,13 +2532,13 @@ OSC emitter — no consumer re-derives it:
 | `waiting_on` | Set when |
 |---|---|
 | `operator` | The child asked a question and is waiting on the operator, or it is budget-halted. Only a TOP-LEVEL child ever becomes `waiting_on: operator` — a mid-tree question goes to its parent and sets nothing |
-| `schedule` | A pending wakeup or cron job |
+| `schedule` | A pending wakeup or cron job, or a claude child owed a rate-limit auto-resume (its row carries `rafiki/rate-limit-resume-at`). The rate-limit case outranks `failed` — the 429 that failed the turn is what the resume retries — and its `display_msg` is `rate limited (HTTP 429); auto-resume at <RFC3339 UTC>`. When the resume is delivered, cancelled by a success, or abandoned at its attempt cap, the label clears and a still-stored turn error reads `failed` again |
 | `events` | News is queued in the event buffer and not yet delivered (a settle fragment held for its debounce) |
 | `job` | A background job is running |
 | `children` | A descendant (any depth, script children included) is not idle/exited. A descendant's own wait does not propagate upward |
 
-Precedence when several hold: `operator` > `failed` > `children` > `events` >
-`job` > `schedule`. `working` outranks all of them, and `waiting` only ever
+Precedence when several hold: `operator` > rate-limit resume (`schedule`) >
+`failed` > `children` > `events` > `job` > `schedule`. `working` outranks all of them, and `waiting` only ever
 applies to a child whose machine status is `idle`.
 
 `operator` and `failed` are carried by two per-child stored facts
