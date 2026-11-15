@@ -48,6 +48,7 @@ type stubControl struct {
 	historyNotFound bool              // GetHistory answers NotFound (no conversation)
 	getChildOK      bool              // GetChild answers with a named child when set
 	scriptChild     bool              // GetChild answers kind=script when set
+	childKind       string            // GetChild answers this non-script kind with latest_ordinal=scriptLatest when set
 
 	streamCtxDone int // StreamEvents invocations ended by the caller cancelling the stream ctx
 
@@ -143,6 +144,12 @@ func (s *stubControl) GetChild(
 	if s.getChildOK {
 		return connect.NewResponse(&rafikiv1.GetChildResponse{Child: &rafikiv1.ChildSummary{
 			ChildId: req.Msg.GetChildId(), Name: "seeded-" + req.Msg.GetChildId(), Status: "idle",
+		}}), nil
+	}
+	if s.childKind != "" {
+		return connect.NewResponse(&rafikiv1.GetChildResponse{Child: &rafikiv1.ChildSummary{
+			ChildId: req.Msg.GetChildId(), Name: "seeded-" + req.Msg.GetChildId(), Kind: s.childKind, Status: "exited",
+			LatestOrdinal: s.scriptLatest,
 		}}), nil
 	}
 	if s.scriptChild {
@@ -715,6 +722,78 @@ func TestEventQueryTypesExplicit(t *testing.T) {
 			t.Errorf("%s must read as explicit", tc.name)
 		}
 	}
+}
+
+// A declared filter naming a type no conversation holds (retry, error, ...)
+// must backfill from the durable event log: GetHistory serves messages only,
+// so filtering its answer to `retry` printed nothing — an exited claude
+// child's 429 and its scheduled auto-resume were invisible to
+// `logs --types retry` and `--all-types` alike.
+func TestLogsDeclaredFilterBackfillsFromEventLog(t *testing.T) {
+	for _, args := range [][]string{
+		{"c_x", "-r", "--types", "retry,error"},
+		{"c_x", "-r", "--all-types"},
+	} {
+		t.Run(strings.Join(args[1:], " "), func(t *testing.T) {
+			c := assert.NewAborting(t)
+			stub := &stubControl{
+				childKind:    "claude",
+				scriptLatest: proto.Int32(3),
+				streamBlocks: true,
+				events:       []*rafikiv1.Event{userMessageEvent("c_x", 0, "from the conversation")},
+				streamEvents: []*rafikiv1.Event{
+					userMessageEvent("c_x", 0, "from the log"),
+					{ChildId: "c_x", Ordinal: proto.Int32(1), Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
+						Code: "turn_failed", Message: "upstream status 429",
+					}}},
+					{ChildId: "c_x", Ordinal: proto.Int32(2), Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{
+						Attempt: 1, WillRetry: true, Reason: "rate limited (HTTP 429)",
+					}}},
+					exitedFor("c_x", proto32(3), ""),
+				},
+			}
+			serveStubControl(t, stub)
+
+			out, _ := runBounded(t, newLogsCmd(), args...)
+			c.Eq(0, stub.historyCalls, "a declared non-conversation filter must not read GetHistory")
+			c.StrContains(out, "rate limited (HTTP 429)", "the retry event is missing from the backfill:\n")
+			c.StrContains(out, "upstream status 429", "the error event is missing from the backfill:\n")
+			waitStreamCancel(t, stub)
+		})
+	}
+}
+
+// The default view, and a declared filter within the conversation types, stay
+// on GetHistory: it is the conversation tree, which also serves a fork's
+// borrowed history the child's own event log does not hold.
+func TestLogsConversationFiltersStayOnHistory(t *testing.T) {
+	for _, args := range [][]string{
+		{"c_x", "-r"},
+		{"c_x", "-r", "--types", "user_message"},
+	} {
+		t.Run(strings.Join(args[1:], " "), func(t *testing.T) {
+			c := assert.NewAborting(t)
+			stub := &stubControl{
+				childKind:    "claude",
+				scriptLatest: proto.Int32(0),
+				events:       []*rafikiv1.Event{userMessageEvent("c_x", 0, "from the conversation")},
+			}
+			serveStubControl(t, stub)
+
+			out, _ := runBounded(t, newLogsCmd(), args...)
+			c.Eq(1, stub.historyCalls, "GetHistory serves the conversation view")
+			c.Eq(0, stub.streamCalls, "no event-log replay for a conversation-only view")
+			c.StrContains(out, "from the conversation", "history missing:\n")
+		})
+	}
+}
+
+func TestEventQueryWantsEventLog(t *testing.T) {
+	c := assert.NewCollecting(t)
+	c.False(eventQuery{childID: "c_1", types: defaultTypeSet(true)}.wantsEventLog(), "the default view reads the conversation")
+	c.False(eventQuery{childID: "c_1", types: []string{"user_message", "assistant_message"}}.wantsEventLog(), "conversation types read the conversation")
+	c.True(eventQuery{childID: "c_1"}.wantsEventLog(), "--all-types reads the log")
+	c.True(eventQuery{childID: "c_1", types: []string{"user_message", "retry"}}.wantsEventLog(), "a non-conversation type reads the log")
 }
 
 // ── completion ───────────────────────────────────────────────────────────────

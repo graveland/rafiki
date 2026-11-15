@@ -919,8 +919,8 @@ func promptForExecutorSetup(ctx context.Context, cmd *cobra.Command, profileName
 // event, not a conversation row, so the transcript GetHistory serves never
 // carries one. The replay is bounded by the child's own latest ordinal
 // (ChildSummary.latest_ordinal), which is what the watermark parameter of the
-// shared durable replay means — fetchScriptLog is that replay, and its name is
-// historical (it is the only bounded StreamEvents read in the CLI).
+// shared durable replay means — fetchEventLog is that replay (the only
+// bounded StreamEvents read in the CLI).
 //
 // window comes from the daemon, in two steps, because neither step alone
 // answers it. The listing carries a window only for a model the OpenRouter
@@ -940,7 +940,7 @@ func forkOverflow(ctx context.Context, ep connectEndpoint, ctrl rafikiv1connect.
 	// is no completed turn to measure — the same "unknown" a missing turn_end
 	// reports. A SET 0 is a real log (ordinals start at 0).
 	if watermark, ok := latestOrdinal(get.Msg.GetChild()); ok {
-		events, err := fetchScriptLog(ctx, ep, ctrl, sourceChildID, watermark)
+		events, err := fetchEventLog(ctx, ep, ctrl, sourceChildID, watermark)
 		if err != nil {
 			return 0, 0, false, err
 		}

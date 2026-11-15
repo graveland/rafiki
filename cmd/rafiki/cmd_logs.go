@@ -33,7 +33,9 @@ prints it and then follows the live event stream from where the history ended.
 The rendered view is one line per event, the same lines rafiki tail prints.
 --types narrows the stream to named event types; --all-types widens it to
 every type, including the ephemeral deltas; -r emits one protojson Event per
-line instead of rendering.
+line instead of rendering. The history is the conversation (messages) unless
+--types/--all-types asks for anything else — retry, error, agent_status,
+turn_end, ... — in which case it is the child's durable event log.
 
 --stdin, --stderr and --all dump the captured process streams, raw: snapshots,
 not a follow. Live stderr is unavailable while the child runs — it is written

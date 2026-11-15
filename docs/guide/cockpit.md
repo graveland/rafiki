@@ -36,7 +36,11 @@ you stop it — a child spawned later appears with no reopening, exactly like
 the rail. `--label k=v`/`--has-label k` narrow the fleet-wide stream to
 children whose labels match; `--types` narrows to named event types,
 `--all-types` widens to every type plus the ephemeral deltas, and `-r` emits
-one protojson `Event` per line instead of rendering:
+one protojson `Event` per line instead of rendering. A child's default
+backfill is its conversation (messages only); a `--types`/`--all-types`
+filter naming anything else (`retry`, `error`, `agent_status`, `turn_end`, …)
+backfills from the child's durable event log instead, so an exited child's
+429s and status changes are there to read:
 
 ```
 14:32:01  spawn   c_01ABC  impl-auth  parent=c_root
