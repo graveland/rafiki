@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/mcpserver"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -382,6 +383,28 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		}
 	}
 
+	// A claude child in rafiki workspace-tools mode runs its Read/Write/Edit/
+	// Bash HERE instead of in Claude Code's own binary, on the executor its
+	// daraja was launched on. boundExecutorFor is the binding claudeRunner
+	// registered at launch — the SAME client the child's executor-bound work
+	// goes through — so the per-call `executor` argument resolves against the
+	// child's real reachable set and nothing runs in the daemon process.
+	//
+	// Both halves must be there: the persisted mode on the child's row (the
+	// same value Spawn resolved once and resume reads back) and the binding
+	// claudeRunner registered after a successful launch. An absent binding
+	// leaves the tier off — Spawn refuses this mode unless the executor pool
+	// and a proxy URL are configured, and a rafiki-mode child cannot reach this
+	// face before its daraja launched, so neither half is permanently missing.
+	if isChild {
+		if be := ctrl.boundExecutorFor(id.ChildID); be != nil {
+			if snap, ok := ctrl.st.Get(id.ChildID); ok && snap.WorkspaceTools == protocol.WorkspaceToolsRafiki {
+				opts.Executor = be
+				opts.ClaudeShapedWorkspace = true
+			}
+		}
+	}
+
 	// A per-child caller's tools are budget-gated: budgetHalted walks the
 	// caller's ancestors over c.breaches, so a child breached only through an
 	// ANCESTOR's subtree budget is refused non-reporting tools too, and its
@@ -409,9 +432,28 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 // nil-checked rather than trusted to mcpserver.New's skip: a Materializer may
 // decline with (nil, nil), and the decline is informational (no spawner, no
 // quota source), not an error.
+//
+// The workspace tier joins the list for a child in rafiki workspace-tools mode
+// (getServer sets both Executor and ClaudeShapedWorkspace together). Only those
+// tools go through tools.BindToExecutor — the same routing and `executor`-
+// argument rules MaterializeAll applies — so the face and a fundi registry serve
+// identically shaped workspace tools. mcpBlueprints are daemon-tier and keep
+// their own bindings: pymodule_run in particular is served by
+// newMCPPyModuleExecutor for a child, and routing it here instead would silently
+// swap that binding.
 func mcpToolset(opts tools.ToolOpts, logger *slog.Logger) []tools.Tool {
-	built := make([]tools.Tool, 0, len(mcpBlueprints))
-	for _, bp := range mcpBlueprints {
+	built := mcpMaterialize(mcpBlueprints, opts, logger, false)
+	if opts.Executor == nil || !opts.ClaudeShapedWorkspace {
+		return built
+	}
+	return append(built, mcpMaterialize(mcpWorkspaceBlueprints, opts, logger, true)...)
+}
+
+// mcpMaterialize builds one blueprint list, dropping every tool that declines
+// and — when bind is set — every tool tools.BindToExecutor refuses to serve.
+func mcpMaterialize(blueprints []tools.Tool, opts tools.ToolOpts, logger *slog.Logger, bind bool) []tools.Tool {
+	built := make([]tools.Tool, 0, len(blueprints))
+	for _, bp := range blueprints {
 		var (
 			t   tools.Tool
 			err error
@@ -427,6 +469,12 @@ func mcpToolset(opts tools.ToolOpts, logger *slog.Logger) []tools.Tool {
 		}
 		if t == nil {
 			continue
+		}
+		if bind {
+			var keep bool
+			if t, keep = tools.BindToExecutor(t, opts); !keep {
+				continue
+			}
 		}
 		built = append(built, t)
 	}
@@ -524,6 +572,34 @@ var mcpBlueprints = []tools.Tool{
 	// install recipe table (getServer's installStoreReady guard).
 	&tools.ExecutorInstallBlueprint{},
 	&tools.ExecutorUninstallBlueprint{},
+}
+
+// mcpWorkspaceBlueprints is the workspace tier a rafiki-mode claude child works
+// through this face: Claude Code's own four spellings, the search/list verbs
+// that go with them, and the job verbs Bash's run_in_background hands work to.
+//
+// They are served ONLY alongside opts.ClaudeShapedWorkspace (see mcpToolset).
+// The native read/write/edit/bash are listed so the Wave-1 rule keeps holding
+// through this face: ClaudeShapedWorkspace makes them decline, and offering a
+// model both spellings of one operation would leave it guessing.
+//
+// pymodule_run is deliberately absent: the face already serves it through
+// newMCPPyModuleExecutor, and a second blueprint of the same name would either
+// collide in the server's registry or shadow the child-binding one.
+var mcpWorkspaceBlueprints = []tools.Tool{
+	&tools.ClaudeReadBlueprint{},
+	&tools.ClaudeWriteBlueprint{},
+	&tools.ClaudeEditBlueprint{},
+	&tools.ClaudeBashBlueprint{},
+	&tools.ReadBlueprint{},
+	&tools.WriteBlueprint{},
+	&tools.EditBlueprint{},
+	&tools.BashBlueprint{},
+	&tools.GlobBlueprint{},
+	&tools.GrepBlueprint{},
+	&tools.LsBlueprint{},
+	&tools.BashOutputBlueprint{},
+	&tools.BashKillBlueprint{},
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint

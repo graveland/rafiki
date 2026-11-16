@@ -1,0 +1,392 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/darajapool"
+	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/presets"
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/pymodules"
+	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
+)
+
+// wsPtr is the pointer helper presets.WorkspaceTools needs.
+func wsPtr(s string) *string { return &s }
+
+// claudeWorkstation is the request shape the claude refusals below drive: a
+// claude spawn that asked for rafiki's workspace tools, with a cwd that exists
+// so nothing but the rule under test can refuse it.
+func claudeWorkstation(t *testing.T) protocol.SpawnRequest {
+	t.Helper()
+	return protocol.SpawnRequest{
+		Kind:           protocol.KindClaude,
+		Cwd:            t.TempDir(),
+		WorkspaceTools: protocol.WorkspaceToolsRafiki,
+	}
+}
+
+// wantWorkspaceToolsRefusal asserts err is InvalidArgument carrying want.
+func wantWorkspaceToolsRefusal(t *testing.T, err error, want string) {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	ck.Require().Error(err, "expected a refusal, got nil")
+	cerr := ck.Require().ErrorAs[*connectapi.ControllerError](err)
+	ck.Eq(protocol.ErrInvalidArgs, cerr.Code, "code")
+	ck.Eq(want, cerr.Message, "message")
+}
+
+// TestWorkspaceToolsPresetResolvesOnce pins the resolve-once rule: the preset
+// fills the mode at spawn, the child's row carries the RESOLVED value, and a
+// resume reads that row. Editing the preset afterwards must not reach the
+// resumed child — the same rule every other preset field follows.
+func TestWorkspaceToolsPresetResolvesOnce(t *testing.T) {
+	ck := assert.NewAborting(t)
+	store := newFakePresetStore("owner-1", presets.Record{
+		Name:           "seat",
+		Kind:           presets.KindClaude,
+		WorkspaceTools: wsPtr(protocol.WorkspaceToolsRafiki),
+	})
+	ctrl := presetController(store)
+
+	req, _, err := ctrl.applyPreset(context.Background(), protocol.SpawnRequest{Preset: "seat"}, "owner-1")
+	ck.Require().NoError(err, "applyPreset")
+	ck.Eq(protocol.WorkspaceToolsRafiki, req.WorkspaceTools, "the preset's mode at spawn")
+
+	// The operator edits the preset after the child started.
+	_, err = store.Put(context.Background(), "owner-1", presets.Record{
+		Name:           "seat",
+		Kind:           presets.KindClaude,
+		WorkspaceTools: wsPtr(protocol.WorkspaceToolsNative),
+	})
+	ck.Require().NoError(err, "edit the preset")
+
+	// What Spawn persisted is what resume rebuilds from.
+	snap := childstore.Snapshot{Kind: protocol.KindClaude, WorkspaceTools: req.WorkspaceTools}
+	resumed := resumeRequestFromSnapshot(snap, "")
+	ck.Eq(protocol.WorkspaceToolsRafiki, resumed.WorkspaceTools,
+		"resume must carry the row's mode, not the edited preset's")
+}
+
+// TestWorkspaceToolsRequestBeatsPreset pins the request-wins rule, and that
+// "native" is stored as the empty default (NormalizeWorkspaceTools' one
+// spelling of "the child keeps its built-ins").
+func TestWorkspaceToolsRequestBeatsPreset(t *testing.T) {
+	ck := assert.NewAborting(t)
+	store := newFakePresetStore("owner-1", presets.Record{
+		Name:           "seat",
+		Kind:           presets.KindClaude,
+		WorkspaceTools: wsPtr(protocol.WorkspaceToolsNative),
+	})
+	ctrl := presetController(store)
+	ctx := context.Background()
+
+	// The request's rafiki choice survives a native preset.
+	got, _, err := ctrl.applyPreset(ctx, protocol.SpawnRequest{
+		Preset:         "seat",
+		WorkspaceTools: protocol.WorkspaceToolsRafiki,
+	}, "owner-1")
+	ck.Require().NoError(err, "applyPreset")
+	ck.Eq(protocol.WorkspaceToolsRafiki, got.WorkspaceTools, "the request's mode")
+
+	// Nothing named: the preset's "native" arrives, and normalizes to "".
+	got, _, err = ctrl.applyPreset(ctx, protocol.SpawnRequest{Preset: "seat"}, "owner-1")
+	ck.Require().NoError(err, "applyPreset")
+	ck.Eq(protocol.WorkspaceToolsNative, got.WorkspaceTools, "the preset's mode reaches the request verbatim")
+	mode, ok := protocol.NormalizeWorkspaceTools(got.WorkspaceTools)
+	ck.True(ok, "native must normalize")
+	ck.Eq("", mode, "native must store as the empty default")
+}
+
+// TestWorkspaceToolsRefusedForFundi pins the first refusal: the mode replaces a
+// claude child's built-ins, and a fundi child never had any.
+func TestWorkspaceToolsRefusedForFundi(t *testing.T) {
+	ctrl := newBatchSpawnController(t)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = ctrl.ShutdownAllChildren(ctx, time.Second, time.Second)
+	})
+
+	req := claudeWorkstation(t)
+	req.Kind = protocol.KindFundi
+	before := len(ctrl.st.List())
+	_, err := ctrl.Spawn(context.Background(), req, users.Identity{})
+	wantWorkspaceToolsRefusal(t, err, "workspace_tools applies to claude children; fundi always uses rafiki's workspace tools")
+	assert.NewCollecting(t).Eq(before, len(ctrl.st.List()), "a refused spawn registers no child")
+}
+
+// TestWorkspaceToolsRefusedWithoutExecutorPool pins the second refusal: with no
+// executor there is nowhere for the replacements to run, and running them in
+// the daemon process is exactly what the executor architecture forbids.
+func TestWorkspaceToolsRefusedWithoutExecutorPool(t *testing.T) {
+	ctrl := newBatchSpawnController(t)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = ctrl.ShutdownAllChildren(ctx, time.Second, time.Second)
+	})
+
+	before := len(ctrl.st.List())
+	_, err := ctrl.Spawn(context.Background(), claudeWorkstation(t), users.Identity{})
+	wantWorkspaceToolsRefusal(t, err, `workspace_tools "rafiki" needs the executor pool: a claude child on the daemon host has no executor to route to`)
+	assert.NewCollecting(t).Eq(before, len(ctrl.st.List()), "a refused spawn registers no child")
+}
+
+// TestWorkspaceToolsRefusedWithoutProxyURL pins the third refusal, added on the
+// Wave-2.1 finding: darajaClaudeParams gates the whole mcp__rafiki__* surface on
+// a configured proxy URL AND this kind being proxied at all, so either miss
+// leaves the eight built-ins disallowed with nothing replacing them — a
+// toolless child.
+func TestWorkspaceToolsRefusedWithoutProxyURL(t *testing.T) {
+	const want = `workspace_tools "rafiki" needs the MCP surface: this daemon serves no proxy for claude children (no proxy URL, or claude outside RAFIKI_PROXY_KINDS), so the built-in workspace tools would be disallowed and unreplaced`
+
+	for _, tc := range []struct {
+		name       string
+		proxyURL   string
+		proxyKinds string
+	}{
+		{name: "no proxy URL", proxyURL: "", proxyKinds: ""},
+		{name: "claude outside the proxy kinds", proxyURL: "http://127.0.0.1:1", proxyKinds: "fundi"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RAFIKI_URL", "")
+			t.Setenv("RAFIKI_PROXY_KINDS", tc.proxyKinds)
+			ctrl := newBatchSpawnController(t)
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = ctrl.ShutdownAllChildren(ctx, time.Second, time.Second)
+			})
+			// An executor pool IS configured: only the MCP surface is missing.
+			ctrl.execPoolConn = &execpool.Pool{}
+			ctrl.darajaPool = &darajapool.Pool{}
+			ctrl.proxyURL = tc.proxyURL
+			ctrl.proxyToken = "tok"
+
+			before := len(ctrl.st.List())
+			_, err := ctrl.Spawn(context.Background(), claudeWorkstation(t), users.Identity{})
+			wantWorkspaceToolsRefusal(t, err, want)
+			assert.NewCollecting(t).Eq(before, len(ctrl.st.List()), "a refused spawn registers no child")
+		})
+	}
+}
+
+// TestWorkspaceToolsCarriedOnResume pins the resume half of the plumbing: the
+// request every resume site rebuilds from the snapshot must carry the mode, or
+// a resumed child relaunches native while its MCP replacements stay served.
+func TestWorkspaceToolsCarriedOnResume(t *testing.T) {
+	ck := assert.NewAborting(t)
+	for _, want := range []string{"", protocol.WorkspaceToolsRafiki} {
+		req := resumeRequestFromSnapshot(childstore.Snapshot{
+			Kind:           protocol.KindClaude,
+			WorkspaceTools: want,
+		}, "")
+		ck.Eq(want, req.WorkspaceTools, "resume request WorkspaceTools for mode %q", want)
+	}
+}
+
+// TestWorkspaceToolsClaudeChildGetsBoundExecutorHomedOnLaunchHost pins the
+// binding claudeRunner registers for a rafiki-mode child: a boundExecutor built
+// from the child's own request and owner, homed on the executor its daraja was
+// launched on, retained where the MCP face looks it up. A native child gets
+// none — its built-in tools already run on that machine.
+//
+// Driven through bindClaudeWorkspaceTools rather than claudeRunner because
+// darajapool.Launch is not injectable: this is the piece claudeRunner runs
+// after a successful launch.
+func TestWorkspaceToolsClaudeChildGetsBoundExecutorHomedOnLaunchHost(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := &Controller{st: childstore.New(), cm: newChildManager()}
+
+	req := protocol.SpawnRequest{
+		Kind:             protocol.KindClaude,
+		WorkspaceTools:   protocol.WorkspaceToolsRafiki,
+		ExecutorSelector: "machine=box-1",
+	}
+	ctrl.bindClaudeWorkspaceTools(req, "c_ws", executors.Executor{ID: "exec-1"}, executorOwner{Name: "brent", UserID: "u-1"})
+
+	be := ctrl.boundExecutorFor("c_ws")
+	ck.Require().NotNil(be, "a rafiki-mode claude child got no boundExecutor")
+	ck.Eq("exec-1", be.homeExecutor(), "the binding's home must be the launch executor")
+
+	// The binder is built from THIS child's request and owner, not a default.
+	cb, ok := be.binder.(*controllerBinder)
+	ck.Require().True(ok, "binder is %T, want *controllerBinder", be.binder)
+	ck.Eq("machine=box-1", cb.req.ExecutorSelector, "binder request")
+	ck.Eq("brent", cb.owner.Name, "binder owner name")
+	ck.Eq("u-1", cb.owner.UserID, "binder owner user id")
+
+	// A native child gets no binding at all.
+	ctrl.bindClaudeWorkspaceTools(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_native", executors.Executor{ID: "exec-1"}, executorOwner{})
+	ck.Nil(ctrl.boundExecutorFor("c_native"), "a native claude child must get no boundExecutor")
+}
+
+// mcpWorkspaceChildRequest returns the child-provenance request the face sees
+// for a claude child, after seeding its row (mode, cwd, launch labels) and the
+// binding claudeRunner would have registered.
+func mcpWorkspaceChildRequest(t *testing.T, face *mcpFace, mode string, binder executorBinder) *http.Request {
+	t.Helper()
+	ctrl := face.controller()
+	ctrl.pymoduleStore = &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
+	ctrl.execPoolConn = joinLiveRelayExecutor(t, executors.Executor{ID: "e-1"}, nil)
+	ctrl.darajaPool = &darajapool.Pool{}
+	ctrl.st.Insert(&childstore.Session{
+		ChildID:        "c-child",
+		Cwd:            "/work",
+		WorkspaceTools: mode,
+		Labels:         map[string]string{"rafiki/executor": "e-1"},
+	})
+	if binder != nil {
+		ctrl.noteBoundExecutor("c-child", newBoundExecutor("c-child", binder))
+	}
+
+	r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	ctx := server.WithIdentity(r.Context(), &server.Identity{
+		UserID: "u-owner", ChildID: "c-child", Via: server.ProvenanceChildToken,
+	})
+	return r.WithContext(ctx)
+}
+
+// mcpToolsByName lists the server's tools keyed by name, failing on a duplicate
+// — which is what pins "exactly one pymodule_run".
+func mcpToolsByName(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	res, err := cs.ListTools(context.Background(), nil)
+	ck.Require().NoError(err, "ListTools")
+	out := make(map[string]*mcp.Tool, len(res.Tools))
+	for _, tl := range res.Tools {
+		if _, dup := out[tl.Name]; dup {
+			t.Fatalf("tool %q is listed more than once; exactly one must be served", tl.Name)
+		}
+		out[tl.Name] = tl
+	}
+	return out
+}
+
+// schemaHasExecutor reports whether a listed tool's input schema carries the
+// per-call `executor` property.
+func schemaHasExecutor(t *testing.T, tl *mcp.Tool) bool {
+	t.Helper()
+	ck := assert.NewAborting(t)
+	schema, ok := tl.InputSchema.(map[string]any)
+	ck.Require().True(ok, "tool %q schema is %T, want an object", tl.Name, tl.InputSchema)
+	props, ok := schema["properties"].(map[string]any)
+	ck.Require().True(ok, "tool %q schema has no properties object", tl.Name)
+	_, has := props["executor"]
+	return has
+}
+
+// TestMCPFaceWorkspaceToolsRafikiChildSeesClaudeShaped pins the served surface
+// of a rafiki-mode claude child: Claude Code's four spellings plus the
+// search/list/job verbs, each with the per-call `executor` argument; none of the
+// native four; and exactly one pymodule_run (the child-binding one the face
+// already served).
+func TestMCPFaceWorkspaceToolsRafikiChildSeesClaudeShaped(t *testing.T) {
+	ck := assert.NewAborting(t)
+	face, _ := mcpFaceFixture(t)
+	req := mcpWorkspaceChildRequest(t, face, protocol.WorkspaceToolsRafiki, newFakeBinder(&fakeExec{id: "e-1"}))
+
+	toolsByName := mcpToolsByName(t, mcpConnect(t, face.getServer(req)))
+
+	want := []string{"Read", "Write", "Edit", "Bash", "glob", "grep", "ls", "bash_output", "bash_kill"}
+	for _, name := range want {
+		tl, ok := toolsByName[name]
+		ck.Require().True(ok, "rafiki-mode child is missing %q (has %v)", name, sortedToolNames(toolsByName))
+		ck.True(schemaHasExecutor(t, tl), "workspace tool %q must carry the executor argument", name)
+	}
+	for _, name := range []string{"read", "write", "edit", "bash"} {
+		ck.NotContains(sortedToolNames(toolsByName), name,
+			"rafiki-mode child was offered the native spelling %q as well as the Claude-shaped one", name)
+	}
+	ck.Contains(sortedToolNames(toolsByName), "pymodule_run", "the child-binding pymodule_run must still be served")
+	ck.Len(countName(sortedToolNames(toolsByName), "pymodule_run"), 1, "exactly one pymodule_run")
+}
+
+// sortedToolNames is the deterministic name list for Contains/NotContains.
+func sortedToolNames(m map[string]*mcp.Tool) []string {
+	out := make([]string, 0, len(m))
+	for name := range m {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// countName returns every occurrence of name in names.
+func countName(names []string, name string) []string {
+	var out []string
+	for _, n := range names {
+		if n == name {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// TestMCPFaceWorkspaceToolsNativeChildUnchanged pins that a native (or
+// unspecified) child's surface is untouched: no workspace tier joins this face
+// for it, even when a binding happens to be retained.
+func TestMCPFaceWorkspaceToolsNativeChildUnchanged(t *testing.T) {
+	ck := assert.NewAborting(t)
+	for _, mode := range []string{"", protocol.WorkspaceToolsNative} {
+		face, _ := mcpFaceFixture(t)
+		req := mcpWorkspaceChildRequest(t, face, mode, newFakeBinder(&fakeExec{id: "e-1"}))
+		names := sortedToolNames(mcpToolsByName(t, mcpConnect(t, face.getServer(req))))
+		for _, name := range []string{"Read", "Write", "Edit", "Bash", "glob", "grep", "ls", "bash_output", "bash_kill"} {
+			ck.NotContains(names, name, "native child (mode %q) unexpectedly got the workspace tier", mode)
+		}
+		ck.Contains(names, "task_add", "native child (mode %q) lost the ordinary surface", mode)
+	}
+}
+
+// TestMCPFaceWorkspaceToolsAmbiguityError pins that a workspace call reaches the
+// binding's own resolution: with two reachable executors and no `executor`
+// argument, Read must be refused with the binding's ambiguity text rather than
+// silently picking one.
+func TestMCPFaceWorkspaceToolsAmbiguityError(t *testing.T) {
+	ck := assert.NewAborting(t)
+	face, _ := mcpFaceFixture(t)
+	req := mcpWorkspaceChildRequest(t, face, protocol.WorkspaceToolsRafiki,
+		newFakeBinder(&fakeExec{id: "e-1"}, &fakeExec{id: "e-2"}))
+	cs := mcpConnect(t, face.getServer(req))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "Read",
+		Arguments: map[string]any{"file_path": "/work/x"},
+	})
+	ck.Require().NoError(err, "CallTool")
+	ck.True(res.IsError, "an ambiguous workspace call must be reported as an error: %v", res)
+	text := mcpErrorText(t, res)
+	ck.StrContains(text, "this agent can reach 2 executors (e-1, e-2); pass executor:", "ambiguity diagnostic")
+}
+
+// mcpErrorText concatenates the text blocks of a FAILING CallTool result —
+// mcpCallText (mcp_face_test.go) deliberately fatals on one.
+func mcpErrorText(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	var b strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
+	}
+	return b.String()
+}

@@ -2287,6 +2287,56 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		req.Kind = protocol.KindFundi
 	}
 
+	// workspace_tools resolves ONCE here, beside the kind it depends on, and
+	// is persisted on the session like NotifyPolicy: a preset edit must never
+	// reach a running or resumed child. The three refusals below are all
+	// rolled into this class — a value the child cannot honour — and each is
+	// made before anything is minted, forked or written, so a refusal starts
+	// no process.
+	workspaceTools, wsOK := protocol.NormalizeWorkspaceTools(req.WorkspaceTools)
+	if !wsOK {
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: fmt.Sprintf("workspace_tools %q is not one of %q, %q", req.WorkspaceTools, protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki),
+		}
+	}
+	if workspaceTools == protocol.WorkspaceToolsRafiki {
+		// Only a claude child has built-in workspace tools to replace: a fundi
+		// child already runs on rafiki's, so the mode is meaningless there
+		// rather than merely unsupported.
+		if req.Kind != protocol.KindClaude {
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+				Code:    protocol.ErrInvalidArgs,
+				Message: "workspace_tools applies to claude children; fundi always uses rafiki's workspace tools",
+			}
+		}
+		// The replacements are served over the executor pool: a claude child on
+		// the daemon's own host has no executor to route a workspace tool to,
+		// and falling back to running them in the daemon process is the one
+		// thing the executor architecture exists to prevent.
+		if !c.claudeExecutorRouted() {
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+				Code:    protocol.ErrInvalidArgs,
+				Message: "workspace_tools \"rafiki\" needs the executor pool: a claude child on the daemon host has no executor to route to",
+			}
+		}
+		// ...and over the MCP face, which darajaClaudeParams gates on a
+		// configured proxy URL AND this kind being proxied at all. Without both,
+		// it injects no mcp__rafiki__* surface: the eight built-ins are
+		// disallowed and nothing replaces them, so the child would be toolless.
+		// Both halves come from the same resolvers that gate reads
+		// (proxyEndpoint, proxyRoutesKind) — never a second notion of
+		// "configured" — because a URL whose RAFIKI_PROXY_KINDS excludes claude
+		// produces exactly the same toolless child, only harder to diagnose.
+		url, _ := c.proxyEndpoint()
+		if url == "" || !proxyRoutesKind(req.Kind) {
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+				Code:    protocol.ErrInvalidArgs,
+				Message: "workspace_tools \"rafiki\" needs the MCP surface: this daemon serves no proxy for claude children (no proxy URL, or claude outside RAFIKI_PROXY_KINDS), so the built-in workspace tools would be disallowed and unreplaced",
+			}
+		}
+	}
+
 	// A fork resolves ONCE, here: the node the new child's conversation starts
 	// after is settled before anything is minted, named or written, so a
 	// refusal starts no process. The node rides the child's session from this
@@ -2753,9 +2803,12 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		SkipDerivedIndex:   req.SkipDerivedIndex,
 		NotifyPolicy:       notifyPolicy,
 		WorkspaceMode:      req.WorkspaceMode,
-		MaxDepth:           grantedDepth(req, childDepthFor(c.st, req.ParentChildID), resolveAbsoluteDepthCeiling()),
-		MaxCost:            grantedCost(req),
-		MaxChildren:        grantedChildren(req),
+		// Resolved above, from the request-or-preset value; stored here so
+		// resume and the MCP face read the decision rather than re-making it.
+		WorkspaceTools: workspaceTools,
+		MaxDepth:       grantedDepth(req, childDepthFor(c.st, req.ParentChildID), resolveAbsoluteDepthCeiling()),
+		MaxCost:        grantedCost(req),
+		MaxChildren:    grantedChildren(req),
 	}
 	c.st.Insert(sess)
 
@@ -3211,10 +3264,13 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		SkipDerivedIndex: snap.SkipDerivedIndex,
 		Notify:           snap.NotifyPolicy,
 		WorkspaceMode:    snap.WorkspaceMode,
-		RecordRequests:   snap.RecordRequests,
-		MaxDepth:         &snap.MaxDepth,
-		MaxCost:          &snap.MaxCost,
-		MaxChildren:      &snap.MaxChildren,
+		// The mode resolved at spawn, read back off the row: resume must never
+		// re-resolve it through a preset, which may have been edited since.
+		WorkspaceTools: snap.WorkspaceTools,
+		RecordRequests: snap.RecordRequests,
+		MaxDepth:       &snap.MaxDepth,
+		MaxCost:        &snap.MaxCost,
+		MaxChildren:    &snap.MaxChildren,
 	}
 	if snap.Kind == protocol.KindClaude {
 		req.ResumeSession = snap.SessionID

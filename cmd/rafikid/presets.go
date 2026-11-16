@@ -136,6 +136,16 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 		req.Thinking = rec.Thinking
 	}
 
+	// Workspace tools: the preset fills only a request that named nothing, the
+	// same request-wins rule as model and provider. The value is stored verbatim
+	// ("native" included); Spawn's NormalizeWorkspaceTools is the one place an
+	// absent choice and "native" collapse to the same "". Resolved once here,
+	// like every other preset field: resume rebuilds from the child's own row
+	// and never comes back through this function.
+	if req.WorkspaceTools == "" && rec.WorkspaceTools != nil {
+		req.WorkspaceTools = *rec.WorkspaceTools
+	}
+
 	// Executor: fill only a request that names nothing at all. A request
 	// selector or ref survives; confinement narrowing runs later, unchanged.
 	if req.ExecutorSelector == "" && req.ExecutorRef == "" {

@@ -209,8 +209,32 @@ func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName,
 	if err != nil {
 		return nil, fmt.Errorf("launch daraja on executor %s: %w", exec.ID, err)
 	}
+	// A rafiki-mode child's workspace tools are served by the MCP face, which
+	// needs THIS child's executor client to run them on. The binding is
+	// registered exactly as a fundi child's is, so exit release, loss handling
+	// and job notices apply unchanged: the same map, the same teardown. It is
+	// registered only AFTER a successful launch — a failed launch leaves no
+	// process and no row, so nothing would ever release it.
+	c.bindClaudeWorkspaceTools(req, childID, exec, executorOwner{Name: ownerName, UserID: ownerUserID})
 	c.stashDarajaBinding(childID, exec.ID, result.Pgid)
 	return darajapool.NewRunner(c.darajaPool, childID), nil
+}
+
+// bindClaudeWorkspaceTools gives a rafiki-mode claude child the boundExecutor
+// its MCP workspace tools run on, homed on the executor its daraja was launched
+// on (workspace tools must land on the machine the child itself runs on). A
+// native child gets none: its built-in tools already run there.
+//
+// Split out of claudeRunner because darajapool.Launch is not injectable, so the
+// registration is what a unit test can drive directly; see
+// TestWorkspaceToolsClaudeChildGetsBoundExecutorHomedOnLaunchHost.
+func (c *Controller) bindClaudeWorkspaceTools(req protocol.SpawnRequest, childID string, exec executors.Executor, owner executorOwner) {
+	if req.WorkspaceTools != protocol.WorkspaceToolsRafiki {
+		return
+	}
+	be := newBoundExecutor(childID, c.binderFor(req, owner))
+	be.setHome(exec.ID)
+	c.noteBoundExecutor(childID, be)
 }
 
 // darajaClaudeParams builds the ClaudeParams a daraja-hosted claude child
