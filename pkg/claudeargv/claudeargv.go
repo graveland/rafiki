@@ -107,6 +107,32 @@ const ReplayUserMessages = "--replay-user-messages"
 // scheduler, so a skill that says "CronCreate" maps onto the only one on offer.
 var NativeSchedulerTools = []string{"CronCreate", "CronDelete", "CronList", "ScheduleWakeup"}
 
+// RafikiWorkspaceDisallowed are Claude Code's local-effect built-ins (claude-cli
+// 2.1.321). A rafiki workspace-tools child must have none of them: each would
+// act on the launch host without naming an executor.
+//
+// The replacements are rafiki's Claude-shaped MCP tools (mcp__rafiki__Read,
+// Write, Edit, Bash and friends), which take the same arguments plus an
+// executor. Leaving a built-in callable does not merely offer a worse path — it
+// reads the wrong machine with no way for the model to say which one it meant,
+// which is invisible in the result.
+var RafikiWorkspaceDisallowed = []string{"Bash", "Read", "Write", "Edit", "NotebookEdit", "LSP", "EnterWorktree", "ExitWorktree"}
+
+// RafikiWorkspacePrompt is what a rafiki workspace-tools child is told about
+// the tools it has instead of the built-ins.
+//
+// It exists because the swap is otherwise silent: Claude Code's own system
+// prompt describes Bash/Read/Write/Edit at length, and the MCP tools that
+// replace them are named mcp__rafiki__Read and so on. A child that is not told
+// tries the built-ins first, gets a "not available" refusal, and spends turns
+// rediscovering the mapping — or, worse, when an executor is the only way to
+// reach the work, concludes it cannot reach it at all.
+const RafikiWorkspacePrompt = "Your built-in file and shell tools are replaced by rafiki's: " +
+	"mcp__rafiki__Read, Write, Edit and Bash take the same arguments as the built-ins plus " +
+	"executor, and mcp__rafiki__glob, grep, ls, bash_output, bash_kill and lsp_* are available too. " +
+	"When you can reach more than one executor, every call must name one with executor; an error " +
+	"lists them. Other MCP servers you have act on the machine you were launched on."
+
 // WithCoordinationPrompt prepends CoordinationPrompt to s when the child
 // carries the MCP agent-control surface (mcpAgentControl), else returns s
 // unchanged. Both argv producers — ParamsFromSpawnRequest here and
@@ -114,18 +140,27 @@ var NativeSchedulerTools = []string{"CronCreate", "CronDelete", "CronList", "Sch
 // launch paths stay byte-identical (test/integration's
 // TestClaudeArgvIdenticalAcrossPaths drives exactly that).
 //
+// workspaceTools == protocol.WorkspaceToolsRafiki appends RafikiWorkspacePrompt
+// after CoordinationPrompt, and only under the same gate: the paragraph names
+// the MCP tools that replaced the built-ins, so a child without the MCP
+// surface must not be told they exist.
+//
 // The prompt and the caller's own appendix ride ONE --append-system-prompt
 // element: the flag is last-wins, so two elements would silently drop one of
 // the two texts. Prepended, not appended, so the daemon's standing policy
 // reads before whatever the caller asked for.
-func WithCoordinationPrompt(mcpAgentControl bool, s string) string {
+func WithCoordinationPrompt(mcpAgentControl bool, workspaceTools string, s string) string {
 	if !mcpAgentControl {
 		return s
 	}
-	if s == "" {
-		return CoordinationPrompt
+	prompt := CoordinationPrompt
+	if workspaceTools == protocol.WorkspaceToolsRafiki {
+		prompt += "\n\n" + RafikiWorkspacePrompt
 	}
-	return CoordinationPrompt + "\n\n" + s
+	if s == "" {
+		return prompt
+	}
+	return prompt + "\n\n" + s
 }
 
 // Mode selects the argv shape.
@@ -181,6 +216,12 @@ type Params struct {
 	// UserArgs is argv passed through from a human's command line. Interactive
 	// only; appended last.
 	UserArgs []string
+
+	// WorkspaceTools is the spawn's workspace-tools mode
+	// (protocol.WorkspaceToolsRafiki, or empty/native). For rafiki, Build adds
+	// RafikiWorkspaceDisallowed to the one --disallowedTools element, so the
+	// child has no built-in that acts on the launch host.
+	WorkspaceTools string
 }
 
 // Build returns argv EXCLUDING the binary itself, matching
@@ -246,6 +287,13 @@ func Build(p Params) []string {
 		if p.MCPConfig != "" || p.MCPConfigFile != "" {
 			disallowed = append(disallowed, NativeSchedulerTools...)
 		}
+		// See RafikiWorkspaceDisallowed: the replacements live on an executor, so
+		// the local-effect built-ins must not be on offer. One flag carries all of
+		// them — a second --disallowedTools would be last-wins and drop
+		// AskUserQuestion along with the schedulers.
+		if p.WorkspaceTools == protocol.WorkspaceToolsRafiki {
+			disallowed = append(disallowed, RafikiWorkspaceDisallowed...)
+		}
 		argv = append(argv, "--disallowedTools", strings.Join(disallowed, ","))
 	}
 	argv = append(argv, p.ExtraArgs...)
@@ -277,10 +325,11 @@ func ParamsFromSpawnRequest(req protocol.SpawnRequest, vals proxyenv.Values) Par
 		Model:              req.Model,
 		ResumeSession:      req.ResumeSession,
 		PermissionMode:     PermissionModeBypass,
-		AppendSystemPrompt: WithCoordinationPrompt(vals.MCPConfig != "", req.AppendSystemPrompt),
+		AppendSystemPrompt: WithCoordinationPrompt(vals.MCPConfig != "", req.WorkspaceTools, req.AppendSystemPrompt),
 		ExtraArgs:          req.ExtraArgs,
 		MCPConfig:          vals.MCPConfig,
 		ModelArgs:          vals.ModelArgs,
+		WorkspaceTools:     req.WorkspaceTools,
 	}
 }
 

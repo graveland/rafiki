@@ -107,6 +107,10 @@ func SpecFromProto(p *darajapb.ChildSpec) ChildSpec {
 			PermissionMode:     c.GetPermissionMode(),
 			AppendSystemPrompt: c.GetAppendSystemPrompt(),
 			ExtraArgs:          c.GetExtraArgs(),
+			// WorkspaceTools is argv (the disallow list and the coordination
+			// paragraph), so a Restart must re-read it — unlike the launch-only
+			// proxy block, which daraja never touches here.
+			WorkspaceTools: c.GetWorkspaceTools(),
 		}
 	case darajapb.Kind_KIND_SCRIPT:
 		return ChildSpec{Kind: KindScript}

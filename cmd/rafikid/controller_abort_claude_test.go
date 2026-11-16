@@ -191,24 +191,29 @@ func TestHandleClaudeAbort_DarajaChildTakesTheRestartBranch(t *testing.T) {
 	c.Eq("daraja pool not wired", err.Error(), "err")
 }
 
-// TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields pins the two
+// TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields pins the
 // argv-shaped restart fields the abort spec must round-trip from the snapshot:
 // daraja rebuilds the child's argv from this spec on every Restart, so
-// dropping AppendSystemPrompt or ExtraArgs here silently restarts the child
-// without the system-prompt appendix and operator flags it was launched with.
-// (The launch-only block — proxy URL/token, passthrough, auto-compact,
-// record-requests — stays deliberately omitted: Restart never rebuilds the
-// environment, only argv.)
+// dropping AppendSystemPrompt, ExtraArgs or WorkspaceTools here silently
+// restarts the child without the system-prompt appendix, the operator flags or
+// the workspace-tools mode it was launched with — and a rafiki-mode child
+// restarted native gets its built-in file and shell tools back while its MCP
+// replacements stay served, which nothing reports. (The launch-only block —
+// proxy URL/token, passthrough, auto-compact, record-requests — stays
+// deliberately omitted: Restart never rebuilds the environment, only argv;
+// ENABLE_TOOL_SEARCH=false is an environment decision for the same reason.)
 func TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields(t *testing.T) {
 	c := assert.NewCollecting(t)
 	snap := childstore.Snapshot{
 		Model:              "claude-sonnet-5",
 		AppendSystemPrompt: "be terse",
 		ExtraArgs:          []string{"--foo", "bar"},
+		WorkspaceTools:     protocol.WorkspaceToolsRafiki,
 	}
 	spec := buildDarajaAbortSpec(snap, "sess-live-sniffed")
 
 	c.Require().NotNil(spec.Claude, "Claude params must not be nil")
 	c.Eq("be terse", spec.Claude.AppendSystemPrompt, "AppendSystemPrompt")
 	c.EqDiff([]string{"--foo", "bar"}, spec.Claude.ExtraArgs, "ExtraArgs")
+	c.Eq(protocol.WorkspaceToolsRafiki, spec.Claude.WorkspaceTools, "WorkspaceTools")
 }

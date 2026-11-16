@@ -170,6 +170,17 @@ type ClaudeOptions struct {
 	// Headers are sent via ANTHROPIC_CUSTOM_HEADERS. Order is normalised so a
 	// respawn with the same inputs produces the same environment.
 	Headers map[string]string
+	// EagerTools forces Claude Code's tool search OFF by setting
+	// ENABLE_TOOL_SEARCH=false, REPLACING any inherited value.
+	//
+	// It is the rafiki workspace-tools child's opt-in. Such a child's built-in
+	// file and shell tools are disallowed and replaced by MCP tools, and tool
+	// search omits most of tools[] on the assumption the model resolves them on
+	// demand — which costs the child the very tools it must now call. Replacing
+	// rather than deferring to the environment is deliberate: an ambient
+	// ENABLE_TOOL_SEARCH would otherwise silently undo the one guarantee this
+	// option buys.
+	EagerTools bool
 }
 
 // mcpServerConfig is one entry of a Claude Code --mcp-config document's
@@ -251,6 +262,12 @@ func ClaudeEnv(environ []string, o ClaudeOptions) ([]string, Values) {
 		if slices.Contains(Managed, k) || slices.Contains(Credentials, k) {
 			continue
 		}
+		// An overridden tool-search setting is dropped with the managed names,
+		// not shadowed: the child's environ must carry ENABLE_TOOL_SEARCH
+		// exactly once (see ClaudeOptions.EagerTools).
+		if o.EagerTools && k == toolSearchEnv {
+			continue
+		}
 		present[k] = true
 		env = append(env, e)
 	}
@@ -285,7 +302,15 @@ func ClaudeEnv(environ []string, o ClaudeOptions) ([]string, Values) {
 		}
 	}
 
-	if !present[toolSearchEnv] && !AnthropicModel(o.Model) {
+	switch {
+	case o.EagerTools:
+		// Unconditional: the opt-in's guarantee — a rafiki workspace-tools child
+		// gets its tools eagerly — must not be undone by an ambient variable, nor
+		// is an Anthropic model an exception (it can call omitted tools, but the
+		// child has just had its built-ins removed and needs the replacements in
+		// front of it).
+		env = append(env, toolSearchEnv+"=false")
+	case !present[toolSearchEnv] && !AnthropicModel(o.Model):
 		env = append(env, toolSearchEnv+"=false")
 	}
 

@@ -4807,8 +4807,12 @@ func buildDarajaAbortSpec(snap childstore.Snapshot, sessionID string) *darajapb.
 			// on ClaudeParams) — daraja's environment is fixed at ITS OWN
 			// process startup and a Restart never rebuilds it, only argv. The
 			// Restart RPC's spec is used purely for argv.)
+			// WorkspaceTools joins them: the disallow list and the workspace
+			// paragraph are argv too, and an abort restart that dropped the mode
+			// would hand back the built-ins the child's MCP replacements replace.
 			AppendSystemPrompt: snap.AppendSystemPrompt,
 			ExtraArgs:          snap.ExtraArgs,
+			WorkspaceTools:     snap.WorkspaceTools,
 		},
 	}
 }

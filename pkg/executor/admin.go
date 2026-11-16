@@ -360,6 +360,13 @@ func (a *AdminServer) Launch(
 		if c.GetRecordRequests() {
 			argv = append(argv, "--record-requests")
 		}
+		// The workspace-tools mode shapes the grandchild's argv (the disallow list
+		// and the coordination paragraph), so it must cross this hop: daraja serve
+		// rebuilds that argv on every Restart. Not a secret, so argv is fine —
+		// unlike the proxy and MCP credentials below.
+		if w := c.GetWorkspaceTools(); w != "" {
+			argv = append(argv, "--workspace-tools", w)
+		}
 		if c.GetAppendSystemPrompt() != "" {
 			// The appendix must never ride THIS host process's argv, which ps on
 			// the executor machine exposes world-readable: stage it to a

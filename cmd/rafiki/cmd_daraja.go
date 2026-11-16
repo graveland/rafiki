@@ -24,6 +24,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
@@ -77,6 +78,7 @@ func newDarajaServeCmd() *cobra.Command {
 	cmd.Flags().Bool("passthrough", false, "omit ANTHROPIC_AUTH_TOKEN so the child's own Claude subscription bills instead of rafiki's proxy token")
 	cmd.Flags().Int("auto-compact-window", 0, "override Claude Code's assumed context window for a proxied model (0: leave its default)")
 	cmd.Flags().Bool("record-requests", false, "ask the proxy to record this conversation's raw HTTP traffic")
+	cmd.Flags().String("workspace-tools", "", "workspace tools mode: rafiki replaces Claude Code's built-in file and shell tools with rafiki's MCP ones (empty or native: leave them alone)")
 	cmd.Flags().String("pin-cert", "", "SHA-256 fingerprint of the daemon's leaf certificate (TLS target only)")
 	cmd.Flags().String("server-name", "", "TLS server name (SNI) when it differs from --connect's host")
 	return cmd
@@ -124,6 +126,10 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 	passthrough, _ := cmd.Flags().GetBool("passthrough")
 	autoCompact, _ := cmd.Flags().GetInt("auto-compact-window")
 	recordRequests, _ := cmd.Flags().GetBool("record-requests")
+	workspaceTools, eagerTools, err := resolveWorkspaceTools(mustGetString(cmd, "workspace-tools"))
+	if err != nil {
+		return err
+	}
 
 	// The proxy token travels by environment, never argv, for the same
 	// reason RAFIKI_DARAJA_TICKET does: ps is world-readable on this machine.
@@ -157,6 +163,12 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 		Model:             model,
 		AutoCompactWindow: autoCompact,
 		Headers:           headers,
+		// The eager-tools switch belongs HERE, not to argv: daraja's environment
+		// is built once, for the process's whole lifetime, while argv is rebuilt
+		// on every Restart. A rafiki workspace-tools child must never be offered
+		// deferred tool search — its built-ins are disallowed and the MCP
+		// replacements must arrive eagerly (proxyenv.ClaudeOptions.EagerTools).
+		EagerTools: eagerTools,
 	})
 	// values.MCPConfig and values.ModelArgs are already empty when proxyURL
 	// == "" (proxyenv.ClaudeEnv's own early return), so ChildSpec.argv()'s
@@ -178,6 +190,7 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 			ResumeSession:      resume,
 			PermissionMode:     permMode,
 			AppendSystemPrompt: appendPrompt,
+			WorkspaceTools:     workspaceTools,
 			// Positional args (everything after the "--" the executor puts
 			// before the spec's ExtraArgs) are the operator escape hatch and
 			// are handed to the child verbatim, appended last by
@@ -441,6 +454,26 @@ func resolveDarajaConnectFlags(connect, connectSocket string) (string, string, e
 func mustGetString(cmd *cobra.Command, name string) string {
 	s, _ := cmd.Flags().GetString(name)
 	return s
+}
+
+// resolveWorkspaceTools maps daraja serve's --workspace-tools flag onto the two
+// places the mode shapes, which fail differently if either is dropped:
+//
+//   - mode is the child spec's workspace-tools value — ARGV, rebuilt from the
+//     spec on every Restart (the disallow list and the workspace paragraph);
+//   - eagerTools is the daraja process's own ENABLE_TOOL_SEARCH=false, fixed in
+//     its environment for the process's whole life.
+//
+// The value is normalised through protocol.NormalizeWorkspaceTools so "native"
+// and empty mean the same thing downstream, and anything else is refused here
+// rather than handed to claudeargv, which would silently ignore it.
+func resolveWorkspaceTools(raw string) (mode string, eagerTools bool, err error) {
+	mode, ok := protocol.NormalizeWorkspaceTools(raw)
+	if !ok {
+		return "", false, fmt.Errorf("--workspace-tools %q: want %q, %q or empty",
+			raw, protocol.WorkspaceToolsRafiki, protocol.WorkspaceToolsNative)
+	}
+	return mode, mode == protocol.WorkspaceToolsRafiki, nil
 }
 
 // resolveAppendPrompt returns the system-prompt appendix from whichever of

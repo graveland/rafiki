@@ -79,6 +79,16 @@ type ChildSpec struct {
 
 	AppendSystemPrompt string
 	ExtraArgs          []string
+
+	// WorkspaceTools is the spawn's workspace-tools mode. "rafiki" disallows
+	// Claude Code's local-effect built-ins (claudeargv.RafikiWorkspaceDisallowed)
+	// and joins the workspace paragraph to the coordination prompt; empty or
+	// "native" leaves both alone.
+	//
+	// It is argv-shaped, so every Restart must carry it: a Restart that left it
+	// off silently restores the built-ins on a child whose replacements are the
+	// only way to reach its work.
+	WorkspaceTools string
 }
 
 // IsZero reports whether spec carries nothing, which Restart reads as "reuse
@@ -86,7 +96,8 @@ type ChildSpec struct {
 // because ChildSpec carries a slice and is no longer comparable.
 func (s ChildSpec) IsZero() bool {
 	return s.Kind == "" && s.Model == "" && s.ResumeSession == "" &&
-		s.PermissionMode == "" && s.AppendSystemPrompt == "" && len(s.ExtraArgs) == 0
+		s.PermissionMode == "" && s.AppendSystemPrompt == "" && len(s.ExtraArgs) == 0 &&
+		s.WorkspaceTools == ""
 }
 
 // KindClaude and KindScript are the child protocols daraja hosts. The relay is
@@ -138,6 +149,7 @@ func (s ChildSpec) params(mcpConfig string, modelArgs []string) claudeargv.Param
 		ExtraArgs:          s.ExtraArgs,
 		MCPConfig:          mcpConfig,
 		ModelArgs:          modelArgs,
+		WorkspaceTools:     s.WorkspaceTools,
 	}
 }
 

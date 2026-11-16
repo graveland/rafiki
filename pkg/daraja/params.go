@@ -34,6 +34,9 @@ import (
 // and ChildSpec.Argv. RecordRequests is carried because the wire type does —
 // it is launch-only (it shapes the executor's daraja-serve argv and the proxy
 // correlation header) and must never reach the claude child's own argv.
+// WorkspaceTools IS argv: it disallows the built-ins and joins the coordination
+// prompt, so it is re-read on every Restart and must never be left off this
+// mapping.
 func ClaudeParamsForRequest(req protocol.SpawnRequest, mcpAgentControl bool) *darajapb.ClaudeParams {
 	return &darajapb.ClaudeParams{
 		Model:         req.Model,
@@ -49,8 +52,11 @@ func ClaudeParamsForRequest(req protocol.SpawnRequest, mcpAgentControl bool) *da
 		// prompt merges into the caller's text here, at mapping time; the
 		// snapshot keeps the caller's original, so a respawn that re-runs
 		// this mapping does not double-append.
-		AppendSystemPrompt: claudeargv.WithCoordinationPrompt(mcpAgentControl, req.AppendSystemPrompt),
+		AppendSystemPrompt: claudeargv.WithCoordinationPrompt(mcpAgentControl, req.WorkspaceTools, req.AppendSystemPrompt),
 		ExtraArgs:          req.ExtraArgs,
 		RecordRequests:     req.RecordRequests,
+		// The disallow list is argv, so it must be re-read by every Restart like
+		// AppendSystemPrompt above, not fixed at launch like the proxy block.
+		WorkspaceTools: req.WorkspaceTools,
 	}
 }

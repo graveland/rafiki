@@ -330,3 +330,40 @@ func TestRestartModel(t *testing.T) {
 		assert.NewCollecting(t).Eq(want, got, "RestartModel(%q)", in)
 	}
 }
+
+// The eager-tools opt-in is a GUARANTEE, not a default: a rafiki
+// workspace-tools child has its built-in file and shell tools disallowed and
+// must see every replacement in tools[] on its first turn. So the option
+// replaces whatever the environment says — including "true", including an
+// Anthropic model — rather than deferring to it as every other Default does. A
+// duplicate would be worse than either outcome: which copy wins belongs to the
+// exec layer, not to this package.
+func TestEagerToolsOverridesInheritedToolSearch(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, model := range []string{"", "claude-opus-5", "moonshotai/kimi-k3"} {
+		for _, inherited := range [][]string{
+			{"ENABLE_TOOL_SEARCH=true", "HOME=/h"},
+			{"ENABLE_TOOL_SEARCH=auto:50", "HOME=/h"},
+		} {
+			env, _ := ClaudeEnv(inherited, ClaudeOptions{URL: "http://x", Model: model, EagerTools: true})
+			got, dupes := envMap(t, env)
+			c.Eq("false", got["ENABLE_TOOL_SEARCH"], "model %q, environ %v: ENABLE_TOOL_SEARCH", model, inherited)
+			c.NotContains(dupes, "ENABLE_TOOL_SEARCH", "model %q, environ %v: duplicated ENABLE_TOOL_SEARCH", model, inherited)
+			n := 0
+			for _, e := range env {
+				if strings.HasPrefix(e, "ENABLE_TOOL_SEARCH=") {
+					n++
+				}
+			}
+			c.Eq(1, n, "model %q, environ %v: want exactly one ENABLE_TOOL_SEARCH entry in %v, got", model, inherited, env)
+			c.Contains(env, "HOME=/h", "model %q: unrelated inherited variable was dropped", model)
+			c.Contains(env, toolSearchEnv+"=false", "model %q: env", model)
+		}
+	}
+
+	// Unset option: today's rule is untouched, including the inherited value
+	// winning (TestClaudeEnv_ToolSearchInheritedValueWins pins that half).
+	env, _ := ClaudeEnv([]string{"ENABLE_TOOL_SEARCH=true"}, ClaudeOptions{URL: "http://x", Model: "moonshotai/kimi-k3"})
+	got, _ := envMap(t, env)
+	c.Eq("true", got["ENABLE_TOOL_SEARCH"], "EagerTools=false: inherited value")
+}

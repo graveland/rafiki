@@ -1319,6 +1319,21 @@ executor forwards the four non-secret ones as `daraja serve` flags
 (`RAFIKI_DARAJA_PROXY_TOKEN`) — the same ps-visibility treatment the ticket
 gets, and for the same reason.
 
+`workspace_tools` (`"rafiki"`, or empty/`"native"`) is the opposite: it is
+ARGV-shaped, so the executor forwards it as `--workspace-tools` and daraja
+re-reads it from every `Restart`'s spec. It disallows Claude Code's local-effect
+built-ins — `Bash`, `Read`, `Write`, `Edit`, `NotebookEdit`, `LSP`,
+`EnterWorktree`, `ExitWorktree` — inside the same single `--disallowedTools`
+element that already carries `AskUserQuestion`, and joins the workspace
+paragraph to the coordination prompt (`claudeargv.RafikiWorkspaceDisallowed`,
+`claudeargv.RafikiWorkspacePrompt`). A restart that dropped it would hand the
+built-ins back to a child whose MCP replacements are still served, with nothing
+reporting the swap. Its one ENVIRONMENT half is
+`ENABLE_TOOL_SEARCH=false`, forced by `proxyenv.ClaudeOptions.EagerTools` at
+daraja's own startup and REPLACING any inherited value: a rafiki-mode child must
+never be offered deferred tool search, or the tools it must now call are the
+ones omitted from `tools[]`.
+
 `Setpgid` makes daraja a group leader and claude joins the group (daraja spawns
 its child with `SpawnSpec.InheritProcessGroup`, opting out of the runner's
 default own-group). `pgid` is therefore the one handle that reaches the whole

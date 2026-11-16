@@ -420,3 +420,104 @@ func TestCoordinationPromptStatesTheWaitingRule(t *testing.T) {
 	c.NotStrContains(coordinationWaiting, "never wait for one",
 		"the waiting paragraph must not repeat the log-channel warning as if it were the rule")
 }
+
+// A rafiki workspace-tools child has rafiki's Claude-shaped MCP tools INSTEAD of
+// Claude Code's local-effect built-ins. Those built-ins would act on the launch
+// host without naming an executor, and the model cannot say afterwards which
+// machine its Read touched — so the whole list goes, in the ONE
+// --disallowedTools element that already carries AskUserQuestion and (with the
+// MCP surface) the scheduler tools. A second element would be last-wins and
+// drop everything in the first.
+func TestBuildRafikiWorkspaceDisallowsExactlyTheList(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	countDisallowed := func(argv []string) (values []string) {
+		for i, a := range argv {
+			if a != "--disallowedTools" {
+				continue
+			}
+			c.Require().Greater(i+1, len(argv), "argv %v: --disallowedTools has no value", argv)
+			values = append(values, argv[i+1])
+		}
+		return values
+	}
+
+	// Proxied rafiki child: AskUserQuestion, the scheduler tools and the eight.
+	rafiki := Build(Params{MCPConfig: "{}", WorkspaceTools: protocol.WorkspaceToolsRafiki})
+	values := countDisallowed(rafiki)
+	c.Require().Eq(1, len(values), "argv %v: want exactly one --disallowedTools element, got", rafiki)
+	names := strings.Split(values[0], ",")
+	for _, want := range append([]string{"AskUserQuestion"}, append(slices.Clone(NativeSchedulerTools), RafikiWorkspaceDisallowed...)...) {
+		c.Contains(names, want, "--disallowedTools value %q", values[0])
+	}
+
+	// Unproxied rafiki child: no MCP surface, so no scheduler swap, but the
+	// local-effect built-ins are still replaced (the mode is what decides that,
+	// not the MCP config).
+	unproxied := Build(Params{WorkspaceTools: protocol.WorkspaceToolsRafiki})
+	values = countDisallowed(unproxied)
+	c.Require().Eq(1, len(values), "argv %v: want exactly one --disallowedTools element, got", unproxied)
+	names = strings.Split(values[0], ",")
+	for _, want := range append([]string{"AskUserQuestion"}, RafikiWorkspaceDisallowed...) {
+		c.Contains(names, want, "unproxied --disallowedTools value %q", values[0])
+	}
+	c.NotContains(names, "CronCreate", "unproxied --disallowedTools value %q", values[0])
+
+	// A native child keeps every built-in.
+	for _, ws := range []string{"", protocol.WorkspaceToolsNative} {
+		native := Build(Params{MCPConfig: "{}", WorkspaceTools: ws})
+		values = countDisallowed(native)
+		c.Require().Eq(1, len(values), "workspace tools %q: want exactly one --disallowedTools element, got", ws)
+		names = strings.Split(values[0], ",")
+		for _, unwanted := range RafikiWorkspaceDisallowed {
+			c.NotContains(names, unwanted, "native --disallowedTools value %q", values[0])
+		}
+		c.Contains(names, "AskUserQuestion", "native --disallowedTools value %q", values[0])
+	}
+
+	// Interactive sessions emit no --disallowedTools at all: a human answers for
+	// the built-ins, and MCP replacements are not on offer there either.
+	c.Eq(0, len(countDisallowed(Build(Params{Mode: ModeInteractive, WorkspaceTools: protocol.WorkspaceToolsRafiki}))),
+		"interactive argv carries --disallowedTools")
+}
+
+// The workspace paragraph is the child's only statement of the swap: Claude
+// Code's own prompt describes the built-ins at length, and the replacements are
+// named mcp__rafiki__*. It rides the same MCP gate as the rest of the
+// coordination prompt (it names tools that gate exists to provide), and it is
+// appended AFTER the existing prompt so the two texts stay distinguishable.
+func TestCoordinationPromptRafikiWorkspaceParagraph(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	got := WithCoordinationPrompt(true, protocol.WorkspaceToolsRafiki, "be terse")
+	want := CoordinationPrompt + "\n\n" + RafikiWorkspacePrompt + "\n\nbe terse"
+	c.Eq(want, got, "rafiki + mcpAgentControl: merged prompt")
+	c.True(strings.Index(got, CoordinationPrompt) < strings.Index(got, RafikiWorkspacePrompt),
+		"the workspace paragraph must follow the coordination prompt, got %q", got)
+
+	for _, native := range []string{"", protocol.WorkspaceToolsNative} {
+		np := WithCoordinationPrompt(true, native, "be terse")
+		c.StrContains(np, CoordinationPrompt, "native %q: merged prompt", native)
+		c.StrContains(np, "be terse", "native %q: merged prompt", native)
+		c.NotStrContains(np, RafikiWorkspacePrompt, "native %q: merged prompt", native)
+	}
+	c.Eq("be terse", WithCoordinationPrompt(false, protocol.WorkspaceToolsRafiki, "be terse"), "rafiki without the MCP surface")
+
+	// The paragraph's own facts: the replacement tool names, the executor
+	// argument and the ambiguity rule a multi-executor child must know.
+	for _, want := range []string{
+		"mcp__rafiki__Read", "mcp__rafiki__glob, grep, ls, bash_output, bash_kill and lsp_*",
+		"same arguments as the built-ins", "executor", "lists them",
+		"act on the machine you were launched on",
+	} {
+		c.StrContains(RafikiWorkspacePrompt, want, "RafikiWorkspacePrompt")
+	}
+
+	// ParamsFromSpawnRequest is the local-subprocess mapping: it must carry the
+	// mode onto Params and into the merged prompt.
+	_, vals := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
+	req := protocol.SpawnRequest{WorkspaceTools: protocol.WorkspaceToolsRafiki, AppendSystemPrompt: "be terse"}
+	p := ParamsFromSpawnRequest(req, vals)
+	c.Eq(protocol.WorkspaceToolsRafiki, p.WorkspaceTools, "ParamsFromSpawnRequest: WorkspaceTools")
+	c.StrContains(p.AppendSystemPrompt, RafikiWorkspacePrompt, "ParamsFromSpawnRequest: AppendSystemPrompt")
+}

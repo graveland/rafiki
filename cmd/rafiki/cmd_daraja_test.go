@@ -105,3 +105,32 @@ func TestDarajaServeDropsTheSeparatorAndKeepsThePositionals(t *testing.T) {
 	got := cmd.Flags().Args()
 	c.EqDiff([]string{"--foo", "bar"}, got, "Flags().Args()")
 }
+
+// resolveWorkspaceTools is the one place --workspace-tools becomes the two
+// things it shapes, and each fails silently if dropped: the spec's mode is ARGV
+// (rebuilt on every Restart, carrying the disallow list and the workspace
+// paragraph), while eagerTools is the daraja process's fixed
+// ENABLE_TOOL_SEARCH=false. A value claudeargv does not know must be refused
+// here — Build would ignore it and launch a native child.
+func TestResolveWorkspaceTools(t *testing.T) {
+	c := assert.NewCollecting(t)
+	tests := []struct {
+		raw   string
+		mode  string
+		eager bool
+	}{
+		{"", "", false},
+		{"native", "", false},
+		{"rafiki", "rafiki", true},
+	}
+	for _, tt := range tests {
+		mode, eager, err := resolveWorkspaceTools(tt.raw)
+		c.Require().NoError(err, "resolveWorkspaceTools(%q)", tt.raw)
+		c.Eq(tt.mode, mode, "resolveWorkspaceTools(%q): mode", tt.raw)
+		c.Eq(tt.eager, eager, "resolveWorkspaceTools(%q): eagerTools", tt.raw)
+	}
+
+	_, _, err := resolveWorkspaceTools("claude-native")
+	c.Require().Error(err, "resolveWorkspaceTools(unknown)")
+	c.StrContains(err.Error(), "claude-native", "the refusal must name the value it rejected")
+}

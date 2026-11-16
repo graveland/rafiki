@@ -56,7 +56,7 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 	// Every argv-shaping field set to a distinct non-zero value. A non-empty
 	// Model is what forces the ModelArgs pair (the gate is o.Model != "", not
 	// model shape); the slash id exercises the custom-model-option spelling.
-	req := protocol.SpawnRequest{
+	baseReq := protocol.SpawnRequest{
 		Kind:               "claude",
 		Model:              "anthropic/sonnet-latest",
 		ResumeSession:      "sess-abc",
@@ -77,7 +77,7 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 				_, v := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{
 					URL:   "https://proxy.example.test:8443",
 					Token: "proxy-bearer",
-					Model: req.Model,
+					Model: baseReq.Model,
 				})
 				assert.NewAborting(t).False(v.MCPConfig == "" || len(v.ModelArgs) == 0, "proxied values = %+v, want MCPConfig and ModelArgs set", v)
 				return v
@@ -89,81 +89,121 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 		},
 	}
 
+	// Both workspace-tools modes, driven through BOTH pipelines. The mode is
+	// argv on the executor host too (the disallow list and the workspace
+	// paragraph are rebuilt from ClaudeParams on every Restart), so a mapping
+	// that carried it on one path only would launch a native child on the other
+	// — the exact drift this test exists to make impossible.
+	workspaceModes := []struct {
+		name  string
+		value string
+	}{
+		{name: "native", value: ""},
+		{name: "rafiki", value: protocol.WorkspaceToolsRafiki},
+	}
+
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c := assert.NewCollecting(t)
-			// One shared stage dir: promptfile names a file by the SHA-256 of its
-			// content, so both paths staging the SAME bytes land on the SAME path —
-			// a shared dir lets the elided comparison below prove byte equality as
-			// well as flag equality.
-			dir := t.TempDir()
+		for _, wm := range workspaceModes {
+			t.Run(tc.name+"/"+wm.name, func(t *testing.T) {
+				req := baseReq
+				req.WorkspaceTools = wm.value
+				c := assert.NewCollecting(t)
+				// One shared stage dir: promptfile names a file by the SHA-256 of its
+				// content, so both paths staging the SAME bytes land on the SAME path —
+				// a shared dir lets the elided comparison below prove byte equality as
+				// well as flag equality.
+				dir := t.TempDir()
 
-			// Local-subprocess path: buildClaudeArgv's body, verbatim, plus the
-			// Stage the exec path runs immediately before Build.
-			stagedLocal, err := claudeargv.Stage(claudeargv.ParamsFromSpawnRequest(req, tc.vals), dir)
-			c.Require().NoError(err, "stage local launch files")
-			local := claudeargv.Build(stagedLocal)
+				// Local-subprocess path: buildClaudeArgv's body, verbatim, plus the
+				// Stage the exec path runs immediately before Build.
+				stagedLocal, err := claudeargv.Stage(claudeargv.ParamsFromSpawnRequest(req, tc.vals), dir)
+				c.Require().NoError(err, "stage local launch files")
+				local := claudeargv.Build(stagedLocal)
 
-			// Daraja path: the wire spec production composes, the host maps and
-			// rebuilds — the chain a Restart (and every launch through an executor
-			// pool) actually runs. StagedArgv is the daraja host's own
-			// stage-then-build, exactly what startLocked calls.
-			wire := &darajapb.ChildSpec{
-				Kind:   darajapb.Kind_KIND_CLAUDE,
-				Claude: daraja.ClaudeParamsForRequest(req, tc.vals.MCPConfig != ""),
-			}
-			darajaArgv, err := daraja.SpecFromProto(wire).StagedArgv(tc.vals.MCPConfig, tc.vals.ModelArgs, dir)
-			c.Require().NoError(err, "stage daraja launch files")
-			c.Require().NotEmpty(darajaArgv, "daraja path produced no argv; Kind must be %q for SpecFromProto to map the spec", req.Kind)
-
-			// Compare with the stage directory elided (the paths differ only in
-			// the random temp root): outside it the two argvs must be identical,
-			// and because file names are content hashes, equality here also
-			// proves both paths staged identical bytes.
-			c.Require().EqDiff(elideDir(dir, darajaArgv), elideDir(dir, local), "argv paths diverged:\n local")
-
-			// The two staged files must hold identical bytes on both paths.
-			localApp, localMCP := stagedPaths(t, local)
-			darajaApp, darajaMCP := stagedPaths(t, darajaArgv)
-			if tc.vals.MCPConfig != "" {
-				c.Eq(readStagedFile(t, localMCP), readStagedFile(t, darajaMCP), "staged MCP config differs across paths")
-			} else {
-				c.Eq("", localMCP, "unproxied local argv carries an --mcp-config element: %q", local)
-				c.Eq("", darajaMCP, "unproxied daraja argv carries an --mcp-config element: %q", darajaArgv)
-			}
-			c.Eq(readStagedFile(t, localApp), readStagedFile(t, darajaApp), "staged appendix differs across paths")
-
-			// The properties the identity exists to protect, asserted on the
-			// shared argv so a vacuous-equal pair cannot hide a lost flag.
-			for _, want := range []string{
-				"--resume",
-				"--append-system-prompt-file",
-				"--dangerously-skip-permissions",
-			} {
-				c.True(argvCarries(local, want), "argv %q missing %q", local, want)
-			}
-			c.NotContains(local, "--append-system-prompt", "argv %q still carries the inline append element", local)
-
-			// The coordination prompt rides a proxied child exactly once, inside
-			// the single staged appendix file, and never reaches an unproxied one
-			// (there it would name tools that do not exist). Both halves of the
-			// gate are the identity above; this is the property the gate protects.
-			appendix := readStagedFile(t, localApp)
-			c.StrContains(appendix, "be terse", "staged appendix")
-			if tc.vals.MCPConfig != "" {
-				c.StrContains(appendix, claudeargv.CoordinationPrompt, "proxied staged appendix carries no coordination prompt")
-			} else {
-				c.NotStrContains(appendix, claudeargv.CoordinationPrompt, "unproxied staged appendix carries the coordination prompt")
-			}
-
-			appendCount := 0
-			for _, a := range local {
-				if a == "--append-system-prompt-file" {
-					appendCount++
+				// Daraja path: the wire spec production composes, the host maps and
+				// rebuilds — the chain a Restart (and every launch through an executor
+				// pool) actually runs. StagedArgv is the daraja host's own
+				// stage-then-build, exactly what startLocked calls.
+				wire := &darajapb.ChildSpec{
+					Kind:   darajapb.Kind_KIND_CLAUDE,
+					Claude: daraja.ClaudeParamsForRequest(req, tc.vals.MCPConfig != ""),
 				}
-			}
-			c.Eq(1, appendCount, "argv %q: want exactly one --append-system-prompt-file element, got", local)
-		})
+				darajaArgv, err := daraja.SpecFromProto(wire).StagedArgv(tc.vals.MCPConfig, tc.vals.ModelArgs, dir)
+				c.Require().NoError(err, "stage daraja launch files")
+				c.Require().NotEmpty(darajaArgv, "daraja path produced no argv; Kind must be %q for SpecFromProto to map the spec", req.Kind)
+
+				// Compare with the stage directory elided (the paths differ only in
+				// the random temp root): outside it the two argvs must be identical,
+				// and because file names are content hashes, equality here also
+				// proves both paths staged identical bytes.
+				c.Require().EqDiff(elideDir(dir, darajaArgv), elideDir(dir, local), "argv paths diverged:\n local")
+
+				// The two staged files must hold identical bytes on both paths.
+				localApp, localMCP := stagedPaths(t, local)
+				darajaApp, darajaMCP := stagedPaths(t, darajaArgv)
+				if tc.vals.MCPConfig != "" {
+					c.Eq(readStagedFile(t, localMCP), readStagedFile(t, darajaMCP), "staged MCP config differs across paths")
+				} else {
+					c.Eq("", localMCP, "unproxied local argv carries an --mcp-config element: %q", local)
+					c.Eq("", darajaMCP, "unproxied daraja argv carries an --mcp-config element: %q", darajaArgv)
+				}
+				c.Eq(readStagedFile(t, localApp), readStagedFile(t, darajaApp), "staged appendix differs across paths")
+
+				// The properties the identity exists to protect, asserted on the
+				// shared argv so a vacuous-equal pair cannot hide a lost flag.
+				for _, want := range []string{
+					"--resume",
+					"--append-system-prompt-file",
+					"--dangerously-skip-permissions",
+				} {
+					c.True(argvCarries(local, want), "argv %q missing %q", local, want)
+				}
+				c.NotContains(local, "--append-system-prompt", "argv %q still carries the inline append element", local)
+
+				// The coordination prompt rides a proxied child exactly once, inside
+				// the single staged appendix file, and never reaches an unproxied one
+				// (there it would name tools that do not exist). Both halves of the
+				// gate are the identity above; this is the property the gate protects.
+				appendix := readStagedFile(t, localApp)
+				c.StrContains(appendix, "be terse", "staged appendix")
+				if tc.vals.MCPConfig != "" {
+					c.StrContains(appendix, claudeargv.CoordinationPrompt, "proxied staged appendix carries no coordination prompt")
+				} else {
+					c.NotStrContains(appendix, claudeargv.CoordinationPrompt, "unproxied staged appendix carries the coordination prompt")
+				}
+
+				// The workspace paragraph rides the same MCP gate: it names the MCP
+				// tools that replaced the built-ins, so only a proxied rafiki child
+				// may be told they exist. Both paths must agree on that too, which the
+				// identity above has already compared — this is the property.
+				if wm.value == protocol.WorkspaceToolsRafiki && tc.vals.MCPConfig != "" {
+					c.StrContains(appendix, claudeargv.RafikiWorkspacePrompt, "rafiki-mode staged appendix carries no workspace paragraph")
+				} else {
+					c.NotStrContains(appendix, claudeargv.RafikiWorkspacePrompt, "staged appendix carries the workspace paragraph for a child with no MCP surface")
+				}
+
+				// The disallow list is the same element on both paths (proved above);
+				// assert its CONTENT here so an equal-but-empty pair cannot pass.
+				names := strings.Split(argvValue(local, "--disallowedTools"), ",")
+				if wm.value == protocol.WorkspaceToolsRafiki {
+					for _, want := range append([]string{"AskUserQuestion"}, claudeargv.RafikiWorkspaceDisallowed...) {
+						c.Contains(names, want, "--disallowedTools values %q: rafiki mode must disallow", names)
+					}
+				} else {
+					for _, unwanted := range claudeargv.RafikiWorkspaceDisallowed {
+						c.NotContains(names, unwanted, "--disallowedTools values %q: a native child keeps its built-ins", names)
+					}
+				}
+
+				appendCount := 0
+				for _, a := range local {
+					if a == "--append-system-prompt-file" {
+						appendCount++
+					}
+				}
+				c.Eq(1, appendCount, "argv %q: want exactly one --append-system-prompt-file element, got", local)
+			})
+		}
 	}
 }
 

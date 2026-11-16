@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/darajapb"
+	"go.graveland.dev/rafiki/pkg/protocol"
+
 	"github.com/multigres/testkit/assert"
 )
 
@@ -285,6 +288,7 @@ func TestChildSpecIsZero(t *testing.T) {
 	c := assert.NewCollecting(t)
 	c.True((ChildSpec{}).IsZero(), "the zero ChildSpec should report IsZero()")
 	c.False((ChildSpec{ExtraArgs: []string{"--foo"}}).IsZero(), "a ChildSpec with only ExtraArgs set should not report IsZero()")
+	c.False((ChildSpec{WorkspaceTools: protocol.WorkspaceToolsRafiki}).IsZero(), "a ChildSpec with only WorkspaceTools set should not report IsZero()")
 }
 
 // stdin reaches the process.
@@ -566,4 +570,48 @@ func TestHostShutdownSignalsAChildThatIgnoresEOF(t *testing.T) {
 	c.NoError(err, "Shutdown")
 	c.False(sig == "" && code == 0, "Shutdown = (%d, %q), want a signalled death", code, sig)
 	c.False(time.Since(start) > 3*time.Second, "Shutdown took %s; the signal rung must follow the short EOF grace", time.Since(start))
+}
+
+// A rafiki workspace-tools child must be disallowed its built-ins on EVERY argv
+// build, not only the first: daraja rebuilds argv from the spec on each
+// Restart, so a mode that rode the launch alone would hand the built-ins back
+// the first time the child restarted — silently, since the replacements stay
+// served and nothing errors.
+func TestDarajaHostAppliesWorkspaceToolsOnRebuild(t *testing.T) {
+	c := assert.NewCollecting(t)
+	const wantList = "AskUserQuestion,Bash,Read,Write,Edit,NotebookEdit,LSP,EnterWorktree,ExitWorktree"
+
+	// The wire → host hop: a Restart RPC carries ClaudeParams, and SpecFromProto
+	// dropping the mode is enough to make every restart native.
+	spec := SpecFromProto(&darajapb.ChildSpec{
+		Kind:   darajapb.Kind_KIND_CLAUDE,
+		Claude: &darajapb.ClaudeParams{WorkspaceTools: protocol.WorkspaceToolsRafiki},
+	})
+	c.Eq(protocol.WorkspaceToolsRafiki, spec.WorkspaceTools, "SpecFromProto: WorkspaceTools")
+	assertPair(t, spec.Argv("", nil), "--disallowedTools", wantList)
+
+	// A native spec keeps every built-in and carries no workspace paragraph.
+	native := SpecFromProto(&darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE, Claude: &darajapb.ClaudeParams{}})
+	c.Eq("", native.WorkspaceTools, "SpecFromProto(native): WorkspaceTools")
+	assertPair(t, native.Argv("", nil), "--disallowedTools", "AskUserQuestion")
+
+	// And the live rebuild: Start launches with the list, Restart keeps it.
+	h := NewHost(HostOptions{
+		Binary: testEchoBinary(t),
+		Spec:   ChildSpec{Kind: KindClaude, WorkspaceTools: protocol.WorkspaceToolsRafiki},
+	})
+	c.Require().NoError(h.Start(), "Start")
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	first := collectStdout(t, h, "ExitWorktree", 5*time.Second)
+	c.StrContains(first, "--disallowedTools "+wantList, "launch argv")
+
+	_, err := h.Restart(ChildSpec{
+		Kind:           KindClaude,
+		Model:          "m2",
+		WorkspaceTools: protocol.WorkspaceToolsRafiki,
+	}, time.Second)
+	c.Require().NoError(err, "Restart")
+	second := collectStdout(t, h, "--disallowedTools "+wantList, 5*time.Second)
+	c.StrContains(second, "--model m2", "restart argv")
 }

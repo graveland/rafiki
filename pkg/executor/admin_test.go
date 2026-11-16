@@ -1290,3 +1290,45 @@ func TestLaunchCarriesTheChildIDForClaude(t *testing.T) {
 	c.Require().NoError(err, "Launch")
 	c.EqDeep([]string{"RAFIKI_CHILD_ID=c_fresh"}, countEnvLines(t, waitForStubEnvDump(t), "RAFIKI_CHILD_ID"), "one fresh entry")
 }
+
+// A rafiki workspace-tools mode must cross the Launch hop. daraja serve derives
+// BOTH halves from it — the grandchild's disallow list and workspace paragraph
+// (argv, rebuilt on every Restart) and its own ENABLE_TOOL_SEARCH=false (env,
+// fixed for life) — so a Launch that dropped the field would silently launch a
+// native child on a machine whose daemon believes its built-ins are gone.
+// Empty stays absent from argv, like every other unset launch field.
+func TestLaunchForwardsWorkspaceTools(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	cmdlineFor := func(childID, workspaceTools string) []string {
+		resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+			ChildId:  childID,
+			Cwd:      t.TempDir(),
+			DialAddr: "127.0.0.1:9999",
+			Spec: &darajapb.ChildSpec{
+				Kind:   darajapb.Kind_KIND_CLAUDE,
+				Claude: &darajapb.ClaudeParams{WorkspaceTools: workspaceTools},
+			},
+		}))
+		c.Require().NoError(err, "Launch(%q)", childID)
+		out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(int(resp.Msg.GetPid()))).CombinedOutput()
+		c.Require().NoError(err, "ps launch(%q): %v (output: %s)", childID, err, out)
+		return strings.Fields(string(out))
+	}
+
+	fields := cmdlineFor("c-ws-rafiki", "rafiki")
+	i := slices.Index(fields, "--workspace-tools")
+	c.Require().True(i >= 0, "--workspace-tools missing; cmdline:\n%v", fields)
+	c.Require().True(i+1 < len(fields), "--workspace-tools has no value; cmdline:\n%v", fields)
+	c.Eq("rafiki", fields[i+1], "--workspace-tools value")
+
+	fields = cmdlineFor("c-ws-native", "")
+	c.False(slices.Contains(fields, "--workspace-tools"), "an empty workspace-tools mode still rode argv:\n%v", fields)
+}
