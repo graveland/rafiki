@@ -352,6 +352,24 @@ type ToolOpts struct {
 	// tool argument can never name a different owner or act as an operator.
 	Sandboxes SandboxManager
 
+	// ExecutorInstaller, when non-nil, gives this agent executor_install and
+	// executor_uninstall — putting a rafiki executor on a machine reachable
+	// over ssh from one of the caller's own executors, and taking it away
+	// again. nil means the daemon has no install recipe table (a DB-less
+	// daemon), so both decline — the same nil-means-decline rule as Sandboxes.
+	// Like Sandboxes it is bound to ONE caller at construction and takes no
+	// caller identity in any method: the daemon closes over the caller's child
+	// id and owner, so a launcher named in an argument can only narrow which of
+	// the caller's machines runs the ssh.
+	ExecutorInstaller ExecutorInstaller
+
+	// CannotUseInstalledExecutor appends a sentence to executor_install's
+	// description for a caller that cannot run workspace tools on the executor
+	// it installs: only the agents it spawns can. Set for a claude-kind child,
+	// whose own tools belong to the host it runs on rather than to an executor
+	// it may choose.
+	CannotUseInstalledExecutor bool
+
 	// Parent, when non-nil, gives this caller agent_report and agent_result.
 	Parent ParentReporter
 

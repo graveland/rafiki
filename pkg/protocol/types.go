@@ -858,6 +858,43 @@ type ExecutorDeleteRequest struct {
 	ExecutorID string `json:"executorId"`
 }
 
+// ExecutorInstallRequest puts a rafiki executor on a machine reachable over ssh
+// from one of the caller's OWN executors.
+//
+// The target is an ssh DESTINATION, never an argv: the ssh that runs it is the
+// launcher's, with the launcher's own config, so ProxyJump, User, keys and
+// Include all come from there. Nothing here gates access — the launcher must be
+// one the caller could already call, and only the daemon can decide that.
+type ExecutorInstallRequest struct {
+	// Target is the ssh destination, "host" or "user@host".
+	Target string `json:"target"`
+	// Via names the launcher executor (its machine name or row id). Empty
+	// means the caller's default launcher.
+	Via string `json:"via,omitempty"`
+	// Name is the machine name the new executor joins; empty means the
+	// destination's host part.
+	Name string `json:"name,omitempty"`
+	// Root is the directory the new executor serves; empty means its home.
+	Root string `json:"root,omitempty"`
+	// Labels are the caller's own trust labels. owner, machine and the
+	// rafiki/installed-* keys are written by the daemon, and a request
+	// carrying one is REFUSED rather than silently overwritten.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Admits is the executor-side admission selector over child labels.
+	Admits string `json:"admits,omitempty"`
+}
+
+// ExecutorInstallResult is one installed executor, as a tool result renders it.
+// Every field is daemon-written: Name is the row's `machine` label, Via and
+// Target come from the launch recipe, and Connected is the pool's live view.
+type ExecutorInstallResult struct {
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	Via       string `json:"via,omitempty"`
+	Target    string `json:"target,omitempty"`
+	Connected bool   `json:"connected,omitempty"`
+}
+
 // ─── Identity ────────────────────────────────────────────────────────────────
 
 // UserCreateResponseData carries the plaintext token. It is the only time it

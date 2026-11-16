@@ -150,6 +150,15 @@ var tierByTool = map[string]Tier{
 	// Daemon — annotates the executor's own database row.
 	"executor_annotate": TierDaemon,
 
+	// Daemon — the install verbs drive the daemon's install orchestrator: the
+	// ssh is run by one of the CALLER's executors and the effect lands on a
+	// machine described by an executor row. Nothing in the caller's own
+	// workspace is touched, so the verb answers the same wherever the agent
+	// runs — which is what makes it usable from a child that could not reach
+	// the target itself.
+	"executor_install":   TierDaemon,
+	"executor_uninstall": TierDaemon,
+
 	// Daemon — the sandbox verbs touch the daemon's sandbox table and the
 	// executor pool, never the caller's filesystem: the container they name
 	// runs on the launcher's machine, so the effect is the same wherever the
