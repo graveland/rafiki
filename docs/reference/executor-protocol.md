@@ -5,15 +5,16 @@ The daemon dispatches filesystem and shell tool calls to an executor process
 protocol: the executor RPCs, their message shapes, the four failure codes, the
 background-handle lifecycle, the workspace lifecycle, and the mtime contract.
 
-There are two transports for the same protocol, and they differ only in what
+There are three transports for the same protocol, and they differ only in what
 carries the bytes:
 
 | Transport | Command | Used when |
 |---|---|---|
 | Reverse-dialled TLS | `rafiki executor serve --connect` | the daemon cannot reach the executor's host (NAT, a laptop) |
 | Unix socket (reverse) | `rafiki executor serve --connect-socket` | executor and daemon on one host, enrolling as a fully rowed member of the pool |
+| ssh stdio relay | `rafiki executor serve --stdio` | a launcher installed the executor on another machine — see "Installing over ssh" |
 
-There was once a third form: the executor listened on a unix socket and the daemon dialled
+There was once another form: the executor listened on a unix socket and the daemon dialled
 it with `rafiki create --executor-socket`. It is gone. It produced an executor with **no
 database row** — no labels, no `admits`, no `isolation`, no `workspace_mode`, invisible to
 selectors and never inherited by a child — which made it the direct cause of two separate
@@ -325,7 +326,7 @@ The scheme selects what the secret is:
 |---|---|---|
 | `Bearer` | the executor's durable credential, or the daraja's in-memory reconnect credential | every connection after the first |
 | `Enroll` | a one-time enrollment token minted by `EnrollExecutor` | an executor's first join |
-| `Ticket` | a one-shot session ticket (transient executor) or launch ticket (daraja) | the first connection for something with no durable identity |
+| `Ticket` | a one-shot session ticket (transient executor), a launch ticket (daraja), or an installed executor's per-launch ticket (row-bound) | the first connection for something with no durable identity |
 
 A missing, repeated, schemeless, unknown-scheme or empty-secret header is
 refused 401 with a body that names the header form, so a peer still speaking
@@ -398,7 +399,7 @@ Describe() → { executorId, platform, roots[], concurrency, isolation,
                workspaceMode, tools[], version, selfReportedLabels,
                proxies[], launchKinds[], skillsSync, pymodulesSync,
                sandboxMountRoots[], sandboxRelayDir, sandboxRelayVolume,
-               mcpCommands[] }
+               mcpCommands[], sshLaunch }
 ```
 
 Unary. Called at startup and periodically to discover the executor's
@@ -426,6 +427,12 @@ workspace_mode rules exist to forbid — unlike those two fields, which the
 executor does not report at all. `skillsSync` and `pymodulesSync` self-report
 the same way (see their Sync sections): each only narrows whether the daemon
 may push that corpus here, and both default to off.
+
+`sshLaunch` reports that this executor accepts the `Remote*` RPCs of
+"Installing over ssh", so it may install and run executors on other machines.
+Self-reported, and therefore narrowing only: `rafiki executor serve
+--no-ssh-launch` reports false, which takes this machine out of the install path
+entirely.
 
 `sandboxMountRoots[]`, `sandboxRelayDir` and `sandboxRelayVolume` self-report
 the launcher's `--sandbox-mount-root` directories and its relay — `--relay-dir`
@@ -1547,6 +1554,216 @@ answering for a failure on a different session.
 **An executor too old to serve it says so.** An `Unimplemented` answer to
 `MCPStdio` is reported as a version gap naming the executor — not as a broken MCP
 server — so an operator upgrades the laptop rather than debugging a config.
+
+## Installing over ssh
+
+An executor can be put on a machine that has never enrolled, through a machine
+that already has. **The daemon never runs ssh**: it asks a LAUNCHER executor it
+already trusts, over the executor connection it already holds
+(`pkg/executor/remote_ssh.go`, `cmd/rafikid/executor_install.go`). The launcher
+is trusted with the target's traffic exactly as far as it is already trusted
+with the ssh keys to it.
+
+An installed executor is a **durable row** — an ordinary
+`conversations.executors` row, written by the daemon with `isolation=none`,
+`workspace_mode=pinned`, the `--root` it was given, and the daemon-written
+`rafiki/installed-via` / `rafiki/installed-target` labels — plus one row in
+`conversations.executor_install` (migration 0070): the launch RECIPE, holding
+the launcher, the ssh destination, the target's executor instance, the root and
+the remote platform. Executor rows hard-delete, so the recipe is what is
+TOMBSTONED (`removed_at`); one live recipe per executor id is a unique index.
+Nothing the target reports gates access: the probe chooses a binary and refuses
+a clobber, and decides nothing about who may use the result.
+
+**A remote executor is available only while its launcher is.** The relaunch is
+lazy — no fleet of idle ssh sessions is kept — so a down installed executor is
+still a name a caller may pass, and the first call that needs it opens the ssh
+session, records a one-time note on that call, and waits for the connection to
+ARRIVE (the pool's on-connect hook, never a poll).
+
+### Who may launch
+
+Any NATIVE executor — one whose row's `isolation` is not `container` — by
+default: the capability equals what `bash` on that machine can already do. A
+container-isolated executor is never a launcher (it has no ssh keys of its own),
+a disabled executor is refused (disabling is a revocation), and an executor
+reporting `sshLaunch=false` is refused — the operator's `--no-ssh-launch`.
+Those three are one gate, run at install time AND on every relaunch, because
+the facts are live.
+
+A child credential may install only through a launcher in its own reachable
+set — the same confinement-narrowed set a spawn gets — and its default launcher
+is its home executor, else its launch host, else the single native executor it
+can reach. A user credential (or the local socket) names one with `via`, and
+otherwise takes the single native executor it owns. Several candidates and no
+`via` is an error listing them: a launcher is never guessed.
+
+### The ssh itself
+
+The option set is fixed, always and only:
+
+```
+-T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+```
+
+**There is no host-key option, ever.** `ProxyJump`, `User`, keys, `Include` and
+host-key policy all come from the launcher's own ssh config, because that is
+the operator's trust decision, not the daemon's. A refusal returns ssh's stderr
+**verbatim** (bounded): an agent reading `Host key verification failed` knows
+the fix, and an invented summary would replace that knowledge with nothing.
+
+Every remote command is built from TYPED request fields and quoted for a POSIX
+shell; no caller-supplied text becomes shell syntax. The one exception is the
+`$HOME` prefix of `binary_path`, which the remote shell expands and whose
+remainder is quoted like any other value. Validation refuses what could not be
+meant: a destination starting with `-` (it would be read as an ssh option),
+whitespace or control characters in a destination, a `binary_path` outside the
+content-addressed cache, an `install_id` outside `[A-Za-z0-9_-]{1,64}`, a
+non-absolute `root`, and an instance name that fails `paths.ValidateInstance`.
+
+**The target's login shell must be POSIX sh.** The remote scripts use
+`${XDG_DATA_HOME:-$HOME/.local/share}`, `[ -f … ]` and `uname -sm`; under a csh
+or fish login shell they fail opaquely — the probe's output is parsed, so a
+syntax error surfaces as a malformed answer rather than as a shell problem.
+
+### The four RPCs
+
+```
+RemoteProbe(RemoteTarget{destination, instance}, binary_path) →
+    { uname, binary_present, credential_present, marker }
+
+RemoteInstall(stream { header{target, binary_path, sha256} | chunk(bytes) }) → {}
+
+RemoteServe(stream { start{target, binary_path, root, install_id} | stdin(bytes) }) →
+    stream { started{pid} | stdout(bytes) | stderr(bytes)
+             | exit{code, signal, stderr_tail} }
+
+RemoteClean(RemoteTarget{destination, instance}, install_id) → { removed }
+```
+
+`RemoteProbe` is ONE ssh whose script prints exactly four lines (`uname=`,
+`binary=`, `cred=`, `marker=`); any other shape is refused with the raw output
+rather than half-parsed. `marker` is the first line of
+`<data dir>/installed-executor`, empty when absent.
+
+`RemoteInstall` pipes the binary to the target over the SAME ssh channel: no
+scp, no sftp, no internet on the target, and no copy kept by the launcher. The
+first frame is the header and every later frame is a chunk of the binary on
+ssh's stdin; the remote writes a temp file, verifies the sha256 it was given,
+`chmod 0755`s it and renames it into place, removing the temp file on any
+failure. A torn or corrupted stream therefore leaves no file at `binary_path`.
+
+`RemoteServe` runs `executor serve --stdio` on the target and relays its stdio
+**unparsed** — stdout is opaque protocol bytes, stderr is opaque diagnostics.
+`started{pid}` is first in the response; `stdout` is flushed as it arrives;
+`stderr` never backpressures stdout (a frame that would stall is dropped, a
+4 KiB ring is the record that survives and it is what `exit.stderr_tail`
+carries); `exit{code, signal, stderr_tail}` is last, and `code` is −1 when a
+signal killed it. Half-closing the request stream closes the remote process's
+stdin. One process per stream, in its own process group, swept the instant the
+leader is reaped, so nothing it forked outlives the session.
+
+`RemoteClean` removes `<data dir>/installed-executor` **iff its first line is
+this install's id**, and answers `removed=false` otherwise. The shared binary
+cache is content-addressed and is left alone.
+
+### `executor serve --stdio`
+
+The launcher starts the installed binary on the target as
+
+```
+exec <binary> executor serve --stdio -P <instance> [--root <root>] --install-id <id>
+```
+
+- **The ticket is the FIRST LINE of stdin**, at most 256 bytes, and never in
+  argv: argv is visible in `ps` on the target, and a ticket is a credential for
+  as long as it is unused. A ticket is minted per launch, is bound to the
+  executor's durable ROW (the pool reads the row for every gating fact, so a
+  disabled row is refused 401 even with a valid ticket), and is revoked on every
+  way out of a launch that is not a connection.
+- **stdout carries only the protocol.** The logger is pinned to stderr before
+  anything can log, because a log line on stdout is read as a frame and kills
+  the session.
+- `--install-id` is required (the remote records it in the marker) and `--stdio`
+  refuses `--connect`, `--connect-socket`, `--credential`,
+  `--credential-file` and `--enroll-token` by name: a stdio executor has no
+  daemon address and no durable credential of its own. Skills, pymodules and
+  repo sync are off — being installed is not a grant to rewrite the machine's
+  Claude corpus or its caches.
+- **The marker** (`<data dir>/installed-executor`, mode 0600, written through a
+  temp file and a rename) is written from the request handler, so it appears
+  only once a request has been served — i.e. only after the upgrade succeeded.
+  A process that never connects leaves the target looking empty, which is the
+  truth.
+
+### The binary depot
+
+A remote executor runs exactly the **daemon's** version: the daemon is the epoch
+authority (`protocol.Epoch`), so a binary built from anything else could fail
+the epoch check on every connection — or pass it while behaving differently.
+The depot therefore never resolves "latest": its tag is this process's own
+`version.String()`, fixed at construction.
+
+Two sources, in order:
+
+1. `$RAFIKI_EXECUTOR_BINARIES/<goos>-<goarch>/rafiki` — an operator's own build
+   (`RAFIKI_EXECUTOR_BINARIES`, `.env.example`). It is the ONLY source for an
+   untagged (dev) daemon, and it is hashed before use.
+2. The signed release for that tag: `checksums.txt.sig` is verified against
+   `relsign.TrustedKeys` **before the archive is requested**
+   (`release.Client.StageBinary`), and the `rafiki` member is then staged into
+   `<cache dir>/executor-binaries/<tag>/<goos>-<goarch>/rafiki` beside its
+   `.sha256`. Every later use re-hashes the cached bytes and treats a mismatch
+   as a cache miss, so a truncated file is never shipped as the daemon's
+   version.
+
+An untagged (dev) daemon with no override REFUSES, naming the command that
+would fill the directory:
+`GOOS=<os> GOARCH=<arch> go build -o <dir>/<os>-<arch>/rafiki ./cmd/rafiki`.
+
+On the target the binary lives at
+`$HOME/.cache/rafiki/bin/rafiki-<tag>-<sha256[:12]>` — content-addressed, shared
+by every executor instance and every daemon that installs there — so a target
+that already has those bytes is pushed nothing. The platform comes from the
+target's own `uname -sm`, and only the exact spellings those unames print are
+accepted (`Linux x86_64`/`aarch64`, `Darwin x86_64`/`arm64`, `OpenBSD
+amd64`/`arm64`); a guess would install a binary that cannot exec.
+
+### The clobber guard
+
+An install proceeds only onto a target that is **empty for its namespace**, or
+that carries **this executor's own install**. There is no `--force`. Three
+refusals, each naming its fix:
+
+| Target state | Refusal | Fix |
+|---|---|---|
+| A durable executor credential exists (`<data dir>/executor.cred`) | the machine already has an enrolled executor | use it, or remove that file on the target first |
+| The marker names a DIFFERENT install | the target carries executor state from another install | `ssh <target> rm -f <data dir>/installed-executor` |
+| This `(owner, machine)` already has an executor row that was not installed over ssh | the name is taken | pick another `--name`, or `rafiki executor delete` that one |
+
+The first two are the probe's answers; the third is the daemon's own row
+lookup. None is bypassable by a client, because every one of them runs on the
+daemon side of the ssh.
+
+### Reinstall and uninstall
+
+**Reinstalling the same name reuses the executor**: the same row and the same
+id, so anything pinned to `executor: <name>` keeps meaning that machine. A
+reinstall IGNORES the request's labels, `root` and `admits` — change those with
+`rafiki executor label` — and it keeps the instance the recipe recorded, not
+the launcher's current one, so a launcher whose profile changed cannot silently
+move the executor to a fresh namespace.
+
+**Uninstall removes what the caller's LINEAGE installed** — the caller itself,
+or an ANCESTOR of it; authority flows down the tree, so a worker may tidy up a
+machine its coordinator provisioned for it, while a sibling's install is not
+its to remove. A row a human installed has no installer child, so no child may
+uninstall it. Uninstall ends the ssh session FIRST (a still-running remote
+rewrites its marker), then removes the target's marker through the launcher
+when it holds this install's id and the launcher is live, then tombstones the
+recipe and deletes the executor row. A failure to clean the marker does NOT
+fail the uninstall: the leftover is named by the next install's clobber guard,
+with the command that clears it.
 
 ## Failure codes
 
