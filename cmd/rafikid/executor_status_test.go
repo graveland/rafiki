@@ -205,3 +205,46 @@ func TestExecutorListOnTheMCPFaceScopesToTheChild(t *testing.T) {
 	c.False(strings.Contains(text, "bluebox"), "the owner's other machines must not be: %s", text)
 	c.False(strings.Contains(text, "notmine"), "another owner's machine must not be: %s", text)
 }
+
+// An installed row carries the transport it was installed with and the daemon's
+// last launch outcome, so a reader can tell a direct machine (it dials, it
+// survives the launcher) from a relayed one without asking anyone.
+func TestExecutorStatusesShowModeAndLastLaunch(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newExecutorStatusFixture(t)
+	f.setInstallMode("inst-kid", executorinstall.ModeDirect)
+	f.state.setOutcome("exec-kid-install", "ok: direct launch started in 900ms")
+
+	rows, err := f.ctrl.ExecutorStatuses(context.Background(), installCaller{
+		OwnerUserID: statusHuman, OwnerName: installTestOwnerName,
+	})
+	c.Require().NoError(err, "ExecutorStatuses for a human caller")
+
+	byID := statusByID(rows)
+	kid := byID["exec-kid-install"]
+	c.Eq(executorinstall.ModeDirect, kid.InstallMode, "the recipe's transport is shown")
+	c.Eq("ok: direct launch started in 900ms", kid.LastLaunch, "and the last launch outcome")
+
+	// A recipe written before the mode column existed reads as the relay, which
+	// is how it behaved — never as "unknown".
+	sib := byID["exec-sibling"]
+	c.Eq(executorinstall.ModeTunnel, sib.InstallMode, "an empty mode reads as tunnel")
+	c.Eq("", sib.LastLaunch, "a machine this daemon never launched has no outcome")
+
+	// A machine that was not installed over ssh has neither.
+	down := byID["exec-down"]
+	c.Eq("", down.InstallMode, "an enrolled machine has no install transport")
+	c.Eq("", down.LastLaunch, "and no launch outcome")
+}
+
+// setInstallMode records the transport on a seeded recipe, as an install would.
+func (f *executorStatusFixture) setInstallMode(id, mode string) {
+	f.installs.mu.Lock()
+	defer f.installs.mu.Unlock()
+	r, ok := f.installs.rows[id]
+	if !ok {
+		f.t.Fatalf("no seeded install %q", id)
+	}
+	r.Mode = mode
+	f.installs.rows[id] = r
+}

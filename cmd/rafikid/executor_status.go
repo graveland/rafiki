@@ -102,6 +102,7 @@ func (c *Controller) ExecutorStatuses(
 		}
 		if d, ok := displays[e.ID]; ok {
 			st.InstalledVia, st.InstalledTarget = d.Via, d.Target
+			st.InstallMode, st.LastLaunch = d.Mode, d.LastLaunch
 		}
 		out = append(out, st)
 	}

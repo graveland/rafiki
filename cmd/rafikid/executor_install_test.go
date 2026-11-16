@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -230,6 +232,14 @@ type fakePush struct {
 	body       []byte
 }
 
+// fakeLaunch is one RemoteLaunch the daemon asked a launcher to perform. The
+// ticket is recorded HERE, never in the start frame: the fake keeps the two
+// apart so a test can prove the secret only ever travelled as the ticket.
+type fakeLaunch struct {
+	start  *executorpb.RemoteLaunchStart
+	ticket string
+}
+
 // fakeLauncher records every Remote* call and answers from scripted results.
 type fakeLauncher struct {
 	mu           sync.Mutex
@@ -238,16 +248,26 @@ type fakeLauncher struct {
 	pushes       []fakePush
 	serves       []*executorpb.RemoteServeStart
 	streams      []*fakeServeStream
+	launches     []fakeLaunch
+	tails        []*executorpb.RemoteLogTailRequest
 	cleans       []*executorpb.RemoteCleanRequest
 
-	probeErr error
-	pushErr  error
-	serveErr error
-	cleanErr error
+	probeErr  error
+	pushErr   error
+	serveErr  error
+	launchErr error
+	tailErr   error
+	cleanErr  error
 	// serveExit, when set, makes the remote exit immediately after the stream
 	// opens — the shape of a target whose ssh works and whose binary does not.
 	serveExit   bool
 	serveStderr string
+	// launchResp is what Launch answers. Unset means `started pid=4242`.
+	launchResp *executorpb.RemoteLaunchResponse
+	// tailText is what LogTail answers, and onLaunch runs INSIDE Launch so a
+	// test can announce the connection a direct launch is waiting for.
+	tailText string
+	onLaunch func(*executorpb.RemoteLaunchStart)
 }
 
 func (f *fakeLauncher) Probe(
@@ -296,13 +316,49 @@ func (f *fakeLauncher) Serve(
 	return stream, nil
 }
 
-func (f *fakeLauncher) Clean(
-	_ context.Context, target *executorpb.RemoteTarget, installID string,
-) (bool, error) {
+func (f *fakeLauncher) Launch(
+	_ context.Context, start *executorpb.RemoteLaunchStart, ticket string,
+) (*executorpb.RemoteLaunchResponse, error) {
+	f.mu.Lock()
+	f.launches = append(f.launches, fakeLaunch{start: start, ticket: ticket})
+	resp, launchErr, hook := f.launchResp, f.launchErr, f.onLaunch
+	f.mu.Unlock()
+	if launchErr != nil {
+		return nil, launchErr
+	}
+	if hook != nil {
+		hook(start)
+	}
+	if resp != nil {
+		return resp, nil
+	}
+	return &executorpb.RemoteLaunchResponse{State: "started", Pid: 4242}, nil
+}
+
+func (f *fakeLauncher) LogTail(
+	_ context.Context, target *executorpb.RemoteTarget, lines int32,
+) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.cleans = append(f.cleans, &executorpb.RemoteCleanRequest{Target: target, InstallId: installID})
-	return f.cleanErr == nil, f.cleanErr
+	f.tails = append(f.tails, &executorpb.RemoteLogTailRequest{Target: target, Lines: lines})
+	if f.tailErr != nil {
+		return "", f.tailErr
+	}
+	return f.tailText, nil
+}
+
+func (f *fakeLauncher) Clean(
+	_ context.Context, target *executorpb.RemoteTarget, installID string, stop bool,
+) (removed, stopped bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cleans = append(f.cleans, &executorpb.RemoteCleanRequest{
+		Target: target, InstallId: installID, StopProcess: stop,
+	})
+	if f.cleanErr != nil {
+		return false, false, f.cleanErr
+	}
+	return true, stop, nil
 }
 
 // probeCalls returns how many probes ran.
@@ -333,6 +389,30 @@ func (f *fakeLauncher) cleanCalls() int {
 	return len(f.cleans)
 }
 
+// launchCalls returns how many direct launches were asked for.
+func (f *fakeLauncher) launchCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.launches)
+}
+
+// launchAt returns the i'th recorded direct launch, if it happened.
+func (f *fakeLauncher) launchAt(i int) (fakeLaunch, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i >= len(f.launches) {
+		return fakeLaunch{}, false
+	}
+	return f.launches[i], true
+}
+
+// tailCalls returns how many log tails were read.
+func (f *fakeLauncher) tailCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.tails)
+}
+
 func (f *fakeLauncher) starts() []*executorpb.RemoteServeStart {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -348,8 +428,9 @@ func (f *fakeLauncher) firstStream() *fakeServeStream {
 	return f.streams[0]
 }
 
-// rpcFields renders every string a launcher RPC carried, for the test that
-// proves the ticket is in none of them.
+// rpcFields renders every string a launcher RPC carried, for the tests that
+// prove the ticket is in none of them. A launch's ticket is deliberately NOT
+// here: it is kept apart precisely so the scan can show it never became a field.
 func (f *fakeLauncher) rpcFields() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -363,6 +444,13 @@ func (f *fakeLauncher) rpcFields() []string {
 	for _, s := range f.serves {
 		out = append(out, s.GetBinaryPath(), s.GetRoot(), s.GetInstallId(),
 			s.GetTarget().GetDestination(), s.GetTarget().GetInstance())
+	}
+	for _, l := range f.launches {
+		out = append(out, l.start.GetBinaryPath(), l.start.GetRoot(), l.start.GetInstallId(),
+			l.start.GetTarget().GetDestination(), l.start.GetTarget().GetInstance())
+	}
+	for _, t := range f.tails {
+		out = append(out, t.GetTarget().GetDestination(), t.GetTarget().GetInstance())
 	}
 	for _, c := range f.cleans {
 		out = append(out, c.GetInstallId(), c.GetTarget().GetDestination(), c.GetTarget().GetInstance())
@@ -528,6 +616,11 @@ func installUserCaller() installCaller {
 // installReq is an install of `brent@ublk-s2` named `ublk-s2`.
 func installReq(via string) *rafikiv1.InstallExecutorRequest {
 	return &rafikiv1.InstallExecutorRequest{Target: "brent@ublk-s2", Via: via}
+}
+
+// installReqMode is installReq with the transport the caller asked for.
+func installReqMode(via, mode string) *rafikiv1.InstallExecutorRequest {
+	return &rafikiv1.InstallExecutorRequest{Target: "brent@ublk-s2", Via: via, Mode: mode}
 }
 
 // expectControllerError asserts the error carries code and the exact message.
@@ -856,6 +949,12 @@ func TestInstallTicketNeverInAnyRPCField(t *testing.T) {
 // seedInstalledExecutor gives the fixture one installed, connected-nowhere
 // executor with a live recipe, so a relaunch has something to launch.
 func (f *installFixture) seedInstalledExecutor() {
+	f.seedInstalledExecutorMode("")
+}
+
+// seedInstalledExecutorMode is seedInstalledExecutor with a recorded transport:
+// "" is a recipe written before the column existed, which reads as tunnel.
+func (f *installFixture) seedInstalledExecutorMode(mode string) {
 	f.execs.execs["exec-1"] = executors.Executor{
 		ID: "exec-1", Labels: map[string]string{"machine": "ublk-s2"},
 		OwnerUserID: installTestOwner, Enabled: true, Isolation: "none",
@@ -864,7 +963,7 @@ func (f *installFixture) seedInstalledExecutor() {
 	if err := f.installs.Insert(context.Background(), executorinstall.Row{
 		ID: "recipe-1", OwnerUserID: installTestOwner, ExecutorID: "exec-1",
 		LauncherExecutorID: installTestLauncher, Target: "brent@ublk-s2",
-		Instance: "work", Platform: "linux/amd64",
+		Instance: "work", Platform: "linux/amd64", Mode: mode,
 	}); err != nil {
 		f.t.Fatalf("seed recipe: %v", err)
 	}
@@ -962,8 +1061,8 @@ func TestRelaunchTimeoutRevokesTicket(t *testing.T) {
 	var ce *connectapi.ControllerError
 	c.Require().True(errors.As(err, &ce), "a launch failure is a ControllerError, got %v", err)
 	c.Eq(protocol.ErrUnavailable, ce.Code, "timeout code")
-	c.StrContains(ce.Message, "executor greyshift did not connect within 25ms; ssh said:",
-		"the timeout names the launcher and the bound")
+	c.StrContains(ce.Message, "executor ublk-s2 on brent@ublk-s2 (via greyshift) did not connect within 25ms; ssh said:",
+		"the timeout names the executor being launched, the target and the launcher")
 
 	stream := f.launcher.firstStream()
 	c.Require().NotNil(stream, "the session was opened")
@@ -1255,4 +1354,522 @@ func TestInstallLauncherDefaultIgnoresADownInstalledExecutor(t *testing.T) {
 		installCaller{OwnerUserID: installTestOwner, OwnerName: installTestOwnerName, ChildID: "c_kid"}, "")
 	c.Require().NoError(err, "the single LIVE launcher must be the default even though the installed one is reachable")
 	c.Eq(installTestLauncher, le.Executor.ID, "launcher")
+}
+
+// ─── Mode choice and the direct launch ──────────────────────────────────────
+
+// TestInstallChooseInstallMode runs the pinned mode-choice table under a name the
+// install tests' verify pattern reaches; the table itself is
+// TestChooseInstallMode.
+func TestInstallChooseInstallMode(t *testing.T) {
+	t.Run("TestChooseInstallMode", TestChooseInstallMode)
+}
+
+// The mode is one decision, made once, from what the operator asked for and what
+// the target proved it can do. Every cell of that table is pinned here, because
+// the refusal text, the logged reason and the STORED mode all come from this one
+// function.
+func TestChooseInstallMode(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	const reachWhy = "target reaches the daemon (curl: connected to 10.0.0.5:8035)"
+	decided := []struct {
+		requested string
+		reach     string
+		detail    string
+		mode      string
+		why       string
+	}{
+		{installModeAuto, "yes", "curl: connected to 10.0.0.5:8035", executorinstall.ModeDirect, reachWhy},
+		{"", "yes", "curl: connected to 10.0.0.5:8035", executorinstall.ModeDirect, reachWhy},
+		{installModeAuto, "no", "curl: connection refused", executorinstall.ModeTunnel,
+			"target cannot reach the daemon: no (curl: connection refused)"},
+		{installModeAuto, "unavailable", "", executorinstall.ModeTunnel,
+			"launcher has no dialable address"},
+		{"", "", "", executorinstall.ModeTunnel, "launcher has no dialable address"},
+		{executorinstall.ModeTunnel, "yes", "curl: connected to 10.0.0.5:8035", executorinstall.ModeTunnel,
+			"tunnel requested"},
+		{executorinstall.ModeTunnel, "no", "curl: connection refused", executorinstall.ModeTunnel,
+			"tunnel requested"},
+		{executorinstall.ModeTunnel, "unavailable", "", executorinstall.ModeTunnel, "tunnel requested"},
+		{executorinstall.ModeDirect, "yes", "curl: connected to 10.0.0.5:8035", executorinstall.ModeDirect,
+			reachWhy},
+	}
+	for _, tc := range decided {
+		mode, why, err := chooseInstallMode(tc.requested, tc.reach, tc.detail)
+		c.NoError(err, "chooseInstallMode(%q, %q)", tc.requested, tc.reach)
+		c.Eq(tc.mode, mode, "mode for requested=%q reach=%q", tc.requested, tc.reach)
+		c.Eq(tc.why, why, "why for requested=%q reach=%q", tc.requested, tc.reach)
+	}
+
+	// Forcing direct onto a target that cannot reach the daemon is refused with
+	// the probe's own words, so the operator learns what to fix.
+	for _, reach := range []string{"no", "unavailable", ""} {
+		_, _, err := chooseInstallMode(executorinstall.ModeDirect, reach, "curl: connection refused")
+		expectControllerError(t, err, protocol.ErrFailedPrecondition,
+			fmt.Sprintf("direct install requires the target to reach the daemon, and it cannot "+
+				"(reach=%s: curl: connection refused); use mode=tunnel, or fix the route and retry", reach))
+	}
+
+	// An unknown spelling is a caller error, never a silent fallback.
+	_, _, err := chooseInstallMode("sideways", "yes", "")
+	expectControllerError(t, err, protocol.ErrInvalidArgs, "mode must be auto, direct or tunnel")
+}
+
+// An unknown mode is refused BEFORE any ssh round trip: a typo must not look like
+// a broken target.
+func TestInstallRejectsUnknownModeBeforeAnySSH(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "sideways"))
+	expectControllerError(t, err, protocol.ErrInvalidArgs, "mode must be auto, direct or tunnel")
+	c.Eq(0, f.launcher.probeCalls(), "an unknown mode runs no ssh")
+	c.Eq(0, len(f.execs.creates), "and writes no row")
+}
+
+// directConnect is the fixture's "the launched process dialled the daemon"
+// announcement: without it a direct launch waits for its timeout, which is what
+// the timeout tests want and every success test does not.
+func (f *installFixture) directConnect(executorID string) {
+	f.launcher.onLaunch = func(*executorpb.RemoteLaunchStart) {
+		f.ctrl.installConnected(executorID)
+	}
+}
+
+// reachableTarget primes both probes with a target that reached the daemon.
+func (f *installFixture) reachableTarget() {
+	f.launcher.probeResults = []*executorpb.RemoteProbeResponse{
+		{Uname: "Linux x86_64", Reach: "yes", ReachDetail: "curl: connected to 10.0.0.5:8035"},
+		{Uname: "Linux x86_64", Reach: "yes", ReachDetail: "curl: connected to 10.0.0.5:8035"},
+	}
+}
+
+// probeReach primes BOTH probes with one reach answer: the mode is decided from
+// the second (the one that carries the depot's binary path), so a fixture that
+// set only one would have the pair disagree about the target.
+func (f *installFixture) probeReach(reach, detail string) {
+	f.launcher.probeResults = []*executorpb.RemoteProbeResponse{
+		{Uname: "Linux x86_64", Reach: reach, ReachDetail: detail},
+		{Uname: "Linux x86_64", Reach: reach, ReachDetail: detail},
+	}
+}
+
+// Auto with a target that proved it can dial the daemon installs the
+// SELF-DIALLING form and records it: the relay is not opened at all.
+func TestInstallAutoChoosesDirectWhenReachYes(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.reachableTarget()
+	f.directConnect("exec-1")
+
+	row, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	c.Require().NoError(err, "install")
+
+	live := f.installs.liveRows()
+	c.Require().Len(live, 1, "the recipe")
+	c.Eq(executorinstall.ModeDirect, live[0].Mode, "the recipe records the self-dialling transport")
+	c.Eq(1, f.launcher.launchCalls(), "one direct launch")
+	c.Eq(0, f.launcher.serveCalls(), "the relay must not be opened as well")
+	c.Eq(executorinstall.ModeDirect, row.GetInstallMode(), "the answer names the transport")
+	c.StrContains(f.state.outcomeOf("exec-1"), "ok: direct launch started in",
+		"the launch outcome is recorded for the listing")
+}
+
+// A target that reports it cannot reach the daemon keeps today's relay.
+func TestInstallAutoFallsBackToTunnelWhenReachNo(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.probeReach("no", "curl: connection refused")
+	f.connectAs = "exec-1"
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	c.Require().NoError(err, "install")
+
+	c.Eq(executorinstall.ModeTunnel, f.installs.liveRows()[0].Mode, "an unreachable target installs the relay")
+	c.Eq(1, f.launcher.serveCalls(), "the relay is opened")
+	c.Eq(0, f.launcher.launchCalls(), "nothing self-dialling is started")
+}
+
+// The same fallback when the launcher has no address to hand a target at all —
+// a unix-socket or relay-only launcher.
+func TestInstallAutoFallsBackToTunnelWhenReachUnavailable(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.probeReach("unavailable", "")
+	f.connectAs = "exec-1"
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	c.Require().NoError(err, "install")
+	c.Eq(executorinstall.ModeTunnel, f.installs.liveRows()[0].Mode, "no dialable address means the relay")
+	c.Eq(0, f.launcher.launchCalls(), "nothing self-dialling is started")
+}
+
+// Forcing direct onto a target that cannot reach the daemon refuses, and says
+// what the probe saw.
+func TestInstallForcedDirectRefusedWhenUnreachable(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.probeReach("no", "curl: connection refused")
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(),
+		installReqMode("", executorinstall.ModeDirect))
+	expectControllerError(t, err, protocol.ErrFailedPrecondition,
+		"direct install requires the target to reach the daemon, and it cannot "+
+			"(reach=no: curl: connection refused); use mode=tunnel, or fix the route and retry")
+	c.Eq(0, len(f.execs.creates), "a refused mode writes nothing")
+	c.Eq(0, f.launcher.launchCalls(), "and starts nothing")
+}
+
+// Forcing tunnel is obeyed even when the target COULD reach the daemon: the
+// override is a decision, not a preference.
+func TestInstallForcedTunnelIgnoresReach(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.reachableTarget()
+	f.connectAs = "exec-1"
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(),
+		installReqMode("", executorinstall.ModeTunnel))
+	c.Require().NoError(err, "install")
+	c.Eq(executorinstall.ModeTunnel, f.installs.liveRows()[0].Mode, "tunnel requested, tunnel recorded")
+	c.Eq(1, f.launcher.serveCalls(), "the relay is opened")
+	c.Eq(0, f.launcher.launchCalls(), "even though the target could have dialled")
+}
+
+// A launcher older than the direct-dial RPCs answers CodeUnimplemented to the
+// launch. Under auto the install falls back to the relay and records the
+// transport that actually worked — the install succeeds, once, as a tunnel.
+func TestInstallAutoFallsBackToTunnelOnAnUnimplementedLauncher(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.reachableTarget()
+	f.launcher.launchErr = connect.NewError(connect.CodeUnimplemented,
+		errors.New("unknown service rafiki.executor.v1.ExecutorService"))
+	f.connectAs = "exec-1"
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	c.Require().NoError(err, "an old launcher must not fail an auto install")
+
+	c.Eq(1, f.launcher.launchCalls(), "the direct launch was tried")
+	c.Eq(1, f.launcher.serveCalls(), "and the install fell back to the relay")
+	c.Eq(executorinstall.ModeTunnel, f.installs.liveRows()[0].Mode,
+		"the recipe records the transport that worked, not the one that was chosen")
+	c.Eq(1, f.installs.modes, "the recipe's mode is REWRITTEN once")
+}
+
+// A REQUIRED direct install on the same launcher refuses, naming the machine
+// that has to be upgraded: silently relaying would be the very thing the
+// operator asked not to happen.
+func TestInstallForcedDirectOnAnUnimplementedLauncherNamesTheLauncher(t *testing.T) {
+	const refused = "launcher greyshift is too old to start a self-dialling executor; " +
+		"upgrade it or use mode=tunnel"
+
+	t.Run("at launch", func(t *testing.T) {
+		f := newInstallFixture(t)
+		f.reachableTarget()
+		f.launcher.launchErr = connect.NewError(connect.CodeUnimplemented,
+			errors.New("unknown service rafiki.executor.v1.ExecutorService"))
+
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(),
+			installReqMode("", executorinstall.ModeDirect))
+		expectControllerError(t, err, protocol.ErrFailedPrecondition, refused)
+		assert.NewAborting(t).Eq(0, f.launcher.serveCalls(),
+			"a forced direct install must not quietly relay")
+	})
+
+	t.Run("at probe", func(t *testing.T) {
+		f := newInstallFixture(t)
+		f.launcher.probeErr = connect.NewError(connect.CodeUnimplemented,
+			errors.New("unknown service rafiki.executor.v1.ExecutorService"))
+
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(),
+			installReqMode("", executorinstall.ModeDirect))
+		expectControllerError(t, err, protocol.ErrFailedPrecondition, refused)
+	})
+}
+
+// The ticket of a direct launch is the stream's stdin frame and NOTHING else: it
+// appears in no RPC field, it is bound to the executor's row, and redeeming it
+// mints the credential the detached process reconnects with.
+func TestDirectLaunchTicketOnlyOnStdinAndMintsCredential(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.reachableTarget()
+	f.directConnect("exec-1")
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	c.Require().NoError(err, "install")
+
+	launch, ok := f.launcher.launchAt(0)
+	c.Require().True(ok, "one direct launch")
+	c.NotEq("", launch.ticket, "the launch carried a ticket")
+
+	// The start frame is daemon-written and carries the recipe's own facts.
+	wantBin := "$HOME/.cache/rafiki/bin/rafiki-" + installTestTag + "-" + f.binSHA[:12]
+	c.Eq(wantBin, launch.start.GetBinaryPath(), "launch binary path")
+	c.Eq("brent@ublk-s2", launch.start.GetTarget().GetDestination(), "launch destination")
+	c.Eq("work", launch.start.GetTarget().GetInstance(), "launch instance")
+	c.Eq(f.installs.liveRows()[0].ID, launch.start.GetInstallId(), "the remote records the recipe id")
+
+	for _, field := range f.launcher.rpcFields() {
+		c.NotStrContains(field, launch.ticket, "the ticket must not appear in any RPC field")
+	}
+
+	// A real one-shot grant, bound to the row, that MINTS a credential: a
+	// detached process has no other way to hold one.
+	grant, ok := f.pool.Tickets().Redeem(launch.ticket)
+	c.Require().True(ok, "the launch carried a minted ticket")
+	c.True(grant.MintCredential, "a direct install redeems into a durable credential")
+	c.Eq("exec-1", grant.RowID, "the ticket is bound to the executor's row")
+	if _, ok := f.pool.Tickets().Redeem(launch.ticket); ok {
+		t.Fatal("a ticket redeemed twice")
+	}
+}
+
+// `running` means the instance was already held: nothing redeemed the ticket, so
+// it must be revoked rather than left for a process that will never read it.
+func TestDirectLaunchRunningSpendsNoTicket(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.reachableTarget()
+	f.launcher.launchResp = &executorpb.RemoteLaunchResponse{State: "running", Pid: 77}
+	f.directConnect("exec-1")
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	c.Require().NoError(err, "install")
+
+	launch, ok := f.launcher.launchAt(0)
+	c.Require().True(ok, "one direct launch")
+	if _, ok := f.pool.Tickets().Redeem(launch.ticket); ok {
+		t.Fatal("a `running` launch left its ticket redeemable; a late dial could still spend it")
+	}
+}
+
+// A target that never dials back is diagnosed by its OWN log, and the error names
+// the executor and the target — not the launcher alone, which is the machine that
+// was working.
+func TestDirectLaunchTimeoutErrorNamesTargetAndCarriesLogTail(t *testing.T) {
+	const tail = "executor: dial tcp 10.0.0.5:8035: connect: connection refused"
+
+	newTimeout := func(t *testing.T) *installFixture {
+		f := newInstallFixture(t)
+		f.reachableTarget()
+		f.state.connectTimeout = 25 * time.Millisecond
+		return f
+	}
+
+	t.Run("with a log tail", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newTimeout(t)
+		f.launcher.tailText = tail
+
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+		var ce *connectapi.ControllerError
+		c.Require().True(errors.As(err, &ce), "a launch failure is a ControllerError, got %v", err)
+		c.Eq(protocol.ErrUnavailable, ce.Code, "timeout code")
+		c.StrContains(ce.Message,
+			"executor ublk-s2 on brent@ublk-s2 (via greyshift) did not connect within 25ms; remote log:",
+			"the timeout names the executor, its target and the launcher")
+		c.StrContains(ce.Message, tail, "the remote executor's own words ride the error")
+		c.Eq(1, f.launcher.tailCalls(), "the log is read exactly once")
+		c.Eq(int32(40), f.launcher.tails[0].GetLines(), "40 lines of it")
+	})
+
+	t.Run("with no readable log", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newTimeout(t)
+		f.launcher.tailErr = connect.NewError(connect.CodeUnavailable,
+			errors.New("ssh: connect to host brent@ublk-s2 port 22: refused"))
+
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+		var ce *connectapi.ControllerError
+		c.Require().True(errors.As(err, &ce), "a launch failure is a ControllerError, got %v", err)
+		c.StrContains(ce.Message, "(log unavailable:", "an unreadable tail is said out loud")
+	})
+}
+
+// The relay's timeout names the executor being launched FIRST and the launcher
+// only as the machine it went through: naming the launcher told an operator to
+// debug the wrong machine.
+func TestTunnelTimeoutNamesTheExecutorNotTheLauncher(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeTunnel)
+	f.state.connectTimeout = 25 * time.Millisecond
+
+	err := f.ctrl.launchInstalled(context.Background(), "exec-1")
+	var ce *connectapi.ControllerError
+	c.Require().True(errors.As(err, &ce), "a launch failure is a ControllerError, got %v", err)
+	c.True(strings.HasPrefix(ce.Message,
+		"executor ublk-s2 on brent@ublk-s2 (via greyshift) did not connect within 25ms; ssh said:"),
+		"the launched executor is named first and the launcher only as `via`: %s", ce.Message)
+}
+
+// A reinstall onto THIS row's own credential is not a collision: the executor.cred
+// beside the marker was put there by the launch this install is reinstalling.
+func TestReinstallOwnDirectCredentialIsNotAClobber(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	f.launcher.probeResults = []*executorpb.RemoteProbeResponse{
+		{Uname: "Linux x86_64", CredentialPresent: true, Marker: "recipe-1", BinaryPresent: true},
+		{Uname: "Linux x86_64", CredentialPresent: true, Marker: "recipe-1", BinaryPresent: true, Reach: "yes"},
+	}
+	f.directConnect("exec-1")
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	c.Require().NoError(err, "a reinstall over its own credential must proceed")
+	c.Eq(0, len(f.execs.creates), "the same executor row is reused")
+	c.Eq(1, f.launcher.launchCalls(), "and the direct install runs again")
+}
+
+// A credential that is NOT this install's is still a collision — on a first
+// install, and on a reinstall whose marker names another install.
+func TestForeignCredentialStillRefused(t *testing.T) {
+	const refused = "ublk-s2 already has a durable executor " +
+		"(${XDG_DATA_HOME:-$HOME/.local/share}/rafiki/profiles/work/executor.cred); " +
+		"use it, or remove that file first"
+
+	t.Run("first install", func(t *testing.T) {
+		f := newInstallFixture(t)
+		f.launcher.probeResults = []*executorpb.RemoteProbeResponse{{
+			Uname: "Linux x86_64", CredentialPresent: true,
+		}}
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReq(""))
+		expectControllerError(t, err, protocol.ErrAlreadyExists, refused)
+	})
+
+	t.Run("reinstall beside another install's marker", func(t *testing.T) {
+		f := newInstallFixture(t)
+		f.seedInstalledExecutorMode(executorinstall.ModeTunnel)
+		f.launcher.probeResults = []*executorpb.RemoteProbeResponse{
+			{Uname: "Linux x86_64", CredentialPresent: true, Marker: "0193-other-install"},
+			{Uname: "Linux x86_64", CredentialPresent: true, Marker: "0193-other-install"},
+		}
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReq(""))
+		expectControllerError(t, err, protocol.ErrAlreadyExists, refused)
+		assert.NewAborting(t).Eq(0, len(f.execs.creates), "nothing is written over a foreign credential")
+	})
+}
+
+// A reinstall that changes the mode REWRITES the recipe, so the next relaunch —
+// possibly after a daemon restart, with no memory of this call — drives the new
+// transport.
+func TestReinstallChangingModeUpdatesTheRecipe(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	f.probeReach("no", "curl: connection refused")
+	f.connectAs = "exec-1"
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(),
+		installReqMode("", executorinstall.ModeTunnel))
+	c.Require().NoError(err, "reinstall")
+
+	c.Eq(executorinstall.ModeTunnel, f.installs.liveRows()[0].Mode, "the recipe now records the relay")
+	c.Eq(1, f.installs.modes, "SetMode is called once, not on every reinstall")
+	c.Eq(1, f.launcher.serveCalls(), "and the relay is what ran")
+}
+
+// A recipe written before the mode column existed carries no mode, and that reads
+// as tunnel — which is exactly how it behaved.
+func TestRecipeWithoutModeReadsAsTunnel(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode("")
+	f.connectAs = "exec-1"
+
+	c.Require().NoError(f.ctrl.launchInstalled(context.Background(), "exec-1"), "relaunch")
+	c.Eq(1, f.launcher.serveCalls(), "an empty mode relaunches through the relay")
+	c.Eq(0, f.launcher.launchCalls(), "and never starts a detached process")
+}
+
+// A relaunch reads the STORED mode: a direct recipe dials again, and never opens
+// the relay.
+func TestRelaunchDirectUsesLaunchNotServe(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	launched := make(chan struct{})
+	var once sync.Once
+	f.launcher.onLaunch = func(*executorpb.RemoteLaunchStart) {
+		once.Do(func() { close(launched) })
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- f.ctrl.launchInstalled(context.Background(), "exec-1") }()
+	select {
+	case <-launched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the direct launch never ran")
+	}
+	c.Eq(0, f.launcher.serveCalls(), "a direct relaunch opens no ssh relay")
+	f.ctrl.installConnected("exec-1")
+	select {
+	case err := <-done:
+		c.NoError(err, "the connect announcement completes the launch")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the launch did not complete on the connect announcement")
+	}
+	c.Eq(1, f.launcher.launchCalls(), "one direct launch")
+	c.StrContains(f.state.outcomeOf("exec-1"), "ok: direct launch started in",
+		"the outcome names the transport and the state")
+}
+
+// Two concurrent relaunches of a direct executor cost ONE launch, exactly as they
+// cost one ssh session in the relay: the flight is keyed by executor id, not by
+// transport.
+func TestRelaunchCoalescesDirectLaunches(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+
+	// The leader is held INSIDE the launch until the followers have all arrived,
+	// so "they joined" is a fact rather than a scheduling hope.
+	launched := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	f.launcher.onLaunch = func(*executorpb.RemoteLaunchStart) {
+		once.Do(func() { close(launched) })
+		<-release
+	}
+
+	leaderDone := make(chan error, 1)
+	go func() { leaderDone <- f.ctrl.launchInstalled(context.Background(), "exec-1") }()
+	select {
+	case <-launched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leader never ran its launch")
+	}
+
+	// Followers whose contexts are already cancelled: each JOINS the in-flight
+	// launch and returns its own context's error instead of opening a launch of
+	// its own.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- f.ctrl.launchInstalled(cancelled, "exec-1")
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		c.ErrorIs(err, context.Canceled, "a coalesced caller returns its own context's error")
+	}
+
+	close(release)
+	f.ctrl.installConnected("exec-1")
+	select {
+	case err := <-leaderDone:
+		c.NoError(err, "the leader completes when the executor connects")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leader never returned after the executor connected")
+	}
+	c.Eq(1, f.launcher.launchCalls(), "five callers must cost ONE direct launch")
 }

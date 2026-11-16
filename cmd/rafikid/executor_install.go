@@ -105,7 +105,14 @@ type installLauncher interface {
 	Probe(ctx context.Context, target *executorpb.RemoteTarget, binaryPath string) (*executorpb.RemoteProbeResponse, error)
 	Push(ctx context.Context, target *executorpb.RemoteTarget, binaryPath, sha256 string, src io.Reader) error
 	Serve(ctx context.Context, start *executorpb.RemoteServeStart) (remoteServeStream, error)
-	Clean(ctx context.Context, target *executorpb.RemoteTarget, installID string) (bool, error)
+	// Launch starts a detached, self-dialling executor. ticket is a direct
+	// install's one secret, and it travels as the launch stream's stdin frame —
+	// never as a field of start.
+	Launch(ctx context.Context, start *executorpb.RemoteLaunchStart, ticket string) (*executorpb.RemoteLaunchResponse, error)
+	// LogTail reads the last lines of the target's executor.log, which is the
+	// only diagnostic a detached process leaves behind.
+	LogTail(ctx context.Context, target *executorpb.RemoteTarget, lines int32) (string, error)
+	Clean(ctx context.Context, target *executorpb.RemoteTarget, installID string, stop bool) (removed, stopped bool, err error)
 }
 
 // remoteServeStream is one RemoteServe bidi stream as the daemon uses it. The
@@ -182,16 +189,52 @@ func (l launcherRemote) Serve(ctx context.Context, start *executorpb.RemoteServe
 	return stream, nil
 }
 
-func (l launcherRemote) Clean(
-	ctx context.Context, target *executorpb.RemoteTarget, installID string,
-) (bool, error) {
-	resp, err := l.cl.RemoteClean(ctx, connect.NewRequest(&executorpb.RemoteCleanRequest{
-		Target: target, InstallId: installID,
+// Launch opens the client-streaming launch, sends the start frame and then the
+// ticket as the stream's only stdin frame, and half-closes before reading the
+// answer.
+func (l launcherRemote) Launch(
+	ctx context.Context, start *executorpb.RemoteLaunchStart, ticket string,
+) (*executorpb.RemoteLaunchResponse, error) {
+	stream := l.cl.RemoteLaunch(ctx)
+	if err := stream.Send(&executorpb.RemoteLaunchRequest{
+		Msg: &executorpb.RemoteLaunchRequest_Start{Start: start},
+	}); err != nil {
+		return nil, err
+	}
+	if err := stream.Send(&executorpb.RemoteLaunchRequest{
+		Msg: &executorpb.RemoteLaunchRequest_Stdin{Stdin: []byte(ticket + "\n")},
+	}); err != nil {
+		return nil, err
+	}
+	resp, err := stream.CloseAndReceive()
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (l launcherRemote) LogTail(
+	ctx context.Context, target *executorpb.RemoteTarget, lines int32,
+) (string, error) {
+	resp, err := l.cl.RemoteLogTail(ctx, connect.NewRequest(&executorpb.RemoteLogTailRequest{
+		Target: target, Lines: lines,
 	}))
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	return resp.Msg.GetRemoved(), nil
+	return resp.Msg.GetTail(), nil
+}
+
+func (l launcherRemote) Clean(
+	ctx context.Context, target *executorpb.RemoteTarget, installID string, stop bool,
+) (removed, stopped bool, err error) {
+	resp, err := l.cl.RemoteClean(ctx, connect.NewRequest(&executorpb.RemoteCleanRequest{
+		Target: target, InstallId: installID, StopProcess: stop,
+	}))
+	if err != nil {
+		return false, false, err
+	}
+	return resp.Msg.GetRemoved(), resp.Msg.GetStopped(), nil
 }
 
 // installState is the orchestrator's state and its seams. One Controller field
@@ -212,11 +255,12 @@ type installState struct {
 	// than sleeping 30s.
 	connectTimeout time.Duration
 
-	mu      sync.Mutex
-	locks   map[string]*installLock       // per (owner, machine)
-	flights map[string]*launchFlight      // per executor id, coalescing launches
-	serves  map[string]context.CancelFunc // per executor id, the live ssh session
-	waiters map[string][]chan struct{}    // per executor id, one-shot connect waiters
+	mu       sync.Mutex
+	locks    map[string]*installLock       // per (owner, machine)
+	flights  map[string]*launchFlight      // per executor id, coalescing launches
+	serves   map[string]context.CancelFunc // per executor id, the live ssh session
+	waiters  map[string][]chan struct{}    // per executor id, one-shot connect waiters
+	outcomes map[string]string             // per executor id, the last launch's outcome
 }
 
 func newInstallState(store executorinstall.Store, depot *executorDepot) *installState {
@@ -228,6 +272,7 @@ func newInstallState(store executorinstall.Store, depot *executorDepot) *install
 		flights:        map[string]*launchFlight{},
 		serves:         map[string]context.CancelFunc{},
 		waiters:        map[string][]chan struct{}{},
+		outcomes:       map[string]string{},
 	}
 }
 
@@ -370,6 +415,49 @@ func (c *Controller) installConnected(executorID string) {
 	}
 }
 
+// setOutcome records the last launch outcome for executorID, which is what a
+// listing shows as `last launch`. In-memory on purpose: it describes what THIS
+// daemon process did, and a daemon that never launched the executor has no
+// outcome to report rather than a stale one.
+func (s *installState) setOutcome(executorID, outcome string) {
+	s.mu.Lock()
+	s.outcomes[executorID] = outcome
+	s.mu.Unlock()
+}
+
+// outcomeOf returns the recorded last launch outcome for executorID, or "".
+func (s *installState) outcomeOf(executorID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.outcomes[executorID]
+}
+
+// recordLaunchOutcome writes the outcome text a listing shows. The failure arm
+// takes only the FIRST line: a launch error carries a remote log tail, and a
+// listing is one row per executor.
+func (c *Controller) recordLaunchOutcome(
+	executorID, mode, state string, took time.Duration, err error,
+) {
+	if c.install == nil {
+		return
+	}
+	if err != nil {
+		c.install.setOutcome(executorID, "failed: "+oneLine(err.Error()))
+		return
+	}
+	c.install.setOutcome(executorID,
+		fmt.Sprintf("ok: %s launch %s in %s", mode, state, took.Round(100*time.Millisecond)))
+}
+
+// oneLine is the first line of text, which is all a one-row listing shows.
+func oneLine(text string) string {
+	i := strings.IndexByte(text, '\n')
+	if i < 0 {
+		return text
+	}
+	return text[:i]
+}
+
 // requireInstaller is the one place the "not available here" answer is written.
 //
 // The two seams are checked with the store: an orchestrator without them is one
@@ -416,6 +504,86 @@ func installLauncherFailure(step, target string, err error) error {
 	}
 }
 
+// isUnimplemented reports whether a launcher answered CodeUnimplemented, which
+// is how a launcher built before the direct-dial RPCs says it has them not.
+func isUnimplemented(err error) bool {
+	return connect.CodeOf(err) == connect.CodeUnimplemented
+}
+
+// installModeAuto is the request spelling that asks the probe instead of naming a
+// transport; the empty string means the same thing.
+const installModeAuto = "auto"
+
+// validateInstallMode refuses an unknown spelling. It runs BEFORE any ssh round
+// trip: an unrecognised mode is a caller error, and spending a probe on it would
+// make a typo look like a broken target.
+func validateInstallMode(requested string) error {
+	switch requested {
+	case "", installModeAuto, executorinstall.ModeDirect, executorinstall.ModeTunnel:
+		return nil
+	}
+	return installErr(protocol.ErrInvalidArgs, "mode must be auto, direct or tunnel")
+}
+
+// chooseInstallMode resolves the requested mode against what the target actually
+// reported about reaching the daemon. It is pure: the decision is one function so
+// the refusal text, the reason recorded in the log and the stored mode can never
+// disagree.
+//
+// reach is the launcher's own answer — "yes", "no", "unavailable", or "" from a
+// launcher too old to check. Only "yes" can carry a direct install: everything
+// else either falls back to the relay (under auto) or refuses (when direct was
+// demanded).
+func chooseInstallMode(requested, reach, detail string) (mode, why string, err error) {
+	if err := validateInstallMode(requested); err != nil {
+		return "", "", err
+	}
+	direct := reach == "yes"
+	reachWhy := fmt.Sprintf("target reaches the daemon (%s)", detail)
+	switch requested {
+	case executorinstall.ModeTunnel:
+		return executorinstall.ModeTunnel, "tunnel requested", nil
+	case executorinstall.ModeDirect:
+		if direct {
+			return executorinstall.ModeDirect, reachWhy, nil
+		}
+		return "", "", installErr(protocol.ErrFailedPrecondition,
+			"direct install requires the target to reach the daemon, and it cannot (reach=%s: %s); "+
+				"use mode=tunnel, or fix the route and retry", reach, detail)
+	}
+	if direct {
+		return executorinstall.ModeDirect, reachWhy, nil
+	}
+	if reach == "" || reach == "unavailable" {
+		return executorinstall.ModeTunnel, "launcher has no dialable address", nil
+	}
+	return executorinstall.ModeTunnel,
+		fmt.Sprintf("target cannot reach the daemon: %s (%s)", reach, detail), nil
+}
+
+// launcherTooOldErr is the refusal for a launcher whose binary predates the
+// direct-dial RPCs: it cannot start a self-dialling executor, and the answer
+// names the machine that must be upgraded.
+func launcherTooOldErr(le execpool.LiveExecutor) error {
+	return installErr(protocol.ErrFailedPrecondition,
+		"launcher %s is too old to start a self-dialling executor; upgrade it or use mode=tunnel",
+		launcherMachineName(le.Executor))
+}
+
+// probeFailure renders a probe that never ran. CodeUnimplemented from a probe
+// under a REQUIRED direct install is the same old-launcher answer the launch
+// path gives, so it names the machine to upgrade; under auto there is nothing to
+// fall back TO — a probe that never answered carries no uname and no binary
+// answer, so there is no install to run over the relay either — and it stays the
+// launcher's own failure.
+func probeFailure(launcher execpool.LiveExecutor, requested, dest string, err error) error {
+	slog.Warn("executor install: probe", "target", dest, "error", sshText(err))
+	if isUnimplemented(err) && requested == executorinstall.ModeDirect {
+		return launcherTooOldErr(launcher)
+	}
+	return installLauncherFailure("probe", dest, err)
+}
+
 // InstallExecutor installs an executor on an ssh target through a launcher
 // executor, and returns once it has connected.
 func (c *Controller) InstallExecutor(
@@ -452,6 +620,13 @@ func (c *Controller) InstallExecutor(
 	labels, lerr := executorTrustLabelsFor(caller.OwnerName, name, req.GetLabels())
 	if lerr != nil {
 		return nil, lerr
+	}
+	// The requested mode is validated here, before any ssh round trip: an
+	// unknown spelling is a caller error, and a probe spent on it would read as
+	// a broken target.
+	requested := strings.TrimSpace(req.GetMode())
+	if merr := validateInstallMode(requested); merr != nil {
+		return nil, merr
 	}
 
 	// 2. The launcher, and what it is allowed to do.
@@ -508,7 +683,7 @@ func (c *Controller) InstallExecutor(
 	target := &executorpb.RemoteTarget{Destination: dest, Instance: instance}
 	probe, err := launcherClient.Probe(ctx, target, "")
 	if err != nil {
-		return nil, installLauncherFailure("probe", dest, err)
+		return nil, probeFailure(launcher, requested, dest, err)
 	}
 	goos, goarch, perr := platformFromUname(probe.GetUname())
 	if perr != nil {
@@ -522,13 +697,31 @@ func (c *Controller) InstallExecutor(
 	binaryPath := depotRemotePath(bin)
 	probe, err = launcherClient.Probe(ctx, target, binaryPath)
 	if err != nil {
-		return nil, installLauncherFailure("probe", dest, err)
+		return nil, probeFailure(launcher, requested, dest, err)
 	}
+	slog.Info("executor install: probe", "target", dest, "uname", probe.GetUname(),
+		"binaryPresent", probe.GetBinaryPresent(), "reach", probe.GetReach(),
+		"reachDetail", probe.GetReachDetail())
 
-	// 5. The clobber guard: an install proceeds only onto a target that is empty
+	// 5. The mode: the operator's requirement, else what the target proved it
+	//    can do. It is resolved ONCE, here, and stored on the recipe — a
+	//    relaunch reads it and never re-probes, because a changed network is an
+	//    operator's reinstall, not a daemon's inference.
+	mode, why, merr := chooseInstallMode(requested, probe.GetReach(), probe.GetReachDetail())
+	if merr != nil {
+		return nil, merr
+	}
+	slog.Info("executor install: mode chosen", "target", dest, "mode", mode,
+		"requested", requested, "why", why)
+
+	// 6. The clobber guard: an install proceeds only onto a target that is empty
 	//    for its namespace, or that carries THIS row's own install. No --force:
 	//    clearing it is one command an agent or a human runs deliberately.
-	if probe.GetCredentialPresent() {
+	//
+	//    A credential is the one exception a REINSTALL makes, and only when the
+	//    marker beside it is this very row's: an executor.cred that this install
+	//    wrote is not a collision with somebody else's executor.
+	if probe.GetCredentialPresent() && !(reinstall && probe.GetMarker() == installRow.ID) {
 		return nil, installErr(protocol.ErrAlreadyExists,
 			"%s already has a durable executor (%s); use it, or remove that file first",
 			name, remoteCredentialPath(instance))
@@ -539,32 +732,48 @@ func (c *Controller) InstallExecutor(
 			name, remoteMarkerPath(instance), marker, dest, remoteMarkerPath(instance))
 	}
 
-	// 6. Push the binary only when the target does not already have THOSE bytes:
+	// 7. Push the binary only when the target does not already have THOSE bytes:
 	//    the path is content-addressed, so a present file is the same build.
-	if !probe.GetBinaryPresent() {
+	staged := !probe.GetBinaryPresent()
+	if staged {
 		if err := c.pushInstalledBinary(ctx, launcherClient, target, binaryPath, bin); err != nil {
 			return nil, err
 		}
 	}
+	binaryAction := "reused"
+	if staged {
+		binaryAction = "staged"
+	}
+	slog.Info("executor install: binary", "target", dest, "state", binaryAction, "path", binaryPath)
 
-	// 7. The durable side. A FRESH install creates the executor row and the
+	// 8. The durable side. A FRESH install creates the executor row and the
 	//    recipe; a REINSTALL reuses both, so `executor: <name>` and pinned
 	//    bindings keep meaning the same executor.
 	platform := goos + "/" + goarch
 	executorID := existing.ID
 	installRowID := installRow.ID
 	if !reinstall {
-		executorID, installRowID, err = c.createInstalledRow(ctx, caller, req, labels, launcher, dest, instance, platform)
+		executorID, installRowID, err = c.createInstalledRow(ctx, caller, req, labels, launcher, dest, instance, platform, mode)
 		if err != nil {
 			return nil, err
 		}
-	} else if installRow.LauncherExecutorID != launcher.Executor.ID || installRow.Platform != platform {
-		if serr := c.install.store.SetLauncher(ctx, installRow.ID, launcher.Executor.ID, platform); serr != nil {
-			return nil, executorinstallErr(serr)
+	} else {
+		if installRow.LauncherExecutorID != launcher.Executor.ID || installRow.Platform != platform {
+			if serr := c.install.store.SetLauncher(ctx, installRow.ID, launcher.Executor.ID, platform); serr != nil {
+				return nil, executorinstallErr(serr)
+			}
+		}
+		// The recipe records the transport that is about to be used, so the NEXT
+		// relaunch — possibly after a daemon restart, with no memory of this
+		// call — drives the same one.
+		if installRow.EffectiveMode() != mode {
+			if serr := c.install.store.SetMode(ctx, installRow.ID, mode); serr != nil {
+				return nil, executorinstallErr(serr)
+			}
 		}
 	}
 
-	// 8. Launch, and refuse to leave a half-installed executor behind. A FRESH
+	// 9. Launch, and refuse to leave a half-installed executor behind. A FRESH
 	//    row that never connects is deleted and its recipe tombstoned: the next
 	//    attempt must look like a first attempt, not like a collision with
 	//    something that was never installed.
@@ -576,8 +785,26 @@ func (c *Controller) InstallExecutor(
 			}
 		}()
 	}
-	if err := c.launchInstalled(ctx, executorID); err != nil {
-		return nil, err
+	if lerr := c.launchInstalled(ctx, executorID); lerr != nil {
+		// A launcher too old to start a self-dialling executor is not a broken
+		// target: under auto the install falls back to the relay and records the
+		// transport that actually worked, while a REQUIRED direct install names
+		// the machine that has to be upgraded.
+		if !isUnimplemented(lerr) {
+			return nil, lerr
+		}
+		if requested == executorinstall.ModeDirect {
+			return nil, launcherTooOldErr(launcher)
+		}
+		mode = executorinstall.ModeTunnel
+		if serr := c.install.store.SetMode(ctx, installRowID, mode); serr != nil {
+			return nil, executorinstallErr(serr)
+		}
+		slog.Info("executor install: mode chosen", "target", dest, "mode", mode,
+			"requested", requested, "why", "launcher is too old to start a self-dialling executor")
+		if lerr = c.launchInstalled(ctx, executorID); lerr != nil {
+			return nil, lerr
+		}
 	}
 	launched = true
 	return c.installedProtoRow(ctx, executorID)
@@ -589,7 +816,7 @@ func (c *Controller) InstallExecutor(
 // target to store, leak, or rotate.
 func (c *Controller) createInstalledRow(
 	ctx context.Context, caller installCaller, req *rafikiv1.InstallExecutorRequest,
-	labels map[string]string, launcher execpool.LiveExecutor, dest, instance, platform string,
+	labels map[string]string, launcher execpool.LiveExecutor, dest, instance, platform, mode string,
 ) (executorID, installRowID string, err error) {
 	labels[installedViaLabel] = launcherMachineName(launcher.Executor)
 	labels[installedTargetLabel] = dest
@@ -616,6 +843,7 @@ func (c *Controller) createInstalledRow(
 		Root:               req.GetRoot(),
 		InstalledByChild:   caller.ChildID,
 		Platform:           platform,
+		Mode:               mode,
 	}); ierr != nil {
 		// No recipe, no executor: the row we just made goes away with it.
 		c.deleteExecutorRow(e.ID)
@@ -943,7 +1171,12 @@ func (c *Controller) launchInstalled(ctx context.Context, executorID string) err
 }
 
 // runLaunch is launchInstalled's body, run once per flight.
-func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
+//
+// The outcome is recorded on EVERY failure past the recipe, not only on one that
+// reached the launcher: a listing that showed the previous launch's `ok` after
+// this one failed for want of a connected launcher would be a lie about the last
+// thing the daemon tried.
+func (c *Controller) runLaunch(ctx context.Context, executorID string) (err error) {
 	row, ok, err := c.install.store.ByExecutor(ctx, executorID)
 	if err != nil {
 		return executorinstallErr(err)
@@ -952,6 +1185,13 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
 		return installErr(protocol.ErrFailedPrecondition,
 			"executor %s was not installed over ssh", shortID(executorID))
 	}
+	mode := row.EffectiveMode()
+	started := time.Now()
+	state := ""
+	defer func() {
+		c.recordLaunchOutcome(executorID, mode, state, time.Since(started), err)
+	}()
+
 	launcher, live := c.liveExecutor(row.LauncherExecutorID)
 	if !live {
 		return installErr(protocol.ErrUnavailable,
@@ -972,12 +1212,31 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
 		return installErr(protocol.ErrFailedPrecondition, "%s", berr.Error())
 	}
 
+	// The transport is the RECIPE's: it was decided once, at install, from the
+	// operator's override or the target's own reachability, and a relaunch reads
+	// it rather than re-probing. A changed network is an operator's reinstall.
+	if mode == executorinstall.ModeDirect {
+		state, err = c.runDirectLaunch(ctx, executorID, row, launcher, bin)
+	} else {
+		state, err = c.runTunnelLaunch(ctx, executorID, row, launcher, bin)
+	}
+	return err
+}
+
+// runTunnelLaunch is the relay: the launcher opens one ssh whose stdio carries
+// the executor protocol, so the target dials nothing and lives exactly as long
+// as that session.
+func (c *Controller) runTunnelLaunch(
+	ctx context.Context, executorID string, row executorinstall.Row,
+	launcher execpool.LiveExecutor, bin depotBinary,
+) (string, error) {
+	started := time.Now()
 	// The ticket is the remote's credential: one shot, bound to the durable row,
 	// and written as the first line of the relayed stdin so it is never in an
 	// argv on either machine.
 	ticket, terr := c.execPool.Tickets().Mint(execpool.TicketGrant{RowID: executorID})
 	if terr != nil {
-		return installErr(protocol.ErrInternal, "mint an install ticket: %s", terr.Error())
+		return "", installErr(protocol.ErrInternal, "mint an install ticket: %s", terr.Error())
 	}
 	// Every way out that is not a connection discards the ticket: a credential
 	// minted for a session nobody is waiting for is one an ssh that finally
@@ -1002,7 +1261,7 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
 	if lerr != nil {
 		cancelServe()
 		discardTicket()
-		return lerr
+		return "", lerr
 	}
 	stream, serr := launcherClient.Serve(serveCtx, &executorpb.RemoteServeStart{
 		Target:     &executorpb.RemoteTarget{Destination: row.Target, Instance: row.Instance},
@@ -1013,19 +1272,21 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
 	if serr != nil {
 		cancelServe()
 		discardTicket()
-		return installLauncherFailure("launch", row.Target, serr)
+		return "", installLauncherFailure("launch", row.Target, serr)
 	}
 	conn := newRemoteServeConn(stream, executorID, row.Target, launcherMachineName(launcher.Executor))
 	if _, werr := conn.Write([]byte(ticket + "\n")); werr != nil {
 		cancelServe()
 		discardTicket()
 		conn.Close()
-		return installLauncherFailure("launch", row.Target, werr)
+		return "", installLauncherFailure("launch", row.Target, werr)
 	}
 
 	// From here the ssh session outlives this function: ServeConn runs the
 	// ordinary executor upgrade on the tunnelled connection, and the executor
 	// connects into the pool exactly as a dialled one does.
+	slog.Info("executor install: launch", "target", row.Target,
+		"mode", executorinstall.ModeTunnel, "state", "relay")
 	c.install.setServe(executorID, cancelServe)
 	go func() {
 		if err := c.install.serve(serveCtx, conn); err != nil && serveCtx.Err() == nil {
@@ -1039,7 +1300,10 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
 	defer timer.Stop()
 	select {
 	case <-connected:
-		return nil
+		slog.Info("executor install: connected", "executor", c.launcherName(ctx, executorID),
+			"target", row.Target, "mode", executorinstall.ModeTunnel,
+			"took", time.Since(started).Round(100*time.Millisecond))
+		return "relay", nil
 	case <-conn.exited():
 		// The remote process ended before it ever spoke the upgrade.
 		code, signal := conn.exitCode()
@@ -1048,13 +1312,17 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
 			"exitCode", code, "signal", signal)
 		c.install.cancelServe(executorID)
 		discardTicket()
-		return installErr(protocol.ErrUnavailable, "relaunch failed via %s: %s",
+		return "", installErr(protocol.ErrUnavailable, "relaunch failed via %s: %s",
 			launcherMachineName(launcher.Executor), conn.stderrTail())
 	case <-timer.C:
 		discardTicket()
 		c.install.cancelServe(executorID)
-		return installErr(protocol.ErrUnavailable, "executor %s did not connect within %s; ssh said: %s",
-			installNameOf(launcher.Executor), c.install.connectTimeout, conn.stderrTail())
+		// The executor being launched is named FIRST. Naming the launcher here
+		// told an operator to go and debug the machine that was working.
+		return "", installErr(protocol.ErrUnavailable,
+			"executor %s on %s (via %s) did not connect within %s; ssh said: %s",
+			c.launcherName(ctx, executorID), row.Target, launcherMachineName(launcher.Executor),
+			c.install.connectTimeout, conn.stderrTail())
 	case <-ctx.Done():
 		// The caller gave up, and it was the leader whose context this flight
 		// rides, so the flight is over: nobody is waiting on this session.
@@ -1064,12 +1332,124 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
 		// credential for a session nobody awaits, which an ssh that finally starts
 		// could still redeem) and end the session.
 		if _, live := c.liveExecutor(executorID); live {
-			return nil
+			return "relay", nil
 		}
 		discardTicket()
 		c.install.cancelServe(executorID)
-		return ctx.Err()
+		return "", ctx.Err()
 	}
+}
+
+// runDirectLaunch starts a DETACHED executor on the target that dials the daemon
+// itself, and waits for the connection.
+//
+// The ticket it carries mints a credential on redemption, so the process keeps
+// authenticating on its own after this call returns, after the launcher goes to
+// sleep, and after the daemon restarts. Nothing about the launch is retried
+// here: the daemon's lazy relaunch is what brings a dead process back.
+func (c *Controller) runDirectLaunch(
+	ctx context.Context, executorID string, row executorinstall.Row,
+	launcher execpool.LiveExecutor, bin depotBinary,
+) (string, error) {
+	// MintCredential is what makes this ticket an ENROLMENT as well as a
+	// one-shot: a detached process has no other way to hold a credential, and
+	// rotating it invalidates the previous launch's.
+	ticket, terr := c.execPool.Tickets().Mint(execpool.TicketGrant{
+		RowID: executorID, MintCredential: true,
+	})
+	if terr != nil {
+		return "", installErr(protocol.ErrInternal, "mint an install ticket: %s", terr.Error())
+	}
+	discardTicket := func() { c.execPool.Tickets().Revoke(ticket) }
+
+	// Registered BEFORE the launch runs: the remote process can dial the daemon
+	// before the launch's ssh has even returned.
+	connected, unwatch := c.install.watchConnect(executorID)
+	defer unwatch()
+
+	// The ssh that starts the process is bound to the DAEMON's lifetime, exactly
+	// like the tunnel's session: a caller that times out did not start this
+	// process, and cancelling the launch mid-flight would leave a target whose
+	// executor may or may not exist.
+	parent := c.baseCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	launchCtx, cancelLaunch := context.WithCancel(parent)
+	defer cancelLaunch()
+
+	launcherClient, lerr := c.launcherFor(launcher)
+	if lerr != nil {
+		discardTicket()
+		return "", lerr
+	}
+	start := &executorpb.RemoteLaunchStart{
+		Target:     &executorpb.RemoteTarget{Destination: row.Target, Instance: row.Instance},
+		BinaryPath: depotRemotePath(bin),
+		Root:       row.Root,
+		InstallId:  row.ID,
+	}
+	started := time.Now()
+	resp, lerr := launcherClient.Launch(launchCtx, start, ticket)
+	if lerr != nil {
+		// The ticket goes even on a failure the launcher never saw: a launch
+		// that timed out on the client side can still have reached the target.
+		discardTicket()
+		slog.Warn("executor install: launch", "target", row.Target,
+			"mode", executorinstall.ModeDirect, "error", sshText(lerr))
+		return "", installLauncherFailure("launch", row.Target, lerr)
+	}
+	state := resp.GetState()
+	slog.Info("executor install: launch", "target", row.Target,
+		"mode", executorinstall.ModeDirect, "state", state, "pid", resp.GetPid())
+	if state == "running" {
+		// The instance was already held, so nothing redeemed this ticket: the
+		// live process reconnects on its own and a minted credential nobody read
+		// would only be one more secret to revoke later.
+		discardTicket()
+	}
+
+	timer := time.NewTimer(c.install.connectTimeout)
+	defer timer.Stop()
+	select {
+	case <-connected:
+		slog.Info("executor install: connected", "executor", c.launcherName(ctx, executorID),
+			"target", row.Target, "mode", executorinstall.ModeDirect,
+			"took", time.Since(started).Round(100*time.Millisecond))
+		return state, nil
+	case <-ctx.Done():
+		if _, live := c.liveExecutor(executorID); live {
+			return state, nil
+		}
+		discardTicket()
+		return state, ctx.Err()
+	case <-timer.C:
+		discardTicket()
+		tail := c.remoteLogTail(ctx, launcherClient, row)
+		msg := fmt.Sprintf("executor %s on %s (via %s) did not connect within %s; remote log:\n%s",
+			c.launcherName(ctx, executorID), row.Target, launcherMachineName(launcher.Executor),
+			c.install.connectTimeout, tail)
+		slog.Warn("executor install: launch", "target", row.Target,
+			"mode", executorinstall.ModeDirect, "error", oneLine(msg))
+		return state, installErr(protocol.ErrUnavailable, "%s", msg)
+	}
+}
+
+// remoteLogTail reads the target's executor.log for a failure message. A
+// detached process's only diagnostic is that file, and a tail that cannot be
+// read is still worth saying out loud rather than an error that reads complete.
+func (c *Controller) remoteLogTail(
+	ctx context.Context, launcher installLauncher, row executorinstall.Row,
+) string {
+	tail, err := launcher.LogTail(ctx,
+		&executorpb.RemoteTarget{Destination: row.Target, Instance: row.Instance}, 40)
+	if err != nil {
+		return fmt.Sprintf("(log unavailable: %s)", sshText(err))
+	}
+	if strings.TrimSpace(tail) == "" {
+		return "(executor.log is empty)"
+	}
+	return tail
 }
 
 // UninstallExecutor removes an executor this lineage installed: the ssh session
@@ -1158,9 +1538,12 @@ func (c *Controller) cleanInstallMarker(ctx context.Context, row executorinstall
 			"launcher", shortID(row.LauncherExecutorID), "target", row.Target, "error", err)
 		return
 	}
-	removed, cerr := launcher.Clean(ctx, &executorpb.RemoteTarget{
+	// Marker-only (stop=false): a direct executor's process is not held by this
+	// daemon, so the row deletion below is what ends it — its next reconnect is
+	// refused. Nothing in THIS path signals a remote process.
+	removed, _, cerr := launcher.Clean(ctx, &executorpb.RemoteTarget{
 		Destination: row.Target, Instance: row.Instance,
-	}, row.ID)
+	}, row.ID, false)
 	if cerr != nil {
 		slog.Warn("uninstall: could not remove the target's install marker; the next install will name it",
 			"target", row.Target, "install", row.ID, "error", cerr)
@@ -1247,10 +1630,13 @@ func (c *Controller) resolveInstallExecutor(
 }
 
 // installDisplay is the installed-row decoration the ExecutorRow mapping adds:
-// the launcher's machine name and the ssh destination.
+// the launcher's machine name, the ssh destination, the stored transport and
+// the outcome of the last launch this daemon performed.
 type installDisplay struct {
-	Via    string
-	Target string
+	Via        string
+	Target     string
+	Mode       string
+	LastLaunch string
 }
 
 // installDisplays returns that decoration for every LIVE install row, keyed by
@@ -1297,7 +1683,11 @@ func (c *Controller) installDisplaysFor(
 		} else if installed, ok := byID[r.ExecutorID]; ok {
 			via = installed.Labels[installedViaLabel]
 		}
-		out[r.ExecutorID] = installDisplay{Via: via, Target: r.Target}
+		view := installDisplay{Via: via, Target: r.Target, Mode: r.EffectiveMode()}
+		if c.install != nil {
+			view.LastLaunch = c.install.outcomeOf(r.ExecutorID)
+		}
+		out[r.ExecutorID] = view
 	}
 	return out
 }
@@ -1307,7 +1697,9 @@ func (c *Controller) installDisplayFor(ctx context.Context, executorID string) i
 	return c.installDisplays(ctx)[executorID]
 }
 
-// launcherName names a launcher executor for an error message.
+// launcherName names an executor row for an error message: its machine label,
+// else a short id. Both halves of an install message use it — the executor being
+// launched and the launcher doing the launching are different rows.
 func (c *Controller) launcherName(ctx context.Context, executorID string) string {
 	if executorID == "" {
 		return ""
@@ -1463,6 +1855,8 @@ func protoExecutorRow(e executors.Executor, connectedAt time.Time, view installD
 		Connected:       e.Connected,
 		InstalledVia:    view.Via,
 		InstalledTarget: view.Target,
+		InstallMode:     view.Mode,
+		LastLaunch:      view.LastLaunch,
 	}
 	if !connectedAt.IsZero() {
 		out.ConnectedAt = timestamppb.New(connectedAt)
