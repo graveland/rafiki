@@ -335,9 +335,10 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 
 	switch scheme {
 	case upgradeconn.SchemeTicket:
-		// A transient executor: no row, no credential, no enrollment. The
-		// ticket was minted over an authenticated control connection, and
-		// redeeming it is what that connection's authentication buys.
+		// A ticket was minted over an authenticated control connection, and
+		// redeeming it is what that connection's authentication buys. What it
+		// buys depends on the grant: a row-less grant stands for a transient
+		// executor, a row-bound one authenticates an existing durable row.
 		grant, ok := p.tickets.Redeem(secret)
 		if !ok {
 			// Terminal. A ticket is one-shot and tied to a control
@@ -348,7 +349,31 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 				Reason: "session ticket is unknown, already used, or revoked",
 			}
 		}
-		e, transient = grant.Executor(), true
+		if grant.RowID == "" {
+			// A transient executor: no row, no credential, no enrollment.
+			e, transient = grant.Executor(), true
+		} else {
+			// A row-bound ticket: the ticket is the credential, the ROW is the
+			// identity — every gating fact (isolation, workspace_mode, roots,
+			// admits, owner) comes from the store, exactly as it does for a
+			// Bearer credential. Nothing is synthesised from the grant, and
+			// `transient` stays false, so admission, refreshRow and parking all
+			// take the durable path.
+			var err error
+			e, err = p.store.Get(r.Context(), grant.RowID)
+			if err != nil {
+				return admission{}, nil, authRefusal(err)
+			}
+			if !e.Enabled {
+				// The row exists and is switched off. Admitting it anyway would
+				// let a control connection's ticket undo `rafiki executor
+				// disable`, which is a revocation.
+				return admission{}, nil, &upgradeconn.Refusal{
+					Status: http.StatusUnauthorized,
+					Reason: "executor is disabled",
+				}
+			}
+		}
 	case upgradeconn.SchemeEnroll:
 		// First enrollment.
 		vals, err := url.ParseQuery(r.Header.Get(upgradeconn.HeaderSelfReported))

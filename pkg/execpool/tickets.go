@@ -10,8 +10,9 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 )
 
-// TicketGrant is everything the daemon knows about a transient executor before
-// it connects.
+// TicketGrant is everything the daemon knows about the executor a ticket admits
+// before it connects: the fields a TRANSIENT executor is synthesised from, or
+// the id of the durable row a row-bound ticket authenticates.
 //
 // Every field is written by the daemon from an AUTHENTICATED control
 // connection — never from anything the executor says about itself. That is
@@ -24,6 +25,18 @@ type TicketGrant struct {
 	Owner       string
 	MachineName string
 	Roots       []string
+	// RowID, when set, admits the EXISTING durable row with this id: every
+	// other field is ignored.
+	//
+	// The two shapes answer two different questions. A row-less grant stands
+	// for a session executor that exists only while a control connection is
+	// open, so the grant IS the row. A row-bound grant is how an executor that
+	// already has a row — installed over ssh, say — presents a fresh one-shot
+	// credential on each launch: the ticket buys this connection, and the row
+	// is the identity, read from the store rather than synthesised. It is the
+	// same authority a Bearer credential carries, only minted by a control
+	// connection instead of issued at enrollment.
+	RowID string
 	// OwnerUserID is the durable id of the identity this session executor
 	// serves — "" for the UDS's unowned fallback, exactly like a child's own
 	// OwnerUserID. It is what selection's ownership check compares against,
@@ -31,7 +44,9 @@ type TicketGrant struct {
 	OwnerUserID string
 }
 
-// Executor synthesises the in-memory row this grant stands for.
+// Executor synthesises the in-memory row this grant stands for. It is the
+// TRANSIENT shape only: a row-bound grant has no synthesised row, because the
+// store's row is the identity (see RowID).
 func (g TicketGrant) Executor() executors.Executor {
 	return executors.Executor{
 		ID: g.ExecutorID,
