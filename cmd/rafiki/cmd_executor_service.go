@@ -809,7 +809,7 @@ func captureExecutorEnv(environ []string) map[string]string {
 // executorServiceBackendStrict instead.
 func executorServiceBackend(cmd *cobra.Command) (serviceBackend, error) {
 	applyExecutorInstance(cmd)
-	return newExecutorServiceBackend(), nil
+	return executorServiceBackendFor(), nil
 }
 
 // executorServiceBackendStrict is executorServiceBackend for the verbs that
@@ -821,7 +821,7 @@ func executorServiceBackendStrict(cmd *cobra.Command) (serviceBackend, error) {
 	if err := requireExecutorInstance(cmd); err != nil {
 		return nil, err
 	}
-	return newExecutorServiceBackend(), nil
+	return executorServiceBackendFor(), nil
 }
 
 func newExecutorServiceUninstallCmd() *cobra.Command {

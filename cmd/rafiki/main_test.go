@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -33,6 +34,22 @@ func TestMain(m *testing.M) {
 	// tests creates a profiles.toml in the developer's real ~/.config/rafiki.
 	os.Setenv("XDG_STATE_HOME", dir)
 	os.Setenv("XDG_CONFIG_HOME", dir)
+	// DATA and CACHE, and HOME with them: the executor verbs resolve
+	// paths.DataDir()/CacheDir() and the unit's own state from these, and a test
+	// that runs one without isolating them reads and WRITES the developer's real
+	// ~/.local/share/rafiki and ~/.cache/rafiki. HOME covers the launchd plist
+	// path (~/Library/LaunchAgents) and everything else that expands a leading
+	// tilde, so a service verb reached from a test can never address the unit the
+	// developer is actually running.
+	home := filepath.Join(dir, "home")
+	for _, d := range []string{home, filepath.Join(home, "data"), filepath.Join(home, "cache")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			panic(err)
+		}
+	}
+	os.Setenv("HOME", home)
+	os.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	os.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
 	// Defense in depth, not a replacement for isolateProfiles(t): every test
 	// that reaches resolveProfile still needs isolateProfiles for its own
 	// isolated config/state tree. But a developer with e.g. RAFIKI_URL

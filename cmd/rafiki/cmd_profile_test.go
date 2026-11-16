@@ -36,9 +36,18 @@ import (
 func isolateProfiles(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
+	// DATA and CACHE too: an executor verb resolves paths.DataDir() and
+	// CacheDir() (its credential, env file, log and install marker), so a test
+	// that reaches one must neither read nor write the developer's real
+	// ~/.local/share/rafiki or ~/.cache/rafiki. HOME covers the launchd plist
+	// path, so no test can address the unit the developer is actually running.
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
 	for _, v := range []string{paths.URL, paths.Token, paths.Socket, paths.DefaultModel, paths.DefaultPreset, paths.DefaultLabels, "RAFIKI_PROFILE"} {
 		t.Setenv(v, "")
 	}
