@@ -69,7 +69,6 @@ func BuildDef(t Tool) msg.ToolDef {
 // the model's tools[] instead of advertising an operation that can only fail.
 func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 	r := NewRegistry()
-	routeSet := routedSet()
 	for _, bp := range br.All() {
 		var t Tool
 		if m, ok := bp.(Materializer); ok {
@@ -85,50 +84,64 @@ func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 			t = bp
 		}
 
-		// No executor means no workspace, so a tool that touches one is not
-		// registered at all. It used to fall back to running in this process,
-		// which for a daemon serving somebody else's child means their agent's
-		// bash on our filesystem — the outcome the executor architecture
-		// exists to prevent.
-		//
-		// A tool with no tier is NOT a workspace tool. Test registries build
-		// their own blueprints, which are absent from tierByTool by
-		// construction, and they must keep working.
-		if tier, known := TierOf(t.Name()); known && tier == TierWorkspace && opts.Executor == nil {
+		bound, keep := BindToExecutor(t, opts)
+		if !keep {
 			continue
 		}
-
-		// When an executor is configured, route machine-local tools to it.
-		// The proxy keeps the original name, description, and input schema
-		// — the model sees an identical surface — but Execute forwards to
-		// the executor process instead of running in-process.
-		if opts.Executor != nil && routeSet[t.Name()] {
-			// The daemon knows the chosen executor's served set (Describe.tools).
-			// A routed tool that set does not contain would be proxied to a
-			// registry that answers "unknown tool", so omit it from the child's
-			// envelope instead. nil means unknown (the socket path) and leaves
-			// routing unfiltered, preserving the pre-Describe behaviour.
-			if opts.ExecutorTools != nil && !opts.ExecutorTools[t.Name()] {
-				continue
-			}
-			t = &executorProxy{tool: t, client: opts.Executor}
-		}
-
-		// Every workspace call may name the executor it runs on. The wrap is
-		// outermost so it covers the proxied tools AND the RPC-backed
-		// background-job verbs, which reach opts.Executor through the ctx they
-		// are given. A daemon-tier tool never gains the argument, and neither
-		// does an untiered one (a test blueprint): those run on no executor, so
-		// an argument naming one could only be refused.
-		if opts.Executor != nil {
-			if tier, known := TierOf(t.Name()); known && tier == TierWorkspace {
-				t = &executorTargeted{tool: t}
-			}
-		}
-
-		r.Register(t)
+		r.Register(bound)
 	}
 	return r
+}
+
+// BindToExecutor applies the executor rules to one already-materialized tool:
+// whether it may be served at all, whether its call is proxied to the executor,
+// and whether it gains the per-call `executor` argument. keep is false when the
+// tool must not be served — it is a workspace tool and there is no executor.
+//
+// MaterializeAll uses it, and so does any surface that builds its tool list by
+// hand (the MCP face): the two must serve an identically shaped workspace tier,
+// because a tool the face served without the `executor` argument would fail on
+// the first call that had a machine to name.
+func BindToExecutor(t Tool, opts ToolOpts) (Tool, bool) {
+	tier, known := TierOf(t.Name())
+	// A tool with no tier is NOT a workspace tool. Test registries build their
+	// own blueprints, which are absent from tierByTool by construction, and
+	// they must keep working.
+	if !known || tier != TierWorkspace {
+		return t, true
+	}
+
+	// No executor means no workspace, so a tool that touches one is not served
+	// at all. It used to fall back to running in this process, which for a
+	// daemon serving somebody else's child means their agent's bash on our
+	// filesystem — the outcome the executor architecture exists to prevent.
+	if opts.Executor == nil {
+		return nil, false
+	}
+
+	// Route machine-local tools to the executor. The proxy keeps the original
+	// name, description, and input schema — the model sees an identical surface
+	// — but Execute forwards to the executor process instead of running
+	// in-process.
+	if routedToolSet()[t.Name()] {
+		// The daemon knows the chosen executor's served set (Describe.tools).
+		// A routed tool that set does not contain would be proxied to a
+		// registry that answers "unknown tool", so omit it from the child's
+		// envelope instead. nil means unknown (the socket path) and leaves
+		// routing unfiltered, preserving the pre-Describe behaviour.
+		if opts.ExecutorTools != nil && !opts.ExecutorTools[t.Name()] {
+			return nil, false
+		}
+		t = &executorProxy{tool: t, client: opts.Executor}
+	}
+
+	// Every workspace call may name the executor it runs on. The wrap is
+	// outermost so it covers the proxied tools AND the RPC-backed
+	// background-job verbs, which reach opts.Executor through the ctx they are
+	// given. A daemon-tier tool never gains the argument, and neither does an
+	// untiered one: those run on no executor, so an argument naming one could
+	// only be refused.
+	return &executorTargeted{tool: t}, true
 }
 
 // MaterializeOnly builds a Registry containing only the named blueprints.
@@ -180,6 +193,11 @@ func routedSet() map[string]bool {
 	}
 	return s
 }
+
+// routedToolSet is routedSet computed once. The routed set is a static property
+// of the tier table (tierByTool plus notRoutedYet), so rebuilding it for every
+// tool of every registry was pure waste.
+var routedToolSet = sync.OnceValue(routedSet)
 
 // executorProxy wraps a Tool so its Execute call is forwarded to an
 // ExecutorClient while the model sees the same definition.
