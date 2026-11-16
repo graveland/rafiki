@@ -276,7 +276,8 @@ seat in the same fleet. `rafiki preset list|get|put|delete` manages them;
 is a new version, a delete stamps every live version, `get NAME --history`
 reads them back). The JSON fields: `description, kind, provider, model,
 thinking, executor, labels, tools, skills, mcp_servers, context_files,
-system_prompt, append_system_prompt, max_cost, max_depth, max_children`.
+system_prompt, append_system_prompt, max_cost, max_depth, max_children,
+workspace_tools`.
 `tools`/`skills`/`mcp_servers` are tri-state: omitted = the kind's default
 (everything), `[]` = none, a list = exactly those.
 
@@ -285,7 +286,10 @@ override `model`/`thinking`/budgets, append to the system prompt, and only
 narrow `tools`/`skills`/`mcp_servers`/`context_files` — a preset's allowlist
 never widens, and its system prompt is never replaced. A claude-kind preset
 accepts only `model`, `provider`, `append_system_prompt`, `executor`,
-`labels` and budgets.
+`labels`, `workspace_tools` and budgets; `workspace_tools` pins whether the
+child uses Claude Code's built-in file and shell tools or rafiki's
+executor-routed ones (`--workspace-tools` on `rafiki create` and `rafiki preset
+put`, see [agent-cli.md](../agent-cli.md)).
 
 ## MCP servers and OAuth
 
