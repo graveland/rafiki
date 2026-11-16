@@ -371,10 +371,9 @@ func TestCoordinationPromptNamesRafikiSchedulers(t *testing.T) {
 }
 
 // TestCoordinationPromptNamesExecutorInstall pins the install sentence: a claude
-// child's own tools stop at its host, so the only way it learns it can provision
-// a machine for the agents it spawns is this line (the MCP face's tool
-// description says "agents you spawn can" without telling it the tool exists for
-// that purpose).
+// child's own tools stop at its host, so provisioning a machine for the agents it
+// spawns is stated where its other standing policy lives — the MCP face's tool
+// description carries only the "agents you spawn can" half.
 func TestCoordinationPromptNamesExecutorInstall(t *testing.T) {
 	c := assert.NewCollecting(t)
 	for _, want := range []string{"executor_install", "ssh", "agents you spawn can then use it by name"} {
