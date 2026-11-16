@@ -393,6 +393,81 @@ func TestReachableInstallerLineageBypassesSelector(t *testing.T) {
 		"a live installed executor on the installer's chain must not be listed twice; got %v", reachIDs(got))
 }
 
+// The installer's grant licenses a SELECTOR bypass and nothing else. An
+// executor's Admits selector and the workspace mode its row offers are
+// confinement facts — who may use the machine at all — so a descendant of the
+// installer does not get past them by being a descendant. Every case here uses
+// an OFFLINE installed row and a request selector the row cannot match, so rule
+// 1's pipeline rejects it on the same grounds and rule 2 is the only path that
+// could let it in: whatever is reachable here is rule 2's doing.
+func TestReachableInstallerGrantAppliesConfinement(t *testing.T) {
+	// lineageGrantEnv is one offline installed executor, installed by c_mid, and
+	// a request from c_mid's child that no selector can match the row with.
+	lineageGrantEnv := func(t *testing.T, row executors.Executor, req protocol.SpawnRequest) executorBinder {
+		t.Helper()
+		installs := installStoreWith(t, "u1", "exec-ublk")
+		c := reachController("u1", nil,
+			map[string]executors.Executor{"exec-ublk": row}, installs)
+		insertChildRow(c, "c_mid", "", "u1")
+		setInstaller(t, installs, "exec-ublk", "c_mid")
+		if req.ParentChildID == "" {
+			req.ParentChildID = "c_mid"
+		}
+		if req.ExecutorSelector == "" {
+			req.ExecutorSelector = "machine=greyshift"
+		}
+		return c.binderFor(req, executorOwner{Name: "u", UserID: "u1"})
+	}
+
+	t.Run("a workspace mode the row does not offer excludes it", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
+		row.WorkspaceMode = "pinned"
+		b := lineageGrantEnv(t, row, protocol.SpawnRequest{WorkspaceMode: "ephemeral"})
+
+		got, err := b.Reachable("c_gc")
+		ck.Require().NoError(err, "Reachable")
+		ck.Empty(got, "an ephemeral spawn must not be handed a pinned executor through lineage; got %v", reachIDs(got))
+	})
+
+	t.Run("an Admits selector that refuses the child excludes it", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
+		row.Admits = "owner=someone-else"
+		b := lineageGrantEnv(t, row, protocol.SpawnRequest{})
+
+		got, err := b.Reachable("c_gc")
+		ck.Require().NoError(err, "Reachable")
+		ck.Empty(got, "lineage must not walk a child past the row's own admission selector; got %v", reachIDs(got))
+	})
+
+	t.Run("the selector bypass survives when confinement allows it", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
+		row.Admits = "owner=u"
+		row.WorkspaceMode = "pinned"
+		b := lineageGrantEnv(t, row, protocol.SpawnRequest{WorkspaceMode: "pinned"})
+
+		got, err := b.Reachable("c_gc")
+		ck.Require().NoError(err, "Reachable")
+		ck.EqDeep([]string{"exec-ublk"}, reachIDs(got),
+			"the installer's grant still bypasses the SELECTOR — confinement alone must not refuse it; got %v", reachIDs(got))
+	})
+
+	t.Run("an unrequested workspace mode constrains nothing", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
+		row.Admits = "owner=u"
+		row.WorkspaceMode = "pinned"
+		b := lineageGrantEnv(t, row, protocol.SpawnRequest{})
+
+		got, err := b.Reachable("c_gc")
+		ck.Require().NoError(err, "Reachable")
+		ck.EqDeep([]string{"exec-ublk"}, reachIDs(got),
+			"a request that asks for no mode is offered any mode, as narrowByWorkspaceMode says; got %v", reachIDs(got))
+	})
+}
+
 // A sandbox-owned child returns its sandbox and nothing else, installed rows
 // included: the same exclusivity that keeps it off ordinary hosts.
 func TestReachableSandboxOwnedChildSeesNoInstalled(t *testing.T) {

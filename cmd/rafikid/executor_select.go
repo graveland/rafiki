@@ -324,11 +324,60 @@ func narrowByWorkspaceMode(candidates []executors.Executor, want string) []execu
 	}
 	var kept []executors.Executor
 	for _, e := range candidates {
-		if workspaceModeOrPinned(e.WorkspaceMode) == want {
+		if workspaceModeOffered(e.WorkspaceMode, want) {
 			kept = append(kept, e)
 		}
 	}
 	return kept
+}
+
+// workspaceModeOffered reports whether an executor whose row says rowMode may
+// serve a request asking for want. An empty want matches every mode, and an
+// unset row mode counts as pinned (see narrowByWorkspaceMode).
+//
+// It is its own predicate because two different paths ask this question:
+// narrowByWorkspaceMode (the live pipeline, and rule 1's offline installed rows)
+// and reachableInstalledCandidates' installer-lineage grant. A second spelling of
+// the comparison is exactly how that grant came to skip the check altogether.
+func workspaceModeOffered(rowMode, want string) bool {
+	return want == "" || workspaceModeOrPinned(rowMode) == want
+}
+
+// executorAdmitsChild reports whether an executor's OWN row lets this child use
+// it at all: it is enabled, it belongs to the child's owner, and its Admits
+// selector matches the child's labels.
+//
+// This is the confinement half of admission, shared by the two places a
+// candidate can come from: the narrowing pipeline every live row runs through
+// (effectiveExecutorSetOver) and reachableInstalledCandidates' installer-lineage
+// grant. Sharing it is the point — the grant licenses a SELECTOR bypass, and a
+// second copy of this predicate is how it grew into a bypass of the row's own
+// admission selector as well.
+//
+// It deliberately does not consult the requesting agent's selectors (those are
+// executors.Narrow, applied by the callers) or the workspace mode (that is
+// workspaceModeOffered): which of those a caller applies is what distinguishes
+// rule 1 from rule 2.
+func executorAdmitsChild(e executors.Executor, childLabels map[string]string, ownerUserID string) bool {
+	if !e.Enabled {
+		return false
+	}
+	// Ownership is checked BEFORE Admits, and in addition to it, never instead
+	// of it: an executor's owner_user_id must equal the child's own (empty on
+	// both sides counts as equal — an unowned executor serves only unowned
+	// children), with no admin exception. Admits can only narrow this further,
+	// never widen past it.
+	if e.OwnerUserID != ownerUserID {
+		return false
+	}
+	admits, err := executors.ParseSelector(e.Admits)
+	if err != nil {
+		// A malformed admission selector must EXCLUDE, never admit. An operator
+		// typo that silently opens a machine to every child is the failure this
+		// ordering exists to prevent.
+		return false
+	}
+	return admits.Matches(childLabels)
 }
 
 // effectiveExecutorSet is every live executor childID may use.
@@ -392,28 +441,11 @@ func (c *Controller) effectiveExecutorSetOver(rows []executors.Executor, childID
 	// Start from every candidate that ADMITS the child. The executor-side
 	// selector is evaluated once, against the child's own labels, because an
 	// agent-side selector alone is permissive by default: it says what the
-	// agent wants, not what the executor will take.
+	// agent wants, not what the executor will take. executorAdmitsChild is the
+	// same predicate the installer-lineage grant applies.
 	var set []executors.Executor
 	for _, e := range rows {
-		if !e.Enabled {
-			continue
-		}
-		// Ownership is checked BEFORE Admits, and in addition to it, never
-		// instead of it: an executor's owner_user_id must equal the child's
-		// own (empty on both sides counts as equal — an unowned executor
-		// serves only unowned children), with no admin exception. Admits can
-		// only narrow this further, never widen past it.
-		if e.OwnerUserID != ownerUserID {
-			continue
-		}
-		admits, err := executors.ParseSelector(e.Admits)
-		if err != nil {
-			// A malformed admission selector must EXCLUDE, never admit. An
-			// operator typo that silently opens a machine to every child is
-			// the failure this ordering exists to prevent.
-			continue
-		}
-		if !admits.Matches(childLabels) {
+		if !executorAdmitsChild(e, childLabels, ownerUserID) {
 			continue
 		}
 		set = append(set, e)
@@ -505,10 +537,14 @@ func (c *Controller) executorRowByID(ctx context.Context, executorID string) (ex
 //     therefore stays a name the agent can call, and the call relaunches it
 //     (controllerBinder.EnsureConnected).
 //  2. every installed executor whose InstalledByChild is the agent itself or
-//     one of its ANCESTORS is reachable to that lineage whatever the selector
-//     says: the installer's own grant, checked only against the owner rule.
-//     Authority flows down the tree, so a spawner's install is usable by what
-//     it spawned; a sibling tree's is not, because it is not on this chain.
+//     one of its ANCESTORS is reachable to that lineage whatever the SELECTOR
+//     says: the installer's own grant. Authority flows down the tree, so a
+//     spawner's install is usable by what it spawned; a sibling tree's is not,
+//     because it is not on this chain. The bypass is the selector and only the
+//     selector — the row's own confinement still applies, through the very
+//     predicates rule 1 uses (executorAdmitsChild, workspaceModeOffered, and
+//     the child-owned-sandbox drop), so lineage can never hand a child a
+//     machine the row refuses it or a workspace mode it does not offer.
 //
 // A read failure adds NOTHING and is logged: this path only ever WIDENS reach,
 // so a failure here must never widen it. Ordering is the caller's
@@ -585,7 +621,18 @@ func (c *Controller) reachableInstalledCandidates(
 			continue
 		}
 		e, ok := c.executorRowByID(ctx, row.ExecutorID)
-		if !ok || !e.Enabled || e.OwnerUserID != owner.UserID || isChildOwnedSandboxRow(e) {
+		if !ok || isChildOwnedSandboxRow(e) {
+			continue
+		}
+		// The grant skips the SELECTOR (and every lineage selector, which rule 1
+		// already folded into its set), never confinement: enabled, owned by this
+		// owner, and admitted by the row's own Admits selector, then the workspace
+		// mode it offers. Both predicates are rule 1's, not a second spelling, so
+		// the two rules cannot drift apart again.
+		if !executorAdmitsChild(e, childLabels, owner.UserID) {
+			continue
+		}
+		if !workspaceModeOffered(e.WorkspaceMode, req.WorkspaceMode) {
 			continue
 		}
 		add(e)
