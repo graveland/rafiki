@@ -81,7 +81,9 @@ type Store interface {
 	// RotateCredential mints a new durable credential for the live row id,
 	// replaces the stored digest in one statement, and returns the plaintext
 	// exactly once. The previous credential stops authenticating at once.
-	// ErrNotFound when the row does not exist.
+	// ErrNotFound when the row does not exist, or when its owning user is
+	// tombstoned (the authentication path hides such a row, so a minted
+	// credential could never be admitted).
 	RotateCredential(ctx context.Context, id string) (plaintext string, err error)
 	Get(ctx context.Context, id string) (Executor, error)
 	List(ctx context.Context) ([]Executor, error)

@@ -461,3 +461,30 @@ func TestRotateCredentialTwiceMintsDifferentSecrets(t *testing.T) {
 	_, err = s.Authenticate(ctx, first)
 	c.ErrorIs(err, executors.ErrNotFound, "the first rotation must stop authenticating after the second, got")
 }
+
+// Rotating a row whose owning user has been tombstoned is an ANSWER, not a
+// rotation. authenticateByHash hides such a row, so a minted credential could
+// never authenticate: the executor would leave holding a secret that is dead
+// on arrival, and its next reconnect would be a terminal 401. ErrNotFound is
+// the terminal answer IsTerminalAuthError already classifies, so the caller
+// stops rather than loops.
+func TestRotateCredentialForTombstonedOwnerIsNotFound(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, us := testStores(t)
+	ctx := context.Background()
+	owner := ownerUser(t, us)
+
+	e, _, err := s.Create(ctx, executors.NewToken{
+		OwnerUserID: owner.ID,
+		Labels:      map[string]string{"machine": machineName(t)},
+		Roots:       []string{},
+	})
+	c.NoError(err, "seed executor")
+	t.Cleanup(func() { _ = s.Delete(context.Background(), e.ID) })
+
+	c.NoError(us.Delete(ctx, owner.Username), "tombstone the owner")
+
+	_, err = s.RotateCredential(ctx, e.ID)
+	c.ErrorIs(err, executors.ErrNotFound,
+		"rotating for a tombstoned owner's row must be ErrNotFound, got")
+}

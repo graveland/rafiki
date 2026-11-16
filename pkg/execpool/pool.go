@@ -334,6 +334,9 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 	var e executors.Executor
 	var credential string
 	var transient bool
+	// mint, when set, rotates a row-bound ticket's credential. It stays a
+	// closure until admission has SUCCEEDED; see the SchemeTicket branch.
+	var mint func(context.Context) (string, error)
 
 	switch scheme {
 	case upgradeconn.SchemeTicket:
@@ -370,8 +373,9 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 				// The row exists and is switched off. Admitting it anyway would
 				// let a control connection's ticket undo `rafiki executor
 				// disable`, which is a revocation. The enabled check sits BEFORE
-				// the rotation on purpose: a refused ticket must not invalidate
-				// the credential a running executor still holds.
+				// the rotation, and the rotation runs only after admission, so a
+				// refused ticket never invalidates the credential a running
+				// executor still holds.
 				return admission{}, nil, &upgradeconn.Refusal{
 					Status: http.StatusUnauthorized,
 					Reason: "executor is disabled",
@@ -380,17 +384,31 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 			if grant.MintCredential {
 				// The install path's direct mode: every launch presents a fresh
 				// one-shot ticket and leaves with a durable credential it keeps,
-				// so it never has to be handed a secret out of band. Rotating
-				// here — after the row was read and found admissible — means a
-				// refused ticket never spends a working credential.
-				cred, rerr := p.store.RotateCredential(r.Context(), e.ID)
-				if rerr != nil {
-					// The same mapping every other credential check uses: an
-					// outage stays 503-class (retried), never a terminal 401
-					// that would take the executor out of service.
-					return admission{}, nil, authRefusal(rerr)
+				// so it never has to be handed a secret out of band.
+				//
+				// DEFERRED, not done here: committing the rotation spends the
+				// credential the running executor holds, and p.admit below can
+				// still refuse this connection 409 when a healthy incumbent
+				// answers. Rotating inline would then leave that incumbent on a
+				// credential that no longer authenticates, so its next reconnect
+				// is a terminal 401. Recording the closure and running it only
+				// after admission SUCCEEDED means a refused ticket costs nothing;
+				// the enabled check above guards the other refusal path.
+				//
+				// RULING: the rotation is not serialised ACROSS tickets. Two
+				// DIFFERENT live tickets for the SAME row, redeemed at once, both
+				// rotate; the last write wins and the other peer's 101 credential
+				// is already dead. Same-ticket replay is safe
+				// (TicketRegistry.Redeem deletes under a mutex). The scope boundary
+				// is that the daemon never mints two minting tickets for one row
+				// concurrently: the launcher coalesces relaunches per executor id,
+				// and install mints one ticket per launch. Crossing that boundary
+				// costs one failed launch — the loser's credential is dead, and its
+				// next relaunch mints a fresh one, so it self-heals.
+				id := e.ID
+				mint = func(ctx context.Context) (string, error) {
+					return p.store.RotateCredential(ctx, id)
 				}
-				credential = cred
 			}
 		}
 	case upgradeconn.SchemeEnroll:
@@ -435,6 +453,17 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 			}
 		}
 		return admission{}, nil, err
+	}
+
+	if mint != nil {
+		cred, rerr := mint(r.Context())
+		if rerr != nil {
+			// The same mapping every other credential check uses: an outage
+			// stays 503-class (retried), never a terminal 401 that would take
+			// the executor out of service.
+			return admission{}, nil, authRefusal(rerr)
+		}
+		credential = cred
 	}
 
 	hdr := http.Header{upgradeconn.HeaderExecutorID: {e.ID}}

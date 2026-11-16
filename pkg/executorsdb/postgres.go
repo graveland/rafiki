@@ -250,6 +250,12 @@ func (s *pgStore) Create(ctx context.Context, t executors.NewToken) (executors.E
 // The generator and the digest are Create's, not a second pair: a credential
 // that authenticated once must keep the same shape and the same hash, or an
 // executor that rotates in cleanly would be rejected on its next Bearer.
+//
+// The UPDATE carries the same tombstoned-owner predicate as
+// authenticateByHash, because a rotation for such a row would hand back a
+// credential the authentication path can never admit. Zero rows updated is
+// ErrNotFound (an ANSWER, terminal); a failed statement stays unwrapped so an
+// outage remains retryable.
 func (s *pgStore) RotateCredential(ctx context.Context, id string) (string, error) {
 	if malformedID(id) {
 		return "", ErrNotFound
@@ -259,7 +265,13 @@ func (s *pgStore) RotateCredential(ctx context.Context, id string) (string, erro
 		return "", err
 	}
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE conversations.executors SET credential_hash = $2 WHERE id = $1`,
+		`UPDATE conversations.executors e
+		    SET credential_hash = $2
+		  WHERE e.id = $1
+		    AND NOT EXISTS (
+		        SELECT 1 FROM conversations.users u
+		         WHERE u.id = e.owner_user_id
+		           AND u.deleted_at IS NOT NULL)`,
 		id, hashToken(credential))
 	if err != nil {
 		// Unwrapped, and never folded into ErrNotFound: a failed statement is

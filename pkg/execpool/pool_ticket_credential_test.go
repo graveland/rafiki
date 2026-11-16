@@ -2,12 +2,16 @@ package execpool
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
+	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 
@@ -100,8 +104,9 @@ func TestRedeemInstallTicketRotatesCredential(t *testing.T) {
 		"executor has nothing to reconnect with", upgradeconn.HeaderCredential)
 	c.NotEq("the-old-credential", minted, "the 101 carried the OLD credential")
 	c.Eq(minted, store.currentCredential(), "the header's plaintext must be the one the store now holds, got")
-	// Free the executor id before the follow-up dials; a live incumbent is a
-	// separate concern (409) this test is not about.
+	// Free the executor id before the follow-up dials; a live incumbent would
+	// be refused 409, which TestRedeemInstallTicketWithLiveIncumbentRotatesNothing
+	// covers.
 	c.NoError(conn.Close(), "close the ticket connection")
 
 	requireRefused(t, exchangeErr(t, p, bearerHeader("the-old-credential")), http.StatusUnauthorized)
@@ -203,6 +208,72 @@ func TestRedeemInstallTicketIsOneShot(t *testing.T) {
 	c.Eq(1, store.rotateCount(), "a replayed ticket rotated the credential again, rotations =")
 	c.ErrorIs(classifyRefusal(err), ErrEnrollmentRejected,
 		"a spent ticket must classify as terminal; retrying cannot revive it")
+}
+
+// A refused ticket must not spend the credential a live executor holds.
+//
+// The rotation is what invalidates that credential, so it may run only after
+// every refusal path has returned — including p.admit's 409 when a healthy
+// incumbent answers. Rotating before admission would leave the incumbent on a
+// dead secret, and its next reconnect would be a terminal 401: the exact shape
+// of a reinstall knocking its own machine out of service.
+func TestRedeemInstallTicketWithLiveIncumbentRotatesNothing(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newTicketCredStore("exec-1", "the-incumbent-credential")
+	p := New(store)
+	p.healthInterval = time.Hour // the incumbent answers; nothing should evict it
+
+	incumbent := joinAsCredential(t, p, &stubHandler{executorID: "exec-1"}, "the-incumbent-credential")
+	waitFor(t, 5*time.Second, "the incumbent to join", func() bool { return len(p.Live()) == 1 })
+
+	ticket, err := p.Tickets().Mint(TicketGrant{
+		Owner: "brent", RowID: "exec-1", MintCredential: true,
+	})
+	c.NoError(err, "mint install ticket")
+
+	ref := requireRefused(t, exchangeErr(t, p, ticketHeader(ticket)), http.StatusConflict)
+	c.StrContains(ref.Reason, "already live", "the refusal must say the incumbent is live, got")
+
+	c.Eq(0, store.rotateCount(),
+		"a 409-refused ticket rotated the credential, rotations =")
+	c.Eq("the-incumbent-credential", store.currentCredential(),
+		"the refused ticket spent the credential the live executor holds, got")
+
+	_, err = store.Authenticate(t.Context(), "the-incumbent-credential")
+	c.NoError(err, "the incumbent's credential must still authenticate after the refusal")
+	c.Len(p.Live(), 1, "the incumbent must still be the live connection")
+	c.NoError(incumbent.Close(), "close the incumbent")
+}
+
+// joinAsCredential performs the full executor link against p with a Bearer
+// credential the caller chooses — joinViaUpgradeConn hardcodes one, and these
+// tests need the row's real credential so the incumbent's survival is
+// observable at the store as well as in the pool.
+func joinAsCredential(t *testing.T, p *Pool, handler executorpbconnect.ExecutorServiceHandler, credential string) net.Conn {
+	t.Helper()
+	c := assert.NewAborting(t)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSConfig(t))
+	c.NoError(err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	mux := http.NewServeMux()
+	mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), p.UpgradeHandler())
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	dialed, err := tls.Dial("tcp", ln.Addr().String(), clientTLSConfig(t))
+	c.NoError(err)
+	t.Cleanup(func() { _ = dialed.Close() })
+	c.NoError(dialed.Handshake())
+
+	upConn, _, err := upgradeconn.Dial(dialed, upgradeconn.Executor, "localhost",
+		http.Header{"Authorization": {string(upgradeconn.SchemeBearer) + " " + credential}})
+	c.NoError(err, "the incumbent must be admitted")
+
+	_, h := executorpbconnect.NewExecutorServiceHandler(handler)
+	go func() { _ = ServeInverted(t.Context(), upConn, h) }()
+	return upConn
 }
 
 // exchangeErr runs one upgrade exchange and returns only its error, for the
