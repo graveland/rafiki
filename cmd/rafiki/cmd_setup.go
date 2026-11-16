@@ -115,7 +115,7 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	// writes the credential, the environment files and the unit name — all per
 	// instance — so the current-profile pointer must not decide which system
 	// service setup touches, and the repoint and the install must agree.
-	applyExecutorInstance(cmd)
+	applyExecutorInstance(w.cmd)
 
 	// ── 1. load ─────────────────────────────────────────────────────────────
 	step(out, stepLoad)
@@ -407,7 +407,7 @@ func repointExecutorService(w *wizard, out io.Writer) error {
 		return nil
 	}
 	fmt.Fprintf(out, "    the installed executor service runs %s, not %s\n", svc.Binary, self)
-	ok, err := w.confirmRun([]string{"rafiki", "executor", "service", "restart"})
+	ok, err := w.confirmRun(instanceHint("rafiki", "executor", "service", "restart"))
 	if err != nil {
 		return err
 	}

@@ -561,6 +561,18 @@ func applyExecutorInstance(cmd *cobra.Command) {
 	}
 }
 
+// instanceHint builds a suggested command line for THIS process's instance: the
+// binary, `-P <instance>` whenever the instance is not the default one, then the
+// arguments. A wizard hint has to show the command that will actually run, and a
+// per-instance unit is only reachable with the flag (same rule as refreshArgv).
+func instanceHint(bin string, args ...string) []string {
+	out := []string{bin}
+	if name := paths.Instance(); name != "" && name != paths.DefaultInstance {
+		out = append(out, "-P", name)
+	}
+	return append(out, args...)
+}
+
 func newExecutorServeCmd() *cobra.Command {
 	var (
 		connectAddr        string

@@ -521,17 +521,48 @@ func TestExecutorInstanceSetupPinsBeforeTheExecutorRepoint(t *testing.T) {
 	var resolved []string
 	orig := executorServiceBackendFor
 	executorServiceBackendFor = func() serviceBackend {
-		resolved = append(resolved, paths.Instance())
+		resolved = append(resolved, paths.Instance()+" "+paths.ExecutorServiceLogPath())
 		return f.execFB
 	}
 	t.Cleanup(func() { executorServiceBackendFor = orig })
 
 	c.Require().NoError(f.runSetup(), "setup with -P work")
 	c.Require().NotEmpty(resolved, "setup must resolve the executor service (the step-8 repoint)")
+	want := "work " + filepath.Join(paths.StateDir(), "executor-work.log")
 	for _, got := range resolved {
-		c.Eq("work", got, "every executor service setup resolves is the DECLARED instance's, pointer or not")
+		c.Eq(want, got, "every executor service setup resolves is the DECLARED instance's, pointer or not")
 	}
 	c.Eq("work", paths.Instance(), "the instance stays the declared one")
+}
+
+// A wizard hint has to show the command that will actually run: a per-instance
+// unit is only reachable with -P, so the step-8 repoint's suggested
+// `executor service restart` must carry it — and must not carry one for the
+// default instance, whose unit needs no flag.
+func TestExecutorInstanceSetupRepointHintCarriesTheDeclaredInstance(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	work := newSetupFixture(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	work.execFB.status = serviceStatus{Installed: true, Binary: "/old/rafiki"}
+	// -P names a profile setup still has to resolve for the daemon it targets.
+	set, err := profile.Load()
+	c.NoError(err, "profile.Load")
+	set.Profiles["work"] = profile.Profile{Name: "work", Socket: set.Profiles["default"].Socket}
+	c.NoError(profile.Save(set), "save the work profile")
+	work.cmd.Flags().StringP("profile", "P", "", "")
+	c.NoError(work.cmd.Flags().Set("profile", "work"), "set -P work")
+	c.Require().NoError(work.runSetup(), "setup with -P work")
+	c.StrContains(work.out.String(), "rafiki -P work executor service restart",
+		"the hint must show the command that will actually run")
+
+	plain := newSetupFixture(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	plain.execFB.status = serviceStatus{Installed: true, Binary: "/old/rafiki"}
+	c.Require().NoError(plain.runSetup(), "setup with no -P")
+	c.StrContains(plain.out.String(), "rafiki executor service restart", "the default-instance hint")
+	c.False(strings.Contains(plain.out.String(), "-P "),
+		"a default-instance hint must not name an instance")
 }
 
 // A declared profile name outside the instance charset is a mistake about
@@ -602,19 +633,26 @@ func TestExecutorInstanceInvalidDeclaredNameWarnsAndFallsBack(t *testing.T) {
 		"one warning for one mistake, not one per site that noticed it")
 }
 
-// instanceRecordingRunner records the process instance at every exec, so a test
-// can see whether the upgrade had pinned before the smoke check (which runs
-// BEFORE the binaries are swapped) and the refresh (which runs after).
+// recordedExec is one subprocess an upgrade ran, in order, with the process
+// instance at the moment it ran.
+type recordedExec struct {
+	argv     []string
+	instance string
+}
+
+// instanceRecordingRunner records every exec in order, so a test can see whether
+// the upgrade had pinned before the smoke check (which runs BEFORE the binaries
+// are swapped) and the refresh (which runs after).
 type instanceRecordingRunner struct {
 	*fakeRunner
-	tag       string
-	instances []string
+	tag    string
+	events []recordedExec
 }
 
 var _ runner = (*instanceRecordingRunner)(nil)
 
 func (r *instanceRecordingRunner) Run(ctx context.Context, env []string, argv ...string) ([]byte, []byte, error) {
-	r.instances = append(r.instances, paths.Instance())
+	r.events = append(r.events, recordedExec{argv: argv, instance: paths.Instance()})
 	if len(argv) == 2 && argv[1] == "--version" {
 		return []byte("rafiki version " + r.tag + "\n"), nil, nil
 	}
@@ -648,9 +686,14 @@ func TestExecutorInstanceUpgradePinsBeforeTheSwap(t *testing.T) {
 	deps.Client, deps.Keys = tr.Client, tr.Keys
 	deps.Exe, deps.Version, deps.Home = self, "v0.1.0", t.TempDir()
 	c.Require().NoError(runUpgrade(context.Background(), deps, upgradeOpts{}), "upgrade with -P work")
-	c.Require().NotEmpty(rec.instances, "the upgrade must have run subprocesses")
-	for _, got := range rec.instances {
-		c.Eq("work", got, "every subprocess — the pre-swap smoke check included — sees the declared instance")
+	c.Require().Len(rec.events, 2, "the smoke check and the refresh")
+	// The smoke check runs BEFORE the swap, so the recorded order proves the
+	// instance was resolved before anything irreversible happened.
+	c.EqDeep([]string{"--version"}, rec.events[0].argv[1:], "the first exec is the pre-swap smoke check")
+	c.Eq("work", rec.events[0].instance, "the instance was already the declared one before the swap")
+	c.Eq("work", rec.events[1].instance, "and after it")
+	for _, e := range rec.events {
+		c.Eq("work", e.instance, "every subprocess sees the declared instance")
 	}
 
 	// An unusable declared name: the upgrade still completes, on the default
@@ -669,8 +712,8 @@ func TestExecutorInstanceUpgradePinsBeforeTheSwap(t *testing.T) {
 	bad.Exe, bad.Version, bad.Home = self2, "v0.1.0", t.TempDir()
 	c.Require().NoError(runUpgrade(context.Background(), bad, upgradeOpts{}),
 		"an unusable instance name must not fail an upgrade after the swap")
-	c.Require().NotEmpty(rec2.instances, "the upgrade must have run subprocesses")
-	for _, got := range rec2.instances {
-		c.Eq(paths.DefaultInstance, got, "the fallback holds for every subprocess")
+	c.Require().NotEmpty(rec2.events, "the upgrade must have run subprocesses")
+	for _, e := range rec2.events {
+		c.Eq(paths.DefaultInstance, e.instance, "the fallback holds for every subprocess")
 	}
 }
