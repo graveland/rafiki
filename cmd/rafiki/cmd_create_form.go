@@ -170,5 +170,11 @@ func createFormDefaults(req protocol.SpawnRequest) tui.SpawnDefaults {
 		// remembered budget, which the form seeds underneath it.
 		MaxCost: req.MaxCost,
 		Preset:  req.Preset,
+		// WorkspaceTools travels for the same reason MaxCost does: without it
+		// `create -i --workspace-tools rafiki` opened a form whose workspace
+		// tools row read native, so the declared mode was silently dropped by
+		// the spawn the form then issued. Empty (the flag never passed) leaves
+		// the row on its native default.
+		WorkspaceTools: req.WorkspaceTools,
 	}
 }

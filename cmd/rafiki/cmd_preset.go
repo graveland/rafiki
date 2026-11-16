@@ -16,6 +16,7 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/presets"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/table"
 )
 
@@ -183,6 +184,7 @@ func presetSpecCells(view presetView) [][2]string {
 		[2]string{"skills", formatSpecList(s.Skills)},
 		[2]string{"mcp_servers", formatSpecList(s.MCPServers)},
 		[2]string{"context_files", formatSpecBool(s.ContextFiles)},
+		[2]string{"workspace_tools", formatSpecString(s.WorkspaceTools)},
 		[2]string{"max_cost", formatSpecFloat(s.MaxCost)},
 		[2]string{"max_depth", formatSpecInt(s.MaxDepth)},
 		[2]string{"max_children", formatSpecInt(s.MaxChildren)},
@@ -246,8 +248,11 @@ func newPresetPutCmd() *cobra.Command {
 			if file == "" {
 				return fmt.Errorf("-f is required (-f - reads stdin)")
 			}
+			workspaceTools, err := presetPutWorkspaceToolsFlag(cmd)
+			if err != nil {
+				return err
+			}
 			var data []byte
-			var err error
 			if file == "-" {
 				data, err = io.ReadAll(os.Stdin)
 			} else {
@@ -256,7 +261,7 @@ func newPresetPutCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req, err := presetPutRequest(name, data)
+			req, err := presetPutRequest(name, data, workspaceTools)
 			if err != nil {
 				return err
 			}
@@ -273,13 +278,40 @@ func newPresetPutCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "path to the preset JSON (-f - reads stdin)")
+	cmd.Flags().String("workspace-tools", "",
+		"claude only: pin the child's workspace tools — native (Claude Code's built-in file and shell tools) or rafiki (rafiki's executor-routed ones, which needs the executor pool)")
 	cmd.ValidArgsFunction = completePresetNames
 	return cmd
 }
 
+// presetPutWorkspaceToolsFlag resolves --workspace-tools into an override for
+// the file's value: nil when the flag was not passed (the file decides), else
+// the mode to store.
+//
+// The vocabulary is judged here by EXACT match and not through
+// protocol.NormalizeWorkspaceTools: on a preset "native" is a real pin (the
+// built-ins stay) and nil is "leave the choice to the spawn", so the helper's
+// fold of native into the empty string would silently turn a pin into
+// "unset" — the opposite of what the caller asked for.
+func presetPutWorkspaceToolsFlag(cmd *cobra.Command) (*string, error) {
+	if !cmd.Flags().Changed("workspace-tools") {
+		return nil, nil
+	}
+	v, _ := cmd.Flags().GetString("workspace-tools")
+	if v != protocol.WorkspaceToolsNative && v != protocol.WorkspaceToolsRafiki {
+		return nil, fmt.Errorf("--workspace-tools must be %q or %q (got %q)",
+			protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki, v)
+	}
+	return &v, nil
+}
+
 // presetPutRequest turns a preset JSON file into a PutPresetRequest. Extracted
 // so the tri-state parsing and the name check are testable without a daemon.
-func presetPutRequest(name string, data []byte) (*rafikiv1.PutPresetRequest, error) {
+//
+// workspaceTools, when non-nil, overrides the file's workspace_tools: the flag
+// is a declaration made on the command line, and the file it edits may be a
+// shared or generated one the caller does not want to rewrite.
+func presetPutRequest(name string, data []byte, workspaceTools *string) (*rafikiv1.PutPresetRequest, error) {
 	spec, err := presets.ParseSpec(data)
 	if err != nil {
 		return nil, err
@@ -288,6 +320,9 @@ func presetPutRequest(name string, data []byte) (*rafikiv1.PutPresetRequest, err
 		return nil, fmt.Errorf("name in file %q does not match %q", spec.Name, name)
 	}
 	spec.Name = name
+	if workspaceTools != nil {
+		spec.WorkspaceTools = workspaceTools
+	}
 	rec := spec.Record()
 	return &rafikiv1.PutPresetRequest{Preset: presets.ToProto(rec)}, nil
 }
@@ -311,6 +346,16 @@ func formatSpecBool(p *bool) string {
 		return ""
 	}
 	return strconv.FormatBool(*p)
+}
+
+// formatSpecString renders an optional string: nil = unset (the spawn's own
+// choice), the value otherwise. "native" is a real value here, not a synonym
+// for unset — a preset that pins it must print it.
+func formatSpecString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 // formatSpecFloat renders an optional float: nil = unset, the number

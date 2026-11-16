@@ -29,6 +29,10 @@ import (
 // typo waiting to cost a round trip.
 var spawnKinds = []string{protocol.KindFundi, protocol.KindClaude}
 
+// workspaceModes are the values the workspace tools row offers, in cycle order.
+// Index 0 is the default: Claude Code keeps its built-in file and shell tools.
+var workspaceModes = []string{protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki}
+
 // spawnField indexes the form's rows. The order is the tab order, and it runs
 // most-edited to least: a name is what you always set and a cwd is what you
 // almost never do. The model row is LAST deliberately: it is the field you
@@ -40,6 +44,10 @@ type spawnField int
 const (
 	fieldName spawnField = iota
 	fieldKind
+	// fieldWorkspaceTools sits beside the kind row because it exists only for
+	// one kind: a claude child's built-in file and shell tools are the thing
+	// rafiki can replace, and no other kind has any.
+	fieldWorkspaceTools
 	fieldExecutor
 	fieldCwd
 	fieldMaxCost
@@ -53,6 +61,8 @@ func (f spawnField) label() string {
 		return "name"
 	case fieldKind:
 		return "kind"
+	case fieldWorkspaceTools:
+		return "workspace tools"
 	case fieldExecutor:
 		return "executor"
 	case fieldCwd:
@@ -63,6 +73,14 @@ func (f spawnField) label() string {
 		return "model"
 	}
 	return "?"
+}
+
+// choiceRow reports whether the row is a fixed-option cycle rather than a text
+// input. A choice row has no cursor and takes no text, so a printable key
+// pressed on it is SWALLOWED: routing one into an input nobody can see is how a
+// keystroke disappears with no error anywhere.
+func (f spawnField) choiceRow() bool {
+	return f == fieldKind || f == fieldWorkspaceTools
 }
 
 // spawnParams is what the form produces. A separate type from the wire request
@@ -77,6 +95,12 @@ type spawnParams struct {
 	// preset is not a form field: it arrives via SpawnDefaults and rides every
 	// spawn this form issues, resolved daemon-side via Controller.Spawn.
 	preset string
+	// workspaceTools is the workspace tools row's value, sent VERBATIM for a
+	// claude child ("native" as well as "rafiki") and empty for every other
+	// kind. The row is a declaration like the kind row: it outranks a preset's
+	// workspace_tools, and sending "" for the row's own native default would
+	// let the preset silently overrule what the form shows.
+	workspaceTools string
 	// forkFrom, when set, starts the new child from a point in another child's
 	// history (borrowed conversation, immutable fork edge). switchSource names
 	// the child a model SWITCH replaces: spawn this fork, then close that one
@@ -107,17 +131,25 @@ func (p spawnParams) tailSource() string {
 
 // spawnForm is the modal shown by `n` on the agents pane.
 //
-// It is deliberately six fields. The Connect SpawnRequest carries labels, and
+// It is deliberately seven rows, one of which (workspace tools) exists only for
+// a claude child. The Connect SpawnRequest carries labels, and
 // two other budgets (depth, children) as well, and its own comment says not to
 // grow it without a consumer for each field -- those stay `rafiki create`
 // flags, set once in a script. Executor is the one addition: it decides where
 // a child runs, which is a per-spawn choice exactly like kind. Cost is the
 // other budget field common enough that a person sets it per-spawn rather
 // than once in a preset, so it earns the keystroke the others don't.
+// Workspace tools earns its row because it decides WHICH tools a claude child
+// has, and there is no safe ambient default to hide it behind: the choice is
+// the spawn's, and the row says which one is in force.
 type spawnForm struct {
 	inputs [spawnFieldCount]textinput.Model
 	kindIx int
-	focus  spawnField
+	// workspaceIx is the workspace tools row's position in workspaceModes. It
+	// is kept when the row is hidden (a non-claude kind), so switching back to
+	// claude restores the choice instead of resetting it to native.
+	workspaceIx int
+	focus       spawnField
 
 	// kindPinned records that the KIND was DECLARED (a --kind flag, a preset's
 	// kind, or a profile's `kind` field reaching the form as SpawnDefaults.Kind)
@@ -189,8 +221,17 @@ type spawnForm struct {
 const fieldLabelWidth = 16
 
 // formChrome is the rows the form spends on things that are not suggestions:
-// title, blank, six field rows, blank, hints, and the detail block.
-const formChrome = 10 + detailHeight
+// title, blank, one row per VISIBLE field, blank, hints, and the detail block.
+// The workspace tools row exists only for a claude child, so the count follows
+// the row's visibility: a fixed count would shrink the fundi form's list by a
+// row belonging to a field that is not on screen.
+func (f *spawnForm) formChrome() int {
+	fields := int(spawnFieldCount)
+	if !f.showsWorkspaceTools() {
+		fields--
+	}
+	return 4 + fields + detailHeight
+}
 
 // suggestWindow is how many suggestion rows fit in a body pane of this height.
 //
@@ -198,7 +239,7 @@ const formChrome = 10 + detailHeight
 // down: a window computed as if they were absent scrolls one screenful past
 // where the panel actually ends.
 func (f *spawnForm) suggestWindow(height int, q *queryDialog) int {
-	chrome := formChrome
+	chrome := f.formChrome()
 	if f.err != "" {
 		chrome += 2
 	}
@@ -318,6 +359,17 @@ func (f *spawnForm) acceptSuggestion() bool {
 
 func (f *spawnForm) kind() string { return spawnKinds[f.kindIx] }
 
+// showsWorkspaceTools reports whether the workspace tools row is on screen:
+// only a claude child has built-in file and shell tools for rafiki to replace.
+func (f *spawnForm) showsWorkspaceTools() bool { return f.kind() == protocol.KindClaude }
+
+// workspaceTools is the row's current value.
+func (f *spawnForm) workspaceTools() string { return workspaceModes[f.workspaceIx] }
+
+func (f *spawnForm) cycleWorkspaceTools(delta int) {
+	f.workspaceIx = (f.workspaceIx + delta + len(workspaceModes)) % len(workspaceModes)
+}
+
 // prefill seeds the form from the caller's defaults, leaving anything empty at
 // the form's own default. cur is the profile's display currency: a declared
 // budget arrives in USD and the field shows what a person would type back in.
@@ -337,6 +389,14 @@ func (f *spawnForm) prefill(d SpawnDefaults, cur *clientstate.Currency) {
 	}
 	if d.MaxCost != nil {
 		f.inputs[fieldMaxCost].SetValue(costField(*d.MaxCost, cur))
+	}
+	// A declared workspace-tools mode (rafiki create -i --workspace-tools …)
+	// prefills the row it now has. An absent (or unknown) value matches nothing
+	// and leaves the form's native default, which is what an absent flag means.
+	for i, m := range workspaceModes {
+		if m == d.WorkspaceTools {
+			f.workspaceIx = i
+		}
 	}
 	for i, k := range spawnKinds {
 		if k == d.Kind {
@@ -371,6 +431,11 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 		forkFrom:     f.forkFrom,
 		switchSource: f.switchSource,
 		keepSource:   f.branches(),
+	}
+	// The row is a claude-only choice, and its value rides the wire even when it
+	// is native: see spawnParams.workspaceTools.
+	if f.showsWorkspaceTools() {
+		p.workspaceTools = f.workspaceTools()
 	}
 	if p.switchSource != "" && !p.keepSource && p.model == f.sourceModel {
 		return spawnParams{}, "nothing to change: pick another model, or rename to clone this one"
@@ -482,19 +547,31 @@ func (c *Cockpit) modelWindow(kind, model string) int32 {
 }
 
 // moveFocus cycles the focused row, wrapping in both directions. Only text
-// rows take the textinput focus flag; the kind row has no cursor.
+// rows take the textinput focus flag; a choice row has no cursor.
 func (f *spawnForm) moveFocus(delta int) {
-	f.inputs[f.focus].Blur()
+	if !f.focus.choiceRow() {
+		f.inputs[f.focus].Blur()
+	}
 	next := (int(f.focus) + delta + int(spawnFieldCount)) % int(spawnFieldCount)
-	// A fork's kind row is LOCKED — only fundi can be forked to — so tabbing
-	// steps over it rather than parking on a row that cannot change.
-	if f.kindLocked() && spawnField(next) == fieldKind {
+	// A row that cannot be acted on is stepped OVER rather than parked on: a
+	// fork's kind row is locked (only fundi can be forked to), and the
+	// workspace tools row does not exist for a non-claude kind. The loop, not a
+	// single retry, because the two can be adjacent.
+	for f.skipped(spawnField(next)) {
 		next = (next + delta + int(spawnFieldCount)) % int(spawnFieldCount)
 	}
 	f.focus = spawnField(next)
-	if f.focus != fieldKind {
+	if !f.focus.choiceRow() {
 		f.inputs[f.focus].Focus()
 	}
+}
+
+// skipped reports whether the tab ring must step over this row as it stands.
+func (f *spawnForm) skipped(row spawnField) bool {
+	if row == fieldKind {
+		return f.kindLocked()
+	}
+	return row == fieldWorkspaceTools && !f.showsWorkspaceTools()
 }
 
 func (f *spawnForm) setKind(kind string) {
@@ -512,7 +589,8 @@ func (f *spawnForm) cycleKind(delta int) {
 // paste inserts clipboard text into the focused row.
 //
 // The kind row has no text field, so a paste there is dropped rather than
-// vanishing into an input nobody can see. The model row re-filters its
+// vanishing into an input nobody can see; the workspace tools row is a choice
+// row for the same reason. The model row re-filters its
 // typeahead exactly as a typed character does — pasting a model id is a common
 // way to fill that row, and a list still filtered by the PREVIOUS value would
 // hide the model just pasted.
@@ -520,7 +598,7 @@ func (f *spawnForm) cycleKind(delta int) {
 // textinput's own sanitizer folds newlines and tabs to spaces, so a multi-line
 // paste lands as one line, which is what every field here holds.
 func (f *spawnForm) paste(content string, all []*rafikiv1.ModelRow, v modelView) tea.Cmd {
-	if f.focus == fieldKind {
+	if f.focus.choiceRow() {
 		return nil
 	}
 	before := f.inputs[fieldModel].Value()
@@ -536,8 +614,8 @@ func (f *spawnForm) paste(content string, all []*rafikiv1.ModelRow, v modelView)
 // update routes a keystroke into the focused row. Returns the command the
 // textinput asked for, if any.
 func (f *spawnForm) update(msg tea.KeyPressMsg) tea.Cmd {
-	if f.focus == fieldKind {
-		// The kind row consumes nothing else: a stray letter here must not
+	if f.focus.choiceRow() {
+		// A choice row consumes nothing else: a stray letter here must not
 		// vanish into an input with no visible cursor.
 		return nil
 	}
@@ -574,12 +652,18 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 	// placeholder and lets long model ids scroll inside their own box.
 	inputW := max(20, width-fieldLabelWidth-6)
 	for i := spawnField(0); i < spawnFieldCount; i++ {
-		if i != fieldKind {
+		if !i.choiceRow() {
 			f.inputs[i].SetWidth(inputW)
 		}
 	}
 
 	for i := spawnField(0); i < spawnFieldCount; i++ {
+		// A claude-only row is absent for every other kind, not rendered
+		// disabled: a row nobody can use is furniture, and the kind row already
+		// says which child this is.
+		if i == fieldWorkspaceTools && !f.showsWorkspaceTools() {
+			continue
+		}
 		marker := "  "
 		if i == f.focus {
 			marker = styleFocusEdge.Render("▌ ")
@@ -594,7 +678,8 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 		// padTo measures with ansi.StringWidth, so the style codes cost no columns.
 		b.WriteString(padTo(styleMeta.Render(label), fieldLabelWidth))
 
-		if i == fieldKind {
+		switch i {
+		case fieldKind:
 			if f.kindLocked() {
 				// Locked: the fork decides the kind, so the row renders state
 				// rather than offering a choice it will not honour.
@@ -602,7 +687,9 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 			} else {
 				b.WriteString(f.kindView())
 			}
-		} else {
+		case fieldWorkspaceTools:
+			b.WriteString(f.workspaceView())
+		default:
 			b.WriteString(f.inputs[i].View())
 		}
 		b.WriteString("\n")
@@ -625,8 +712,13 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *cl
 
 	b.WriteString("\n")
 	// The ⏎ hint is contextual because ⏎ genuinely does two things, and a
-	// static footer would be wrong on one row out of four.
-	hints := "↑/↓ field   ⇥ complete   ←/→ kind   ⌥E executor   ⏎ create   esc cancel"
+	// static footer would be wrong on one row out of four. ←/→ is named for the
+	// row under the cursor, since two rows are cycles rather than text.
+	cycle := "kind"
+	if f.focus == fieldWorkspaceTools {
+		cycle = "workspace tools"
+	}
+	hints := "↑/↓ field   ⇥ complete   ←/→ " + cycle + "   ⌥E executor   ⏎ create   esc cancel"
 	if f.focus == fieldModel {
 		// The model row has its own vocabulary and it is worth the line: ↑/↓
 		// mean the list here rather than the field ring, and ^F is the only
@@ -708,13 +800,24 @@ func (f *spawnForm) suggestView(width, window int, v modelView) string {
 // kindView renders the choice row as its options, the selected one marked.
 // Showing both is the point: a single value gives no hint that it can change.
 func (f *spawnForm) kindView() string {
-	parts := make([]string, 0, len(spawnKinds))
-	for i, k := range spawnKinds {
-		if i == f.kindIx {
-			parts = append(parts, styleRailFocused.Render("("+k+")"))
+	return cycleView(spawnKinds, f.kindIx)
+}
+
+// workspaceView renders the workspace tools row the same way, for the same
+// reason: the row has two values and only one is in force.
+func (f *spawnForm) workspaceView() string {
+	return cycleView(workspaceModes, f.workspaceIx)
+}
+
+// cycleView renders a closed option set with the selected value marked.
+func cycleView(options []string, selected int) string {
+	parts := make([]string, 0, len(options))
+	for i, o := range options {
+		if i == selected {
+			parts = append(parts, styleRailFocused.Render("("+o+")"))
 			continue
 		}
-		parts = append(parts, styleMeta.Render(" "+k+" "))
+		parts = append(parts, styleMeta.Render(" "+o+" "))
 	}
 	return strings.Join(parts, " ")
 }
@@ -781,22 +884,34 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 		f.moveFocus(-1)
 		return c, c.fetchModelsCmd(f.kind())
 	case "left":
-		if f.focus == fieldKind {
+		switch f.focus {
+		case fieldKind:
 			f.cycleKind(-1)
 			return c, c.kindChanged()
+		case fieldWorkspaceTools:
+			f.cycleWorkspaceTools(-1)
+			return c, nil
 		}
 	case "right":
-		if f.focus == fieldKind {
+		switch f.focus {
+		case fieldKind:
 			f.cycleKind(+1)
 			return c, c.kindChanged()
+		case fieldWorkspaceTools:
+			f.cycleWorkspaceTools(+1)
+			return c, nil
 		}
 	case "space":
 		// "space", not " ": bubbletea's KeyPressMsg.String() spells it out, so
 		// a case of " " matches nothing and the binding is silently dead. This
 		// shipped that way once.
-		if f.focus == fieldKind {
+		switch f.focus {
+		case fieldKind:
 			f.cycleKind(+1)
 			return c, c.kindChanged()
+		case fieldWorkspaceTools:
+			f.cycleWorkspaceTools(+1)
+			return c, nil
 		}
 	case "ctrl+s":
 		// The band opens over the typeahead, so the suggestions re-order under

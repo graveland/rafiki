@@ -243,6 +243,12 @@ func (c *Cockpit) buildSpawnRequest(p spawnParams) *rafikiv1.SpawnRequest {
 		// nothing here reads the executor cache, because this runs inside a
 		// tea.Cmd closure and Update writes that cache concurrently.
 		HomeExecutor: p.home,
+		// WorkspaceTools rides for a claude child only, and carries the row's
+		// value VERBATIM — "native" as well as "rafiki". On the wire "" means
+		// "unset, let a preset decide", so folding the row's native default into
+		// it would let a preset's rafiki outrank the value the form displays.
+		// params() leaves it empty for every other kind.
+		WorkspaceTools: p.workspaceTools,
 	}
 	if p.forkFrom != nil {
 		req.ForkFrom = &rafikiv1.SpawnRequest_ForkFrom{

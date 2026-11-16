@@ -90,6 +90,81 @@ func TestOpenCreatePrefillsTheExecutor(t *testing.T) {
 	ck.Eq("greyshift", c.form.inputs[fieldExecutor].Value(), "executor")
 }
 
+// The workspace tools row exists only for a claude child — no other kind has
+// built-in file and shell tools to replace — and its value rides the wire
+// VERBATIM, native included: on the wire "" means "let a preset decide", so
+// folding the row's default into it would let a preset silently overrule what
+// the form shows.
+func TestSpawnFormWorkspaceToolsOnlyForClaude(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	// fundi: no row, nothing on the wire, and tabbing never parks on it.
+	c := formCockpit(t)
+	ck.Require().Eq(protocol.KindFundi, c.form.kind(), "the form opens on fundi")
+	out := ansi.Strip(c.form.view(80, 24, c.modelView, nil, nil))
+	ck.NotStrContains(out, "workspace tools", "a fundi form offered a claude-only row")
+	p, problem := c.form.params(nil)
+	ck.Require().Eq("", problem, "params")
+	ck.Eq("", p.workspaceTools, "a fundi spawn carries no workspace tools")
+	ck.Eq("", c.buildSpawnRequest(p).GetWorkspaceTools(), "wire WorkspaceTools for fundi")
+	c.form.moveFocus(int(fieldKind) - int(c.form.focus))
+	ck.Require().Eq(fieldKind, c.form.focus, "focus on the kind row")
+	c.form.moveFocus(+1)
+	ck.Eq(fieldExecutor, c.form.focus, "tab stepped onto a row that is not on screen")
+
+	// claude: the row is there, on native by default, offering both modes.
+	for i, k := range spawnKinds {
+		if k == protocol.KindClaude {
+			c.form.kindIx = i
+		}
+	}
+	out = ansi.Strip(c.form.view(80, 24, c.modelView, nil, nil))
+	ck.StrContains(out, "workspace tools", "a claude form is missing its workspace tools row")
+	for _, mode := range workspaceModes {
+		ck.StrContains(out, mode, "the row must offer every mode")
+	}
+	p, problem = c.form.params(nil)
+	ck.Require().Eq("", problem, "params")
+	ck.Eq(protocol.WorkspaceToolsNative, p.workspaceTools, "the row defaults to native")
+	ck.Eq(protocol.WorkspaceToolsNative, c.buildSpawnRequest(p).GetWorkspaceTools(), "wire WorkspaceTools, native")
+
+	// It is a choice, not a text field: ←/→/space cycle it, and a printable
+	// key is swallowed rather than vanishing into an input nobody can see.
+	c.form.moveFocus(int(fieldWorkspaceTools) - int(c.form.focus))
+	ck.Require().Eq(fieldWorkspaceTools, c.form.focus, "focus on the workspace tools row")
+	c.handleKey(keyMsg("right"))
+	ck.Eq(protocol.WorkspaceToolsRafiki, c.form.workspaceTools(), "→ did not cycle the row")
+	c.handleKey(keyMsg("space"))
+	ck.Eq(protocol.WorkspaceToolsNative, c.form.workspaceTools(), "space did not cycle the row")
+	c.handleKey(keyMsg("left"))
+	ck.Eq(protocol.WorkspaceToolsRafiki, c.form.workspaceTools(), "← did not cycle the row")
+	before := make([]string, spawnFieldCount)
+	for f := spawnField(0); f < spawnFieldCount; f++ {
+		before[f] = c.form.inputs[f].Value()
+	}
+	c.handleKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	for f := spawnField(0); f < spawnFieldCount; f++ {
+		ck.Eq(before[f], c.form.inputs[f].Value(), "a keystroke on the choice row landed in the %s row", f.label())
+	}
+
+	p, problem = c.form.params(nil)
+	ck.Require().Eq("", problem, "params")
+	ck.Eq(protocol.WorkspaceToolsRafiki, p.workspaceTools, "params carries the row")
+	ck.Eq(protocol.WorkspaceToolsRafiki, c.buildSpawnRequest(p).GetWorkspaceTools(), "wire WorkspaceTools, rafiki")
+
+	// A declared mode prefills the row: `create -i --workspace-tools rafiki`
+	// must show what it would spawn, or the form silently degrades it.
+	d := NewCockpit(Options{
+		BaseURL:    "http://127.0.0.1:1",
+		OpenCreate: true,
+		CreateDefaults: SpawnDefaults{
+			Kind: protocol.KindClaude, Cwd: "/tmp/x", WorkspaceTools: protocol.WorkspaceToolsRafiki,
+		},
+	})
+	ck.Require().NotNil(d.form, "OpenCreate did not open the form")
+	ck.Eq(protocol.WorkspaceToolsRafiki, d.form.workspaceTools(), "a declared --workspace-tools must prefill the row")
+}
+
 // A preset named by the caller rides every spawn the form issues — it is not
 // an editable field, so nothing is shown and nothing the user types can drop
 // it; buildSpawnRequest is what puts it on the wire.

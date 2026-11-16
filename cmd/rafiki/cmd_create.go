@@ -191,6 +191,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 		"do not offer this machine as a workspace; nothing here joins the daemon's executor pool for this session")
 	cmd.Flags().String("home", "",
 		"executor where --cwd applies and CLAUDE.md is read from; defaults to this machine when it is eligible")
+	cmd.Flags().String("workspace-tools", "",
+		"claude only: rafiki replaces the built-in file and shell tools with rafiki's executor-routed ones")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -506,6 +508,20 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	recordRequests, _ := cmd.Flags().GetBool("record-requests")
 	skipDerivedIndex, _ := cmd.Flags().GetBool("skip-derived-index")
 	notify, _ := cmd.Flags().GetString("notify")
+	// --workspace-tools is a DECLARED choice and rides the wire VERBATIM --
+	// "native" as well as "rafiki" -- because on the wire "" means "unset,
+	// let a preset decide" while "native" means "pin the built-ins". Folding
+	// native into "" here would let a preset's rafiki silently outrank the
+	// value the caller typed. The daemon stores "native" as the default ("").
+	// Whether the resolved kind may carry it at all is workspaceToolsRefusal's
+	// call, on the FINAL kind -- a preset supplies its own after this point.
+	workspaceTools, _ := cmd.Flags().GetString("workspace-tools")
+	if workspaceTools != "" {
+		if _, ok := protocol.NormalizeWorkspaceTools(workspaceTools); !ok {
+			return protocol.SpawnRequest{}, fmt.Errorf("--workspace-tools must be %q or %q (got %q)",
+				protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki, workspaceTools)
+		}
+	}
 	passthroughAuth, _ := cmd.Flags().GetString("passthrough-auth")
 	if passthroughAuth != "" {
 		if _, err := proxyenv.ParsePassthroughMode(passthroughAuth); err != nil {
@@ -539,6 +555,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		PassthroughAuth:    passthroughAuth,
 		SkipDerivedIndex:   skipDerivedIndex,
 		Notify:             notify,
+		WorkspaceTools:     workspaceTools,
 		ForkFrom:           forkFrom,
 		FromTag:            fromTagFlag,
 		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;
@@ -642,6 +659,7 @@ func connectSpawnRequest(req protocol.SpawnRequest) *rafikiv1.SpawnRequest {
 		PassthroughAuth:    req.PassthroughAuth,
 		SkipDerivedIndex:   req.SkipDerivedIndex,
 		Notify:             req.Notify,
+		WorkspaceTools:     req.WorkspaceTools,
 	}
 	if req.MaxDepth != nil {
 		depth := int32(*req.MaxDepth)
@@ -1060,6 +1078,27 @@ func forkOverflow(ctx context.Context, ep connectEndpoint, ctrl rafikiv1connect.
 	return tokens, window, tokens > 0 && window > 0, nil
 }
 
+// workspaceToolsRefusal reports why a declared --workspace-tools cannot ride
+// this spawn, or nil when it can.
+//
+// Only a claude child has built-in file and shell tools to replace, so the flag
+// is refused for every other kind rather than sent and quietly ignored — an
+// inert flag reads as "it worked" to the caller. The wording is the daemon's
+// own refusal verbatim: the client and the daemon must not be able to disagree
+// about the rule.
+//
+// It takes the FINAL kind, so it must run after applyCreatePreset: a preset's
+// kind outranks the profile and remembered kinds buildSpawnRequest resolved on
+// its own, and judging the pre-preset kind would refuse
+// `--preset <claude preset> --workspace-tools rafiki` (a valid spawn) while
+// allowing the mirror case the daemon then rejects.
+func workspaceToolsRefusal(kind, workspaceTools string) error {
+	if workspaceTools == "" || kind == protocol.KindClaude {
+		return nil
+	}
+	return errors.New("workspace_tools applies to claude children; fundi always uses rafiki's workspace tools")
+}
+
 // compactRefusal reports why --compact cannot apply to this spawn, or nil when
 // it can. It refuses BOTH ways the flag would otherwise be inert — a spawn that
 // borrows nothing, and a TAG fork — because an inert flag is the failure this
@@ -1218,6 +1257,13 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		resolveSpawnModel(&req, p, p.Name)
+	}
+
+	// The declared workspace-tools mode is judged against the FINAL kind, which
+	// the preset branch above may just have supplied — see workspaceToolsRefusal.
+	// It runs before the form branch so a refused spawn never opens a modal.
+	if err := workspaceToolsRefusal(req.Kind, req.WorkspaceTools); err != nil {
+		return err
 	}
 
 	// The fork gate. It runs HERE, after the model resolution above, because

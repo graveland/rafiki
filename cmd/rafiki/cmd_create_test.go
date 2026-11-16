@@ -204,6 +204,112 @@ func TestCreateSkipDerivedIndexReachesTheRequest(t *testing.T) {
 	c.False(connectSpawnRequest(req).GetSkipDerivedIndex(), "wire SkipDerivedIndex without the flag")
 }
 
+// TestCreateWorkspaceToolsFlagMapped pins --workspace-tools onto the built
+// request and the Connect wire message, VERBATIM. "native" must not be folded
+// into "": on the wire "" means "unset, let a preset decide", so folding it
+// would let a preset's rafiki silently outrank the value the caller declared.
+func TestCreateWorkspaceToolsFlagMapped(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		flag, wantReq, wantWire string
+	}{
+		{"rafiki", protocol.WorkspaceToolsRafiki, protocol.WorkspaceToolsRafiki},
+		{protocol.WorkspaceToolsNative, protocol.WorkspaceToolsNative, protocol.WorkspaceToolsNative},
+	} {
+		isolateProfiles(t)
+		resetProfileCache()
+		cmd := newTestCreateCmd()
+		c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+		c.Require().NoError(cmd.Flags().Set("kind", protocol.KindClaude))
+		c.Require().NoError(cmd.Flags().Set("workspace-tools", tc.flag), "--workspace-tools %s", tc.flag)
+
+		req, err := buildSpawnRequest(cmd, nil)
+		c.Require().NoError(err, "--workspace-tools %s", tc.flag)
+		c.Eq(tc.wantReq, req.WorkspaceTools, "req.WorkspaceTools with --workspace-tools %s", tc.flag)
+		c.Eq(tc.wantWire, connectSpawnRequest(req).GetWorkspaceTools(), "wire WorkspaceTools with --workspace-tools %s", tc.flag)
+	}
+
+	// No flag: nothing is declared, so the request and the wire stay empty and
+	// a preset's own workspace_tools can still apply.
+	isolateProfiles(t)
+	resetProfileCache()
+	cmd := newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("kind", protocol.KindClaude))
+	req, err := buildSpawnRequest(cmd, nil)
+	c.Require().NoError(err)
+	c.Eq("", req.WorkspaceTools, "req.WorkspaceTools without the flag")
+	c.Eq("", connectSpawnRequest(req).GetWorkspaceTools(), "wire WorkspaceTools without the flag")
+
+	// A value outside the vocabulary fails before any dial, naming both values
+	// rather than letting the daemon refuse a request the client built.
+	isolateProfiles(t)
+	resetProfileCache()
+	cmd = newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("workspace-tools", "none"))
+	_, err = buildSpawnRequest(cmd, nil)
+	c.Require().Error(err, "--workspace-tools none = nil error")
+	c.StrContains(err.Error(), `"native"`, "the refusal names the accepted values: %v", err)
+	c.StrContains(err.Error(), `"rafiki"`, "the refusal names the accepted values: %v", err)
+}
+
+// TestCreateWorkspaceToolsRefusedForFundi pins the client-side refusal for
+// every non-claude kind, in the daemon's own words, and pins WHY the check
+// lives on the final kind: a preset supplies a kind buildSpawnRequest cannot
+// know, and it outranks the profile and remembered kinds it resolved alone.
+func TestCreateWorkspaceToolsRefusedForFundi(t *testing.T) {
+	c := assert.NewCollecting(t)
+	const want = "workspace_tools applies to claude children; fundi always uses rafiki's workspace tools"
+
+	// Only a claude child has built-in file and shell tools to replace. Both
+	// values are refused for the other kinds: an inert flag reads as "it
+	// worked", and native is just as inapplicable as rafiki.
+	for _, kind := range []string{protocol.KindFundi, protocol.KindScript} {
+		for _, mode := range []string{protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki} {
+			err := workspaceToolsRefusal(kind, mode)
+			c.Require().Error(err, "workspaceToolsRefusal(%q, %q), want a refusal", kind, mode)
+			c.Eq(want, err.Error(), "refusal text for kind %q mode %q", kind, mode)
+		}
+	}
+	for _, mode := range []string{"", protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki} {
+		c.NoError(workspaceToolsRefusal(protocol.KindClaude, mode), "workspaceToolsRefusal(claude, %q)", mode)
+	}
+	// Nothing declared: nothing to refuse, whatever the kind.
+	c.NoError(workspaceToolsRefusal(protocol.KindFundi, ""), "an absent --workspace-tools must pass")
+
+	// The resolved-kind case. buildSpawnRequest resolves fundi here (no --kind),
+	// and it must NOT refuse: the preset below supplies claude, and a preset's
+	// kind is part of the resolution chain. The refusal is judged after the
+	// preset has spoken, which is where runCreate calls it.
+	isolateProfiles(t)
+	resetProfileCache()
+	cmd := newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("workspace-tools", protocol.WorkspaceToolsRafiki))
+	req, err := buildSpawnRequest(cmd, nil)
+	c.Require().NoError(err, "buildSpawnRequest must not judge the pre-preset kind")
+	c.Require().NoError(applyCreatePreset(&req, "claude-seat", presets.Record{Name: "claude-seat", Kind: presets.KindClaude}, "", false, ""),
+		"applyCreatePreset")
+	c.NoError(workspaceToolsRefusal(req.Kind, req.WorkspaceTools),
+		"a claude preset may carry a declared mode")
+
+	// The same flag against a preset whose kind is fundi is refused: that kind
+	// is what the spawn would actually be.
+	isolateProfiles(t)
+	resetProfileCache()
+	cmd = newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("workspace-tools", protocol.WorkspaceToolsRafiki))
+	req, err = buildSpawnRequest(cmd, nil)
+	c.Require().NoError(err, "buildSpawnRequest")
+	c.Require().NoError(applyCreatePreset(&req, "fundi-seat", presets.Record{Name: "fundi-seat", Kind: presets.KindFundi}, "", false, ""),
+		"applyCreatePreset")
+	err = workspaceToolsRefusal(req.Kind, req.WorkspaceTools)
+	c.Require().Error(err, "a preset that resolves the kind to fundi must be refused too")
+	c.Eq(want, err.Error(), "refusal text after the preset resolved the kind")
+}
+
 func TestBuildSpawnRequest_NameFromArgs(t *testing.T) {
 	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()

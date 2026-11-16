@@ -344,6 +344,10 @@ type SpawnDefaults struct {
 	// Preset is sent with every spawn issued from the form and resolved
 	// daemon-side via Controller.Spawn.
 	Preset string
+	// WorkspaceTools is a DECLARED workspace tools mode ("native" or "rafiki") that
+	// prefills the claude-only workspace tools row. Empty leaves the row on its
+	// native default — the same value an absent `--workspace-tools` sends.
+	WorkspaceTools string
 }
 
 // ── Model ───────────────────────────────────────────────────────────────────
