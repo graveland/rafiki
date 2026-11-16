@@ -404,6 +404,7 @@ func cloneRequest(req *rafikiv1.SpawnRequest) *rafikiv1.SpawnRequest {
 		SkipDerivedIndex:   req.SkipDerivedIndex,
 		Notify:             req.Notify,
 		HomeExecutor:       req.HomeExecutor,
+		WorkspaceTools:     req.WorkspaceTools,
 		Sandbox:            req.Sandbox,
 		ForkFrom:           req.ForkFrom,
 		FromTag:            req.FromTag,

@@ -612,6 +612,7 @@ func TestRunCloneRequestKeepsEveryField(t *testing.T) {
 		SkipDerivedIndex:   true,
 		Notify:             "result",
 		HomeExecutor:       "home",
+		WorkspaceTools:     "rafiki",
 		Sandbox:            &rafikiv1.SandboxSpec{},
 		ForkFrom:           &rafikiv1.SpawnRequest_ForkFrom{ChildId: sourceID, Cursor: "m:1"},
 		FromTag:            "tag",
