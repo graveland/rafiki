@@ -40,9 +40,11 @@ asking you when ambiguous. `--no-local-executor` turns the local offer off;
 
 There are two kinds of executor:
 
-- **Durable** — enrolled with `rafiki executor enroll` or created outright
-  with `rafiki executor create`. Has a database row with operator-written
-  labels, admission, isolation, and workspace mode; lives until deleted.
+- **Durable** — enrolled with `rafiki executor enroll`, created outright with
+  `rafiki executor create`, or installed on another machine over ssh with
+  `rafiki executor install` ("Installing an executor over ssh" below). Has a
+  database row with operator-written labels, admission, isolation, and
+  workspace mode; lives until deleted.
   Naming one is two steps on two machines — name the machine where it will
   run, then mint the enrollment token wherever the operator is:
 
