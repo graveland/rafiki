@@ -56,11 +56,14 @@ func ServiceEnvFile() string {
 // exist on one machine: the daemon's file holds RAFIKI_DB and provider API
 // keys, and nothing on the executor side reads postgres or resolves API keys
 // — merging the two would hand every bash tool child a DSN it has no use for.
+//
+// The file is per executor instance — executor.env / executor-<name>.env —
+// while ConfigDir stays shared; an explicit override still wins over both.
 func ExecutorEnvFile() string {
 	if v := os.Getenv(ExecutorEnvFileEnv); v != "" {
 		return v
 	}
-	return filepath.Join(ConfigDir(), "executor.env")
+	return filepath.Join(ConfigDir(), instanceFileName("executor", ".env"))
 }
 
 // ExecutorOverridesFile is the EXECUTOR's environment-OVERRIDE file:
@@ -75,11 +78,14 @@ func ExecutorEnvFile() string {
 // the executor at the agent that actually holds the keys. Hand-maintained
 // (0600); install never writes it, because force semantics make an
 // auto-captured value harmful where an inert one was merely useless.
+//
+// Per executor instance, like ExecutorEnvFile:
+// executor-overrides.env / executor-overrides-<name>.env.
 func ExecutorOverridesFile() string {
 	if v := os.Getenv(ExecutorOverridesFileEnv); v != "" {
 		return v
 	}
-	return filepath.Join(ConfigDir(), "executor-overrides.env")
+	return filepath.Join(ConfigDir(), instanceFileName("executor-overrides", ".env"))
 }
 
 // envAssignment is one KEY=VALUE parsed out of an environment file, in file

@@ -17,7 +17,9 @@ import (
 // motivated deleting it.
 var ErrNoMachineName = errors.New("this machine has no executor name")
 
-// MachineNameFile is where an interactive box keeps its name.
+// MachineNameFile is where an interactive box keeps its name. It follows the
+// executor instance through DataDir, so two instances on one OS user can be two
+// differently named executors.
 func MachineNameFile() string { return filepath.Join(DataDir(), "executor-name") }
 
 // MachineName resolves this machine's executor name.

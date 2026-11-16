@@ -131,6 +131,11 @@ type executorInstallOptions struct {
 }
 
 func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
+	// Before any path is read: the credential file, the environment file and
+	// the unit's name are all per instance. See applyExecutorInstance.
+	if err := applyExecutorInstance(cmd); err != nil {
+		return err
+	}
 	connect, _ := cmd.Flags().GetString("connect")
 	connectSocket, _ := cmd.Flags().GetString("connect-socket")
 	enrollToken, _ := cmd.Flags().GetString("enroll-token")
@@ -217,6 +222,14 @@ func installExecutorService(opts executorInstallOptions, out io.Writer) error {
 	}
 
 	args := []string{"executor", "serve", "--root", resolvedRoot}
+	// A non-default instance is named in argv, not inferred from the unit's
+	// environment: `executor serve` takes the RAW name (never the
+	// current-profile pointer), so the unit has to say which instance it is —
+	// otherwise a restart after someone switched profiles would serve the
+	// default one, with the default credential.
+	if instance := paths.Instance(); instance != paths.DefaultInstance {
+		args = append(args, "--profile", instance)
+	}
 	if connectSocket != "" {
 		args = append(args, "--connect-socket", connectSocket)
 	} else {

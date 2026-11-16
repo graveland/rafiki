@@ -414,10 +414,42 @@ func skillsSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bo
 	if cmd.Flags().Changed("skills-sync") {
 		return flagOn
 	}
+	// A non-default instance with no CLAUDE_CONFIG_DIR of its own would write
+	// the SAME ~/.claude/skills the default instance writes, so the implied
+	// forms (--launch claude, RAFIKI_EXECUTOR_SKILLS_SYNC) stay off; an
+	// EXPLICIT --skills-sync=true is refused outright by
+	// refuseSkillsSyncForNonDefaultInstance. Honouring the implication here
+	// would rewrite one corpus under another instance's children.
+	if skillsSyncConflictsWithDefaultInstance() {
+		return false
+	}
 	if os.Getenv("RAFIKI_EXECUTOR_SKILLS_SYNC") != "" {
 		return true
 	}
 	return slices.Contains(launchKinds, "claude")
+}
+
+// skillsSyncConflictsWithDefaultInstance reports whether --skills-sync would
+// write the SHARED ~/.claude/skills: true for a non-default instance that has no
+// CLAUDE_CONFIG_DIR of its own.
+func skillsSyncConflictsWithDefaultInstance() bool {
+	return paths.Instance() != paths.DefaultInstance && os.Getenv("CLAUDE_CONFIG_DIR") == ""
+}
+
+// refuseSkillsSyncForNonDefaultInstance refuses an EXPLICIT --skills-sync=true
+// on a non-default instance with no CLAUDE_CONFIG_DIR. The implied forms are
+// switched off by skillsSyncEnabled instead: an operator who asked for the
+// corpus in so many words is told why it cannot be honoured, rather than getting
+// a directory two instances would each rewrite.
+func refuseSkillsSyncForNonDefaultInstance(cmd *cobra.Command, flagOn bool) error {
+	if !cmd.Flags().Changed("skills-sync") || !flagOn {
+		return nil
+	}
+	if !skillsSyncConflictsWithDefaultInstance() {
+		return nil
+	}
+	return fmt.Errorf("--skills-sync writes ~/.claude/skills, which instance %q also writes; "+
+		"set CLAUDE_CONFIG_DIR for instance %q to enable it", paths.DefaultInstance, paths.Instance())
 }
 
 // pymodulesSyncEnabled resolves the effective --pymodules-sync value from the
@@ -472,6 +504,44 @@ func repoSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bool
 
 // ─── serve ─────────────────────────────────────────────────────────────────────
 
+// executorInstanceName is the RAW instance name this process serves: the
+// -P/--profile flag, else a non-empty RAFIKI_PROFILE, else DefaultInstance.
+//
+// Raw, never resolved: `executor serve` runs on machines that have no
+// profiles.toml at all (a remote target installed over ssh), and resolving
+// against one would let a `rafiki profile use` on the same box move a SERVICE's
+// state. The pointer is a client's convenience, not a service's identity.
+func executorInstanceName(cmd *cobra.Command) string {
+	if cmd != nil {
+		if flag, _ := cmd.Flags().GetString("profile"); flag != "" {
+			return flag
+		}
+	}
+	if env := os.Getenv("RAFIKI_PROFILE"); env != "" {
+		return env
+	}
+	return paths.DefaultInstance
+}
+
+// applyExecutorInstance namespaces this process's executor paths under the raw
+// instance name. Called before anything resolves a path — by `executor serve`,
+// which never resolves a profile, and by the executor verbs that can run without
+// one (`service install`, `executor name`).
+//
+// A raw name of DefaultInstance leaves an instance that resolveProfile already
+// set alone: with no flag and no RAFIKI_PROFILE, the pointer-resolved profile
+// still decides, so only a DECLARED name outranks it.
+func applyExecutorInstance(cmd *cobra.Command) error {
+	name := executorInstanceName(cmd)
+	if name == paths.DefaultInstance {
+		return nil
+	}
+	if err := paths.SetInstance(name); err != nil {
+		return fmt.Errorf("cannot use %q as the executor instance: %w", name, err)
+	}
+	return nil
+}
+
 func newExecutorServeCmd() *cobra.Command {
 	var (
 		connectAddr        string
@@ -513,10 +583,22 @@ Two transports, exactly one of which is used:
                     the host:port derived from $RAFIKI_URL when neither flag is
                     given.
   --connect-socket  reverse-dial a rafikid on this machine over its executor
-                    unix socket, enrolling as a fully rowed pool member.`,
+                    unix socket, enrolling as a fully rowed pool member.
+
+-P/--profile names this executor's on-disk INSTANCE — data, cache, both
+environment files and the service unit's name — and NOT a daemon: serve never
+resolves its endpoint through a profile. The default instance keeps the layout
+every existing install already has; any other name lives under profiles/<name>.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
+
+			// FIRST: every path this command resolves — the credential file,
+			// both environment files, the caches, the machine name — is derived
+			// from the instance.
+			if err := applyExecutorInstance(cmd); err != nil {
+				return err
+			}
 
 			// The retired spellings must fail loudly rather than silently do
 			// nothing: an operator's argv or service unit that still says
@@ -530,6 +612,13 @@ Two transports, exactly one of which is used:
 			}
 
 			pinnedEnv := executorPinnedEnv()
+
+			// After executorPinnedEnv, so a CLAUDE_CONFIG_DIR the operator put in
+			// executor.env counts as having one. See
+			// refuseSkillsSyncForNonDefaultInstance.
+			if err := refuseSkillsSyncForNonDefaultInstance(cmd, skillsSync); err != nil {
+				return err
+			}
 
 			// The relay has nowhere to forward sandboxes unless this command
 			// already knows how to reach the daemon, so refuse before anything

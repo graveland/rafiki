@@ -67,7 +67,12 @@ func ConfigDir() string { return base("XDG_CONFIG_HOME", ".config") }
 
 // DataDir is persistent application data: $XDG_DATA_HOME/rafiki, else
 // ~/.local/share/rafiki. Session records live here — they must survive a reboot.
-func DataDir() string { return base("XDG_DATA_HOME", ".local", "share") }
+//
+// For a non-default executor instance it is namespaced under profiles/<name>
+// (see SetInstance): the credential, the machine name and the session records
+// all belong to ONE instance, and two instances on one OS user must not share
+// them.
+func DataDir() string { return instanceScoped(base("XDG_DATA_HOME", ".local", "share")) }
 
 // StateDir is state that persists but is not precious: $XDG_STATE_HOME/rafiki,
 // else ~/.local/state/rafiki. Logs live here.
@@ -116,12 +121,17 @@ func ServiceLogPath() string { return filepath.Join(StateDir(), "controller.log"
 // ExecutorServiceLogPath is where the EXECUTOR's service unit sends its output.
 // Separate from the daemon's: a machine can run both, and interleaving two
 // services into one file makes each one's log harder to read than either would
-// be alone.
-func ExecutorServiceLogPath() string { return filepath.Join(StateDir(), "executor.log") }
+// be alone. Per instance (executor.log / executor-<name>.log), because StateDir
+// itself is shared by every instance.
+func ExecutorServiceLogPath() string {
+	return filepath.Join(StateDir(), instanceFileName("executor", ".log"))
+}
 
 // CacheDir is disposable, regenerable data: $XDG_CACHE_HOME/rafiki, else
-// ~/.cache/rafiki.
-func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
+// ~/.cache/rafiki. Namespaced per executor instance, like DataDir: the pymodule
+// sync PRUNES what it does not know, so two instances sharing one cache would
+// delete each other's corpus.
+func CacheDir() string { return instanceScoped(base("XDG_CACHE_HOME", ".cache")) }
 
 // ClientStateFile holds the rafiki client's own preferences: things a person
 // chose that should survive a restart, in one document with named sections.

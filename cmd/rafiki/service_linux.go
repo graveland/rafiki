@@ -25,6 +25,18 @@ const systemdUnitName = "rafiki"
 // executor commonly runs on a machine hosting no daemon at all.
 const systemdExecutorUnitName = "rafiki-executor"
 
+// executorUnitName is the executor's unit name for one instance: the base name
+// for the default instance (every install that predates instances), and
+// "<base>-<instance>" otherwise. Two instances on one OS user are two services
+// with two credentials and two roots, so they cannot share a unit — `stop`
+// would be ambiguous, exactly as it would be between the daemon and executor.
+func executorUnitName(instance string) string {
+	if instance == "" || instance == paths.DefaultInstance {
+		return systemdExecutorUnitName
+	}
+	return systemdExecutorUnitName + "-" + instance
+}
+
 // unitTemplate is the systemd user service unit for the rafiki daemon.
 const unitTemplate = `[Unit]
 Description={{.Description}}
@@ -101,7 +113,7 @@ func newServiceBackend() serviceBackend {
 
 // newExecutorServiceBackend manages the executor's unit rather than the daemon's.
 func newExecutorServiceBackend() serviceBackend {
-	return &linuxBackend{unit: systemdExecutorUnitName + ".service", description: "rafiki executor", logPath: paths.ExecutorServiceLogPath()}
+	return &linuxBackend{unit: executorUnitName(paths.Instance()) + ".service", description: "rafiki executor", logPath: paths.ExecutorServiceLogPath()}
 }
 
 func (b *linuxBackend) unitPath() (string, error) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
 )
 
@@ -38,6 +39,29 @@ func resolveProfile(cmd *cobra.Command) (profile.Resolved, error) {
 		profileVal, profileErr = profile.Resolve(profile.Selection{
 			Flag: flag, Env: env, EnvSet: envSet,
 		})
+		if profileErr == nil {
+			// The profile names this process's executor instance too, so every
+			// command that resolves one reads the SAME instance's data dir, cache
+			// and machine name that `executor serve -P <name>` writes. The
+			// RESOLVED name, not the raw flag: a command with no -P follows the
+			// current-profile pointer, and `rafiki executor setup` must install
+			// the unit for the instance that pointer selects.
+			//
+			// A profile name is only checked as a path component (pkg/profile), so
+			// one outside the instance charset cannot name an instance. That must
+			// not fail a client command which never touches executor state: the
+			// executor verbs validate the DECLARED name loudly instead
+			// (applyExecutorInstance). Such a profile keeps the default layout —
+			// today's — and says so once.
+			if verr := paths.ValidateInstance(profileVal.Name); verr != nil {
+				fmt.Fprintf(os.Stderr,
+					"rafiki: profile %q cannot name an executor instance (%v); using the default instance\n",
+					profileVal.Name, verr)
+			} else {
+				// Already validated, so this cannot fail.
+				_ = paths.SetInstance(profileVal.Name)
+			}
+		}
 		profileResolved = true
 		if profileErr == nil && profileVal.Bootstrapped {
 			fmt.Fprintf(os.Stderr,
@@ -89,11 +113,16 @@ func multipleProfilesConfigured() bool {
 // resetProfileCache clears the once-per-process resolution. Tests only: each
 // test case supplies its own manifest, and a sync.Once shared across them
 // would make the first case's profile win for the whole package.
+//
+// It resets the executor instance with it, because the instance is derived from
+// the resolved profile: leaving a previous case's instance behind would move the
+// NEXT case's DataDir under profiles/<that name>.
 func resetProfileCache() {
 	profileOnce = sync.Once{}
 	profileVal = profile.Resolved{}
 	profileErr = nil
 	profileResolved = false
+	_ = paths.SetInstance(paths.DefaultInstance)
 }
 
 // resolvedProfile returns the process's already-resolved profile, if one was

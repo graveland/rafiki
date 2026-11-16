@@ -27,6 +27,13 @@ func newExecutorNameCmd() *cobra.Command {
 }
 
 func runExecutorName(cmd *cobra.Command, args []string) error {
+	// The name lives in the instance's data dir, so a declared
+	// -P/RAFIKI_PROFILE must select it. The raw flag, not a resolved profile:
+	// an executor-only machine has no profiles.toml, and creating one here
+	// would be a side effect of reading a name.
+	if err := applyExecutorInstance(cmd); err != nil {
+		return err
+	}
 	if len(args) == 1 {
 		if err := paths.SetMachineName(args[0]); err != nil {
 			return err

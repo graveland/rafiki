@@ -30,6 +30,18 @@ const launchdLabel = "dev.graveland.rafiki"
 // all — and sharing an identity would make `stop` ambiguous.
 const executorLaunchdLabel = "dev.graveland.rafiki-executor"
 
+// executorLaunchdLabelFor is the executor's launchd label for one instance: the
+// base label for the default instance (every install that predates instances),
+// and "<base>-<instance>" otherwise. Same reasoning as executorUnitName in
+// service_linux.go — two instances are two services, and launchctl addresses a
+// service by its label.
+func executorLaunchdLabelFor(instance string) string {
+	if instance == "" || instance == paths.DefaultInstance {
+		return executorLaunchdLabel
+	}
+	return executorLaunchdLabel + "-" + instance
+}
+
 // plistTemplate is the launchd property list for the rafiki daemon.
 const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -145,7 +157,7 @@ func newServiceBackend() serviceBackend {
 
 // newExecutorServiceBackend manages the executor's unit rather than the daemon's.
 func newExecutorServiceBackend() serviceBackend {
-	return &darwinBackend{label: executorLaunchdLabel, logPath: paths.ExecutorServiceLogPath(), restartGrace: executorRestartGrace}
+	return &darwinBackend{label: executorLaunchdLabelFor(paths.Instance()), logPath: paths.ExecutorServiceLogPath(), restartGrace: executorRestartGrace}
 }
 
 func (b *darwinBackend) plistPath() (string, error) {

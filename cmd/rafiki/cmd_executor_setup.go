@@ -115,6 +115,14 @@ var executorSetupWaitLive = func(ctx context.Context, cmd *cobra.Command, select
 // RunE is a one-line wrapper. Exposed so `rafiki setup` and `rafiki create`'s
 // missing-executor prompt call the same code.
 func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
+	// The profile names the instance this executor's state lives under, and
+	// this flow writes the credential, the machine name and the unit. A
+	// declared -P/RAFIKI_PROFILE applies here even when nothing in this flow
+	// resolves a profile (a non-interactive run with --enroll-token does not).
+	if err := applyExecutorInstance(w.cmd); err != nil {
+		return err
+	}
+
 	st, _, err := installstate.Load()
 	if err != nil {
 		return fmt.Errorf("%s: %w", installstate.Path(), err)
