@@ -214,6 +214,14 @@ const (
 	// plane must not silently also open executor enrollment to it.
 	ExecutorsEnabled = "RAFIKI_EXECUTORS_ENABLED"
 
+	// ExecutorBinariesDir is where the daemon finds the `rafiki` binary it
+	// installs on another machine over ssh, laid out as
+	// <dir>/<goos>-<goarch>/rafiki. It is checked BEFORE the release host, and
+	// it is the only source for a build that is not a release tag: a dev build
+	// has no assets to fetch, so it refuses the install with the command that
+	// would produce the binary rather than guessing at one.
+	ExecutorBinariesDir = "RAFIKI_EXECUTOR_BINARIES"
+
 	// ExecutorEnvFileEnv names an override for the executor's environment file
 	// (see ExecutorEnvFile in envfile.go). It is baked into the executor's
 	// service unit at install time for the same reason RAFIKI_ENV_FILE is baked
