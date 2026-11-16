@@ -58,7 +58,9 @@ func resolveProfile(cmd *cobra.Command) (profile.Resolved, error) {
 					"rafiki: profile %q cannot name an executor instance (%v); using the default instance\n",
 					profileVal.Name, verr)
 			} else {
-				// Already validated, so this cannot fail.
+				// Already validated, so this cannot fail. A no-op when an
+				// executor-service verb has already pinned the declared instance —
+				// see applyExecutorInstance.
 				_ = paths.SetInstance(profileVal.Name)
 			}
 		}
@@ -114,15 +116,16 @@ func multipleProfilesConfigured() bool {
 // test case supplies its own manifest, and a sync.Once shared across them
 // would make the first case's profile win for the whole package.
 //
-// It resets the executor instance with it, because the instance is derived from
-// the resolved profile: leaving a previous case's instance behind would move the
-// NEXT case's DataDir under profiles/<that name>.
+// It resets the executor instance and its pin with it, because the instance is
+// derived from the resolved profile: leaving a previous case's instance behind
+// would move the NEXT case's DataDir under profiles/<that name>, and leaving a
+// pin behind would stop the next case's pointer resolution from applying at all.
 func resetProfileCache() {
 	profileOnce = sync.Once{}
 	profileVal = profile.Resolved{}
 	profileErr = nil
 	profileResolved = false
-	_ = paths.SetInstance(paths.DefaultInstance)
+	paths.ResetInstanceForTest()
 }
 
 // resolvedProfile returns the process's already-resolved profile, if one was

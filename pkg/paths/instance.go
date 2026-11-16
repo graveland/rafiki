@@ -16,27 +16,67 @@ const DefaultInstance = "default"
 // to the name it quotes into a shell script.
 const maxInstanceLen = 64
 
-// instanceMu guards instanceName. Instance() is read from every path resolver —
-// once per tool call in a long-lived executor — so it takes a lock rather than
-// being plain: SetInstance runs once at startup, before any path is read, and a
-// data race here would be a race on where state lands, not on a display value.
+// instanceMu guards instanceName and instancePinned. Instance() is read from
+// every path resolver — once per tool call in a long-lived executor — so it
+// takes a lock rather than being plain: the instance is set once at startup,
+// before any path is read, and a data race here would be a race on where state
+// lands, not on a display value.
 var (
-	instanceMu   sync.Mutex
-	instanceName = DefaultInstance
+	instanceMu     sync.Mutex
+	instanceName   = DefaultInstance
+	instancePinned bool
 )
 
 // SetInstance namespaces this PROCESS's DataDir and CacheDir under
 // profiles/<name> for any name other than DefaultInstance. It never touches
 // ConfigDir, StateDir or RuntimeDir: the daemon's sockets and the client's
 // own state live there. Call once, before any path is read.
+//
+// It is a NO-OP once PinInstance has pinned the instance. That is deliberate:
+// an ordinary client command resolving the current-profile pointer must not move
+// the namespace of a verb whose on-disk state was already claimed for a declared
+// instance.
 func SetInstance(name string) error {
 	if err := ValidateInstance(name); err != nil {
 		return err
 	}
 	instanceMu.Lock()
+	defer instanceMu.Unlock()
+	if instancePinned {
+		return nil
+	}
 	instanceName = name
-	instanceMu.Unlock()
 	return nil
+}
+
+// PinInstance sets this process's instance and PINS it: a later SetInstance is
+// then a no-op, while a later PinInstance may still name another instance.
+//
+// For a verb whose on-disk state must not move when someone switches profiles —
+// the executor-service verbs, whose credential, environment files, log path and
+// unit name must all describe ONE instance for the whole invocation. The same
+// process can resolve the current-profile pointer afterwards (executor setup's
+// enrollment client reaches newConnectEndpoint, which calls resolveProfile), and
+// an ambient pointer must not be able to split the credential check from the
+// write.
+func PinInstance(name string) error {
+	if err := ValidateInstance(name); err != nil {
+		return err
+	}
+	instanceMu.Lock()
+	defer instanceMu.Unlock()
+	instanceName = name
+	instancePinned = true
+	return nil
+}
+
+// ResetInstanceForTest clears the instance and its pin. Tests only: production
+// pins at most once, at the start of a verb, and never unpins.
+func ResetInstanceForTest() {
+	instanceMu.Lock()
+	defer instanceMu.Unlock()
+	instanceName = DefaultInstance
+	instancePinned = false
 }
 
 // Instance reports the current instance name (DefaultInstance when unset).

@@ -523,24 +523,27 @@ func executorInstanceName(cmd *cobra.Command) string {
 	return paths.DefaultInstance
 }
 
-// applyExecutorInstance sets this process's executor instance from the RAW name:
-// the -P/--profile flag, else a non-empty RAFIKI_PROFILE, else the default
-// instance. Every executor-SERVICE verb calls it before resolving a path —
-// `executor serve`, `executor setup`, `executor service install|uninstall|
+// applyExecutorInstance sets and PINS this process's executor instance from the
+// RAW name: the -P/--profile flag, else a non-empty RAFIKI_PROFILE, else the
+// default instance. Every executor-SERVICE verb calls it before resolving a path
+// — `executor serve`, `executor setup`, `executor service install|uninstall|
 // start|stop|restart|status|logs|tail`, and `executor name` — so the credential
 // path, the env-file path, the log path and the unit name all agree on ONE
 // directory.
 //
-// It always sets, including the default instance. That is what makes the rule
-// hold when an ordinary client command has already run in the same process:
-// resolveProfile follows the current-profile pointer, and ambient profile state
-// must not decide which system service gets installed or stopped. The cost is
-// that `rafiki executor setup` with no -P on a machine whose pointer names
-// `work` installs the `default` unit — exactly what it did before instances
-// existed.
+// It PINS (paths.PinInstance), so nothing later in the same invocation can move
+// it. That matters because the same process still resolves profiles for other
+// reasons: `executor setup` mints its enrollment token through
+// newConnectEndpoint, which calls resolveProfile, and with no -P that follows the
+// current-profile pointer. Without the pin, the credential check would read the
+// default directory and the unit, credential and env file would be written under
+// the pointer's profile. Ambient profile state must not decide which system
+// service gets installed or stopped; the cost is that `rafiki executor setup`
+// with no -P on a machine whose pointer names `work` installs the `default`
+// unit — exactly what it did before instances existed.
 func applyExecutorInstance(cmd *cobra.Command) error {
 	name := executorInstanceName(cmd)
-	if err := paths.SetInstance(name); err != nil {
+	if err := paths.PinInstance(name); err != nil {
 		return fmt.Errorf("cannot use %q as the executor instance: %w", name, err)
 	}
 	return nil

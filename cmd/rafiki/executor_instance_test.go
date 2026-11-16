@@ -3,8 +3,14 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,48 +20,70 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// resetInstance restores the process-wide executor instance. Tests only: the
-// instance is global on purpose (one per process, set before any path is read),
-// so a test that names one must not leave the package's other tests resolving
-// their paths under profiles/<name>.
+// resetInstance restores the process-wide executor instance and clears its pin.
+// Tests only: the instance is global on purpose (one per process, set before any
+// path is read), so a test that names or pins one must not leave the package's
+// other tests resolving their paths under profiles/<name>.
 func resetInstance(t *testing.T) {
 	t.Helper()
-	t.Cleanup(func() { _ = paths.SetInstance(paths.DefaultInstance) })
+	t.Cleanup(paths.ResetInstanceForTest)
+}
+
+// executorVerb builds one executor-service verb under a root carrying the
+// persistent -P, and parses args into it — the shape cobra produces for
+// `rafiki [-P name] executor …`.
+func executorVerb(c *assert.C, newVerb func() *cobra.Command, args ...string) *cobra.Command {
+	root := &cobra.Command{Use: "rafiki"}
+	root.PersistentFlags().StringP("profile", "P", "", "")
+	cmd := newVerb()
+	root.AddCommand(cmd)
+	c.NoError(cmd.ParseFlags(args), "parse %v", args)
+	return cmd
+}
+
+// seedPointerProfiles writes two profiles and points the current-profile pointer
+// at the second, so a test can tell the pointer's instance from a declared one.
+func seedPointerProfiles(t *testing.T) {
+	t.Helper()
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"work":     {Name: "work", Socket: filepath.Join(t.TempDir(), "work.sock")},
+		"personal": {Name: "personal", Socket: filepath.Join(t.TempDir(), "personal.sock")},
+	}}); err != nil {
+		t.Fatalf("save profiles: %v", err)
+	}
+	if err := profile.SavePointer("personal"); err != nil {
+		t.Fatalf("save pointer: %v", err)
+	}
 }
 
 // A service's on-disk state must not move when someone runs `rafiki profile
-// use`: every executor-service verb takes its instance from the RAW -P /
+// use`: every executor-service verb PINS its instance from the RAW -P /
 // RAFIKI_PROFILE, else default — never the current-profile pointer that
-// resolveProfile follows. Otherwise the "already enrolled?" check, the write and
-// a later `service stop` could each land in a different directory.
+// resolveProfile follows. Without the pin, `executor setup`'s enrollment lookup
+// (which resolves a profile) flips the instance after the credential check and
+// before the write, splitting them across two directories.
 func TestExecutorInstanceServiceVerbsIgnoreCurrentProfilePointer(t *testing.T) {
 	c := assert.NewAborting(t)
 	isolateProfiles(t)
+	resetProfileCache()
 	resetInstance(t)
 	dataHome := filepath.Join(t.TempDir(), "data")
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	seedPointerProfiles(t)
 
-	// A pointer naming "work", and the instance resolveProfile already set from
-	// it — exactly the state a `service stop` issued in that process inherits.
-	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
-		"work": {Name: "work", Socket: filepath.Join(t.TempDir(), "work.sock")},
-	}}), "Save")
-	c.NoError(profile.SavePointer("work"), "SavePointer")
-	c.NoError(paths.SetInstance("work"), "SetInstance(work)")
+	// Mirror case: with no executor verb in play, an ordinary client command
+	// follows the pointer — that is the per-profile namespacing that stays.
+	p, err := resolveProfile(executorVerb(c, newExecutorServiceStatusCmd))
+	c.NoError(err, "resolveProfile")
+	c.Eq("personal", p.Name, "the pointer selects the profile")
+	c.Eq("personal", paths.Instance(), "an ordinary client command takes the pointer's instance")
+	c.Eq(filepath.Join(dataHome, "rafiki", "profiles", "personal"), paths.DataDir(), "DataDir from the pointer")
 
-	// The production shape: the verb under a root carrying the persistent -P.
-	verb := func(newVerb func() *cobra.Command, args ...string) *cobra.Command {
-		root := &cobra.Command{Use: "rafiki"}
-		root.PersistentFlags().StringP("profile", "P", "", "")
-		cmd := newVerb()
-		root.AddCommand(cmd)
-		c.NoError(cmd.ParseFlags(args), "parse %v", args)
-		return cmd
-	}
-
-	// No -P: the pointer must not choose the service's instance.
-	c.NoError(applyExecutorInstance(verb(newExecutorServiceStatusCmd)), "applyExecutorInstance, no -P")
+	// No -P: the verb pins the DEFAULT instance, and a later pointer resolution
+	// — exactly what executor setup's enrollment client does — must not move it.
+	resetProfileCache()
+	c.NoError(applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd)), "applyExecutorInstance, no -P")
 	c.Eq(paths.DefaultInstance, paths.Instance(), "a service verb with no -P must resolve the default instance")
 	c.Eq(filepath.Join(dataHome, "rafiki"), paths.DataDir(), "DataDir with no -P")
 	c.Eq(filepath.Join(dataHome, "rafiki", "executor.cred"),
@@ -64,23 +92,157 @@ func TestExecutorInstanceServiceVerbsIgnoreCurrentProfilePointer(t *testing.T) {
 	c.Eq(filepath.Join(paths.ConfigDir(), "executor.env"), paths.ExecutorEnvFile(),
 		"the env file install writes with no -P")
 
-	// The same rule for `executor setup`, whose RunE installs the unit.
-	c.NoError(applyExecutorInstance(verb(newExecutorSetupCmd)), "applyExecutorInstance for setup, no -P")
-	c.Eq(paths.DefaultInstance, paths.Instance(), "executor setup with no -P must resolve the default instance")
+	p, err = resolveProfile(executorVerb(c, newExecutorSetupCmd))
+	c.NoError(err, "resolveProfile after the pin")
+	c.Eq("personal", p.Name, "the pointer still resolves")
+	c.Eq(paths.DefaultInstance, paths.Instance(), "a pointer resolution must not move a pinned instance")
+	c.Eq(filepath.Join(dataHome, "rafiki"), paths.DataDir(), "DataDir after the pointer resolution")
+	c.Eq(filepath.Join(paths.ConfigDir(), "executor.env"), paths.ExecutorEnvFile(),
+		"the env file stays in the pinned instance")
 
-	// A declared name still wins, over the pointer and over the default.
-	c.NoError(applyExecutorInstance(verb(newExecutorServiceStatusCmd, "-P", "work")), "applyExecutorInstance, -P work")
+	// A declared name wins over the pointer for the whole process.
+	resetProfileCache()
+	c.NoError(applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd, "-P", "work")), "applyExecutorInstance, -P work")
 	c.Eq("work", paths.Instance(), "an explicit -P must name the instance")
 	c.Eq(filepath.Join(dataHome, "rafiki", "profiles", "work"), paths.DataDir(), "DataDir with -P work")
+	_, err = resolveProfile(executorVerb(c, newExecutorSetupCmd))
+	c.NoError(err, "resolveProfile after the -P pin")
+	c.Eq("work", paths.Instance(), "the pointer must not override a declared -P")
 	c.Eq(filepath.Join(paths.ConfigDir(), "executor-work.env"), paths.ExecutorEnvFile(),
 		"the env file install writes with -P work")
-	c.Eq(filepath.Join(dataHome, "rafiki", "profiles", "work", "executor.cred"), filepath.Join(paths.DataDir(), "executor.cred"),
-		"the credential check and the write agree on the instance")
 
 	// And the environment form, which the pointer never supplies.
+	resetProfileCache()
 	t.Setenv("RAFIKI_PROFILE", "work")
-	c.NoError(applyExecutorInstance(verb(newExecutorServiceStatusCmd)), "applyExecutorInstance from RAFIKI_PROFILE")
-	c.Eq("work", paths.Instance(), "RAFIKI_PROFILE names the instance")
+	c.NoError(applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd)), "applyExecutorInstance from RAFIKI_PROFILE")
+	_, err = resolveProfile(executorVerb(c, newExecutorSetupCmd))
+	c.NoError(err, "resolveProfile after the env pin")
+	c.Eq("work", paths.Instance(), "RAFIKI_PROFILE names the instance, and the pointer cannot move it")
+}
+
+// The failing sequence itself: `executor setup` with no credential mints a token,
+// minting resolves the profile through newConnectEndpoint, and with no -P that
+// follows the pointer. The pin must keep the write in the instance the credential
+// check already read.
+func TestExecutorInstanceSetupPinsThroughTheEnrollmentLookup(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateSetup(t)
+	resetProfileCache()
+	resetInstance(t)
+	t.Setenv(paths.ExecutorEnvFileEnv, "") // let the instance name the file
+	dataHome := filepath.Join(t.TempDir(), "data")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	seedPointerProfiles(t)
+	seedMachineName(t, "test-box")
+	stubExecutorSetup(t)
+
+	// The token-minter, standing in for production's newConnectEndpoint: it
+	// resolves the profile, which is the flip this test exists for.
+	var resolved bool
+	orig := executorEnrollClient
+	executorEnrollClient = func(_ context.Context, cmd *cobra.Command, _ string, _ []string) (string, error) {
+		resolved = true
+		if _, err := resolveProfile(cmd); err != nil {
+			return "", err
+		}
+		return "one-time-token", nil
+	}
+	t.Cleanup(func() { executorEnrollClient = orig })
+
+	// The enrollment exchange dials a daemon that is not there; a short deadline
+	// ends it at the connect, which is AFTER the env file is written.
+	cmd := newExecutorSetupCmd()
+	c.NoError(cmd.ParseFlags([]string{"--non-interactive", "--connect", "127.0.0.1:1"}), "parse setup flags")
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	cmd.SetContext(ctx)
+	var out strings.Builder
+	w := newWizard(cmd)
+	w.out = &out
+	err := runExecutorSetup(ctx, w, &out)
+
+	c.Error(err, "the enrollment exchange has no daemon to reach")
+	c.True(resolved, "the flow must have resolved a profile, or this test proves nothing")
+	c.Eq(paths.DefaultInstance, paths.Instance(), "the pointer's profile must not move the pinned instance")
+	c.Eq(filepath.Join(dataHome, "rafiki"), paths.DataDir(), "DataDir after the enrollment lookup")
+	_, statErr := os.Stat(filepath.Join(paths.ConfigDir(), "executor.env"))
+	c.NoError(statErr, "the env file the install wrote before enrolling")
+	_, workErr := os.Stat(filepath.Join(paths.ConfigDir(), "executor-work.env"))
+	c.True(os.IsNotExist(workErr), "the pointer's instance must not be written")
+}
+
+// recordingServiceBackend captures the spec installExecutorService hands the
+// service manager, so a test can assert which instance the unit was written for.
+type recordingServiceBackend struct {
+	fakeExecutorBackend
+	spec serviceSpec
+}
+
+func (r *recordingServiceBackend) Install(spec serviceSpec) error {
+	r.spec = spec
+	r.installed = true
+	return nil
+}
+
+// The credential check and the write are provably ONE instance for one
+// invocation: the credential seeded in the default directory satisfies the
+// check (no token is minted), and the unit the install writes carries that same
+// credential path, no --profile, and the default environment file — with the
+// pointer naming another profile throughout.
+func TestExecutorInstanceSetupWritesTheCheckedInstance(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateSetup(t)
+	resetProfileCache()
+	resetInstance(t)
+	t.Setenv(paths.ExecutorEnvFileEnv, "") // let the instance name the file
+	dataHome := filepath.Join(t.TempDir(), "data")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	seedPointerProfiles(t)
+	seedMachineName(t, "test-box")
+	seedExecutorCredential(t) // in the DEFAULT data dir, which is the instance at check time
+
+	// Minting would mean the check read a different directory from the write.
+	origEnroll := executorEnrollClient
+	executorEnrollClient = func(context.Context, *cobra.Command, string, []string) (string, error) {
+		t.Error("executor setup minted a token: the credential check and the write disagreed on the instance")
+		return "", errors.New("unexpected enrollment")
+	}
+	t.Cleanup(func() { executorEnrollClient = origEnroll })
+
+	rec := &recordingServiceBackend{}
+	origBackend := executorServiceBackendFor
+	executorServiceBackendFor = func() serviceBackend { return rec }
+	origWait := executorSetupWaitLive
+	executorSetupWaitLive = func(context.Context, *cobra.Command, string) error { return nil }
+	t.Cleanup(func() {
+		executorServiceBackendFor = origBackend
+		executorSetupWaitLive = origWait
+	})
+
+	if _, err := runExecutorSetupForTest(t, "--non-interactive"); err != nil {
+		t.Fatalf("runExecutorSetup: %v", err)
+	}
+	c.True(rec.installed, "the unit must have been installed")
+
+	c.Eq(paths.DefaultInstance, paths.Instance(), "the pointer must not have moved the instance")
+	c.False(slices.Contains(rec.spec.Args, "--profile"),
+		"a default-instance unit must not carry --profile: %v", rec.spec.Args)
+	c.Eq(filepath.Join(dataHome, "rafiki", "executor.cred"), flagValue(rec.spec.Args, "--credential-file"),
+		"the unit's credential file is the one the check read")
+	_, statErr := os.Stat(filepath.Join(paths.ConfigDir(), "executor.env"))
+	c.NoError(statErr, "the env file the install wrote")
+	_, workErr := os.Stat(filepath.Join(paths.ConfigDir(), "executor-work.env"))
+	c.True(os.IsNotExist(workErr), "the pointer's instance must not be written")
+}
+
+// flagValue returns the argument following name, or "" when it is absent.
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // `executor serve` takes its instance from the RAW -P value, never from
