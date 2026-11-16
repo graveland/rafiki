@@ -111,13 +111,61 @@ func remoteDataDirScript(instance string) string {
 //	binary=<yes|no>
 //	cred=<yes|no>
 //	marker=<first line of the install marker, or empty>
-func remoteProbeScript(instance, binaryPath string) string {
+//
+// and, when this launcher has an address a target could dial, the two reach
+// lines remoteReachScript defines. addr is THIS launcher's own address, never
+// a request field: it is what the target is asked to reach, so it never travels
+// through the daemon. An address that is not a plain host:port is treated as
+// no address at all — it is never rendered into a script, and the probe
+// reports it unavailable with the address named.
+func remoteProbeScript(instance, binaryPath, addr string) string {
 	bin := remoteBinaryExpr(binaryPath)
-	return remoteDataDirScript(instance) + "; " +
+	s := remoteDataDirScript(instance) + "; " +
 		`printf 'uname=%s\n' "$(uname -sm)"; ` +
 		`if [ -x ` + bin + ` ]; then printf 'binary=yes\n'; else printf 'binary=no\n'; fi; ` +
 		`if [ -f "$d/executor.cred" ]; then printf 'cred=yes\n'; else printf 'cred=no\n'; fi; ` +
 		`if [ -f "$d/installed-executor" ]; then printf 'marker=%s\n' "$(head -n 1 "$d/installed-executor")"; else printf 'marker=\n'; fi`
+	if !remoteReachAddrRE.MatchString(addr) {
+		return s
+	}
+	return s + "; " + remoteReachScript(addr)
+}
+
+// remoteReachScript asks the target whether it can dial addr, and prints the
+// probe's last two lines:
+//
+//	reach=<yes|no>
+//	reach_detail=<one line>
+//
+// The target tries the first of curl, bash's /dev/tcp and nc that it has; a
+// success is named (via curl / via bash / via nc) and a failure carries the
+// tool's own first stderr line, so the daemon can say what the target said
+// rather than summarizing it. Host and port are interpolated only through
+// shellQuote, and only after remoteReachAddrRE has vouched for them.
+func remoteReachScript(addr string) string {
+	host, port, _ := strings.Cut(addr, ":")
+	h, p := shellQuote(host), shellQuote(port)
+	// onFail is the tail of every branch: the target is unreachable and
+	// reach_detail is the first line of the tool's stderr. err is captured from
+	// stderr only (2>&1 duplicates it onto the capture pipe before stdout is
+	// sent to /dev/null), and the carriage return comes off so the detail is one
+	// clean line whatever the target's line endings are.
+	onFail := `reach=no; reach_detail=$(printf '%s\n' "$err" | head -n 1 | tr -d '\r')`
+	bashExec := `exec 3<>/dev/tcp/` + h + `/` + p
+	return "reach=no\n" +
+		`reach_detail='no curl, bash or nc on the target'` + "\n" +
+		`if command -v curl >/dev/null 2>&1; then ` +
+		`if err=$(curl -sS -m 5 -o /dev/null ` + shellQuote("https://"+addr+"/healthz") + ` 2>&1 >/dev/null); ` +
+		`then reach=yes; reach_detail='via curl'; else ` + onFail + `; fi; ` +
+		`elif command -v bash >/dev/null 2>&1; then ` +
+		`tb=bash; command -v timeout >/dev/null 2>&1 && tb='timeout 5 bash'; ` +
+		`if err=$($tb -c ` + shellQuote(bashExec) + ` 2>&1 >/dev/null); ` +
+		`then reach=yes; reach_detail='via bash'; else ` + onFail + `; fi; ` +
+		`elif command -v nc >/dev/null 2>&1; then ` +
+		`if err=$(nc -z -w 5 ` + h + ` ` + p + ` 2>&1 >/dev/null); ` +
+		`then reach=yes; reach_detail='via nc'; else ` + onFail + `; fi; ` +
+		`fi` + "\n" +
+		`printf 'reach=%s\n' "$reach"; printf 'reach_detail=%s\n' "$reach_detail"`
 }
 
 // remoteInstallScript writes stdin to a temp file in the content-addressed
@@ -144,10 +192,38 @@ func remoteServeScript(binaryPath, instance, root, installID string) string {
 
 // remoteCleanScript removes the install marker iff its first line names THIS
 // install. The shared binary cache is content-addressed and is left alone.
-func remoteCleanScript(instance, installID string) string {
-	return remoteDataDirScript(instance) +
+//
+// With stop, the marker's own process is stopped FIRST and only under that
+// same match: a marker for another install id leaves the process, the pid file
+// and the credential alone, and prints neither word.
+func remoteCleanScript(instance, installID string, stop bool) string {
+	s := remoteDataDirScript(instance) +
 		`; f="$d/installed-executor"; ` +
-		`[ -f "$f" ] && [ "$(head -n 1 "$f")" = ` + shellQuote(installID) + ` ] && rm -f "$f" && echo removed || true`
+		`[ -f "$f" ] && [ "$(head -n 1 "$f")" = ` + shellQuote(installID) + ` ] || exit 0; `
+	if stop {
+		s += remoteStopScript()
+	}
+	return s + `rm -f "$f" && echo removed || true`
+}
+
+// remoteStopScript stops the detached executor named by $d/executor.pid and
+// removes the per-install state that would let it come back: the pid file, the
+// credential and the lock. The detached executor is a session leader, so its
+// pid is also its process group id and one signal reaches everything it forked.
+// TERM first, then up to 5s of 0.5s polls, then KILL. It runs inside the
+// matching-marker gate remoteCleanScript opens, never on its own.
+//
+// The pid must be a positive decimal number: `kill -TERM -- -0` would signal the
+// remote shell's OWN process group, so a corrupt or empty pid file is no pid.
+func remoteStopScript() string {
+	return `p=""; [ -f "$d/executor.pid" ] && p=$(head -n 1 "$d/executor.pid"); ` +
+		`case "$p" in ''|0|0*|*[!0-9]*) p="" ;; esac; ` +
+		`if [ -n "$p" ]; then ` +
+		`kill -TERM -- -"$p" 2>/dev/null || true; ` +
+		`i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done; ` +
+		`kill -0 "$p" 2>/dev/null && { kill -KILL -- -"$p" 2>/dev/null || true; }; ` +
+		`rm -f "$d/executor.pid" "$d/executor.cred" "$d/executor.lock"; echo stopped; ` +
+		`fi; `
 }
 
 // Validation limits. A destination is an ssh destination, not a command: the
@@ -156,10 +232,20 @@ func remoteCleanScript(instance, installID string) string {
 // character is refused before ssh is executed.
 const remoteDestinationMax = 255
 
+// remoteReachNoAddr is what the parse answers for a four-line probe: this
+// launcher has no dialable address, so the target was never asked.
+const remoteReachNoAddr = "launcher has no dialable address"
+
 var (
 	remoteBinaryPathRE = regexp.MustCompile(`^\$HOME/\.cache/rafiki/bin/rafiki-[A-Za-z0-9._-]+$`)
 	remoteInstallIDRE  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	remoteSHA256RE     = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
+	// remoteReachAddrRE is the shape of an address a target is asked to dial: a
+	// plain host:port. Anything else — a URL, a bracketed IPv6 literal, a path,
+	// a value with shell syntax in it — is not something a target can be told to
+	// reach, and is treated as no address at all.
+	remoteReachAddrRE = regexp.MustCompile(`^[A-Za-z0-9._-]+:[0-9]{1,5}$`)
 )
 
 func validateRemoteDestination(dest string) error {
@@ -343,8 +429,9 @@ func (s *Server) RemoteProbe(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
+	addr := s.opts.ConnectAddr
 	stdout, stderr, err := s.runSSHScript(ctx, target.GetDestination(),
-		remoteProbeScript(target.GetInstance(), req.Msg.GetBinaryPath()))
+		remoteProbeScript(target.GetInstance(), req.Msg.GetBinaryPath(), addr))
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, connect.NewError(connect.CodeCanceled, ctx.Err())
@@ -356,16 +443,24 @@ func (s *Server) RemoteProbe(
 	if perr != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("remote probe: %w; raw output: %q", perr, string(stdout)))
 	}
+	if addr != "" && !remoteReachAddrRE.MatchString(addr) {
+		// %q keeps the address on one line whatever it holds: the detail is a
+		// statement about this launcher's own setting, never shell syntax.
+		resp.Reach = "unavailable"
+		resp.ReachDetail = fmt.Sprintf("launcher address %q is not a plain host:port", addr)
+	}
 	return connect.NewResponse(resp), nil
 }
 
-// parseRemoteProbeOutput accepts exactly the four lines the probe script
-// prints. Any other shape is a bug or a shell that is not POSIX, and the caller
-// sees the raw output rather than a half-parsed guess.
+// parseRemoteProbeOutput accepts exactly the four lines the probe script always
+// prints, or those four plus the two reach lines. Any other shape is a bug or a
+// shell that is not POSIX, and the caller sees the raw output rather than a
+// half-parsed guess. The four-line shape answers reach=unavailable: the script
+// only omits the reach lines when this launcher has no dialable address.
 func parseRemoteProbeOutput(out string) (*executorpb.RemoteProbeResponse, error) {
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 4 {
-		return nil, fmt.Errorf("expected four lines, got %d", len(lines))
+	if len(lines) != 4 && len(lines) != 6 {
+		return nil, fmt.Errorf("expected four or six lines, got %d", len(lines))
 	}
 	uname, ok := strings.CutPrefix(lines[0], "uname=")
 	if !ok {
@@ -383,12 +478,27 @@ func parseRemoteProbeOutput(out string) (*executorpb.RemoteProbeResponse, error)
 	if !ok {
 		return nil, fmt.Errorf("line 4 is not marker=")
 	}
-	return &executorpb.RemoteProbeResponse{
+	resp := &executorpb.RemoteProbeResponse{
 		Uname:             strings.TrimSpace(uname),
 		BinaryPresent:     binary == "yes",
 		CredentialPresent: cred == "yes",
 		Marker:            strings.TrimSpace(marker),
-	}, nil
+		Reach:             "unavailable",
+		ReachDetail:       remoteReachNoAddr,
+	}
+	if len(lines) == 6 {
+		reach, ok := strings.CutPrefix(lines[4], "reach=")
+		if !ok || (reach != "yes" && reach != "no") {
+			return nil, fmt.Errorf("line 5 is not reach=yes|no")
+		}
+		detail, ok := strings.CutPrefix(lines[5], "reach_detail=")
+		if !ok {
+			return nil, fmt.Errorf("line 6 is not reach_detail=")
+		}
+		resp.Reach = reach
+		resp.ReachDetail = strings.TrimSpace(detail)
+	}
+	return resp, nil
 }
 
 // RemoteInstall pipes one binary to the target. The first message is the
@@ -802,14 +912,21 @@ func (s *Server) RemoteClean(
 	}
 
 	stdout, stderr, err := s.runSSHScript(ctx, target.GetDestination(),
-		remoteCleanScript(target.GetInstance(), req.Msg.GetInstallId()))
+		remoteCleanScript(target.GetInstance(), req.Msg.GetInstallId(), req.Msg.GetStopProcess()))
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, connect.NewError(connect.CodeCanceled, ctx.Err())
 		}
 		return nil, connect.NewError(connect.CodeUnavailable, sshFailure(target.GetDestination(), stderr, err))
 	}
-	return connect.NewResponse(&executorpb.RemoteCleanResponse{
-		Removed: strings.TrimSpace(string(stdout)) == "removed",
-	}), nil
+	resp := &executorpb.RemoteCleanResponse{}
+	for _, line := range strings.Split(string(stdout), "\n") {
+		switch strings.TrimSpace(line) {
+		case "removed":
+			resp.Removed = true
+		case "stopped":
+			resp.Stopped = true
+		}
+	}
+	return connect.NewResponse(resp), nil
 }

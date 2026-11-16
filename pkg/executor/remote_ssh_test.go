@@ -59,6 +59,7 @@ exec /bin/sh -c "$1"
 
 type remoteFixture struct {
 	home   string
+	bin    string
 	record string
 	env    []string
 }
@@ -76,12 +77,31 @@ func newRemoteFixture(t *testing.T, extraEnv ...string) *remoteFixture {
 		"RAFIKI_TEST_SSH_RECORD=" + record,
 	}
 	env = append(env, extraEnv...)
-	return &remoteFixture{home: home, record: record, env: env}
+	return &remoteFixture{home: home, bin: bin, record: record, env: env}
 }
 
 func (f *remoteFixture) server(t *testing.T) *Server {
 	t.Helper()
 	return NewServer(Options{Root: t.TempDir(), Env: f.env})
+}
+
+// serverAt is server with a dialable address: the one a probe asks the target
+// to reach and a launch hands the remote executor as its --connect.
+func (f *remoteFixture) serverAt(t *testing.T, addr string) *Server {
+	t.Helper()
+	return NewServer(Options{Root: t.TempDir(), Env: f.env, ConnectAddr: addr})
+}
+
+// dataDir is where the fake target's per-instance state lives.
+func (f *remoteFixture) dataDir() string {
+	return filepath.Join(f.home, ".local", "share", "rafiki")
+}
+
+// writeBin writes one executable helper into the fixture's PATH directory.
+func (f *remoteFixture) writeBin(t *testing.T, name, body string) {
+	t.Helper()
+	assert.NewAborting(t).Require().NoError(
+		os.WriteFile(filepath.Join(f.bin, name), []byte(body), 0o755), "write %s", name)
 }
 
 func (f *remoteFixture) argv(t *testing.T) []string {
@@ -576,4 +596,240 @@ func waitForRemotePID(t *testing.T, path string) int {
 	}
 	t.Fatalf("the fixture never wrote %s", path)
 	return 0
+}
+
+func TestParseRemoteProbeAcceptsFourOrSixLines(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	four := "uname=Linux x86_64\nbinary=yes\ncred=no\nmarker=install-42\n"
+	got, err := parseRemoteProbeOutput(four)
+	c.Require().NoError(err, "four lines")
+	c.Eq("install-42", got.GetMarker(), "the four-line shape parses as it did")
+	c.Eq("unavailable", got.GetReach(), "four lines means the target was never asked")
+	c.Eq(remoteReachNoAddr, got.GetReachDetail(), "the four-line detail")
+
+	six := four + "reach=yes\nreach_detail=via curl\n"
+	got, err = parseRemoteProbeOutput(six)
+	c.Require().NoError(err, "six lines")
+	c.Eq("yes", got.GetReach(), "reach")
+	c.Eq("via curl", got.GetReachDetail(), "reach detail")
+
+	got, err = parseRemoteProbeOutput(four + "reach=no\nreach_detail=curl: (7) Failed to connect\n")
+	c.Require().NoError(err, "six lines with a failure")
+	c.Eq("no", got.GetReach(), "reach")
+	c.Eq("curl: (7) Failed to connect", got.GetReachDetail(), "the tool's own words survive")
+
+	for name, out := range map[string]string{
+		"five lines":     four + "reach=yes\n",
+		"wrong prefix":   "platform=Linux x86_64\nbinary=yes\ncred=no\nmarker=\n",
+		"reach=maybe":    four + "reach=maybe\nreach_detail=via curl\n",
+		"no detail":      four + "reach=yes\nverdict=yes\n",
+		"line five only": four + "reach=yes\n",
+		"too many":       six + "extra=1\n",
+	} {
+		_, err := parseRemoteProbeOutput(out)
+		c.Require().Error(err, "%s was accepted", name)
+	}
+}
+
+func TestRemoteProbeReachUnavailableWithoutConnectAddr(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newRemoteFixture(t)
+	client := newRemoteClient(t, f.server(t))
+
+	resp, err := client.RemoteProbe(context.Background(), connect.NewRequest(&executorpb.RemoteProbeRequest{
+		Target: &executorpb.RemoteTarget{Destination: "target", Instance: paths.DefaultInstance},
+	}))
+	c.Require().NoError(err, "probe")
+	c.Eq("unavailable", resp.Msg.GetReach(),
+		"a launcher with no dialable address reports unavailable, which selects tunnel")
+	c.Eq("launcher has no dialable address", resp.Msg.GetReachDetail(), "reach detail")
+
+	argv := f.argv(t)
+	c.NotStrContains(argv[len(argv)-1], "reach=",
+		"a probe with no address must not ask the target to dial anything")
+}
+
+func TestRemoteProbeReachRejectsAHostileAddress(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	for _, addr := range []string{
+		"127.0.0.1",
+		"[::1]:8035",
+		"127.0.0.1:9999; touch /tmp/rafiki-pwned",
+		"127.0.0.1:9999 $(id)",
+		"127.0.0.1:9999 'quoted'",
+		"http://127.0.0.1:8035",
+		"127.0.0.1:99999999",
+	} {
+		f := newRemoteFixture(t)
+		client := newRemoteClient(t, f.serverAt(t, addr))
+
+		resp, err := client.RemoteProbe(context.Background(), connect.NewRequest(&executorpb.RemoteProbeRequest{
+			Target: &executorpb.RemoteTarget{Destination: "target", Instance: paths.DefaultInstance},
+		}))
+		c.Require().NoError(err, "probe with address %q", addr)
+		c.Eq("unavailable", resp.Msg.GetReach(), "address %q", addr)
+		c.StrContains(resp.Msg.GetReachDetail(), "is not a plain host:port", "address %q", addr)
+
+		script := f.argv(t)[len(f.argv(t))-1]
+		c.NotStrContains(script, "reach=", "address %q reached the remote script", addr)
+		c.NotStrContains(script, addr, "address %q reached the remote script", addr)
+		c.NotStrContains(script, "touch /tmp/rafiki-pwned", "address %q carried shell syntax", addr)
+	}
+}
+
+func TestRemoteProbeScriptRunsReachChecks(t *testing.T) {
+	c := assert.NewAborting(t)
+	addr := "daemon.example:8035"
+
+	// run executes the probe script under sh with a PATH the test owns
+	// completely: no system curl, bash, nc or timeout is visible, so the tool
+	// the script picks is the test's choice and nothing else's.
+	run := func(t *testing.T, tools map[string]string) (map[string]string, *remoteFixture) {
+		t.Helper()
+		f := &remoteFixture{bin: t.TempDir(), home: t.TempDir()}
+		for name, body := range tools {
+			f.writeBin(t, name, body)
+		}
+		for _, name := range []string{"head", "tr", "uname"} {
+			real, err := exec.LookPath(name)
+			c.Require().NoError(err, "%s must be on the test's PATH", name)
+			c.Require().NoError(os.Symlink(real, filepath.Join(f.bin, name)), "symlink %s", name)
+		}
+		cmd := exec.Command("/bin/sh", "-c", remoteProbeScript(paths.DefaultInstance, "", addr))
+		cmd.Env = []string{"PATH=" + f.bin, "HOME=" + f.home}
+		out, err := cmd.Output()
+		c.Require().NoError(err, "run the probe script")
+
+		lines := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+			k, v, ok := strings.Cut(line, "=")
+			c.Require().True(ok, "unparsable probe line %q", line)
+			lines[k] = v
+		}
+		return lines, f
+	}
+	argvOf := func(c *assert.C, path string) []string {
+		c.Helper()
+		b, err := os.ReadFile(path)
+		c.Require().NoError(err, "read %s", path)
+		return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	}
+
+	t.Run("curl that connects", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		lines, f := run(t, map[string]string{"curl": "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/curl.argv\"\nexit 0\n"})
+		c.Eq("yes", lines["reach"], "curl exit 0 is reached")
+		c.Eq("via curl", lines["reach_detail"], "the tool that answered")
+		argv := argvOf(c, filepath.Join(f.home, "curl.argv"))
+		c.EqDeep([]string{"-sS", "-m", "5", "-o", "/dev/null", "https://" + addr + "/healthz"}, argv,
+			"the curl invocation, without -f: any HTTP response counts")
+	})
+
+	t.Run("curl that fails", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		lines, _ := run(t, map[string]string{"curl": "#!/bin/sh\n" +
+			"printf 'curl: (7) Failed to connect to daemon.example port 8035\\n' >&2\nexit 7\n"})
+		c.Eq("no", lines["reach"], "a failing curl is not reached")
+		c.Eq("curl: (7) Failed to connect to daemon.example port 8035", lines["reach_detail"],
+			"reach_detail is the tool's own first stderr line")
+	})
+
+	t.Run("no curl, nc connects", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		lines, f := run(t, map[string]string{"nc": "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/nc.argv\"\nexit 0\n"})
+		c.Eq("yes", lines["reach"], "nc exit 0 is reached")
+		c.Eq("via nc", lines["reach_detail"], "the tool that answered")
+		argv := argvOf(c, filepath.Join(f.home, "nc.argv"))
+		c.EqDeep([]string{"-z", "-w", "5", "daemon.example", "8035"}, argv, "the nc invocation")
+	})
+
+	t.Run("curl's stderr keeps one line", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		lines, _ := run(t, map[string]string{"curl": "#!/bin/sh\n" +
+			"printf 'first line\\nsecond line\\n' >&2\nexit 7\n"})
+		c.Eq("first line", lines["reach_detail"], "newlines removed: one line, the first")
+	})
+}
+
+func TestRemoteCleanStopsOnlyAMatchingInstall(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	// sleeper starts a process in its own process group, as the detached
+	// executor is, and reaps it the moment it dies so `kill -0` answers ESRCH
+	// rather than a zombie's success.
+	sleeper := func(t *testing.T) int {
+		t.Helper()
+		cmd := exec.Command("sleep", "60")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		c.Require().NoError(cmd.Start(), "start the sleeper")
+		go func() { _ = cmd.Wait() }()
+		t.Cleanup(func() { _ = cmd.Process.Kill() })
+		return cmd.Process.Pid
+	}
+	run := func(t *testing.T, home, installID string) string {
+		t.Helper()
+		cmd := exec.Command("/bin/sh", "-c", remoteCleanScript(paths.DefaultInstance, installID, true))
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home}
+		out, err := cmd.Output()
+		c.Require().NoError(err, "run the clean script")
+		return string(out)
+	}
+	seed := func(t *testing.T) (home, dir string, pid int) {
+		t.Helper()
+		home = t.TempDir()
+		dir = filepath.Join(home, ".local", "share", "rafiki")
+		c.Require().NoError(os.MkdirAll(dir, 0o755), "mkdir the data dir")
+		pid = sleeper(t)
+		c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.pid"),
+			[]byte(strconv.Itoa(pid)+"\n"), 0o600), "write the pid file")
+		c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.cred"), []byte("cred\n"), 0o600), "cred")
+		c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.lock"), nil, 0o600), "lock")
+		return home, dir, pid
+	}
+
+	t.Run("a matching marker stops the process", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		home, dir, pid := seed(t)
+		c.Require().NoError(os.WriteFile(filepath.Join(dir, "installed-executor"),
+			[]byte("install-a\n"), 0o600), "write the marker")
+
+		out := run(t, home, "install-a")
+		c.StrContains(out, "stopped\n", "a matching marker stops the install")
+		c.StrContains(out, "removed\n", "the marker is removed")
+		c.True(waitForRemoteDeath(pid), "the install's process group survived the stop")
+		for _, name := range []string{"installed-executor", "executor.pid", "executor.cred", "executor.lock"} {
+			_, err := os.Stat(filepath.Join(dir, name))
+			c.True(os.IsNotExist(err), "%s survived a matching clean", name)
+		}
+	})
+
+	t.Run("a mismatched marker leaves everything alone", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		home, dir, pid := seed(t)
+		c.Require().NoError(os.WriteFile(filepath.Join(dir, "installed-executor"),
+			[]byte("install-b\n"), 0o600), "write the marker")
+
+		out := run(t, home, "install-a")
+		c.NotStrContains(out, "removed", "another install's marker is not this one's to remove")
+		c.NotStrContains(out, "stopped", "another install's process is not this one's to stop")
+		c.False(remoteProcessDead(pid), "the other install's process was killed")
+		for _, name := range []string{"installed-executor", "executor.pid", "executor.cred", "executor.lock"} {
+			_, err := os.Stat(filepath.Join(dir, name))
+			c.NoError(err, "%s was removed for another install", name)
+		}
+	})
+
+	t.Run("stop requested with no pid file", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		home, dir, _ := seed(t)
+		c.Require().NoError(os.Remove(filepath.Join(dir, "executor.pid")), "clear the pid file")
+		c.Require().NoError(os.WriteFile(filepath.Join(dir, "installed-executor"),
+			[]byte("install-a\n"), 0o600), "write the marker")
+
+		out := run(t, home, "install-a")
+		c.StrContains(out, "removed\n", "the marker is still removed")
+		c.NotStrContains(out, "stopped", "nothing was stopped, so nothing reports a stop")
+	})
 }
