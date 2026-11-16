@@ -680,14 +680,15 @@ func TestRemoteProbeReachRejectsAHostileAddress(t *testing.T) {
 }
 
 func TestRemoteProbeScriptRunsReachChecks(t *testing.T) {
-	c := assert.NewAborting(t)
 	addr := "daemon.example:8035"
 
 	// run executes the probe script under sh with a PATH the test owns
 	// completely: no system curl, bash, nc or timeout is visible, so the tool
-	// the script picks is the test's choice and nothing else's.
-	run := func(t *testing.T, tools map[string]string) (map[string]string, *remoteFixture) {
+	// the script picks is the test's choice and nothing else's. The script is
+	// bounded here too, so a branch that hangs fails the test instead of it.
+	run := func(t *testing.T, dialAddr string, tools map[string]string) (map[string]string, *remoteFixture) {
 		t.Helper()
+		c := assert.NewAborting(t)
 		f := &remoteFixture{bin: t.TempDir(), home: t.TempDir()}
 		for name, body := range tools {
 			f.writeBin(t, name, body)
@@ -697,8 +698,13 @@ func TestRemoteProbeScriptRunsReachChecks(t *testing.T) {
 			c.Require().NoError(err, "%s must be on the test's PATH", name)
 			c.Require().NoError(os.Symlink(real, filepath.Join(f.bin, name)), "symlink %s", name)
 		}
-		cmd := exec.Command("/bin/sh", "-c", remoteProbeScript(paths.DefaultInstance, "", addr))
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", remoteProbeScript(paths.DefaultInstance, "", dialAddr))
 		cmd.Env = []string{"PATH=" + f.bin, "HOME=" + f.home}
+		// A branch that hangs would otherwise leave the shell's child holding
+		// the pipe, so the bound has to close it rather than wait for it.
+		cmd.WaitDelay = 2 * time.Second
 		out, err := cmd.Output()
 		c.Require().NoError(err, "run the probe script")
 
@@ -719,35 +725,82 @@ func TestRemoteProbeScriptRunsReachChecks(t *testing.T) {
 
 	t.Run("curl that connects", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		lines, f := run(t, map[string]string{"curl": "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/curl.argv\"\nexit 0\n"})
+		lines, f := run(t, addr, map[string]string{"curl": "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/curl.argv\"\nexit 0\n"})
 		c.Eq("yes", lines["reach"], "curl exit 0 is reached")
 		c.Eq("via curl", lines["reach_detail"], "the tool that answered")
 		argv := argvOf(c, filepath.Join(f.home, "curl.argv"))
 		c.EqDeep([]string{"-sS", "-m", "5", "-o", "/dev/null", "https://" + addr + "/healthz"}, argv,
-			"the curl invocation, without -f: any HTTP response counts")
+			"the curl invocation, without -f and without -k: any answer over the system roots counts")
 	})
 
 	t.Run("curl that fails", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		lines, _ := run(t, map[string]string{"curl": "#!/bin/sh\n" +
+		lines, _ := run(t, addr, map[string]string{"curl": "#!/bin/sh\n" +
 			"printf 'curl: (7) Failed to connect to daemon.example port 8035\\n' >&2\nexit 7\n"})
 		c.Eq("no", lines["reach"], "a failing curl is not reached")
 		c.Eq("curl: (7) Failed to connect to daemon.example port 8035", lines["reach_detail"],
 			"reach_detail is the tool's own first stderr line")
 	})
 
+	t.Run("bash under timeout connects", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		lines, f := run(t, addr, map[string]string{
+			"bash":    "#!/bin/sh\n: > \"$HOME/bash.ran\"\n",
+			"timeout": "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/timeout.argv\"\nexit 0\n",
+		})
+		c.Eq("yes", lines["reach"], "a bounded bash /dev/tcp is reached")
+		c.Eq("via bash", lines["reach_detail"], "the tool that answered")
+		c.EqDeep([]string{"5", "bash", "-c", "exec 3<>/dev/tcp/'daemon.example'/'8035'"},
+			argvOf(c, filepath.Join(f.home, "timeout.argv")),
+			"bash's /dev/tcp runs under timeout, always")
+		c.NoFileExists(filepath.Join(f.home, "bash.ran"), "bash was run directly, with nothing to bound it")
+	})
+
+	t.Run("no timeout means no bash probe", func(t *testing.T) {
+		// bash's /dev/tcp has no connect timeout of its own: with no `timeout` on
+		// the target the probe must not run it at all, or a black-holed route
+		// hangs the whole probe. The fake bash sleeps for far longer than the
+		// probe's own bound, so taking the branch fails the test.
+		c := assert.NewAborting(t)
+		lines, f := run(t, addr, map[string]string{
+			"bash": "#!/bin/sh\n: > \"$HOME/bash.ran\"\nexec /bin/sleep 30\n",
+		})
+		c.Eq("no", lines["reach"], "an unusable bash is not reached")
+		c.Eq("no curl, bash or nc on the target", lines["reach_detail"], "the no-tool answer")
+		c.NoFileExists(filepath.Join(f.home, "bash.ran"), "bash was probed with no timeout to bound it")
+	})
+
+	t.Run("no timeout falls through to nc", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		lines, f := run(t, addr, map[string]string{
+			"bash": "#!/bin/sh\n: > \"$HOME/bash.ran\"\nexec /bin/sleep 30\n",
+			"nc":   "#!/bin/sh\nexit 0\n",
+		})
+		c.Eq("yes", lines["reach"], "nc is still reached without timeout")
+		c.Eq("via nc", lines["reach_detail"], "the tool that answered")
+		c.NoFileExists(filepath.Join(f.home, "bash.ran"), "bash was probed with no timeout to bound it")
+	})
+
 	t.Run("no curl, nc connects", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		lines, f := run(t, map[string]string{"nc": "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/nc.argv\"\nexit 0\n"})
+		lines, f := run(t, addr, map[string]string{"nc": "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/nc.argv\"\nexit 0\n"})
 		c.Eq("yes", lines["reach"], "nc exit 0 is reached")
 		c.Eq("via nc", lines["reach_detail"], "the tool that answered")
 		argv := argvOf(c, filepath.Join(f.home, "nc.argv"))
 		c.EqDeep([]string{"-z", "-w", "5", "daemon.example", "8035"}, argv, "the nc invocation")
 	})
 
+	t.Run("no curl, bash or nc", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		lines, _ := run(t, addr, nil)
+		c.Eq("no", lines["reach"], "a target with no tool is not reached")
+		c.Eq("no curl, bash or nc on the target", lines["reach_detail"],
+			"the answer names why nothing was tried")
+	})
+
 	t.Run("curl's stderr keeps one line", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		lines, _ := run(t, map[string]string{"curl": "#!/bin/sh\n" +
+		lines, _ := run(t, addr, map[string]string{"curl": "#!/bin/sh\n" +
 			"printf 'first line\\nsecond line\\n' >&2\nexit 7\n"})
 		c.Eq("first line", lines["reach_detail"], "newlines removed: one line, the first")
 	})
@@ -832,4 +885,160 @@ func TestRemoteCleanStopsOnlyAMatchingInstall(t *testing.T) {
 		c.StrContains(out, "removed\n", "the marker is still removed")
 		c.NotStrContains(out, "stopped", "nothing was stopped, so nothing reports a stop")
 	})
+}
+
+// remoteStopRun is one execution of the clean script. kill is a shell FUNCTION
+// the test owns: the shell's kill is a BUILTIN, so a PATH stub would never run,
+// while a function shadows the builtin exactly where the script's own `kill`
+// calls look. It records its argv and returns a status, so no signal is ever
+// sent and every signal the script tried to send is a line.
+type remoteStopRun struct {
+	output string
+	kill   []string
+	dir    string
+}
+
+// runRemoteStop seeds a target whose install marker matches install-a, puts
+// pidLine in executor.pid, and runs the full clean script under sh. ps selects
+// what the target can ask about the pid's process group: "" is no ps at all,
+// "real" is the host's own ps, anything else is a script printing a pgid.
+// alive makes the kill stub answer `kill -0` with success, so the process is
+// still running after both signals.
+func runRemoteStop(t *testing.T, pidLine string, alive bool, ps string) remoteStopRun {
+	t.Helper()
+	c := assert.NewAborting(t)
+	f := &remoteFixture{bin: t.TempDir(), home: t.TempDir()}
+	// The poll's sleep is a no-op so the two 5s bounds cost the test nothing.
+	f.writeBin(t, "sleep", "#!/bin/sh\nexit 0\n")
+	for _, name := range []string{"head", "tr", "rm"} {
+		real, err := exec.LookPath(name)
+		c.Require().NoError(err, "%s must be on the test's PATH", name)
+		c.Require().NoError(os.Symlink(real, filepath.Join(f.bin, name)), "symlink %s", name)
+	}
+	switch ps {
+	case "":
+	case "real":
+		real, err := exec.LookPath("ps")
+		c.Require().NoError(err, "ps must be on the test's PATH")
+		c.Require().NoError(os.Symlink(real, filepath.Join(f.bin, "ps")), "symlink ps")
+	default:
+		f.writeBin(t, "ps", ps)
+	}
+
+	dir := filepath.Join(f.home, ".local", "share", "rafiki")
+	c.Require().NoError(os.MkdirAll(dir, 0o755), "mkdir the data dir")
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "installed-executor"), []byte("install-a\n"), 0o600), "marker")
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.pid"), []byte(pidLine+"\n"), 0o600), "pid file")
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.cred"), []byte("cred\n"), 0o600), "cred")
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.lock"), nil, 0o600), "lock")
+
+	zero := "1"
+	if alive {
+		zero = "0"
+	}
+	record := filepath.Join(f.home, "kill.argv")
+	stub := `kill() { printf '%s\n' "$*" >> ` + shellQuote(record) +
+		`; case "$1" in -0) return ` + zero + ` ;; *) return 0 ;; esac; }; `
+
+	cmd := exec.Command("/bin/sh", "-c",
+		stub+remoteCleanScript(paths.DefaultInstance, "install-a", true))
+	cmd.Env = []string{"PATH=" + f.bin, "HOME=" + f.home}
+	out, err := cmd.Output()
+	c.Require().NoError(err, "run the clean script")
+	run := remoteStopRun{output: string(out), dir: dir}
+	if raw, rerr := os.ReadFile(record); rerr == nil {
+		run.kill = strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	}
+	return run
+}
+
+// standIn starts a process for the stop script to be wrong about: group puts it
+// in its own process group, as the detached executor is.
+func standIn(t *testing.T, group bool) int {
+	t.Helper()
+	c := assert.NewAborting(t)
+	cmd := exec.Command("sleep", "60")
+	if group {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+	c.Require().NoError(cmd.Start(), "start the stand-in process")
+	go func() { _ = cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	return cmd.Process.Pid
+}
+
+// TestRemoteStopRefusesAnImplausiblePid pins the pid guard: a plausible-looking
+// pid 1 reaches `kill -TERM -1` (every process the remote user may signal, this
+// ssh session included), and a pid the guard stops rejecting signals something
+// nobody vouched for.
+func TestRemoteStopRefusesAnImplausiblePid(t *testing.T) {
+	victim := standIn(t, true)
+
+	for _, pid := range []string{"", "0", "1", "-5", "12abc", "12345678901234567890"} {
+		t.Run("pid="+strconv.Quote(pid), func(t *testing.T) {
+			c := assert.NewAborting(t)
+			run := runRemoteStop(t, pid, false, "real")
+			c.Eq(0, len(run.kill), "the stop script signalled %v for pid %q", run.kill, pid)
+			c.NotStrContains(run.output, "stopped", "pid %q was reported stopped", pid)
+			c.StrContains(run.output, "removed\n", "the marker is still removed for pid %q", pid)
+			for _, name := range []string{"executor.pid", "executor.cred", "executor.lock"} {
+				c.FileExists(filepath.Join(run.dir, name), "%s was removed for pid %q", name, pid)
+			}
+			c.False(remoteProcessDead(victim), "the stand-in process was signalled")
+		})
+	}
+}
+
+// TestRemoteStopSignalsTheGroupOnlyForASessionLeader pins the pgid equality: a
+// group signal is only safe when ps says this pid IS the group's leader, and
+// anything else — a different pgid, no ps at all — is a plain pid signal.
+func TestRemoteStopSignalsTheGroupOnlyForASessionLeader(t *testing.T) {
+	t.Run("a session leader takes its group", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		pid := standIn(t, true)
+		run := runRemoteStop(t, strconv.Itoa(pid), false, "real")
+		c.Require().NotEmpty(run.kill, "the stop script sent no signal")
+		c.Eq("-TERM -"+strconv.Itoa(pid), run.kill[0], "a session leader's pid is its process group")
+		c.StrContains(run.output, "stopped\n", "a process reported gone is stopped")
+		c.NoFileExists(filepath.Join(run.dir, "executor.pid"), "a stopped process's pid file is removed")
+	})
+
+	t.Run("a pid outside its own group is signalled alone", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		pid := standIn(t, false)
+		run := runRemoteStop(t, strconv.Itoa(pid), false, "real")
+		c.Require().NotEmpty(run.kill, "the stop script sent no signal")
+		c.Eq("-TERM "+strconv.Itoa(pid), run.kill[0], "a pid that leads no group must not take one with it")
+	})
+
+	t.Run("no ps means no group signal", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		run := runRemoteStop(t, "4242", false, "")
+		c.Require().NotEmpty(run.kill, "the stop script sent no signal")
+		c.Eq("-TERM 4242", run.kill[0], "with no ps to vouch for it, the pid is signalled alone")
+	})
+
+	t.Run("a ps that disagrees means no group signal", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		run := runRemoteStop(t, "4242", false, "#!/bin/sh\nprintf '  9999\\n'\n")
+		c.Require().NotEmpty(run.kill, "the stop script sent no signal")
+		c.Eq("-TERM 4242", run.kill[0], "a pgid that is not the pid is not this pid's group")
+	})
+}
+
+// TestRemoteStopLeavesStateWhenTheProcessSurvivesKill pins the success gate: a
+// live executor must keep its credential and lock, and the daemon must not be
+// told it stopped.
+func TestRemoteStopLeavesStateWhenTheProcessSurvivesKill(t *testing.T) {
+	c := assert.NewAborting(t)
+	run := runRemoteStop(t, "4242", true, "#!/bin/sh\nprintf '  4242\\n'\n")
+
+	c.Require().NotEmpty(run.kill, "the stop script sent no signal")
+	c.Eq("-TERM -4242", run.kill[0], "the first signal is TERM")
+	c.Contains(run.kill, "-KILL -4242", "a survivor of TERM is sent KILL")
+	c.NotStrContains(run.output, "stopped", "a process that survived KILL was reported stopped")
+	c.StrContains(run.output, "removed\n", "the marker is still removed")
+	for _, name := range []string{"executor.pid", "executor.cred", "executor.lock"} {
+		c.FileExists(filepath.Join(run.dir, name), "%s was removed although the process survived", name)
+	}
 }

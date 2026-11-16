@@ -137,11 +137,12 @@ func remoteProbeScript(instance, binaryPath, addr string) string {
 //	reach=<yes|no>
 //	reach_detail=<one line>
 //
-// The target tries the first of curl, bash's /dev/tcp and nc that it has; a
-// success is named (via curl / via bash / via nc) and a failure carries the
-// tool's own first stderr line, so the daemon can say what the target said
-// rather than summarizing it. Host and port are interpolated only through
-// shellQuote, and only after remoteReachAddrRE has vouched for them.
+// The target tries the first of curl, bash's /dev/tcp (only where `timeout` can
+// bound it) and nc that it has; a success is named (via curl / via bash / via
+// nc) and a failure carries the tool's own first stderr line, so the daemon can
+// say what the target said rather than summarizing it. Host and port are
+// interpolated only through shellQuote, and only after remoteReachAddrRE has
+// vouched for them.
 func remoteReachScript(addr string) string {
 	host, port, _ := strings.Cut(addr, ":")
 	h, p := shellQuote(host), shellQuote(port)
@@ -152,18 +153,27 @@ func remoteReachScript(addr string) string {
 	// clean line whatever the target's line endings are.
 	onFail := `reach=no; reach_detail=$(printf '%s\n' "$err" | head -n 1 | tr -d '\r')`
 	bashExec := `exec 3<>/dev/tcp/` + h + `/` + p
+	// curl runs WITHOUT -k on purpose: a remote executor dials the daemon with
+	// the system roots only (pinned self-signed certificates are an explicit
+	// non-goal), so a target that cannot verify the daemon's certificate cannot
+	// connect either, and curl's exit status alone is the honest answer — and
+	// because any HTTP answer counts, -f would misreport a 404 as unreachable.
+	curlBranch := `if command -v curl >/dev/null 2>&1; then ` +
+		`if err=$(curl -sS -m 5 -o /dev/null ` + shellQuote("https://"+addr+"/healthz") + ` 2>&1 >/dev/null); ` +
+		`then reach=yes; reach_detail='via curl'; else ` + onFail + `; fi; `
+	// The bash branch is only usable where `timeout` exists to bound it: bash's
+	// /dev/tcp has no connect timeout of its own, and a black-holed route would
+	// hang the probe (macOS ships no timeout). Without it, nc — which has -w —
+	// is next.
+	bashBranch := `elif command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then ` +
+		`if err=$(timeout 5 bash -c ` + shellQuote(bashExec) + ` 2>&1 >/dev/null); ` +
+		`then reach=yes; reach_detail='via bash'; else ` + onFail + `; fi; `
+	ncBranch := `elif command -v nc >/dev/null 2>&1; then ` +
+		`if err=$(nc -z -w 5 ` + h + ` ` + p + ` 2>&1 >/dev/null); ` +
+		`then reach=yes; reach_detail='via nc'; else ` + onFail + `; fi; `
 	return "reach=no\n" +
 		`reach_detail='no curl, bash or nc on the target'` + "\n" +
-		`if command -v curl >/dev/null 2>&1; then ` +
-		`if err=$(curl -sS -m 5 -o /dev/null ` + shellQuote("https://"+addr+"/healthz") + ` 2>&1 >/dev/null); ` +
-		`then reach=yes; reach_detail='via curl'; else ` + onFail + `; fi; ` +
-		`elif command -v bash >/dev/null 2>&1; then ` +
-		`tb=bash; command -v timeout >/dev/null 2>&1 && tb='timeout 5 bash'; ` +
-		`if err=$($tb -c ` + shellQuote(bashExec) + ` 2>&1 >/dev/null); ` +
-		`then reach=yes; reach_detail='via bash'; else ` + onFail + `; fi; ` +
-		`elif command -v nc >/dev/null 2>&1; then ` +
-		`if err=$(nc -z -w 5 ` + h + ` ` + p + ` 2>&1 >/dev/null); ` +
-		`then reach=yes; reach_detail='via nc'; else ` + onFail + `; fi; ` +
+		curlBranch + bashBranch + ncBranch +
 		`fi` + "\n" +
 		`printf 'reach=%s\n' "$reach"; printf 'reach_detail=%s\n' "$reach_detail"`
 }
@@ -208,21 +218,41 @@ func remoteCleanScript(instance, installID string, stop bool) string {
 
 // remoteStopScript stops the detached executor named by $d/executor.pid and
 // removes the per-install state that would let it come back: the pid file, the
-// credential and the lock. The detached executor is a session leader, so its
-// pid is also its process group id and one signal reaches everything it forked.
-// TERM first, then up to 5s of 0.5s polls, then KILL. It runs inside the
-// matching-marker gate remoteCleanScript opens, never on its own.
+// credential and the lock. TERM first, then up to 5s of 0.5s polls, then KILL.
+// It runs inside the matching-marker gate remoteCleanScript opens, never on its
+// own.
 //
-// The pid must be a positive decimal number: `kill -TERM -- -0` would signal the
-// remote shell's OWN process group, so a corrupt or empty pid file is no pid.
+// The detached executor is a session leader, so its pid is also its process
+// group id and one signal reaches everything it forked. That is true only of a
+// pid `ps` agrees is the group's leader: everything else is signalled as a
+// plain pid, and a ps that cannot answer is no evidence of a group. Nothing here
+// ever guesses.
+//
+// The pid must be 2..9999999: `kill -TERM -0` would signal the remote shell's
+// OWN process group and `kill -TERM -1` every process the remote user may
+// signal, this ssh session included, so an implausible pid file is no pid.
+//
+// `stopped` is printed, and the per-install files removed, only once the process
+// is confirmed gone. A process that survives KILL keeps its credential and lock
+// on disk and the target reports neither word: telling the daemon an executor
+// stopped while it is still running is worse than saying nothing.
 func remoteStopScript() string {
 	return `p=""; [ -f "$d/executor.pid" ] && p=$(head -n 1 "$d/executor.pid"); ` +
 		`case "$p" in ''|0|0*|*[!0-9]*) p="" ;; esac; ` +
+		`case "$p" in ????????*) p="" ;; esac; ` +
+		`if [ -n "$p" ] && [ "$p" -lt 2 ]; then p=""; fi; ` +
 		`if [ -n "$p" ]; then ` +
-		`kill -TERM -- -"$p" 2>/dev/null || true; ` +
+		`g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d '[:space:]'); ` +
+		`tg="$p"; [ "$g" = "$p" ] && tg="-$p"; ` +
+		`kill -TERM "$tg" 2>/dev/null || true; ` +
 		`i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done; ` +
-		`kill -0 "$p" 2>/dev/null && { kill -KILL -- -"$p" 2>/dev/null || true; }; ` +
+		`if kill -0 "$p" 2>/dev/null; then ` +
+		`kill -KILL "$tg" 2>/dev/null || true; ` +
+		`i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done; ` +
+		`fi; ` +
+		`if ! kill -0 "$p" 2>/dev/null; then ` +
 		`rm -f "$d/executor.pid" "$d/executor.cred" "$d/executor.lock"; echo stopped; ` +
+		`fi; ` +
 		`fi; `
 }
 

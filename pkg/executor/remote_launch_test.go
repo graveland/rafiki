@@ -153,6 +153,47 @@ func TestRemoteLaunchScrubsTheTicketFromErrors(t *testing.T) {
 	c.StrContains(err.Error(), "[redacted]", "the echoed ticket is scrubbed, not merely absent")
 }
 
+// TestRemoteLaunchRefusesATicketWithANewline pins the frame's one-line rule:
+// TrimRight takes only the frame's own line ending off, and a newline left
+// inside the ticket would become a second line on the remote shell's stdin —
+// and a ticket no single scrub could match.
+func TestRemoteLaunchRefusesATicketWithANewline(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	for _, ticket := range []string{"tkt-a\nb", "tkt-a\rb"} {
+		f := newRemoteFixture(t)
+		binPath := f.installBinary(t, "rafiki-launch", recordingLaunchBinary)
+		client := newRemoteClient(t, f.serverAt(t, remoteLaunchAddr))
+
+		_, err := launchFrames(t, client, launchStart(binPath, "", "install-7"), launchTicket(ticket))
+		c.Require().Error(err, "ticket %q was accepted", ticket)
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "ticket %q", ticket)
+		_, statErr := os.Stat(f.record)
+		c.True(os.IsNotExist(statErr), "ssh must not run for ticket %q", ticket)
+	}
+}
+
+// TestRemoteLaunchScrubsTheTicketBeforeQuoting pins the order in the
+// CodeInternal branch: the ticket holds the characters %q escapes, so quoting
+// the echo first would render it differently and the scrub would miss it.
+func TestRemoteLaunchScrubsTheTicketBeforeQuoting(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newRemoteFixture(t)
+	const ticket = `tkt-"9\b`
+	// A target that echoes its stdin to STDOUT: the echo is not a launch line,
+	// so it becomes the raw output of a CodeInternal answer.
+	binPath := f.installBinary(t, "rafiki-echo-stdout",
+		"#!/bin/sh\nread -r line\nprintf '%s\\n' \"$line\"\nexit 0\n")
+	client := newRemoteClient(t, f.serverAt(t, remoteLaunchAddr))
+
+	_, err := launchFrames(t, client, launchStart(binPath, "", "install-7"), launchTicket(ticket))
+	c.Require().Error(err, "an echo was accepted as a launch")
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "a target that printed something else is Internal")
+	c.StrContains(err.Error(), "raw output:", "the raw output must reach the caller")
+	c.StrContains(err.Error(), "[redacted]", "the echoed ticket is scrubbed before it is quoted")
+	c.NotStrContains(err.Error(), ticket, "the ticket reached the error message")
+}
+
 func TestRemoteLaunchRefusesWithoutConnectAddr(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newRemoteFixture(t)

@@ -177,6 +177,14 @@ func (s *Server) RemoteLaunch(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("remote launch: the ticket frame is empty"))
 	}
+	// TrimRight takes only the frame's own line ending off. A newline that is
+	// still there would be a SECOND line on the remote shell's stdin, reaching
+	// the executor's stdin, and scrubbing the echoed ticket would then have to
+	// match it in pieces.
+	if strings.ContainsAny(ticket, "\r\n") {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("remote launch: the ticket must be one line"))
+	}
 	// The client half-closes after the ticket, so a further frame is a bug loud
 	// enough to name — and it is refused BEFORE any ssh runs, because a second
 	// launch would spend a second ticket.
@@ -201,8 +209,11 @@ func (s *Server) RemoteLaunch(
 
 	resp, perr := parseRemoteLaunchOutput(string(stdout))
 	if perr != nil {
-		return nil, connect.NewError(connect.CodeInternal, errors.New(scrubTicket(
-			fmt.Sprintf("remote launch: %v; raw output: %q", perr, string(stdout)), ticket)))
+		// The scrub runs on the RAW output, before %q quotes it: quoting first
+		// would render a quote or a backslash inside the ticket escaped, so the
+		// scrub would no longer match and the ticket would ride out in pieces.
+		return nil, connect.NewError(connect.CodeInternal, errors.New(
+			fmt.Sprintf("remote launch: %v; raw output: %q", perr, scrubTicket(string(stdout), ticket))))
 	}
 	slog.Debug("executor: remote launch", "destination", target.GetDestination(),
 		"installId", msg.GetInstallId(), "state", resp.GetState(), "pid", resp.GetPid())
