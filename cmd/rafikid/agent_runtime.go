@@ -627,6 +627,19 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	if c.sandboxStore != nil {
 		ro.Sandboxes = newControllerSandboxes(c, childID, ownerUserID)
 	}
+	// executor_install/executor_uninstall: the same per-child binding rule again
+	// — this child's daemon-stamped id, its owner and the owner's display name
+	// are closed over at construction, so a launcher named as a tool argument can
+	// only narrow which of THIS lineage's machines runs the ssh. Guarded on the
+	// install recipe table for the same reason as Sandboxes: without it the verbs
+	// can only answer Unavailable, so they decline instead of materializing.
+	if c.installStoreReady() {
+		ro.ExecutorInstaller = newExecutorInstallBinding(c, installCaller{
+			OwnerUserID: ownerUserID,
+			OwnerName:   ownerName,
+			ChildID:     childID,
+		})
+	}
 	// Same binding rule for the child→parent verbs: agent_report and
 	// agent_result report from THIS child's position in the tree, through the
 	// same hub the Connect verbs run.

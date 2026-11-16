@@ -330,6 +330,18 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		}
 		opts.Sandboxes = newMCPSandboxes(ctrl, mcpSandboxOwner(id), callerChild)
 	}
+	// executor_install/executor_uninstall need the install recipe table, so they
+	// decline on a DB-less daemon (installStoreReady) -- the same
+	// nil-means-decline rule as Sandboxes above. The caller is resolved by
+	// installCallerFromContext, the SAME function connectExecutorInstaller uses,
+	// so a credential becomes one installCaller on both faces and a launcher it
+	// may not reach is refused identically on either (TestInstallFacesAdmitIdentically).
+	// A claude child cannot run workspace tools on an executor it installs -- its
+	// own tools belong to the host it runs on -- so its description says so.
+	if ctrl.installStoreReady() {
+		opts.ExecutorInstaller = newExecutorInstallBinding(ctrl, installCallerFromContext(r.Context(), ctrl))
+		opts.CannotUseInstalledExecutor = isChild && childIsClaude(ctrl, id.ChildID)
+	}
 	// Recall + memory tools, bound to the caller's owner the same way the
 	// conversation reader is: an admin's conversation-derived hits cover the
 	// whole daemon, but only for a real user credential; a named user's are
@@ -506,6 +518,12 @@ var mcpBlueprints = []tools.Tool{
 	&tools.MemoryGetBlueprint{},
 	&tools.MemoryTreeBlueprint{},
 	&tools.MemoryDeleteBlueprint{},
+	// The ssh pair: a claude child's own tools stop at the host it runs on, so
+	// installing a machine for its SUBAGENTS is a workspace capability it
+	// otherwise has no way to reach. Both decline when the daemon has no
+	// install recipe table (getServer's installStoreReady guard).
+	&tools.ExecutorInstallBlueprint{},
+	&tools.ExecutorUninstallBlueprint{},
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint
