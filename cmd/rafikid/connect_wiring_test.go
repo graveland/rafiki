@@ -116,16 +116,18 @@ func TestBuildProtocolSpawnRequestCarriesFieldsThrough(t *testing.T) {
 		Cwd: "/work", Name: "scout", Model: "claude-opus-5", Kind: "fundi",
 		Preset: "reviewer", ParentChildID: "c_0",
 		ExecutorSelector: "kind=native", ExecutorRef: "greyshift",
-		HomeExecutor: "blueshift",
-		Labels:       map[string]string{"team": "a"},
-		MaxDepth:     &depth,
-		MaxCost:      &cost,
-		MaxChildren:  &children,
+		HomeExecutor:   "blueshift",
+		WorkspaceTools: "rafiki",
+		Labels:         map[string]string{"team": "a"},
+		MaxDepth:       &depth,
+		MaxCost:        &cost,
+		MaxChildren:    &children,
 	})
 	c.Eq("reviewer", got.Preset, "Preset")
 	c.False(got.Kind != "fundi" || got.Model != "claude-opus-5" || got.Name != "scout", "identity fields wrong: %+v", got)
 	c.False(got.ParentChildID != "c_0" || got.ExecutorRef != "greyshift", "lineage/executor wrong: %+v", got)
 	c.Eq("blueshift", got.HomeExecutor, "home_executor did not reach the framed request: %+v", got)
+	c.Eq("rafiki", got.WorkspaceTools, "workspace_tools did not reach the framed request: %+v", got)
 	c.Eq("a", got.Labels["team"], "labels wrong: %+v", got.Labels)
 	c.False(got.MaxDepth == nil || *got.MaxDepth != 2 || got.MaxCost == nil || *got.MaxCost != 1.5 || got.MaxChildren == nil || *got.MaxChildren != 3, "budgets wrong: %+v", got)
 }

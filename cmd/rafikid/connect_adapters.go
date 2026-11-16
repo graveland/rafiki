@@ -442,11 +442,14 @@ func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 		ExecutorSelector: p.ExecutorSelector,
 		SkipDerivedIndex: p.SkipDerivedIndex,
 		Notify:           p.Notify,
-		ExecutorRef:      p.ExecutorRef,
-		HomeExecutor:     p.HomeExecutor,
-		MaxDepth:         p.MaxDepth,
-		MaxCost:          p.MaxCost,
-		MaxChildren:      p.MaxChildren,
+		// Raw, un-normalized: Controller.Spawn is the one place an absent
+		// choice and "native" collapse, and the place the refusals live.
+		WorkspaceTools: p.WorkspaceTools,
+		ExecutorRef:    p.ExecutorRef,
+		HomeExecutor:   p.HomeExecutor,
+		MaxDepth:       p.MaxDepth,
+		MaxCost:        p.MaxCost,
+		MaxChildren:    p.MaxChildren,
 
 		ConfigDir:          p.ConfigDir,
 		AppendSystemPrompt: p.AppendSystemPrompt,
