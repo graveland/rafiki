@@ -409,20 +409,22 @@ func TestExecutorInstanceCreateReadsTheDeclaredInstanceMachineName(t *testing.T)
 	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetInstance(t)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
 	t.Setenv(paths.ExecutorName, "") // the per-instance FILE decides, not the env
-
-	// Two instances, two names: which one create reads is the whole question.
-	seedInstanceMachineName(t, paths.DefaultInstance, "default-box")
-	seedInstanceMachineName(t, "work", "work-box")
-	paths.ResetInstanceForTest()
 
 	stub := &createStubControl{executors: []*rafikiv1.ExecutorRow{
 		executorRow("default-box", true, map[string]string{"owner": "brent"}),
 		executorRow("work-box", true, map[string]string{"owner": "brent"}),
 	}}
+	// FIRST, because it isolates too (isolateProfiles moves XDG_DATA_HOME):
+	// anything seeded before it lands in a data dir create never reads.
 	serveCreateStub(t, stub)
+
+	// Two instances, two names: which one create reads is the whole question.
+	// Seeded AFTER the last isolation, through paths.MachineNameFile(), so the
+	// fixture and the read resolve the same directory.
+	seedInstanceMachineName(t, paths.DefaultInstance, "default-box")
+	seedInstanceMachineName(t, "work", "work-box")
+	paths.ResetInstanceForTest()
 
 	// Name the pointer's profile "work" and serve it on the same socket, so the
 	// pointer's instance is the one whose machine name must NOT be reported.

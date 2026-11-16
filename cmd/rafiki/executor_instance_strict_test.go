@@ -62,6 +62,23 @@ func TestExecutorInstanceServiceUninstallRefusesAnInvalidDeclaredName(t *testing
 	c.Eq(paths.DefaultInstance, paths.Instance(), "a refusal must not fall back to the default instance")
 }
 
+// The other direction, so the strict switch is pinned both ways: a VALID
+// declared name must still reach the backend, for the instance it names. A verb
+// that refused every uninstall would satisfy the test above and take away the
+// only way to remove a per-instance unit.
+func TestExecutorInstanceServiceUninstallActsOnTheDeclaredInstance(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+	resetInstance(t)
+	calls := stubExecutorBackendCalls(t)
+
+	cmd := executorVerb(c, newExecutorServiceUninstallCmd, "-P", "work")
+	c.NoError(cmd.RunE(cmd, nil), "a valid declared instance name must uninstall")
+	c.Eq(1, len(*calls), "exactly one backend resolution")
+	c.Eq("work", paths.Instance(), "the uninstall must act on the declared instance")
+}
+
 // `rafiki -P "my work" executor setup` must NOT overwrite the default
 // credential, environment file and unit: it refuses before the first write, and
 // before the enrollment exchange that would mint a token for the wrong instance.

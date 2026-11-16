@@ -830,7 +830,7 @@ func newExecutorServiceUninstallCmd() *cobra.Command {
 		Short: "Stop and remove the executor service",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			b, err := executorServiceBackend(cmd)
+			b, err := executorServiceBackendStrict(cmd)
 			if err != nil {
 				return err
 			}

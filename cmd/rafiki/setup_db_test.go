@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -478,7 +479,7 @@ func TestSetupDBExistingVolumeSkipsInitWait(t *testing.T) {
 func TestMigrateDatabaseDSNInEnvNotArgv(t *testing.T) {
 	r := newFakeRunner()
 	dsn := "postgres://postgres:pw@127.0.0.1:5432/rafiki?sslmode=disable"
-	if err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", dsn, installstate.DBModeDSN); err != nil {
+	if err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", dsn, installstate.DBModeDSN, io.Discard); err != nil {
 		t.Fatalf("migrateDatabase: %v", err)
 	}
 	if len(r.runCalls) != 1 {
@@ -499,7 +500,7 @@ func TestMigrateDatabaseDSNInEnvNotArgv(t *testing.T) {
 func TestMigrateDatabaseReportsStderrAndHint(t *testing.T) {
 	r := newFakeRunner()
 	r.scripts[runKey([]string{"/usr/local/bin/rafikid", "migrate"})] = fakeScript{stderr: []byte("no such extension"), err: errExit()}
-	err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", "postgres://x", installstate.DBModeDSN)
+	err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", "postgres://x", installstate.DBModeDSN, io.Discard)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -513,12 +514,22 @@ func TestMigrateDatabaseReportsStderrAndHint(t *testing.T) {
 // An embedded install needs none of the extensions a supplied DSN does, and its
 // migrate is also the first binary download and initdb: the hint must point at
 // that, never at extensions the operator cannot install.
+//
+// The live stream is a buffer here, not the process's stderr: an embedded
+// migrate's progress lines go to the writer setup passes (its own output), and
+// a test that handed it os.Stderr would spray an unattributable line into the
+// package's output. Asserting on the buffer also pins that the stream is wired
+// at all.
 func TestMigrateDatabaseEmbeddedHintIsNotAboutExtensions(t *testing.T) {
 	r := newFakeRunner()
 	r.scripts[runKey([]string{"/usr/local/bin/rafikid", "migrate"})] = fakeScript{stderr: []byte("checksum mismatch"), err: errExit()}
-	err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", embeddedDSN, installstate.DBModeEmbedded)
+	var live bytes.Buffer
+	err := migrateDatabase(context.Background(), r, "/usr/local/bin/rafikid", embeddedDSN, installstate.DBModeEmbedded, &live)
 	if err == nil {
 		t.Fatal("want error, got nil")
+	}
+	if got := live.String(); !strings.Contains(got, "checksum mismatch") {
+		t.Errorf("the live stream must carry the subprocess stderr as it is written: got %q", got)
 	}
 	for _, want := range []string{"checksum mismatch", "download", paths.DataDir(), paths.StateDir()} {
 		if !strings.Contains(err.Error(), want) {

@@ -8,9 +8,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
-	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -350,18 +350,23 @@ func lastDockerLogs(ctx context.Context, r runner) string {
 // migrateDatabase runs rafikid migrate against dsn. The DSN travels in the
 // environment (RAFIKI_DB), never in argv.
 //
+// live is where the embedded migrate's own progress lines go as they are
+// written; setup passes its own output writer, so every line an operator reads
+// during `rafiki setup` comes out of one stream (and a test captures the same
+// stream instead of the process's stderr).
+//
 // The failure hint depends on the mode. On an embedded install the whole
 // download, checksum verification and initdb happen inside this exec, so
 // telling the operator about server extensions would point them at the wrong
 // thing entirely — the first thing they read on the most likely failure.
-func migrateDatabase(ctx context.Context, r runner, rafikidPath, dsn string, mode installstate.DBMode) error {
+func migrateDatabase(ctx context.Context, r runner, rafikidPath, dsn string, mode installstate.DBMode, live io.Writer) error {
 	env := []string{"RAFIKI_DB=" + dsn}
 	var stderr []byte
 	var err error
 	if mode == installstate.DBModeEmbedded {
 		// The first embedded migrate downloads tens of megabytes and runs initdb,
 		// so rafikid's own progress lines are shown as they are written.
-		_, stderr, err = r.RunLive(ctx, env, os.Stderr, rafikidPath, "migrate")
+		_, stderr, err = r.RunLive(ctx, env, live, rafikidPath, "migrate")
 	} else {
 		_, stderr, err = r.Run(ctx, env, rafikidPath, "migrate")
 	}

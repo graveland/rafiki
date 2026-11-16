@@ -179,6 +179,17 @@ type setupFixture struct {
 // PATH, a stubbed service backend, and a fake Control server on the profile's
 // own socket. It seeds a baseline "everything done" state that individual tests
 // override.
+//
+// The executor step's two profile-touching seams are stubbed too. This
+// fixture's subject is the DAEMON unit, and its tests deliberately export
+// daemon-only variables that profile.CheckRetiredEnv refuses (RAFIKI_DEFAULT_MODEL
+// is captured into the unit even though the CLIENT has retired it). Both seams
+// reach the profile through newConnectEndpoint, so leaving them real makes
+// setup's outcome depend on how far profile resolution gets — and enrollment is
+// skipped in production only on a machine that already holds
+// <data>/executor.cred, which an isolated data dir correctly does not have.
+// A test that wants a real seam stubs it itself (cmd_executor_setup_test.go,
+// executor_instance_test.go).
 func newSetupFixture(t *testing.T) *setupFixture {
 	t.Helper()
 	c := assert.NewAborting(t)
@@ -231,6 +242,16 @@ func newSetupFixture(t *testing.T) *setupFixture {
 	origExec := executorServiceBackendFor
 	executorServiceBackendFor = func() serviceBackend { return f.execFB }
 	t.Cleanup(func() { executorServiceBackendFor = origExec })
+
+	origEnroll := executorEnrollClient
+	executorEnrollClient = func(context.Context, *cobra.Command, string, []string) (string, error) {
+		return "test-enroll-token", nil
+	}
+	t.Cleanup(func() { executorEnrollClient = origEnroll })
+
+	origWaitLive := executorSetupWaitLive
+	executorSetupWaitLive = func(context.Context, *cobra.Command, string) error { return nil }
+	t.Cleanup(func() { executorSetupWaitLive = origWaitLive })
 
 	f.stub = &setupStubControl{executors: []*rafikiv1.ExecutorRow{{
 		Id: "ex1", Machine: "machine", Eligible: true, LaunchKinds: []string{"claude"},
