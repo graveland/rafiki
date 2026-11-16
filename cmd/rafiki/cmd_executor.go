@@ -31,6 +31,7 @@ func newExecutorCmd() *cobra.Command {
 
   serve                 BE an executor on this machine, in the foreground.
   service               run it as a per-user system service (launchd/systemd).
+  install, uninstall    put an executor on an ssh target, through one of yours.
   enroll, create, list,
   label, disable,
   enable, name          administer the pool, via the daemon's control socket.
@@ -49,6 +50,12 @@ The administrative verbs output JSON.`,
 		newExecutorEnableCmd(),
 		newExecutorDeleteCmd(),
 		newExecutorNameCmd(),
+		// install/uninstall are the ssh pair: the executor they act on runs on
+		// ANOTHER machine, reached through one of this caller's own executors.
+		// They sit with the pool verbs because what they administer is a row in
+		// the pool, even though the machine was never enrolled here.
+		newExecutorInstallCmd(),
+		newExecutorUninstallCmd(),
 		// serve is the executor ITSELF, not an operator verb against the
 		// daemon; see cmd_executor_serve.go. It sits under the same noun
 		// because "be an executor" and "administer executors" are the same
@@ -235,6 +242,7 @@ func fetchExecutorRows(ctx context.Context, ctl rafikiv1connect.ControlClient, s
 const (
 	colID = iota
 	colName
+	colVia
 	colStatus
 	colLabels
 	colAdmits
@@ -291,6 +299,7 @@ func renderExecutorTable(w io.Writer, execs []*rafikiv1.ExecutorRow, useColor bo
 		rows[i] = []string{
 			shortExecutorID(ex.GetId()),
 			defaultDash(ex.GetMachine()),
+			defaultDash(ex.GetInstalledVia()),
 			executorStatus(ex),
 			executorFormatLabels(ex.GetLabels(), 48),
 			defaultDash(ex.GetAdmits()),
@@ -300,7 +309,7 @@ func renderExecutorTable(w io.Writer, execs []*rafikiv1.ExecutorRow, useColor bo
 	}
 
 	t := table.New()
-	t.Headers("ID", "MACHINE", "STATUS", "LABELS", "ADMITS", "CONNECTED", "LAST SEEN")
+	t.Headers("ID", "MACHINE", "VIA", "STATUS", "LABELS", "ADMITS", "CONNECTED", "LAST SEEN")
 	t.Rows(rows...)
 	t.StyleFunc(func(row, col int) lipgloss.Style {
 		// Padding is layout, not color: it applies whether or not styling

@@ -163,6 +163,15 @@ type executorStubControl struct {
 	sawDisable []string
 	sawEnable  []string
 	sawDelete  []string
+
+	// The ssh pair. installRow is what InstallExecutor answers with, so a test
+	// can pin how the CLI renders it; the errors are what a refused install or
+	// uninstall surfaces.
+	sawInstall   *rafikiv1.InstallExecutorRequest
+	installRow   *rafikiv1.ExecutorRow
+	installErr   error
+	sawUninstall []string
+	uninstallErr error
 }
 
 func (s *executorStubControl) ListExecutors(
@@ -226,6 +235,32 @@ func (s *executorStubControl) DeleteExecutor(
 ) (*connect.Response[rafikiv1.DeleteExecutorResponse], error) {
 	s.sawDelete = append(s.sawDelete, req.Msg.GetExecutorId())
 	return connect.NewResponse(&rafikiv1.DeleteExecutorResponse{}), nil
+}
+
+func (s *executorStubControl) InstallExecutor(
+	_ context.Context,
+	req *connect.Request[rafikiv1.InstallExecutorRequest],
+) (*connect.Response[rafikiv1.InstallExecutorResponse], error) {
+	s.sawInstall = req.Msg
+	if s.installErr != nil {
+		return nil, s.installErr
+	}
+	row := s.installRow
+	if row == nil {
+		row = &rafikiv1.ExecutorRow{Id: "exec-1", Machine: req.Msg.GetName()}
+	}
+	return connect.NewResponse(&rafikiv1.InstallExecutorResponse{Executor: row}), nil
+}
+
+func (s *executorStubControl) UninstallExecutor(
+	_ context.Context,
+	req *connect.Request[rafikiv1.UninstallExecutorRequest],
+) (*connect.Response[rafikiv1.UninstallExecutorResponse], error) {
+	s.sawUninstall = append(s.sawUninstall, req.Msg.GetExecutor())
+	if s.uninstallErr != nil {
+		return nil, s.uninstallErr
+	}
+	return connect.NewResponse(&rafikiv1.UninstallExecutorResponse{}), nil
 }
 
 // executorTestDaemon stands a stub Control handler up on a scratch profile's
