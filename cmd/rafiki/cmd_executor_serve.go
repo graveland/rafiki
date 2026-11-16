@@ -599,6 +599,9 @@ func newExecutorServeCmd() *cobra.Command {
 		sandboxMountRoots  []string
 		relayDir           string
 		relayFootholdImage string
+		noSSHLaunch        bool
+		stdio              bool
+		installID          string
 	)
 
 	cmd := &cobra.Command{
@@ -638,6 +641,23 @@ every existing install already has; any other name lives under profiles/<name>.`
 			}
 			if os.Getenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC") != "" {
 				return errors.New("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC is now RAFIKI_EXECUTOR_REPO_SYNC")
+			}
+
+			// --stdio is a different transport, not a flag on the reverse-dial
+			// path: a launcher started this process over ssh, the daemon writes
+			// the one-shot ticket to stdin, and the protocol speaks on
+			// stdin/stdout. Branch before anything resolves a connect address.
+			if stdio {
+				return runStdioServeCommand(cmd, stdioServeConfig{
+					Root:            root,
+					Concurrency:     concurrency,
+					RTKMode:         rtkMode,
+					SpillDir:        spillDir,
+					JobOutputBudget: jobBudgetMB << 20,
+					LSPConfig:       lspConfig,
+					NoLSP:           noLSP,
+					InstallID:       installID,
+				})
 			}
 
 			pinnedEnv := executorPinnedEnv()
@@ -751,6 +771,7 @@ every existing install already has; any other name lives under profiles/<name>.`
 				SandboxRelayDir:     resolvedRelayDir,
 				SandboxRelayVolume:  relayVolume,
 				BeforeSandboxCreate: beforeCreate,
+				NoSSHLaunch:         noSSHLaunch,
 				Env:                 pinnedEnv,
 			})
 			defer func() { _ = srv.Close() }()
@@ -881,6 +902,14 @@ every existing install already has; any other name lives under profiles/<name>.`
 			"other platforms the relay dir is opt-in. "+
 			"--relay-dir= (empty) disables it")
 	cmd.Flags().StringVar(&relayFootholdImage, "relay-foothold-image", "", relayFootholdImageHelp)
+	cmd.Flags().BoolVar(&noSSHLaunch, "no-ssh-launch", false,
+		"refuse to install or run executors on other machines over ssh")
+	cmd.Flags().BoolVar(&stdio, "stdio", false,
+		"speak the executor protocol on stdin/stdout, for an ssh launcher: the one-shot ticket is "+
+			"the first line of stdin, stdout carries only the protocol, and every log line goes to stderr")
+	cmd.Flags().StringVar(&installID, "install-id", "",
+		"the daemon's executor-install id this --stdio executor records in <data dir>/installed-executor "+
+			"once it has upgraded (required with --stdio)")
 
 	return cmd
 }
@@ -914,6 +943,11 @@ func executorConnectOptions(addr, socketPath, pinCert, serverName, enrollToken, 
 			"os":      runtime.GOOS,
 			"arch":    runtime.GOARCH,
 			"version": version.String(),
+			// The executor INSTANCE this process serves. The daemon uses it as
+			// the remote instance name when this machine is asked to install an
+			// executor elsewhere; it gates nothing, so self-reporting it is safe
+			// in exactly the way proxies and launch_kinds are.
+			"instance": paths.Instance(),
 		},
 		Handler: handler,
 	}

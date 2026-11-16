@@ -56,6 +56,18 @@ type ConnectOptions struct {
 	// credential, labels, admission — is identical, so a local executor is a
 	// fully rowed executor and not a special case.
 	SocketPath string
+
+	// Conn, when set, is the connection to speak on and nothing is dialled:
+	// Addr, ServerName, PinCert and SocketPath are ignored. It is how an
+	// executor reached through a tunnel (a remote `executor serve --stdio`
+	// over ssh, or a pool-side ServeConn) reaches the same upgrade path as a
+	// directly dialled one.
+	//
+	// A caller-supplied connection is ONE-SHOT: Connect makes exactly one
+	// attempt on it and returns that attempt's result, because a ticket is
+	// spent by the first exchange and the conn cannot be re-established by
+	// this process. There is no redial loop on this path.
+	Conn net.Conn
 }
 
 // ErrEnrollmentRejected stops the reconnect loop for good. It means rafikid
@@ -77,6 +89,14 @@ var (
 )
 
 func Connect(ctx context.Context, o ConnectOptions) error {
+	// A caller-supplied connection is one-shot (see ConnectOptions.Conn): the
+	// first exchange spends the ticket, and this process cannot re-establish a
+	// tunnel somebody else owns. So there is no redial loop — return exactly
+	// what the one attempt produced, including a terminal refusal.
+	if o.Conn != nil {
+		return connectOnce(ctx, o)
+	}
+
 	initial, ceiling := initialBackoff, maxBackoff
 	backoff := initial
 
@@ -177,6 +197,13 @@ func classifyRefusal(err error) error {
 // byte-identical on both, which is what keeps a local executor a fully rowed
 // executor rather than a second kind of thing.
 func dialDaemon(ctx context.Context, o ConnectOptions) (net.Conn, string, error) {
+	// A connection handed in is used as it stands. There is no hostname to
+	// derive one from, so "localhost" is the conventional Host filler: the
+	// daemon's mux routes on PATH alone and never resolves it.
+	if o.Conn != nil {
+		return o.Conn, "localhost", nil
+	}
+
 	if o.SocketPath != "" {
 		var d net.Dialer
 		conn, err := d.DialContext(ctx, "unix", o.SocketPath)

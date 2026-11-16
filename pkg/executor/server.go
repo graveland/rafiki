@@ -131,6 +131,12 @@ type Options struct {
 	// passes and before a container-create is forwarded. A non-nil error refuses
 	// the create (Unavailable). The foothold's Ensure is wired here.
 	BeforeSandboxCreate func(context.Context) error
+
+	// NoSSHLaunch disables the Remote* RPCs: this executor refuses to install
+	// or run executors on other machines over ssh. Self-reported (Describe's
+	// ssh_launch) and therefore only ever narrowing — the capability itself
+	// equals what bash on this executor can already do.
+	NoSSHLaunch bool
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -328,6 +334,7 @@ func (s *Server) Describe(
 		SandboxMountRoots:  append([]string(nil), s.opts.SandboxMountRoots...),
 		SandboxRelayDir:    s.opts.SandboxRelayDir,
 		SandboxRelayVolume: s.opts.SandboxRelayVolume,
+		SshLaunch:          !s.opts.NoSSHLaunch,
 	}), nil
 }
 

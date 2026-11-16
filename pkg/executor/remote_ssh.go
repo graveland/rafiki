@@ -1,0 +1,803 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package executor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+	"unicode"
+
+	"connectrpc.com/connect"
+
+	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/paths"
+)
+
+// The Remote* RPCs are how a NATIVE executor installs and runs executors on
+// other machines over ssh. The daemon never runs ssh: it asks a launcher it
+// already trusts, and the launcher is trusted with the target's traffic exactly
+// as far as it is already trusted with the ssh keys to it.
+//
+// Everything the remote command is built from is a TYPED request field, quoted
+// for a POSIX shell. Nothing caller-supplied reaches the command unquoted, so a
+// hostile value can never become shell syntax; the validation below is the
+// second line, refusing the shapes that make no sense at all (a destination
+// that would be read as an ssh option, a path outside the content-addressed
+// binary cache).
+//
+// The process handling is modelled on MCPStdio: one ssh per stream, its own
+// process group, stdout/stderr pumped as opaque bytes, and the group swept the
+// instant the leader is reaped so nothing it forked outlives the stream.
+
+// remoteSSHOptions is the whole ssh option set, always and only. No host-key
+// option: ProxyJump, User, keys and Include all come from the launcher's own
+// ssh config, because that is the operator's trust decision, not the daemon's.
+var remoteSSHOptions = []string{
+	"-T",
+	"-o", "BatchMode=yes",
+	"-o", "ConnectTimeout=10",
+	"-o", "ServerAliveInterval=15",
+	"-o", "ServerAliveCountMax=3",
+}
+
+// sshArgs builds the exact argv every Remote* ssh runs.
+func sshArgs(destination, remoteCommand string) []string {
+	args := make([]string, 0, len(remoteSSHOptions)+2)
+	args = append(args, remoteSSHOptions...)
+	return append(args, destination, remoteCommand)
+}
+
+// shellQuote renders s as ONE POSIX shell word. Every value interpolated into a
+// remote command goes through this; the only exception is the literal $HOME
+// prefix of binary_path, which remoteBinaryExpr handles.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// remoteBinaryExpr renders a validated binary_path for a remote command. The
+// daemon only ever sends $HOME/.cache/rafiki/bin/rafiki-<tag>-<sha>; $HOME is
+// expanded by the remote shell and the remainder is quoted like any other
+// value, so a cache path can never be read as syntax.
+func remoteBinaryExpr(binaryPath string) string {
+	const home = "$HOME/"
+	if strings.HasPrefix(binaryPath, home) {
+		return `"$HOME"/` + shellQuote(strings.TrimPrefix(binaryPath, home))
+	}
+	return shellQuote(binaryPath)
+}
+
+// remoteDataDirScript is the POSIX sh that computes the target's data directory
+// in $d. It MUST agree with paths.DataDir() under paths.SetInstance(instance):
+// the credential and the install marker are read and written through it.
+func remoteDataDirScript(instance string) string {
+	s := `d="${XDG_DATA_HOME:-$HOME/.local/share}/rafiki"`
+	if instance != paths.DefaultInstance {
+		// Concatenated OUTSIDE the double quotes: a shellQuote'd value inside
+		// them would keep its single quotes literally, and the directory would
+		// no longer match paths.DataDir().
+		s += `; d="$d/profiles/"` + shellQuote(instance)
+	}
+	return s
+}
+
+// remoteProbeScript prints exactly four lines, in this order:
+//
+//	uname=<uname -sm>
+//	binary=<yes|no>
+//	cred=<yes|no>
+//	marker=<first line of the install marker, or empty>
+func remoteProbeScript(instance, binaryPath string) string {
+	bin := remoteBinaryExpr(binaryPath)
+	return remoteDataDirScript(instance) + "; " +
+		`printf 'uname=%s\n' "$(uname -sm)"; ` +
+		`if [ -x ` + bin + ` ]; then printf 'binary=yes\n'; else printf 'binary=no\n'; fi; ` +
+		`if [ -f "$d/executor.cred" ]; then printf 'cred=yes\n'; else printf 'cred=no\n'; fi; ` +
+		`if [ -f "$d/installed-executor" ]; then printf 'marker=%s\n' "$(head -n 1 "$d/installed-executor")"; else printf 'marker=\n'; fi`
+}
+
+// remoteInstallScript writes stdin to a temp file in the content-addressed
+// binary cache, verifies it before the final rename, and removes the temp file
+// on any failure. No scp or sftp: the target needs no internet and the launcher
+// keeps no copy.
+func remoteInstallScript(binaryPath, sha256 string) string {
+	return `mkdir -p "$HOME/.cache/rafiki/bin" && ` +
+		`t=$(mktemp "$HOME/.cache/rafiki/bin/.rafiki.XXXXXX") && ` +
+		`cat > "$t" && ` +
+		`{ sha256sum "$t" 2>/dev/null || shasum -a 256 "$t" 2>/dev/null || sha256 -q "$t"; } | awk '{print $1}' | grep -qx ` + shellQuote(sha256) + ` && ` +
+		`chmod 0755 "$t" && mv -f "$t" ` + remoteBinaryExpr(binaryPath) + ` || { rm -f "$t"; exit 1; }`
+}
+
+// remoteServeScript runs the installed executor in its stdio mode. `exec`
+// replaces the shell, so the ssh channel's exit status is the executor's.
+func remoteServeScript(binaryPath, instance, root, installID string) string {
+	s := `exec ` + remoteBinaryExpr(binaryPath) + ` executor serve --stdio -P ` + shellQuote(instance)
+	if root != "" {
+		s += ` --root ` + shellQuote(root)
+	}
+	return s + ` --install-id ` + shellQuote(installID)
+}
+
+// remoteCleanScript removes the install marker iff its first line names THIS
+// install. The shared binary cache is content-addressed and is left alone.
+func remoteCleanScript(instance, installID string) string {
+	return remoteDataDirScript(instance) +
+		`; f="$d/installed-executor"; ` +
+		`[ -f "$f" ] && [ "$(head -n 1 "$f")" = ` + shellQuote(installID) + ` ] && rm -f "$f" && echo removed || true`
+}
+
+// Validation limits. A destination is an ssh destination, not a command: the
+// character set is not restricted (user@host and IPv6 are legal), but anything
+// that would be read as an option, split into words, or smuggle a control
+// character is refused before ssh is executed.
+const remoteDestinationMax = 255
+
+var (
+	remoteBinaryPathRE = regexp.MustCompile(`^\$HOME/\.cache/rafiki/bin/rafiki-[A-Za-z0-9._-]+$`)
+	remoteInstallIDRE  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	remoteSHA256RE     = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+)
+
+func validateRemoteDestination(dest string) error {
+	if dest == "" {
+		return errors.New("destination must not be empty")
+	}
+	if len(dest) > remoteDestinationMax {
+		return fmt.Errorf("destination is longer than %d bytes", remoteDestinationMax)
+	}
+	if strings.HasPrefix(dest, "-") {
+		return fmt.Errorf("destination %q must not start with '-': it would be read as an ssh option", dest)
+	}
+	for _, r := range dest {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("destination %q must not contain whitespace or control characters", dest)
+		}
+	}
+	return nil
+}
+
+func validateRemoteTarget(t *executorpb.RemoteTarget) error {
+	if t == nil {
+		return errors.New("target is required")
+	}
+	if err := validateRemoteDestination(t.GetDestination()); err != nil {
+		return err
+	}
+	if err := paths.ValidateInstance(t.GetInstance()); err != nil {
+		return fmt.Errorf("instance: %w", err)
+	}
+	return nil
+}
+
+func validateRemoteBinaryPath(binaryPath string, allowEmpty bool) error {
+	if binaryPath == "" {
+		if allowEmpty {
+			return nil
+		}
+		return errors.New("binary_path is required")
+	}
+	if !remoteBinaryPathRE.MatchString(binaryPath) {
+		return fmt.Errorf("binary_path %q must be $HOME/.cache/rafiki/bin/rafiki-<tag>-<sha>", binaryPath)
+	}
+	return nil
+}
+
+func validateRemoteRoot(root string) error {
+	if root == "" {
+		return nil
+	}
+	if !strings.HasPrefix(root, "/") {
+		return fmt.Errorf("root %q must be an absolute path on the target", root)
+	}
+	for _, r := range root {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("root %q must not contain control characters", root)
+		}
+	}
+	return nil
+}
+
+func validateRemoteInstallID(installID string) error {
+	if !remoteInstallIDRE.MatchString(installID) {
+		return fmt.Errorf("install_id %q must be 1-64 characters of letters, digits, '-' or '_'", installID)
+	}
+	return nil
+}
+
+// refuseSSHLaunch is the operator's opt-out: `executor serve --no-ssh-launch`
+// makes this executor refuse every Remote* RPC, before it validates anything.
+func (s *Server) refuseSSHLaunch() error {
+	if s.opts.NoSSHLaunch {
+		return connect.NewError(connect.CodePermissionDenied,
+			errors.New("ssh launch is disabled on this executor (--no-ssh-launch)"))
+	}
+	return nil
+}
+
+// lookPathIn resolves name against the PATH in env, not the process's own. The
+// executor's pinned env is what every subprocess it spawns runs under, so ssh
+// must be found the same way a tool shell would find it.
+func lookPathIn(env []string, name string) (string, error) {
+	path := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == "PATH" {
+			path = v
+		}
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		info, err := os.Stat(p)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		return p, nil
+	}
+	return "", fmt.Errorf("%s: not found in PATH", name)
+}
+
+// sshCommand builds the one ssh a Remote* call runs. ctx cancels it; Setpgid
+// gives the serve path a group to sweep, exactly as MCPStdio does.
+func (s *Server) sshCommand(ctx context.Context, destination, remoteCommand string) (*exec.Cmd, error) {
+	env := s.opts.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	sshPath, err := lookPathIn(env, "ssh")
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, sshPath, sshArgs(destination, remoteCommand)...)
+	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd, nil
+}
+
+// cappedBuffer keeps the last max bytes written to it, so ssh's stderr is
+// bounded no matter how chatty a refusal is.
+type cappedBuffer struct {
+	max int
+	buf []byte
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	b.buf = append(b.buf, p...)
+	if b.max > 0 && len(b.buf) > b.max {
+		b.buf = b.buf[len(b.buf)-b.max:]
+	}
+	return n, nil
+}
+
+func (b *cappedBuffer) Bytes() []byte { return b.buf }
+
+// runSSHScript runs one ssh and returns its stdout and stderr. Used by the
+// one-shot calls (probe, clean), never by the streaming ones.
+func (s *Server) runSSHScript(ctx context.Context, destination, script string) (stdout, stderr []byte, err error) {
+	cmd, err := s.sshCommand(ctx, destination, script)
+	if err != nil {
+		return nil, nil, err
+	}
+	var out, errBuf cappedBuffer
+	out.max = 64 << 10
+	errBuf.max = stderrTailMax
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	return out.Bytes(), errBuf.Bytes(), err
+}
+
+// sshFailure turns a non-zero ssh exit into the error a caller sees. ssh's
+// stderr is returned verbatim (bounded): an agent reading "Host key
+// verification failed" knows the fix, and that knowledge must not be replaced
+// by an invented summary.
+func sshFailure(destination string, stderr []byte, err error) error {
+	tail := strings.TrimSpace(string(stderr))
+	if tail != "" {
+		return errors.New(tail)
+	}
+	return fmt.Errorf("ssh %s: %w", destination, err)
+}
+
+// RemoteProbe runs one ssh and reports what the daemon needs to decide an
+// install: the target's platform, whether the binary is already there, and
+// whether the target carries state another install would clobber.
+func (s *Server) RemoteProbe(
+	ctx context.Context,
+	req *connect.Request[executorpb.RemoteProbeRequest],
+) (*connect.Response[executorpb.RemoteProbeResponse], error) {
+	if err := s.refuseSSHLaunch(); err != nil {
+		return nil, err
+	}
+	target := req.Msg.GetTarget()
+	if err := validateRemoteTarget(target); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if err := validateRemoteBinaryPath(req.Msg.GetBinaryPath(), true); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	stdout, stderr, err := s.runSSHScript(ctx, target.GetDestination(),
+		remoteProbeScript(target.GetInstance(), req.Msg.GetBinaryPath()))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, connect.NewError(connect.CodeCanceled, ctx.Err())
+		}
+		return nil, connect.NewError(connect.CodeUnavailable, sshFailure(target.GetDestination(), stderr, err))
+	}
+
+	resp, perr := parseRemoteProbeOutput(string(stdout))
+	if perr != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("remote probe: %w; raw output: %q", perr, string(stdout)))
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// parseRemoteProbeOutput accepts exactly the four lines the probe script
+// prints. Any other shape is a bug or a shell that is not POSIX, and the caller
+// sees the raw output rather than a half-parsed guess.
+func parseRemoteProbeOutput(out string) (*executorpb.RemoteProbeResponse, error) {
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 4 {
+		return nil, fmt.Errorf("expected four lines, got %d", len(lines))
+	}
+	uname, ok := strings.CutPrefix(lines[0], "uname=")
+	if !ok {
+		return nil, fmt.Errorf("line 1 is not uname=")
+	}
+	binary, ok := strings.CutPrefix(lines[1], "binary=")
+	if !ok || (binary != "yes" && binary != "no") {
+		return nil, fmt.Errorf("line 2 is not binary=yes|no")
+	}
+	cred, ok := strings.CutPrefix(lines[2], "cred=")
+	if !ok || (cred != "yes" && cred != "no") {
+		return nil, fmt.Errorf("line 3 is not cred=yes|no")
+	}
+	marker, ok := strings.CutPrefix(lines[3], "marker=")
+	if !ok {
+		return nil, fmt.Errorf("line 4 is not marker=")
+	}
+	return &executorpb.RemoteProbeResponse{
+		Uname:             strings.TrimSpace(uname),
+		BinaryPresent:     binary == "yes",
+		CredentialPresent: cred == "yes",
+		Marker:            strings.TrimSpace(marker),
+	}, nil
+}
+
+// RemoteInstall pipes one binary to the target. The first message is the
+// header; every later message is a chunk of the binary, forwarded to ssh's
+// stdin. The target verifies the sha256 before the final rename, so a torn or
+// corrupted stream leaves no file at binary_path.
+func (s *Server) RemoteInstall(
+	ctx context.Context,
+	stream *connect.ClientStream[executorpb.RemoteInstallRequest],
+) (*connect.Response[executorpb.RemoteInstallResponse], error) {
+	if err := s.refuseSSHLaunch(); err != nil {
+		return nil, err
+	}
+	if !stream.Receive() {
+		if err := stream.Err(); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("remote install: no header: %w", err))
+		}
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("remote install: no header"))
+	}
+	header := stream.Msg().GetHeader()
+	if header == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("remote install: first message must be a header"))
+	}
+	target := header.GetTarget()
+	if err := validateRemoteTarget(target); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if err := validateRemoteBinaryPath(header.GetBinaryPath(), false); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if !remoteSHA256RE.MatchString(header.GetSha256()) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("sha256 %q must be 64 hexadecimal characters", header.GetSha256()))
+	}
+
+	cmd, err := s.sshCommand(ctx, target.GetDestination(),
+		remoteInstallScript(header.GetBinaryPath(), header.GetSha256()))
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	var out, errBuf cappedBuffer
+	out.max = 64 << 10
+	errBuf.max = stderrTailMax
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("remote install: stdin pipe: %w", err))
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, fmt.Errorf("remote install: starting ssh: %w", err))
+	}
+
+	var writeErr error
+	for stream.Receive() {
+		msg := stream.Msg()
+		if msg.GetHeader() != nil {
+			// The daemon is the only caller, so a second header is a bug loud
+			// enough to name rather than a condition to tolerate.
+			_ = stdin.Close()
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				errors.New("remote install: header sent more than once"))
+		}
+		if chunk := msg.GetChunk(); len(chunk) > 0 {
+			if _, werr := stdin.Write(chunk); werr != nil {
+				// ssh is gone (a bad destination, a full disk); Wait below
+				// reports why through its stderr.
+				slog.Debug("executor: remote install stdin write failed",
+					"destination", target.GetDestination(), "error", werr)
+				writeErr = werr
+				break
+			}
+		}
+	}
+	recvErr := stream.Err()
+	if writeErr != nil {
+		recvErr = nil
+	}
+	_ = stdin.Close() // EOF ends the remote `cat`
+	waitErr := cmd.Wait()
+
+	if recvErr != nil {
+		return nil, recvErr
+	}
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return nil, connect.NewError(connect.CodeCanceled, ctx.Err())
+		}
+		return nil, connect.NewError(connect.CodeUnavailable, sshFailure(target.GetDestination(), errBuf.Bytes(), waitErr))
+	}
+	return connect.NewResponse(&executorpb.RemoteInstallResponse{}), nil
+}
+
+// remoteServeSink serializes sends on one stream. Connect's server-side
+// BidiStream is not documented as safe for concurrent Send, and the stdout
+// pump, the stderr pump and the exit frame all send.
+//
+// stderr uses TryLock for the same reason MCPStdio does: a stalled send must
+// never let a chatty remote executor deadlock its own session. The ring is the
+// record that survives.
+type remoteServeSink struct {
+	mu     sync.Mutex
+	stream *connect.BidiStream[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse]
+}
+
+func (s *remoteServeSink) send(msg *executorpb.RemoteServeResponse) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stream.Send(msg)
+}
+
+func (s *remoteServeSink) trySend(msg *executorpb.RemoteServeResponse) bool {
+	if !s.mu.TryLock() {
+		return false
+	}
+	defer s.mu.Unlock()
+	return s.stream.Send(msg) == nil
+}
+
+// RemoteServe runs `executor serve --stdio` on the target over ssh and relays
+// its stdio, unparsed. The daemon wraps the stream as a net.Conn and runs the
+// ordinary executor upgrade on it, so this side needs no daemon address and
+// parses nothing.
+//
+// One process per stream: stream end (the daemon going away, a pod rolling)
+// kills the process group, so no remote executor outlives the session that
+// asked for it.
+func (s *Server) RemoteServe(
+	ctx context.Context,
+	stream *connect.BidiStream[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse],
+) error {
+	if err := s.refuseSSHLaunch(); err != nil {
+		return err
+	}
+	first, err := stream.Receive()
+	if err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("remote serve: no start message: %w", err))
+	}
+	start := first.GetStart()
+	if start == nil {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("remote serve: first message must be a start"))
+	}
+	target := start.GetTarget()
+	if err := validateRemoteTarget(target); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if err := validateRemoteBinaryPath(start.GetBinaryPath(), false); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if err := validateRemoteRoot(start.GetRoot()); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if err := validateRemoteInstallID(start.GetInstallId()); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	cmd, err := s.sshCommand(ctx, target.GetDestination(),
+		remoteServeScript(start.GetBinaryPath(), target.GetInstance(), start.GetRoot(), start.GetInstallId()))
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable, err)
+	}
+
+	// Hand-built pipes, not cmd.StdinPipe/StdoutPipe/StderrPipe: os/exec closes
+	// those on Wait, which discards whatever the process wrote just before it
+	// died — and a dying executor's last stderr line is exactly the diagnostic
+	// this feature exists to carry (the same reasoning as MCPStdio).
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("remote serve: stdin pipe: %w", err))
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		stdinR.Close()
+		stdinW.Close()
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("remote serve: stdout pipe: %w", err))
+	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		stdinR.Close()
+		stdinW.Close()
+		stdoutR.Close()
+		stdoutW.Close()
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("remote serve: stderr pipe: %w", err))
+	}
+	cmd.Stdin = stdinR
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
+	closeAll := func() {
+		for _, f := range []*os.File{stdinR, stdinW, stdoutR, stdoutW, stderrR, stderrW} {
+			f.Close()
+		}
+	}
+	if err := cmd.Start(); err != nil {
+		closeAll()
+		return connect.NewError(connect.CodeUnavailable, fmt.Errorf("remote serve: starting ssh: %w", err))
+	}
+	stdinR.Close()
+	stdoutW.Close()
+	stderrW.Close()
+	pid := cmd.Process.Pid
+	slog.Debug("executor: remote serve started", "destination", target.GetDestination(), "pid", pid)
+
+	// Wait reaps the process exactly once; procMu/reaped make "no signal after
+	// the wait" an invariant rather than a timing argument (a pgid belongs to
+	// this executor only while its leader is unreaped).
+	var (
+		procMu sync.Mutex
+		reaped bool
+	)
+	waitCh := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		procMu.Lock()
+		reaped = true
+		procMu.Unlock()
+		waitCh <- err
+	}()
+
+	watcherDone := make(chan struct{})
+	var stopOnce sync.Once
+	stopWatcher := func() { stopOnce.Do(func() { close(watcherDone) }) }
+	defer stopWatcher()
+	var killedByUs atomic.Bool
+	kill := func(grace time.Duration) {
+		procMu.Lock()
+		defer procMu.Unlock()
+		if reaped {
+			return
+		}
+		killedByUs.Store(true)
+		killMCPGroup(pid, grace)
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-watcherDone:
+		}
+		if ctx.Err() != nil {
+			kill(child.TermGrace)
+		}
+	}()
+
+	sink := &remoteServeSink{stream: stream}
+	if err := sink.send(&executorpb.RemoteServeResponse{
+		Msg: &executorpb.RemoteServeResponse_Started{Started: &executorpb.RemoteServeStarted{Pid: int32(pid)}},
+	}); err != nil {
+		kill(child.TermGrace)
+		<-waitCh
+		stdinW.Close()
+		stdoutR.Close()
+		stderrR.Close()
+		return err
+	}
+
+	ring := &mcpStderrRing{}
+	var pumps sync.WaitGroup
+	pumps.Add(2)
+	go func() {
+		defer pumps.Done()
+		buf := make([]byte, mcpStdoutChunk)
+		for {
+			n, rerr := stdoutR.Read(buf)
+			if n > 0 {
+				if err := sink.send(&executorpb.RemoteServeResponse{
+					Msg: &executorpb.RemoteServeResponse_Stdout{Stdout: append([]byte(nil), buf[:n]...)},
+				}); err != nil {
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer pumps.Done()
+		buf := make([]byte, 16<<10)
+		for {
+			n, rerr := stderrR.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				ring.append(chunk)
+				sink.trySend(&executorpb.RemoteServeResponse{
+					Msg: &executorpb.RemoteServeResponse_Stderr{Stderr: chunk},
+				})
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	// The stdin pump runs on its own goroutine: the remote process exiting must
+	// end the stream even while the daemon still holds the request side open.
+	stdinDone := make(chan error, 1)
+	go func() {
+		defer stdinW.Close() // a half-close closes the remote process's stdin
+		for {
+			msg, rerr := stream.Receive()
+			if rerr != nil {
+				if !errors.Is(rerr, io.EOF) {
+					slog.Debug("executor: remote serve stream ended", "destination", target.GetDestination(), "error", rerr)
+				}
+				stdinDone <- nil
+				return
+			}
+			if msg.GetStart() != nil {
+				stdinDone <- connect.NewError(connect.CodeInvalidArgument,
+					errors.New("remote serve: start sent more than once"))
+				return
+			}
+			if data := msg.GetStdin(); len(data) > 0 {
+				if _, werr := stdinW.Write(data); werr != nil {
+					slog.Debug("executor: remote serve stdin write failed",
+						"destination", target.GetDestination(), "error", werr)
+					stdinDone <- nil
+					return
+				}
+			}
+		}
+	}()
+
+	var (
+		waitErr error
+		pumpErr error
+	)
+	select {
+	case waitErr = <-waitCh:
+	case pumpErr = <-stdinDone:
+		if pumpErr == nil {
+			// The daemon half-closed; the process may still be running, and
+			// killing it now would truncate one that answers on EOF.
+			select {
+			case waitErr = <-waitCh:
+			case <-ctx.Done():
+				kill(child.TermGrace)
+				waitErr = <-waitCh
+			}
+		} else {
+			kill(child.TermGrace)
+			waitErr = <-waitCh
+		}
+	case <-ctx.Done():
+		kill(child.TermGrace)
+		waitErr = <-waitCh
+	}
+
+	// The leader is reaped: stop the watcher NOW so a cancellation during the
+	// drain cannot signal a pid the kernel is free to reuse.
+	stopWatcher()
+
+	// Anything the leader FORKED may still hold the pipes; sweep the group
+	// immediately, before the pid can be recycled.
+	sweepMCPGroup(pid)
+
+	drained := make(chan struct{})
+	go func() { pumps.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(mcpDrainGrace):
+	}
+	stdoutR.Close()
+	stderrR.Close()
+	stdinW.Close()
+
+	code := -1
+	signal := ""
+	if cmd.ProcessState != nil {
+		code = cmd.ProcessState.ExitCode()
+		if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			signal = ws.Signal().String()
+		}
+	}
+	tail := ring.tail()
+	slog.Info("executor: remote serve exited",
+		"destination", target.GetDestination(), "pid", pid,
+		"exitCode", code, "signal", signal, "killedByUs", killedByUs.Load(), "error", waitErr)
+
+	if pumpErr != nil {
+		return pumpErr
+	}
+	if err := sink.send(&executorpb.RemoteServeResponse{
+		Msg: &executorpb.RemoteServeResponse_Exit{Exit: &executorpb.RemoteServeExit{
+			Code:       int32(code),
+			Signal:     signal,
+			StderrTail: tail,
+		}},
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RemoteClean removes the target's install marker iff its first line names this
+// install. The binary cache is content-addressed and shared, so it stays.
+func (s *Server) RemoteClean(
+	ctx context.Context,
+	req *connect.Request[executorpb.RemoteCleanRequest],
+) (*connect.Response[executorpb.RemoteCleanResponse], error) {
+	if err := s.refuseSSHLaunch(); err != nil {
+		return nil, err
+	}
+	target := req.Msg.GetTarget()
+	if err := validateRemoteTarget(target); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if err := validateRemoteInstallID(req.Msg.GetInstallId()); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	stdout, stderr, err := s.runSSHScript(ctx, target.GetDestination(),
+		remoteCleanScript(target.GetInstance(), req.Msg.GetInstallId()))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, connect.NewError(connect.CodeCanceled, ctx.Err())
+		}
+		return nil, connect.NewError(connect.CodeUnavailable, sshFailure(target.GetDestination(), stderr, err))
+	}
+	return connect.NewResponse(&executorpb.RemoteCleanResponse{
+		Removed: strings.TrimSpace(string(stdout)) == "removed",
+	}), nil
+}
