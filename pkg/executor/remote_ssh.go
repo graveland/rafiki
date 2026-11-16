@@ -79,18 +79,30 @@ func remoteBinaryExpr(binaryPath string) string {
 	return shellQuote(binaryPath)
 }
 
+// RemoteDataDirExpr renders the target's data directory as a POSIX shell
+// expression, unexpanded — the form an operator can paste on the target, and
+// the form the daemon's install refusals name a file in. It MUST agree with
+// paths.DataDir() under paths.SetInstance(instance); remoteDataDirScript
+// assigns exactly this expression to $d, so the credential and the install
+// marker are read and written through the same path a message names.
+// It is deliberately NOT shell-quoted, so it reads the same in a script and in
+// a message. That is safe because the instance name is validated to
+// [A-Za-z0-9._-] by paths.ValidateInstance at the one gate every Remote* RPC
+// shares (validateRemoteTarget), and a variable assignment does not word-split
+// in any case.
+func RemoteDataDirExpr(instance string) string {
+	expr := `${XDG_DATA_HOME:-$HOME/.local/share}/rafiki`
+	if instance != paths.DefaultInstance {
+		expr += "/profiles/" + instance
+	}
+	return expr
+}
+
 // remoteDataDirScript is the POSIX sh that computes the target's data directory
 // in $d. It MUST agree with paths.DataDir() under paths.SetInstance(instance):
 // the credential and the install marker are read and written through it.
 func remoteDataDirScript(instance string) string {
-	s := `d="${XDG_DATA_HOME:-$HOME/.local/share}/rafiki"`
-	if instance != paths.DefaultInstance {
-		// Concatenated OUTSIDE the double quotes: a shellQuote'd value inside
-		// them would keep its single quotes literally, and the directory would
-		// no longer match paths.DataDir().
-		s += `; d="$d/profiles/"` + shellQuote(instance)
-	}
-	return s
+	return "d=" + RemoteDataDirExpr(instance)
 }
 
 // remoteProbeScript prints exactly four lines, in this order:
