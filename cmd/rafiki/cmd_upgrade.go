@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/installstate"
+	"go.graveland.dev/rafiki/pkg/release"
 	"go.graveland.dev/rafiki/pkg/relsign"
 	"go.graveland.dev/rafiki/pkg/version"
 )
@@ -27,7 +28,7 @@ type upgradeOpts struct {
 type upgradeDeps struct {
 	Out, Err     io.Writer
 	Runner       runner
-	Client       *releaseClient
+	Client       *release.Client
 	Keys         []relsign.Key
 	GOOS, GOARCH string
 	Exe          string // symlink-resolved path of the running binary
@@ -62,7 +63,7 @@ func newUpgradeCmd() *cobra.Command {
 				Out:     cmd.OutOrStdout(),
 				Err:     cmd.ErrOrStderr(),
 				Runner:  execRunner{},
-				Client:  newReleaseClient(downloadBase),
+				Client:  release.NewClient(downloadBase),
 				Keys:    relsign.TrustedKeys,
 				GOOS:    runtime.GOOS,
 				GOARCH:  runtime.GOARCH,
@@ -90,7 +91,7 @@ func runUpgrade(ctx context.Context, d upgradeDeps, o upgradeOpts) error {
 
 	if o.Check {
 		if tag == "" {
-			latest, err := d.Client.latestTag(ctx)
+			latest, err := d.Client.LatestTag(ctx)
 			if err != nil {
 				return err
 			}
@@ -129,7 +130,7 @@ func runUpgrade(ctx context.Context, d upgradeDeps, o upgradeOpts) error {
 	}
 
 	if tag == "" {
-		latest, err := d.Client.latestTag(ctx)
+		latest, err := d.Client.LatestTag(ctx)
 		if err != nil {
 			return err
 		}
@@ -163,11 +164,11 @@ func runUpgrade(ctx context.Context, d upgradeDeps, o upgradeOpts) error {
 	}
 
 	fmt.Fprintf(d.Out, "downloading and verifying %s\n", tag)
-	staged, err := d.Client.stageRelease(ctx, d.Keys, tag, d.GOOS, d.GOARCH, dest)
+	staged, err := d.Client.StageRelease(ctx, d.Keys, tag, d.GOOS, d.GOARCH, dest)
 	if err != nil {
 		return err
 	}
-	defer staged.cleanup()
+	defer staged.Cleanup()
 
 	if err := smokeCheck(ctx, d.Runner, staged.Rafiki, tag); err != nil {
 		return err
