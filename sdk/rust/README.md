@@ -75,12 +75,16 @@ Typed wrappers over `Client::unary` and `Client::server_stream`, taking and
 returning the generated `pb::` types: `get_history`, `stream_events(req,
 idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
 `resume`, `rename`, `set_budget`, `list_presets`, `list_models`,
-`list_model_aliases`, `put_model_alias`, `delete_model_alias`, `tag`, `untag`, `list_tags`, `list_executors`, `begin_provider_login`, `complete_provider_login`,
+`list_model_aliases`, `put_model_alias`, `delete_model_alias`, `tag`, `untag`, `list_tags`, `list_executors`, `install_executor`, `uninstall_executor`, `begin_provider_login`, `complete_provider_login`,
 `delete_provider_credential`, `begin_mcp_login`, `complete_mcp_login`,
 `delete_mcp_credential`. `unary` and `server_stream` are public, so an
 RPC added to `control.proto` is callable immediately (regenerate first). `pb`
 holds the `rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the
 `Daraja*` RPCs carry.
+
+`install_executor` puts an executor on an ssh `target` through a launcher
+executor (`via`) and answers the new row once it connects;
+`uninstall_executor(executor)` removes one by machine name or id.
 
 `list_model_aliases` / `put_model_alias` / `delete_model_alias` manage the
 calling connection OWNER's model aliases: a slash-free `name` the owner

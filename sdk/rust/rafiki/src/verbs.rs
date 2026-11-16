@@ -177,6 +177,28 @@ impl Client {
         self.unary("ListExecutors", req).await
     }
 
+    /// Install an executor on an ssh `target` through a launcher executor and
+    /// answer the new row once it has connected. `via` names the launcher
+    /// (machine name or id; empty = the caller's default native executor); a
+    /// child may install through a launcher it can reach.
+    pub async fn install_executor(
+        &self,
+        req: &pb::InstallExecutorRequest,
+    ) -> Result<pb::InstallExecutorResponse, Error> {
+        self.unary("InstallExecutor", req).await
+    }
+
+    /// Remove an executor installed over ssh, named by machine name or id. A
+    /// child may uninstall only what its lineage installed.
+    pub async fn uninstall_executor(&self, executor: &str) -> Result<(), Error> {
+        let req = pb::UninstallExecutorRequest {
+            executor: executor.to_string(),
+        };
+        self.unary::<_, pb::UninstallExecutorResponse>("UninstallExecutor", &req)
+            .await?;
+        Ok(())
+    }
+
     /// Start an OAuth login for one provider. `provider` is the NAME of a
     /// `providers.toml` entry whose KIND authenticates by login
     /// (`openai-responses-chatgpt`). The answer carries the `login_id` to

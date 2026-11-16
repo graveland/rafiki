@@ -99,6 +99,18 @@ const (
 	// ExecutorServiceMCPStdioProcedure is the fully-qualified name of the ExecutorService's MCPStdio
 	// RPC.
 	ExecutorServiceMCPStdioProcedure = "/rafiki.executor.v1.ExecutorService/MCPStdio"
+	// ExecutorServiceRemoteProbeProcedure is the fully-qualified name of the ExecutorService's
+	// RemoteProbe RPC.
+	ExecutorServiceRemoteProbeProcedure = "/rafiki.executor.v1.ExecutorService/RemoteProbe"
+	// ExecutorServiceRemoteInstallProcedure is the fully-qualified name of the ExecutorService's
+	// RemoteInstall RPC.
+	ExecutorServiceRemoteInstallProcedure = "/rafiki.executor.v1.ExecutorService/RemoteInstall"
+	// ExecutorServiceRemoteServeProcedure is the fully-qualified name of the ExecutorService's
+	// RemoteServe RPC.
+	ExecutorServiceRemoteServeProcedure = "/rafiki.executor.v1.ExecutorService/RemoteServe"
+	// ExecutorServiceRemoteCleanProcedure is the fully-qualified name of the ExecutorService's
+	// RemoteClean RPC.
+	ExecutorServiceRemoteCleanProcedure = "/rafiki.executor.v1.ExecutorService/RemoteClean"
 )
 
 // ExecutorServiceClient is a client for the rafiki.executor.v1.ExecutorService service.
@@ -222,6 +234,19 @@ type ExecutorServiceClient interface {
 	// because an unattached process is one the daemon cannot talk to and nobody
 	// reaps.
 	MCPStdio(context.Context) *connect.BidiStreamForClient[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse]
+	// RemoteProbe runs ONE ssh to target and reports what the daemon needs to
+	// decide an install. The executor builds the remote script from these typed
+	// fields only; nothing in it is caller-supplied shell.
+	RemoteProbe(context.Context, *connect.Request[executorpb.RemoteProbeRequest]) (*connect.Response[executorpb.RemoteProbeResponse], error)
+	// RemoteInstall pipes a binary to target over ssh. First message is the
+	// header; the rest carry bytes.
+	RemoteInstall(context.Context) *connect.ClientStreamForClient[executorpb.RemoteInstallRequest, executorpb.RemoteInstallResponse]
+	// RemoteServe runs `executor serve --stdio` on target over ssh and relays
+	// its stdio, unparsed. One process per stream; stream end kills it.
+	RemoteServe(context.Context) *connect.BidiStreamForClient[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse]
+	// RemoteClean removes the target's install marker iff its first line equals
+	// install_id. The shared binary cache is left alone.
+	RemoteClean(context.Context, *connect.Request[executorpb.RemoteCleanRequest]) (*connect.Response[executorpb.RemoteCleanResponse], error)
 }
 
 // NewExecutorServiceClient constructs a client for the rafiki.executor.v1.ExecutorService service.
@@ -379,6 +404,30 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("MCPStdio")),
 			connect.WithClientOptions(opts...),
 		),
+		remoteProbe: connect.NewClient[executorpb.RemoteProbeRequest, executorpb.RemoteProbeResponse](
+			httpClient,
+			baseURL+ExecutorServiceRemoteProbeProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("RemoteProbe")),
+			connect.WithClientOptions(opts...),
+		),
+		remoteInstall: connect.NewClient[executorpb.RemoteInstallRequest, executorpb.RemoteInstallResponse](
+			httpClient,
+			baseURL+ExecutorServiceRemoteInstallProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("RemoteInstall")),
+			connect.WithClientOptions(opts...),
+		),
+		remoteServe: connect.NewClient[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse](
+			httpClient,
+			baseURL+ExecutorServiceRemoteServeProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("RemoteServe")),
+			connect.WithClientOptions(opts...),
+		),
+		remoteClean: connect.NewClient[executorpb.RemoteCleanRequest, executorpb.RemoteCleanResponse](
+			httpClient,
+			baseURL+ExecutorServiceRemoteCleanProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("RemoteClean")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -408,6 +457,10 @@ type executorServiceClient struct {
 	gitFetchBundle   *connect.Client[executorpb.GitFetchBundleRequest, executorpb.GitFetchBundleResponse]
 	proxy            *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
 	mCPStdio         *connect.Client[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse]
+	remoteProbe      *connect.Client[executorpb.RemoteProbeRequest, executorpb.RemoteProbeResponse]
+	remoteInstall    *connect.Client[executorpb.RemoteInstallRequest, executorpb.RemoteInstallResponse]
+	remoteServe      *connect.Client[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse]
+	remoteClean      *connect.Client[executorpb.RemoteCleanRequest, executorpb.RemoteCleanResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -528,6 +581,26 @@ func (c *executorServiceClient) Proxy(ctx context.Context) *connect.BidiStreamFo
 // MCPStdio calls rafiki.executor.v1.ExecutorService.MCPStdio.
 func (c *executorServiceClient) MCPStdio(ctx context.Context) *connect.BidiStreamForClient[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse] {
 	return c.mCPStdio.CallBidiStream(ctx)
+}
+
+// RemoteProbe calls rafiki.executor.v1.ExecutorService.RemoteProbe.
+func (c *executorServiceClient) RemoteProbe(ctx context.Context, req *connect.Request[executorpb.RemoteProbeRequest]) (*connect.Response[executorpb.RemoteProbeResponse], error) {
+	return c.remoteProbe.CallUnary(ctx, req)
+}
+
+// RemoteInstall calls rafiki.executor.v1.ExecutorService.RemoteInstall.
+func (c *executorServiceClient) RemoteInstall(ctx context.Context) *connect.ClientStreamForClient[executorpb.RemoteInstallRequest, executorpb.RemoteInstallResponse] {
+	return c.remoteInstall.CallClientStream(ctx)
+}
+
+// RemoteServe calls rafiki.executor.v1.ExecutorService.RemoteServe.
+func (c *executorServiceClient) RemoteServe(ctx context.Context) *connect.BidiStreamForClient[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse] {
+	return c.remoteServe.CallBidiStream(ctx)
+}
+
+// RemoteClean calls rafiki.executor.v1.ExecutorService.RemoteClean.
+func (c *executorServiceClient) RemoteClean(ctx context.Context, req *connect.Request[executorpb.RemoteCleanRequest]) (*connect.Response[executorpb.RemoteCleanResponse], error) {
+	return c.remoteClean.CallUnary(ctx, req)
 }
 
 // ExecutorServiceHandler is an implementation of the rafiki.executor.v1.ExecutorService service.
@@ -651,6 +724,19 @@ type ExecutorServiceHandler interface {
 	// because an unattached process is one the daemon cannot talk to and nobody
 	// reaps.
 	MCPStdio(context.Context, *connect.BidiStream[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse]) error
+	// RemoteProbe runs ONE ssh to target and reports what the daemon needs to
+	// decide an install. The executor builds the remote script from these typed
+	// fields only; nothing in it is caller-supplied shell.
+	RemoteProbe(context.Context, *connect.Request[executorpb.RemoteProbeRequest]) (*connect.Response[executorpb.RemoteProbeResponse], error)
+	// RemoteInstall pipes a binary to target over ssh. First message is the
+	// header; the rest carry bytes.
+	RemoteInstall(context.Context, *connect.ClientStream[executorpb.RemoteInstallRequest]) (*connect.Response[executorpb.RemoteInstallResponse], error)
+	// RemoteServe runs `executor serve --stdio` on target over ssh and relays
+	// its stdio, unparsed. One process per stream; stream end kills it.
+	RemoteServe(context.Context, *connect.BidiStream[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse]) error
+	// RemoteClean removes the target's install marker iff its first line equals
+	// install_id. The shared binary cache is left alone.
+	RemoteClean(context.Context, *connect.Request[executorpb.RemoteCleanRequest]) (*connect.Response[executorpb.RemoteCleanResponse], error)
 }
 
 // NewExecutorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -804,6 +890,30 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("MCPStdio")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceRemoteProbeHandler := connect.NewUnaryHandler(
+		ExecutorServiceRemoteProbeProcedure,
+		svc.RemoteProbe,
+		connect.WithSchema(executorServiceMethods.ByName("RemoteProbe")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceRemoteInstallHandler := connect.NewClientStreamHandler(
+		ExecutorServiceRemoteInstallProcedure,
+		svc.RemoteInstall,
+		connect.WithSchema(executorServiceMethods.ByName("RemoteInstall")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceRemoteServeHandler := connect.NewBidiStreamHandler(
+		ExecutorServiceRemoteServeProcedure,
+		svc.RemoteServe,
+		connect.WithSchema(executorServiceMethods.ByName("RemoteServe")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceRemoteCleanHandler := connect.NewUnaryHandler(
+		ExecutorServiceRemoteCleanProcedure,
+		svc.RemoteClean,
+		connect.WithSchema(executorServiceMethods.ByName("RemoteClean")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.executor.v1.ExecutorService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ExecutorServiceDescribeProcedure:
@@ -854,6 +964,14 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceProxyHandler.ServeHTTP(w, r)
 		case ExecutorServiceMCPStdioProcedure:
 			executorServiceMCPStdioHandler.ServeHTTP(w, r)
+		case ExecutorServiceRemoteProbeProcedure:
+			executorServiceRemoteProbeHandler.ServeHTTP(w, r)
+		case ExecutorServiceRemoteInstallProcedure:
+			executorServiceRemoteInstallHandler.ServeHTTP(w, r)
+		case ExecutorServiceRemoteServeProcedure:
+			executorServiceRemoteServeHandler.ServeHTTP(w, r)
+		case ExecutorServiceRemoteCleanProcedure:
+			executorServiceRemoteCleanHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -957,4 +1075,20 @@ func (UnimplementedExecutorServiceHandler) Proxy(context.Context, *connect.BidiS
 
 func (UnimplementedExecutorServiceHandler) MCPStdio(context.Context, *connect.BidiStream[executorpb.MCPStdioRequest, executorpb.MCPStdioResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.MCPStdio is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) RemoteProbe(context.Context, *connect.Request[executorpb.RemoteProbeRequest]) (*connect.Response[executorpb.RemoteProbeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.RemoteProbe is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) RemoteInstall(context.Context, *connect.ClientStream[executorpb.RemoteInstallRequest]) (*connect.Response[executorpb.RemoteInstallResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.RemoteInstall is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) RemoteServe(context.Context, *connect.BidiStream[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.RemoteServe is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) RemoteClean(context.Context, *connect.Request[executorpb.RemoteCleanRequest]) (*connect.Response[executorpb.RemoteCleanResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.RemoteClean is not implemented"))
 }

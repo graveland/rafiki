@@ -38,6 +38,11 @@ type ExecutorRow struct {
 	LaunchKinds []string
 	Eligible    bool
 	Reason      string
+	// InstalledVia and InstalledTarget are set for an executor installed over
+	// ssh: the launcher's machine name and the target's ssh destination. Empty
+	// for every other row.
+	InstalledVia    string
+	InstalledTarget string
 }
 
 // ExecutorLister is the narrow slice of the daemon's Controller needed to
@@ -107,18 +112,20 @@ func (s *Server) ListExecutors(
 
 func toProtoExecutor(r ExecutorRow) *rafikiv1.ExecutorRow {
 	out := &rafikiv1.ExecutorRow{
-		Id:            r.ID,
-		Machine:       r.Machine,
-		Labels:        r.Labels,
-		Isolation:     r.Isolation,
-		WorkspaceMode: r.WorkspaceMode,
-		Roots:         r.Roots,
-		Admits:        r.Admits,
-		Enabled:       r.Enabled,
-		Connected:     r.Connected,
-		LaunchKinds:   r.LaunchKinds,
-		Eligible:      r.Eligible,
-		Reason:        r.Reason,
+		Id:              r.ID,
+		Machine:         r.Machine,
+		Labels:          r.Labels,
+		Isolation:       r.Isolation,
+		WorkspaceMode:   r.WorkspaceMode,
+		Roots:           r.Roots,
+		Admits:          r.Admits,
+		Enabled:         r.Enabled,
+		Connected:       r.Connected,
+		LaunchKinds:     r.LaunchKinds,
+		Eligible:        r.Eligible,
+		Reason:          r.Reason,
+		InstalledVia:    r.InstalledVia,
+		InstalledTarget: r.InstalledTarget,
 	}
 	if !r.ConnectedAt.IsZero() {
 		out.ConnectedAt = timestamppb.New(r.ConnectedAt)

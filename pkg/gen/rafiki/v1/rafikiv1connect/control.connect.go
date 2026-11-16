@@ -255,6 +255,11 @@ const (
 	ControlUntagProcedure = "/rafiki.v1.Control/Untag"
 	// ControlListTagsProcedure is the fully-qualified name of the Control's ListTags RPC.
 	ControlListTagsProcedure = "/rafiki.v1.Control/ListTags"
+	// ControlInstallExecutorProcedure is the fully-qualified name of the Control's InstallExecutor RPC.
+	ControlInstallExecutorProcedure = "/rafiki.v1.Control/InstallExecutor"
+	// ControlUninstallExecutorProcedure is the fully-qualified name of the Control's UninstallExecutor
+	// RPC.
+	ControlUninstallExecutorProcedure = "/rafiki.v1.Control/UninstallExecutor"
 	// LoginBeginLoginProcedure is the fully-qualified name of the Login's BeginLogin RPC.
 	LoginBeginLoginProcedure = "/rafiki.v1.Login/BeginLogin"
 	// LoginCompleteLoginProcedure is the fully-qualified name of the Login's CompleteLogin RPC.
@@ -399,6 +404,12 @@ type ControlClient interface {
 	Tag(context.Context, *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error)
 	Untag(context.Context, *connect.Request[v1.UntagRequest]) (*connect.Response[v1.UntagResponse], error)
 	ListTags(context.Context, *connect.Request[v1.ListTagsRequest]) (*connect.Response[v1.ListTagsResponse], error)
+	// InstallExecutor puts an executor on an ssh target through a launcher
+	// executor and returns once it has connected. See
+	// docs/reference/executor-protocol.md "Installing over ssh".
+	InstallExecutor(context.Context, *connect.Request[v1.InstallExecutorRequest]) (*connect.Response[v1.InstallExecutorResponse], error)
+	// UninstallExecutor removes an installed executor.
+	UninstallExecutor(context.Context, *connect.Request[v1.UninstallExecutorRequest]) (*connect.Response[v1.UninstallExecutorResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -1012,6 +1023,18 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("ListTags")),
 			connect.WithClientOptions(opts...),
 		),
+		installExecutor: connect.NewClient[v1.InstallExecutorRequest, v1.InstallExecutorResponse](
+			httpClient,
+			baseURL+ControlInstallExecutorProcedure,
+			connect.WithSchema(controlMethods.ByName("InstallExecutor")),
+			connect.WithClientOptions(opts...),
+		),
+		uninstallExecutor: connect.NewClient[v1.UninstallExecutorRequest, v1.UninstallExecutorResponse](
+			httpClient,
+			baseURL+ControlUninstallExecutorProcedure,
+			connect.WithSchema(controlMethods.ByName("UninstallExecutor")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -1117,6 +1140,8 @@ type controlClient struct {
 	tag                      *connect.Client[v1.TagRequest, v1.TagResponse]
 	untag                    *connect.Client[v1.UntagRequest, v1.UntagResponse]
 	listTags                 *connect.Client[v1.ListTagsRequest, v1.ListTagsResponse]
+	installExecutor          *connect.Client[v1.InstallExecutorRequest, v1.InstallExecutorResponse]
+	uninstallExecutor        *connect.Client[v1.UninstallExecutorRequest, v1.UninstallExecutorResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -1619,6 +1644,16 @@ func (c *controlClient) ListTags(ctx context.Context, req *connect.Request[v1.Li
 	return c.listTags.CallUnary(ctx, req)
 }
 
+// InstallExecutor calls rafiki.v1.Control.InstallExecutor.
+func (c *controlClient) InstallExecutor(ctx context.Context, req *connect.Request[v1.InstallExecutorRequest]) (*connect.Response[v1.InstallExecutorResponse], error) {
+	return c.installExecutor.CallUnary(ctx, req)
+}
+
+// UninstallExecutor calls rafiki.v1.Control.UninstallExecutor.
+func (c *controlClient) UninstallExecutor(ctx context.Context, req *connect.Request[v1.UninstallExecutorRequest]) (*connect.Response[v1.UninstallExecutorResponse], error) {
+	return c.uninstallExecutor.CallUnary(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
@@ -1757,6 +1792,12 @@ type ControlHandler interface {
 	Tag(context.Context, *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error)
 	Untag(context.Context, *connect.Request[v1.UntagRequest]) (*connect.Response[v1.UntagResponse], error)
 	ListTags(context.Context, *connect.Request[v1.ListTagsRequest]) (*connect.Response[v1.ListTagsResponse], error)
+	// InstallExecutor puts an executor on an ssh target through a launcher
+	// executor and returns once it has connected. See
+	// docs/reference/executor-protocol.md "Installing over ssh".
+	InstallExecutor(context.Context, *connect.Request[v1.InstallExecutorRequest]) (*connect.Response[v1.InstallExecutorResponse], error)
+	// UninstallExecutor removes an installed executor.
+	UninstallExecutor(context.Context, *connect.Request[v1.UninstallExecutorRequest]) (*connect.Response[v1.UninstallExecutorResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -2366,6 +2407,18 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("ListTags")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlInstallExecutorHandler := connect.NewUnaryHandler(
+		ControlInstallExecutorProcedure,
+		svc.InstallExecutor,
+		connect.WithSchema(controlMethods.ByName("InstallExecutor")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlUninstallExecutorHandler := connect.NewUnaryHandler(
+		ControlUninstallExecutorProcedure,
+		svc.UninstallExecutor,
+		connect.WithSchema(controlMethods.ByName("UninstallExecutor")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
@@ -2568,6 +2621,10 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlUntagHandler.ServeHTTP(w, r)
 		case ControlListTagsProcedure:
 			controlListTagsHandler.ServeHTTP(w, r)
+		case ControlInstallExecutorProcedure:
+			controlInstallExecutorHandler.ServeHTTP(w, r)
+		case ControlUninstallExecutorProcedure:
+			controlUninstallExecutorHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -2975,6 +3032,14 @@ func (UnimplementedControlHandler) Untag(context.Context, *connect.Request[v1.Un
 
 func (UnimplementedControlHandler) ListTags(context.Context, *connect.Request[v1.ListTagsRequest]) (*connect.Response[v1.ListTagsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListTags is not implemented"))
+}
+
+func (UnimplementedControlHandler) InstallExecutor(context.Context, *connect.Request[v1.InstallExecutorRequest]) (*connect.Response[v1.InstallExecutorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.InstallExecutor is not implemented"))
+}
+
+func (UnimplementedControlHandler) UninstallExecutor(context.Context, *connect.Request[v1.UninstallExecutorRequest]) (*connect.Response[v1.UninstallExecutorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.UninstallExecutor is not implemented"))
 }
 
 // LoginClient is a client for the rafiki.v1.Login service.

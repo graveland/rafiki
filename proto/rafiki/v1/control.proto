@@ -1079,10 +1079,27 @@ message ExecutorRow {
   google.protobuf.Timestamp connected_at = 15;
   // last_seen is the last pool sighting; unset = unknown.
   google.protobuf.Timestamp last_seen = 16;
+  // installed_via is the launcher machine name, set for an executor
+  // installed over ssh.
+  string installed_via = 17;
+  // installed_target is its ssh destination.
+  string installed_target = 18;
 
   reserved 13, 14;
   reserved "connected_at_ms", "last_seen_ms";
 }
+
+message InstallExecutorRequest {
+  string target = 1;               // ssh destination
+  string via = 2;                  // launcher: machine name or id; empty = caller's default
+  string name = 3;                 // machine name; empty = the destination's host part
+  string root = 4;
+  map<string, string> labels = 5;
+  string admits = 6;
+}
+message InstallExecutorResponse { ExecutorRow executor = 1; }
+message UninstallExecutorRequest { string executor = 1; } // machine name or id
+message UninstallExecutorResponse {}
 
 message ListExecutorsRequest {
   // kind scopes eligibility: "claude" checks launch-kind support, "fundi"
@@ -1487,6 +1504,12 @@ service Control {
   rpc Tag(TagRequest) returns (TagResponse);
   rpc Untag(UntagRequest) returns (UntagResponse);
   rpc ListTags(ListTagsRequest) returns (ListTagsResponse);
+  // InstallExecutor puts an executor on an ssh target through a launcher
+  // executor and returns once it has connected. See
+  // docs/reference/executor-protocol.md "Installing over ssh".
+  rpc InstallExecutor(InstallExecutorRequest) returns (InstallExecutorResponse);
+  // UninstallExecutor removes an installed executor.
+  rpc UninstallExecutor(UninstallExecutorRequest) returns (UninstallExecutorResponse);
 }
 
 // SkillFileInfo describes one supporting file of a skill without carrying it:

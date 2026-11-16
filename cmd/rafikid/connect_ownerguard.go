@@ -214,6 +214,11 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"EnableExecutor":  ownerExempt,
 	"DeleteExecutor":  ownerExempt,
 
+	// Installing executors over ssh: the installer derives the owner from the
+	// connection and checks the executor's owner itself.
+	"InstallExecutor":   ownerExempt,
+	"UninstallExecutor": ownerExempt,
+
 	"ExecutorSession": ownerExempt,
 
 	"CreateUser": ownerExempt,
@@ -314,13 +319,15 @@ var ownerExemptReasons = map[string]string{
 	"ListProviderBans":   "read-only, non-scoped facts; no owner dimension (anyCaller)",
 	"ListRoutes":         "read-only, non-scoped facts; no owner dimension (anyCaller)",
 
-	"ListExecutors":   "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
-	"EnrollExecutor":  "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
-	"CreateExecutor":  "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
-	"LabelExecutor":   "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
-	"DisableExecutor": "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
-	"EnableExecutor":  "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
-	"DeleteExecutor":  "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
+	"ListExecutors":     "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
+	"EnrollExecutor":    "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
+	"CreateExecutor":    "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
+	"LabelExecutor":     "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
+	"DisableExecutor":   "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
+	"EnableExecutor":    "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
+	"DeleteExecutor":    "executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection",
+	"InstallExecutor":   "the installer derives the owner from the connection and checks the executor's owner itself",
+	"UninstallExecutor": "the installer derives the owner from the connection and checks the executor's owner itself",
 
 	"ExecutorSession": "executor surface; owner checks are the executor admin seam's concern (out of scope)",
 

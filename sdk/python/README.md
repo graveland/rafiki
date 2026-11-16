@@ -140,6 +140,12 @@ c.put_model_alias("ds", "openrouter/~deepseek/deepseek-flash-latest")  # create 
 rows = c.list_model_aliases()                          # one ModelAliasRow per alias
 c.delete_model_alias("ds")                             # not_found when there is none
 
+# Executors installed over ssh: install_executor puts a rafiki executor on a
+# target through a launcher executor and returns the new row as a dict once it
+# connects; uninstall_executor removes one (by machine name or id).
+row = c.install_executor("ublk-s2", via="greyshift", labels={"rack": "r1"})
+c.uninstall_executor("ublk-s2")
+
 # Forks and tags. A fork starts a child from a point in another child's
 # history: fork_from names the child and a cursor ("m:<ordinal>"; empty = the
 # source's last completed turn), while from_tag names a tag instead, resolved

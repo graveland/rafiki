@@ -2687,6 +2687,8 @@ class ExecutorRow:
     reason: str = ""
     connected_at: Optional[datetime.datetime] = None
     last_seen: Optional[datetime.datetime] = None
+    installed_via: str = ""
+    installed_target: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -2718,6 +2720,10 @@ class ExecutorRow:
             out["connectedAt"] = _ts_out(self.connected_at)
         if self.last_seen is not None:
             out["lastSeen"] = _ts_out(self.last_seen)
+        if self.installed_via != "":
+            out["installedVia"] = self.installed_via
+        if self.installed_target != "":
+            out["installedTarget"] = self.installed_target
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ExecutorRow":
@@ -2764,6 +2770,105 @@ class ExecutorRow:
         _v = _d.get("lastSeen")
         if _v is not None:
             obj.last_seen = _ts_in(_v, "lastSeen")
+        _v = _d.get("installedVia")
+        if _v is not None:
+            obj.installed_via = _v
+        _v = _d.get("installedTarget")
+        if _v is not None:
+            obj.installed_target = _v
+        return obj
+
+@dataclasses.dataclass
+class InstallExecutorRequest:
+    target: str = ""
+    via: str = ""
+    name: str = ""
+    root: str = ""
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    admits: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.target != "":
+            out["target"] = self.target
+        if self.via != "":
+            out["via"] = self.via
+        if self.name != "":
+            out["name"] = self.name
+        if self.root != "":
+            out["root"] = self.root
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        if self.admits != "":
+            out["admits"] = self.admits
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "InstallExecutorRequest":
+        obj = cls()
+        _v = _d.get("target")
+        if _v is not None:
+            obj.target = _v
+        _v = _d.get("via")
+        if _v is not None:
+            obj.via = _v
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("root")
+        if _v is not None:
+            obj.root = _v
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        _v = _d.get("admits")
+        if _v is not None:
+            obj.admits = _v
+        return obj
+
+@dataclasses.dataclass
+class InstallExecutorResponse:
+    executor: Optional[ExecutorRow] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor is not None:
+            out["executor"] = self.executor.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "InstallExecutorResponse":
+        obj = cls()
+        _v = _d.get("executor")
+        if _v is not None:
+            obj.executor = ExecutorRow.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class UninstallExecutorRequest:
+    executor: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor != "":
+            out["executor"] = self.executor
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UninstallExecutorRequest":
+        obj = cls()
+        _v = _d.get("executor")
+        if _v is not None:
+            obj.executor = _v
+        return obj
+
+@dataclasses.dataclass
+class UninstallExecutorResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UninstallExecutorResponse":
+        obj = cls()
         return obj
 
 @dataclasses.dataclass

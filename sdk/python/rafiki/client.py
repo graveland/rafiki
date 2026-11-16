@@ -799,6 +799,44 @@ class Client:
         req = _gen.control_pb.DeleteModelAliasRequest(name=name)
         self._call("DeleteModelAlias", req, _gen.control_pb.DeleteModelAliasResponse)
 
+    # ── executors installed over ssh ─────────────────────────────────────────
+
+    def install_executor(
+        self,
+        target: str,
+        *,
+        via: "str | None" = None,
+        name: "str | None" = None,
+        root: "str | None" = None,
+        labels: "dict | None" = None,
+        admits: "str | None" = None,
+    ) -> dict:
+        """Install an executor on the ssh ``target`` through a launcher
+        executor, and return the new executor row as a dict once it has
+        connected. ``via`` names the launcher (machine name or id; unset = the
+        caller's default native executor), ``name`` the machine name (unset =
+        the destination's host part), ``root`` the remote workspace root, and
+        ``labels``/``admits`` the row's admission facts. A child may install
+        through a launcher it can reach."""
+        req = _gen.control_pb.InstallExecutorRequest(
+            target=target,
+            via=via or "",
+            name=name or "",
+            root=root or "",
+            labels=_labels_wire(labels),
+            admits=admits or "",
+        )
+        row = self._call(
+            "InstallExecutor", req, _gen.control_pb.InstallExecutorResponse
+        ).executor
+        return row.to_dict() if row is not None else {}
+
+    def uninstall_executor(self, executor: str) -> None:
+        """Remove an executor installed over ssh, named by machine name or id.
+        A child may uninstall only what its lineage installed."""
+        req = _gen.control_pb.UninstallExecutorRequest(executor=executor)
+        self._call("UninstallExecutor", req, _gen.control_pb.UninstallExecutorResponse)
+
     # ── provider login (per-user provider credentials) ───────────────────────
 
     def begin_provider_login(self, provider: str) -> _gen.control_pb.BeginProviderLoginResponse:

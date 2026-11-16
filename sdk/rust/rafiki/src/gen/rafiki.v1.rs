@@ -1923,7 +1923,47 @@ pub struct ExecutorRow {
     /// last_seen is the last pool sighting; unset = unknown.
     #[prost(message, optional, tag = "16")]
     pub last_seen: ::core::option::Option<::prost_types::Timestamp>,
+    /// installed_via is the launcher machine name, set for an executor
+    /// installed over ssh.
+    #[prost(string, tag = "17")]
+    pub installed_via: ::prost::alloc::string::String,
+    /// installed_target is its ssh destination.
+    #[prost(string, tag = "18")]
+    pub installed_target: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InstallExecutorRequest {
+    /// ssh destination
+    #[prost(string, tag = "1")]
+    pub target: ::prost::alloc::string::String,
+    /// launcher: machine name or id; empty = caller's default
+    #[prost(string, tag = "2")]
+    pub via: ::prost::alloc::string::String,
+    /// machine name; empty = the destination's host part
+    #[prost(string, tag = "3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub root: ::prost::alloc::string::String,
+    #[prost(map = "string, string", tag = "5")]
+    pub labels: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+    #[prost(string, tag = "6")]
+    pub admits: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InstallExecutorResponse {
+    #[prost(message, optional, tag = "1")]
+    pub executor: ::core::option::Option<ExecutorRow>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UninstallExecutorRequest {
+    #[prost(string, tag = "1")]
+    pub executor: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct UninstallExecutorResponse {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListExecutorsRequest {
     /// kind scopes eligibility: "claude" checks launch-kind support, "fundi"

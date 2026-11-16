@@ -136,6 +136,20 @@ service ExecutorService {
   // because an unattached process is one the daemon cannot talk to and nobody
   // reaps.
   rpc MCPStdio(stream MCPStdioRequest) returns (stream MCPStdioResponse);
+
+  // RemoteProbe runs ONE ssh to target and reports what the daemon needs to
+  // decide an install. The executor builds the remote script from these typed
+  // fields only; nothing in it is caller-supplied shell.
+  rpc RemoteProbe(RemoteProbeRequest) returns (RemoteProbeResponse);
+  // RemoteInstall pipes a binary to target over ssh. First message is the
+  // header; the rest carry bytes.
+  rpc RemoteInstall(stream RemoteInstallRequest) returns (RemoteInstallResponse);
+  // RemoteServe runs `executor serve --stdio` on target over ssh and relays
+  // its stdio, unparsed. One process per stream; stream end kills it.
+  rpc RemoteServe(stream RemoteServeRequest) returns (stream RemoteServeResponse);
+  // RemoteClean removes the target's install marker iff its first line equals
+  // install_id. The shared binary cache is left alone.
+  rpc RemoteClean(RemoteCleanRequest) returns (RemoteCleanResponse);
 }
 
 message DescribeRequest {}
@@ -204,6 +218,10 @@ message DescribeResponse {
   // only ever NARROWS what this executor will do, and it is enforced on this
   // side, before anything is spawned.
   repeated string mcp_commands = 19;
+  // ssh_launch reports that this executor accepts the Remote* RPCs, so it
+  // may install and run executors on other machines over ssh. Self-reported:
+  // false when the operator passed --no-ssh-launch; it only narrows.
+  bool ssh_launch = 20;
 }
 
 message HealthRequest {}
@@ -657,3 +675,59 @@ message GitBundleRequest  { string repo = 1; string branch = 2; repeated string 
 message GitBundleResponse { bool up_to_date = 1; string bundle_path = 2; int64 bytes = 3; string tip_oid = 4; }
 message GitFetchBundleRequest  { string repo = 1; string bundle_path = 2; string branch = 3; bool force = 4; }
 message GitFetchBundleResponse { string old_oid = 1; string new_oid = 2; bool created_repo = 3; }
+
+// ─── Installing executors over ssh ──────────────────────────────────────────
+// A launcher executor runs these against an ssh target on the daemon's behalf.
+// The executor builds every remote command from the typed fields below; no
+// caller-supplied shell reaches a remote host.
+
+message RemoteTarget {
+  string destination = 1; // ssh destination, e.g. "ublk-s2" or "root@10.0.0.5"
+  string instance = 2;    // executor instance (profile) name on the target
+}
+message RemoteProbeRequest {
+  RemoteTarget target = 1;
+  string binary_path = 2; // remote path to test for an executable; may be empty
+}
+message RemoteProbeResponse {
+  string uname = 1;            // `uname -sm`, trimmed
+  bool binary_present = 2;
+  bool credential_present = 3; // <data dir>/executor.cred exists
+  string marker = 4;           // contents of <data dir>/installed-executor, trimmed; "" if absent
+}
+message RemoteInstallRequest {
+  oneof msg {
+    RemoteInstallHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+message RemoteInstallHeader {
+  RemoteTarget target = 1;
+  string binary_path = 2;
+  string sha256 = 3; // the remote verifies before the final rename
+}
+message RemoteInstallResponse {}
+message RemoteServeRequest {
+  oneof msg {
+    RemoteServeStart start = 1;
+    bytes stdin = 2;
+  }
+}
+message RemoteServeStart {
+  RemoteTarget target = 1;
+  string binary_path = 2;
+  string root = 3;       // empty: the remote executor's default root
+  string install_id = 4; // the install row id the remote records in its marker
+}
+message RemoteServeResponse {
+  oneof msg {
+    RemoteServeStarted started = 1;
+    bytes stdout = 2;
+    bytes stderr = 3;
+    RemoteServeExit exit = 4;
+  }
+}
+message RemoteServeStarted { int32 pid = 1; }
+message RemoteCleanRequest { RemoteTarget target = 1; string install_id = 2; }
+message RemoteCleanResponse { bool removed = 1; }
+message RemoteServeExit { int32 code = 1; string signal = 2; string stderr_tail = 3; }

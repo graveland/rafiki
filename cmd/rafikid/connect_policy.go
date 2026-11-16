@@ -196,6 +196,12 @@ var controlPolicyTable = map[string]controlPolicy{
 	// stats, never a user's data.
 	"ModelRoutes": policyAnyCaller,
 
+	// Installing executors over ssh. A child may install through a launcher it
+	// can reach and uninstall only what its lineage installed; the handler
+	// enforces both (the gate names no target).
+	"InstallExecutor":   policyChildScoped,
+	"UninstallExecutor": policyChildScoped,
+
 	// userOnly: everything that acts with operator authority or answers as
 	// the caller's identity. Listed explicitly so the completeness test can
 	// tell "classified userOnly" from "missing".
