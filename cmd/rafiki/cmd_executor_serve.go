@@ -191,6 +191,37 @@ func validateRelayFoothold(image, relayDir string, relayDirSet bool, proxies map
 	return nil
 }
 
+// executorDialTarget is what `executor serve` dials, and the address it
+// advertises as its own. They live in one value because they differ in exactly
+// one case — a unix socket has something to dial and nothing to hand out — and
+// because a launcher given a socket path as a dial target would carry a path
+// that exists on this machine only.
+type executorDialTarget struct {
+	// Addr is the host:port the TCP transport dials, empty on the socket one.
+	Addr string
+	// Socket is the unix socket the executor dials, empty on the TCP one.
+	Socket string
+	// SelfAddr is what another machine should dial to reach the same daemon:
+	// Addr over TCP, empty over a socket. It is what Options.ConnectAddr and a
+	// spawned daraja receive.
+	SelfAddr string
+}
+
+// resolveExecutorDialTarget resolves --connect/--connect-socket (or the
+// $RAFIKI_URL-derived default) into the target above. A --stdio executor never
+// reaches this: it speaks stdin/stdout and returns before a dial is resolved.
+func resolveExecutorDialTarget(connect, connectSocket string) (executorDialTarget, error) {
+	addr, sock, err := resolveExecutorConnectFlags(connect, connectSocket)
+	if err != nil {
+		return executorDialTarget{}, err
+	}
+	t := executorDialTarget{Addr: addr, Socket: sock}
+	if sock == "" {
+		t.SelfAddr = addr
+	}
+	return t, nil
+}
+
 // ticketServeFlags is the slice of `executor serve`'s flags the install-ticket
 // transport reads. Kept separate from the cobra command so the validation is
 // testable on its own.
@@ -211,13 +242,19 @@ type ticketServeFlags struct {
 // conflicting flag in every error. It runs before anything resolves a path or
 // reads a byte: a launcher whose argv still says --stdio needs to be told which
 // flag conflicts, not handed a process that silently ignores it.
+//
+// The detached child (the fd pair) is validated by the SAME rules as the
+// launcher: it presents the same ticket on the same dial and records the same
+// marker, so a child whose argv carries a conflicting flag must be refused just
+// as loudly. Only the two flags that NAME the ticket's carrier differ.
 func validateTicketFlags(f ticketServeFlags) error {
 	// The two inherited descriptors are one mechanism: a ticket with no lock
 	// would let a second launch start a second executor, and a lock with no
 	// ticket would start one that cannot authenticate. They are POINTERS so an
 	// unset descriptor cannot be confused with fd 0 — stdin, which is never an
 	// inherited ticket pipe or lock.
-	if f.TicketFD != nil || f.LockFD != nil {
+	child := f.TicketFD != nil || f.LockFD != nil
+	if child {
 		if f.TicketFD == nil {
 			return errors.New("--lock-fd requires --ticket-fd: the inherited ticket pipe is what the " +
 				"detached child reads its one ticket from")
@@ -234,10 +271,9 @@ func validateTicketFlags(f ticketServeFlags) error {
 			return errors.New("--ticket-stdin cannot be combined with --ticket-fd: the detached child " +
 				"reads its ticket from the inherited pipe, not from stdin")
 		}
-		return nil
 	}
 
-	if !f.TicketStdin {
+	if !child && !f.TicketStdin {
 		if f.Detach {
 			return errors.New("--detach requires --ticket-stdin: there would be no ticket to carry " +
 				"and nothing to start")
@@ -246,33 +282,53 @@ func validateTicketFlags(f ticketServeFlags) error {
 	}
 
 	if f.Connect == "" {
-		return errors.New("--ticket-stdin requires --connect: the ticket is presented on a dial, " +
+		return errors.New("an install ticket requires --connect: the ticket is presented on a dial, " +
 			"and --connect names the daemon to dial")
 	}
 	if f.InstallID == "" {
-		return errors.New("--ticket-stdin requires --install-id: the executor records the install it " +
-			"belongs to once its credential is on disk")
+		return errors.New("an install ticket requires --install-id: the executor records the install " +
+			"it belongs to once its credential is on disk")
 	}
 	if !stdioInstallIDRE.MatchString(f.InstallID) {
 		return fmt.Errorf("--install-id %q must be 1-64 characters of letters, digits, '-' or '_'", f.InstallID)
 	}
 	if f.Stdio {
-		return errors.New("--ticket-stdin cannot be combined with --stdio: a --stdio executor speaks " +
-			"the protocol on stdin/stdout and cannot dial")
+		return errors.New("an install ticket cannot be combined with --stdio: a --stdio executor " +
+			"speaks the protocol on stdin/stdout and cannot dial")
 	}
 	if f.ConnectSocket != "" {
-		return errors.New("--ticket-stdin cannot be combined with --connect-socket: an install ticket " +
-			"authenticates a dial over TCP, and a socket peer is already local and trusted")
+		return errors.New("an install ticket cannot be combined with --connect-socket: an install " +
+			"ticket authenticates a dial over TCP, and a socket peer is already local and trusted")
 	}
 	if f.EnrollToken != "" {
-		return errors.New("--ticket-stdin cannot be combined with --enroll-token: enrollment creates a " +
-			"row, while a ticket redeems the row an install already made")
+		return errors.New("an install ticket cannot be combined with --enroll-token: enrollment " +
+			"creates a row, while a ticket redeems the row an install already made")
 	}
 	if f.Credential != "" {
-		return errors.New("--ticket-stdin cannot be combined with --credential: the ticket's whole " +
-			"purpose is to obtain the credential from the daemon")
+		return errors.New("an install ticket cannot be combined with --credential: the ticket's " +
+			"whole purpose is to obtain the credential from the daemon")
 	}
 	return nil
+}
+
+// installEnrollHook builds the OnEnrolled hook of a ticket-authenticated serve.
+// Two things happen there, in that order: the spent ticket is cleared from THIS
+// process's copy (Connect clears only its own — see
+// execpool.ClearInstallTicketOnEnroll), and the install marker is recorded,
+// because a credential on disk is what makes the install known to be live.
+//
+// A marker failure is logged and not fatal: the marker is the clobber guard, not
+// the protocol — the same rule the --stdio path follows.
+func installEnrollHook(ticket *string, installID string) func() {
+	return func() {
+		// Spent, and its credential is on disk: keeping it in memory for the
+		// life of the process only risks a core dump.
+		*ticket = ""
+		if err := writeInstallMarker(installID); err != nil {
+			slog.Error("executor: could not record the install marker",
+				"installId", installID, "error", err)
+		}
+	}
 }
 
 // bindFootholdRelay binds the launcher's loopback TCP relay and returns the
@@ -826,25 +882,15 @@ every existing install already has; any other name lives under profiles/<name>.`
 				// executor from one that never started.
 				slog.Info("executor: started detached", "pid", os.Getpid(), "dataDir", paths.DataDir())
 			case ticketStdin:
-				t, err := readTicketLine(os.Stdin, detachTicketMax)
+				t, err := ticketFromReader(os.Stdin, "stdin")
 				if err != nil {
 					return fmt.Errorf("--ticket-stdin: %w", err)
-				}
-				if t == "" {
-					return errors.New("--ticket-stdin: no install ticket on stdin; the launcher writes it as the first line")
 				}
 				installTicket = t
 			}
 			var onEnrolled func()
 			if installTicket != "" {
-				onEnrolled = func() {
-					if err := writeInstallMarker(installID); err != nil {
-						// Not fatal: the marker is the clobber guard, not the protocol —
-						// the same rule the --stdio path follows.
-						slog.Error("executor: could not record the install marker",
-							"installId", installID, "error", err)
-					}
-				}
+				onEnrolled = installEnrollHook(&installTicket, installID)
 			}
 
 			// The detached child holds the instance lock for its whole life. The
@@ -853,10 +899,11 @@ every existing install already has; any other name lives under profiles/<name>.`
 			// exits or a second launch would start a second executor.
 			var instanceLock *os.File
 			if lockFD >= 0 {
-				instanceLock = holdInheritedLock(lockFD)
-				if instanceLock == nil {
-					return fmt.Errorf("--lock-fd %d is not an open descriptor", lockFD)
+				l, err := holdInheritedLock(lockFD)
+				if err != nil {
+					return err
 				}
+				instanceLock = l
 			}
 
 			// After executorPinnedEnv, so a CLAUDE_CONFIG_DIR the operator put in
@@ -873,7 +920,7 @@ every existing install already has; any other name lives under profiles/<name>.`
 				return err
 			}
 
-			resolvedConnect, resolvedSocket, err := resolveExecutorConnectFlags(connectAddr, connectSocket)
+			target, err := resolveExecutorDialTarget(connectAddr, connectSocket)
 			if err != nil {
 				return err
 			}
@@ -969,10 +1016,10 @@ every existing install already has; any other name lives under profiles/<name>.`
 				SandboxRelayVolume:  relayVolume,
 				BeforeSandboxCreate: beforeCreate,
 				NoSSHLaunch:         noSSHLaunch,
-				// The address this executor itself dials, "host:port", so a
-				// launcher can hand it to a target that should reach the same
-				// daemon. Empty on the socket transport, which has no address.
-				ConnectAddr: resolvedConnect,
+				// The address a launcher should dial to reach the SAME daemon —
+				// host:port on the TCP transport, empty on the socket one, which
+				// has no address anything else could dial.
+				ConnectAddr: target.SelfAddr,
 				Env:         pinnedEnv,
 			})
 			defer func() { _ = srv.Close() }()
@@ -1012,8 +1059,8 @@ every existing install already has; any other name lives under profiles/<name>.`
 				ChildBinary:   childBin,
 				LaunchKinds:   launchKinds,
 				SocketDir:     darajaSockets,
-				ConnectAddr:   resolvedConnect,
-				ConnectSocket: resolvedSocket,
+				ConnectAddr:   target.SelfAddr,
+				ConnectSocket: target.Socket,
 				ProxyURL:      proxyURL,
 				// The executor's own TLS posture rides every launch: the
 				// daraja it spawns, and the per-child socket that daraja
@@ -1026,9 +1073,9 @@ every existing install already has; any other name lives under profiles/<name>.`
 			defer admin.Close()
 			handler := executorHandler(srv, admin)
 
-			// resolveExecutorConnectFlags already guarantees exactly one of
-			// these is set, or returned an error above.
-			err = serveWithRelay(cmdCtx(cmd), resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
+			// resolveExecutorDialTarget already guarantees exactly one of these is
+			// set, or returned an error above.
+			err = serveWithRelay(cmdCtx(cmd), target.Addr, target.Socket, pinnedFingerprint, serverName,
 				enrollToken, credential, credentialFile, installTicket, resolvedRelayDir, footholdLn, onEnrolled, handler)
 			// The inherited lock descriptor must stay open until serve returns: the
 			// flock lives on the open file description, so a finalizer closing it
@@ -1202,7 +1249,12 @@ func serveWithRelay(ctx context.Context, addr, socketPath, pinCert, serverName, 
 
 	o := executorConnectOptions(addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, handler)
 	o.InstallTicket = installTicket
-	o.OnEnrolled = onEnrolled
+	if installTicket != "" {
+		// Connect dials with a COPY of these options and clears only that copy,
+		// so the caller's own ticket is cleared here — the field would otherwise
+		// hold the spent ticket for the life of the process.
+		o.OnEnrolled = execpool.ClearInstallTicketOnEnroll(&o, onEnrolled)
+	}
 
 	connErr := make(chan error, 1)
 	go func() {

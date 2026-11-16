@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/spf13/cobra"
 
@@ -37,6 +40,11 @@ import (
 //     child (fd 4), which is what keeps the lock held after the parent exits.
 //   - a second launch reads no stdin at all when the lock is held. Reading it
 //     would spend the one-shot ticket on a launch that starts nothing.
+//
+// It is unix-only, and not for want of a Windows stub: rafiki does not build for
+// GOOS=windows at all (pkg/repos takes an unguarded syscall.Flock and pkg/child
+// runs an unguarded syscall.Kill), so a _other.go here would be dead code; if
+// Windows is ever supported, this file needs one.
 
 // detachTicketMax bounds the ticket line this file reads and writes. It is
 // generous beside the --stdio limit because the line is still one short opaque
@@ -107,18 +115,42 @@ func readPID(dir string) int {
 // writePID records the detached child's pid, which uninstall needs in order to
 // signal the process group, and which a second launch names when it reports the
 // executor as already running.
+//
+// Atomic, because a second launch reads this file to answer "running pid=":
+// writing in place would let it read an empty or half-written pid and report a
+// launch that is not there. A temp file in the same directory plus a rename is
+// the whole mechanism.
 func writePID(dir string, pid int) error {
 	path := filepath.Join(dir, "executor.pid")
-	if err := os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	f, err := os.CreateTemp(dir, ".executor.pid-*")
+	if err != nil {
+		return fmt.Errorf("create a pid temp file in %s: %w", dir, err)
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // a no-op after a successful rename
+	if _, err := fmt.Fprintf(f, "%d\n", pid); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("chmod %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename %s: %w", tmp, err)
 	}
 	return nil
 }
 
 // rotateLog renames an oversized executor.log to executor.log.1, replacing the
-// previous rotation. It runs BEFORE the child opens the log, so the child's
-// append can never straddle the rename. A log at or under detachLogMax is left
-// alone: rotation is a disk guard, not a log policy.
+// previous rotation. It runs once per LAUNCH, immediately before the child opens
+// the log, so the child's append can never straddle the rename; a relaunch is
+// also the only moment the file can have grown past the bound unobserved, since
+// a running executor's log is not read by anything here. A log at or under
+// detachLogMax is left alone: rotation is a disk guard, not a log policy.
 func rotateLog(dir string) {
 	logPath := filepath.Join(dir, "executor.log")
 	st, err := os.Stat(logPath)
@@ -191,12 +223,19 @@ func detachChildArgs(parent []string) []string {
 // isDetachParentFlag reports whether arg is one of the flags the detached child
 // must not inherit. Both spellings pflag accepts are covered (--flag and
 // --flag=value).
+//
+// The leading dash is REQUIRED: a flag VALUE that happens to spell one of these
+// names is an ordinary argument and must survive. Without that check
+// `--install-id detach` lost the value `detach` and the child was handed
+// `--install-id --ticket-fd=3`.
 func isDetachParentFlag(arg string) bool {
-	name := arg
+	if !strings.HasPrefix(arg, "-") {
+		return false
+	}
+	name := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
 	if i := strings.IndexByte(name, '='); i >= 0 {
 		name = name[:i]
 	}
-	name = strings.TrimPrefix(strings.TrimPrefix(name, "-"), "-")
 	switch name {
 	case "detach", "ticket-stdin", "ticket-fd", "lock-fd":
 		return true
@@ -231,30 +270,60 @@ func readTicketLine(r io.Reader, max int) (string, error) {
 	}
 }
 
-// readInheritedTicket reads the ticket from the inherited descriptor and closes
-// it at once: the ticket is spent by the first connect, so it must not stay
-// readable in this process a moment longer than needed.
-func readInheritedTicket(fd int) (string, error) {
-	f := os.NewFile(uintptr(fd), "install-ticket")
-	if f == nil {
-		return "", fmt.Errorf("no install ticket on fd %d", fd)
-	}
-	defer func() { _ = f.Close() }()
-	ticket, err := readTicketLine(f, detachTicketMax)
-	if err != nil {
-		return "", fmt.Errorf("read the install ticket from fd %d: %w", fd, err)
+// ticketFromReader reads ONE ticket line, phrasing both refusals in terms of
+// where the ticket was expected: "no install ticket on stdin" for a launcher and
+// "no install ticket on fd 3" for a detached child. An empty read IS that
+// refusal: the io.EOF a reader ends with is not something an operator can act on.
+func ticketFromReader(r io.Reader, where string) (string, error) {
+	ticket, err := readTicketLine(r, detachTicketMax)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("read the install ticket from %s: %w", where, err)
 	}
 	if ticket == "" {
-		return "", fmt.Errorf("no install ticket on fd %d", fd)
+		return "", fmt.Errorf("no install ticket on %s", where)
 	}
 	return ticket, nil
 }
 
-// holdInheritedLock adopts the inherited lock descriptor. It is never closed:
-// the lock is this instance's claim to "an executor is running here", and
-// releasing it early would let a second launch start a second executor.
-func holdInheritedLock(fd int) *os.File {
-	return os.NewFile(uintptr(fd), "executor.lock")
+// requireOpenDescriptor reports whether fd is open in this process. os.NewFile
+// cannot answer that — it wraps any fd >= 0 — so a bogus one would be adopted
+// silently and fail only at the first read, or, for the lock, never fail at all.
+func requireOpenDescriptor(fd int) error {
+	_, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	return err
+}
+
+// readInheritedTicket reads the ticket from the inherited descriptor and closes
+// it at once: the ticket is spent by the first connect, so it must not stay
+// readable in this process a moment longer than needed. The descriptor is probed
+// first, so a --ticket-fd that is not open fails by name rather than as a
+// closed-fd read — or, worse, as a close of whatever the number now refers to.
+func readInheritedTicket(fd int) (string, error) {
+	if err := requireOpenDescriptor(fd); err != nil {
+		return "", fmt.Errorf("--ticket-fd %d is not an open descriptor: %w", fd, err)
+	}
+	f := os.NewFile(uintptr(fd), "install-ticket")
+	defer func() { _ = f.Close() }()
+	return ticketFromReader(f, fmt.Sprintf("fd %d", fd))
+}
+
+// holdInheritedLock adopts the inherited lock descriptor, after probing it. It is
+// never closed: the lock is this instance's claim to "an executor is running
+// here", and releasing it early would let a second launch start a second
+// executor.
+//
+// The descriptor is marked close-on-exec. It arrives as a dup of the parent's —
+// exec's ExtraFiles clears FD_CLOEXEC in the child — so without this every
+// process this executor later spawns (bash, a background job, an MCP server, an
+// LSP) inherits the locked file description, and an orphaned grandchild holds
+// executor.lock for the rest of its life with no executor running: every
+// relaunch then prints "running pid=<dead pid>" and starts nothing.
+func holdInheritedLock(fd int) (*os.File, error) {
+	if err := requireOpenDescriptor(fd); err != nil {
+		return nil, fmt.Errorf("--lock-fd %d is not an open descriptor: %w", fd, err)
+	}
+	unix.CloseOnExec(fd)
+	return os.NewFile(uintptr(fd), "executor.lock"), nil
 }
 
 // runDetach is `executor serve --ticket-stdin --detach`: take the instance
@@ -307,12 +376,9 @@ func runDetach(cmd *cobra.Command, cfg detachConfig) error {
 		}
 	}()
 
-	ticket, err := readTicketLine(stdin, detachTicketMax)
+	ticket, err := ticketFromReader(stdin, "stdin")
 	if err != nil {
-		return fmt.Errorf("read the install ticket: %w", err)
-	}
-	if ticket == "" {
-		return errors.New("no install ticket on stdin")
+		return err
 	}
 
 	rotateLog(dir)
@@ -364,8 +430,12 @@ func runDetach(cmd *cobra.Command, cfg detachConfig) error {
 	_ = lock.Close()
 	_ = proc.Process.Release()
 
+	// A pid file that cannot be written is NOT a failed launch: the child is
+	// running and holds the instance lock, so reporting a failure would invite a
+	// second launch that starts nothing.
 	if err := writePID(dir, pid); err != nil {
-		return err
+		slog.Warn("executor: could not record the detached executor's pid",
+			"pid", pid, "dataDir", dir, "error", err)
 	}
 	_, err = fmt.Fprintf(stdout, "started pid=%d\n", pid)
 	return err

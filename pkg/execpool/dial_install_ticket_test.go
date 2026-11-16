@@ -1,12 +1,14 @@
 package execpool
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -225,4 +227,73 @@ func TestConnectInstallTicketRefusedIsTerminalAndNotRetried(t *testing.T) {
 	err := Connect(t.Context(), installOpts(f, filepath.Join(t.TempDir(), "executor.cred"), "spent-ticket"))
 	c.ErrorIs(err, ErrEnrollmentRejected, "a refused install ticket is terminal")
 	c.Eq(1, len(f.presented()), "a refused install ticket must not be retried")
+}
+
+// Connect dials with a COPY of the options, so its own clearing leaves the
+// caller's value holding the spent ticket for the life of the process — a
+// secret readable from a heap profile or a core dump.
+// ClearInstallTicketOnEnroll is the hook that clears it, and it must still call
+// the caller's own hook.
+func TestConnectInstallTicketClearsTheCallersCopy(t *testing.T) {
+	c := assert.NewAborting(t)
+	fastReconnect(t)
+
+	f := newInstallTicketFixture(t, func(n int, _ string) (http.Header, error) {
+		if n == 1 {
+			return http.Header{
+				upgradeconn.HeaderCredential: {"minted-cred"},
+				upgradeconn.HeaderExecutorID: {"install-1"},
+			}, nil
+		}
+		return http.Header{}, &upgradeconn.Refusal{Status: http.StatusUnauthorized, Reason: "unknown credential"}
+	})
+
+	credFile := filepath.Join(t.TempDir(), "executor.cred")
+	o := installOpts(f, credFile, "one-time-ticket")
+	hooks := 0
+	o.OnEnrolled = ClearInstallTicketOnEnroll(&o, func() { hooks++ })
+
+	err := Connect(t.Context(), o)
+	c.ErrorIs(err, ErrEnrollmentRejected, "the second dial is refused 401, which ends the loop")
+
+	c.Eq("", o.InstallTicket, "the caller's copy of the spent ticket must be cleared on redemption")
+	c.Eq(1, hooks, "the caller's own OnEnrolled hook must still run, once")
+	c.EqDeep([]string{"Ticket one-time-ticket", "Bearer minted-cred"}, f.presented(),
+		"clearing the caller's copy must not disturb which credential each dial presents")
+}
+
+// A credential the daemon minted and rotated into place cannot be stored. The
+// ticket is spent by that rotation, so retrying would present it again and earn
+// a 401 that names the wrong cause: the failure is terminal, and the message
+// leads with the write that actually failed.
+func TestConnectInstallTicketCredentialWriteFailureIsTerminal(t *testing.T) {
+	c := assert.NewAborting(t)
+	fastReconnect(t)
+
+	f := newInstallTicketFixture(t, func(int, string) (http.Header, error) {
+		return http.Header{upgradeconn.HeaderCredential: {"minted-cred"}}, nil
+	})
+
+	// A regular FILE where the credential's directory belongs: creating the
+	// directory fails, which is the whole class of "cannot store it here".
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	c.Require().NoError(os.WriteFile(blocker, []byte("not a directory"), 0o600), "seed the blocker file")
+
+	enrolled := 0
+	o := installOpts(f, filepath.Join(blocker, "executor.cred"), "ticket-1")
+	o.OnEnrolled = func() { enrolled++ }
+
+	// A bounding context: the regression this guards is a Connect that treats the
+	// failure as retryable, and that loops rather than returning.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	err := Connect(ctx, o)
+	c.Require().Error(err, "a credential that cannot be stored must fail the connect")
+	c.ErrorIs(err, ErrEnrollmentRejected,
+		"the daemon already rotated the credential, so this is terminal, not retryable")
+	c.True(strings.HasPrefix(err.Error(), "create credential directory"),
+		"the message must lead with the write failure; got %q", err.Error())
+	c.Eq(0, enrolled, "the install marker is recorded only once the credential is on disk")
+	c.Eq(1, len(f.presented()), "a spent ticket must not be presented a second time")
 }

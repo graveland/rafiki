@@ -49,14 +49,23 @@ type ConnectOptions struct {
 	// It is checked BEFORE the credential file: a relaunch presents a fresh
 	// ticket while the previous credential is still on disk, and the daemon
 	// rotates that credential when the ticket is redeemed. A failure to write
-	// the returned credential after that rotation is an ordinary error — the
-	// ticket is spent, the next attempt gets a terminal 401 and the process
-	// exits, and the daemon's lazy relaunch recovers.
+	// the returned credential after that rotation is TERMINAL and names the
+	// write failure: the daemon has already rotated the credential, so the
+	// ticket is spent and a retry would earn a 401 that hides the real cause.
+	// That error satisfies errors.Is(err, ErrEnrollmentRejected) whichever
+	// half of it is asked about.
+	//
+	// Connect receives a COPY of these options and can only clear that copy, so
+	// a caller that keeps its own value must clear it in OnEnrolled — see
+	// ClearInstallTicketOnEnroll.
 	InstallTicket string
 
 	// OnEnrolled is called once, after an install ticket's credential is on
 	// disk, so the caller can record that this target is installed. It is
 	// never called on any other path; nil is a no-op.
+	//
+	// It is also where a caller clears its own copy of the spent ticket:
+	// ClearInstallTicketOnEnroll wraps a hook to do exactly that.
 	OnEnrolled func()
 
 	// CredentialFile is where an ENROLLED executor persists the credential it
@@ -87,6 +96,22 @@ type ConnectOptions struct {
 	// spent by the first exchange and the conn cannot be re-established by
 	// this process. There is no redial loop on this path.
 	Conn net.Conn
+}
+
+// ClearInstallTicketOnEnroll wraps an install-ticket serve's OnEnrolled hook so
+// that the SPENT ticket does not outlive the one connect which presented it.
+//
+// Connect receives a copy of ConnectOptions and clears only that copy, so a
+// caller holding its own — the executor's serve wiring does — keeps the ticket
+// in a struct field for the life of the process, where a heap profile or a core
+// dump can read it. Install the wrapper as o.OnEnrolled before dialling.
+func ClearInstallTicketOnEnroll(o *ConnectOptions, hook func()) func() {
+	return func() {
+		o.InstallTicket = ""
+		if hook != nil {
+			hook()
+		}
+	}
 }
 
 // ErrEnrollmentRejected stops the reconnect loop for good. It means rafikid
@@ -199,7 +224,11 @@ func connectOnce(ctx context.Context, o ConnectOptions) (bool, error) {
 			return false, fmt.Errorf("%w: install ticket requires a credential file", ErrEnrollmentRejected)
 		}
 		if err := storeCredential(o.CredentialFile, credential); err != nil {
-			return false, err
+			// The write failure is the cause, so it leads; the sentinel is still
+			// in the chain because the daemon HAS rotated the credential: the
+			// ticket is spent and retrying would earn a 401 that names the wrong
+			// cause. Nothing here is recoverable in this process.
+			return false, fmt.Errorf("%w: %w", err, ErrEnrollmentRejected)
 		}
 		// The id is logged; neither secret ever is.
 		slog.Info("executor: install ticket redeemed; credential stored",
