@@ -2701,6 +2701,8 @@ class ExecutorRow:
     last_seen: Optional[datetime.datetime] = None
     installed_via: str = ""
     installed_target: str = ""
+    install_mode: str = ""
+    last_launch: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -2736,6 +2738,10 @@ class ExecutorRow:
             out["installedVia"] = self.installed_via
         if self.installed_target != "":
             out["installedTarget"] = self.installed_target
+        if self.install_mode != "":
+            out["installMode"] = self.install_mode
+        if self.last_launch != "":
+            out["lastLaunch"] = self.last_launch
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ExecutorRow":
@@ -2788,6 +2794,12 @@ class ExecutorRow:
         _v = _d.get("installedTarget")
         if _v is not None:
             obj.installed_target = _v
+        _v = _d.get("installMode")
+        if _v is not None:
+            obj.install_mode = _v
+        _v = _d.get("lastLaunch")
+        if _v is not None:
+            obj.last_launch = _v
         return obj
 
 @dataclasses.dataclass
@@ -2798,6 +2810,7 @@ class InstallExecutorRequest:
     root: str = ""
     labels: dict[str, str] = dataclasses.field(default_factory=dict)
     admits: str = ""
+    mode: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -2813,6 +2826,8 @@ class InstallExecutorRequest:
             out["labels"] = dict((k, v) for k, v in self.labels.items())
         if self.admits != "":
             out["admits"] = self.admits
+        if self.mode != "":
+            out["mode"] = self.mode
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "InstallExecutorRequest":
@@ -2835,6 +2850,9 @@ class InstallExecutorRequest:
         _v = _d.get("admits")
         if _v is not None:
             obj.admits = _v
+        _v = _d.get("mode")
+        if _v is not None:
+            obj.mode = _v
         return obj
 
 @dataclasses.dataclass

@@ -5059,6 +5059,8 @@ type RemoteProbeResponse struct {
 	BinaryPresent     bool                   `protobuf:"varint,2,opt,name=binary_present,json=binaryPresent,proto3" json:"binary_present,omitempty"`
 	CredentialPresent bool                   `protobuf:"varint,3,opt,name=credential_present,json=credentialPresent,proto3" json:"credential_present,omitempty"` // <data dir>/executor.cred exists
 	Marker            string                 `protobuf:"bytes,4,opt,name=marker,proto3" json:"marker,omitempty"`                                                 // contents of <data dir>/installed-executor, trimmed; "" if absent
+	Reach             string                 `protobuf:"bytes,5,opt,name=reach,proto3" json:"reach,omitempty"`                                                   // "yes", "no" or "unavailable"
+	ReachDetail       string                 `protobuf:"bytes,6,opt,name=reach_detail,json=reachDetail,proto3" json:"reach_detail,omitempty"`                    // one line: the probe tool's own words, or why unavailable
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -5117,6 +5119,20 @@ func (x *RemoteProbeResponse) GetCredentialPresent() bool {
 func (x *RemoteProbeResponse) GetMarker() string {
 	if x != nil {
 		return x.Marker
+	}
+	return ""
+}
+
+func (x *RemoteProbeResponse) GetReach() string {
+	if x != nil {
+		return x.Reach
+	}
+	return ""
+}
+
+func (x *RemoteProbeResponse) GetReachDetail() string {
+	if x != nil {
+		return x.ReachDetail
 	}
 	return ""
 }
@@ -5611,6 +5627,7 @@ type RemoteCleanRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Target        *RemoteTarget          `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
 	InstallId     string                 `protobuf:"bytes,2,opt,name=install_id,json=installId,proto3" json:"install_id,omitempty"`
+	StopProcess   bool                   `protobuf:"varint,3,opt,name=stop_process,json=stopProcess,proto3" json:"stop_process,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5659,9 +5676,17 @@ func (x *RemoteCleanRequest) GetInstallId() string {
 	return ""
 }
 
+func (x *RemoteCleanRequest) GetStopProcess() bool {
+	if x != nil {
+		return x.StopProcess
+	}
+	return false
+}
+
 type RemoteCleanResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Removed       bool                   `protobuf:"varint,1,opt,name=removed,proto3" json:"removed,omitempty"`
+	Stopped       bool                   `protobuf:"varint,2,opt,name=stopped,proto3" json:"stopped,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5699,6 +5724,13 @@ func (*RemoteCleanResponse) Descriptor() ([]byte, []int) {
 func (x *RemoteCleanResponse) GetRemoved() bool {
 	if x != nil {
 		return x.Removed
+	}
+	return false
+}
+
+func (x *RemoteCleanResponse) GetStopped() bool {
+	if x != nil {
+		return x.Stopped
 	}
 	return false
 }
@@ -5759,6 +5791,304 @@ func (x *RemoteServeExit) GetSignal() string {
 func (x *RemoteServeExit) GetStderrTail() string {
 	if x != nil {
 		return x.StderrTail
+	}
+	return ""
+}
+
+type RemoteLaunchRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*RemoteLaunchRequest_Start
+	//	*RemoteLaunchRequest_Stdin
+	Msg           isRemoteLaunchRequest_Msg `protobuf_oneof:"msg"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoteLaunchRequest) Reset() {
+	*x = RemoteLaunchRequest{}
+	mi := &file_executor_proto_msgTypes[89]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoteLaunchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoteLaunchRequest) ProtoMessage() {}
+
+func (x *RemoteLaunchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[89]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoteLaunchRequest.ProtoReflect.Descriptor instead.
+func (*RemoteLaunchRequest) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{89}
+}
+
+func (x *RemoteLaunchRequest) GetMsg() isRemoteLaunchRequest_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *RemoteLaunchRequest) GetStart() *RemoteLaunchStart {
+	if x != nil {
+		if x, ok := x.Msg.(*RemoteLaunchRequest_Start); ok {
+			return x.Start
+		}
+	}
+	return nil
+}
+
+func (x *RemoteLaunchRequest) GetStdin() []byte {
+	if x != nil {
+		if x, ok := x.Msg.(*RemoteLaunchRequest_Stdin); ok {
+			return x.Stdin
+		}
+	}
+	return nil
+}
+
+type isRemoteLaunchRequest_Msg interface {
+	isRemoteLaunchRequest_Msg()
+}
+
+type RemoteLaunchRequest_Start struct {
+	Start *RemoteLaunchStart `protobuf:"bytes,1,opt,name=start,proto3,oneof"`
+}
+
+type RemoteLaunchRequest_Stdin struct {
+	Stdin []byte `protobuf:"bytes,2,opt,name=stdin,proto3,oneof"` // the install ticket line; the ONLY place it travels
+}
+
+func (*RemoteLaunchRequest_Start) isRemoteLaunchRequest_Msg() {}
+
+func (*RemoteLaunchRequest_Stdin) isRemoteLaunchRequest_Msg() {}
+
+type RemoteLaunchStart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Target        *RemoteTarget          `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	BinaryPath    string                 `protobuf:"bytes,2,opt,name=binary_path,json=binaryPath,proto3" json:"binary_path,omitempty"`
+	Root          string                 `protobuf:"bytes,3,opt,name=root,proto3" json:"root,omitempty"` // empty: the remote executor's default root
+	InstallId     string                 `protobuf:"bytes,4,opt,name=install_id,json=installId,proto3" json:"install_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoteLaunchStart) Reset() {
+	*x = RemoteLaunchStart{}
+	mi := &file_executor_proto_msgTypes[90]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoteLaunchStart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoteLaunchStart) ProtoMessage() {}
+
+func (x *RemoteLaunchStart) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[90]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoteLaunchStart.ProtoReflect.Descriptor instead.
+func (*RemoteLaunchStart) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{90}
+}
+
+func (x *RemoteLaunchStart) GetTarget() *RemoteTarget {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *RemoteLaunchStart) GetBinaryPath() string {
+	if x != nil {
+		return x.BinaryPath
+	}
+	return ""
+}
+
+func (x *RemoteLaunchStart) GetRoot() string {
+	if x != nil {
+		return x.Root
+	}
+	return ""
+}
+
+func (x *RemoteLaunchStart) GetInstallId() string {
+	if x != nil {
+		return x.InstallId
+	}
+	return ""
+}
+
+type RemoteLaunchResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         string                 `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"` // "started" or "running"
+	Pid           int32                  `protobuf:"varint,2,opt,name=pid,proto3" json:"pid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoteLaunchResponse) Reset() {
+	*x = RemoteLaunchResponse{}
+	mi := &file_executor_proto_msgTypes[91]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoteLaunchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoteLaunchResponse) ProtoMessage() {}
+
+func (x *RemoteLaunchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[91]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoteLaunchResponse.ProtoReflect.Descriptor instead.
+func (*RemoteLaunchResponse) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{91}
+}
+
+func (x *RemoteLaunchResponse) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *RemoteLaunchResponse) GetPid() int32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+type RemoteLogTailRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Target        *RemoteTarget          `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	Lines         int32                  `protobuf:"varint,2,opt,name=lines,proto3" json:"lines,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoteLogTailRequest) Reset() {
+	*x = RemoteLogTailRequest{}
+	mi := &file_executor_proto_msgTypes[92]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoteLogTailRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoteLogTailRequest) ProtoMessage() {}
+
+func (x *RemoteLogTailRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[92]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoteLogTailRequest.ProtoReflect.Descriptor instead.
+func (*RemoteLogTailRequest) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{92}
+}
+
+func (x *RemoteLogTailRequest) GetTarget() *RemoteTarget {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *RemoteLogTailRequest) GetLines() int32 {
+	if x != nil {
+		return x.Lines
+	}
+	return 0
+}
+
+type RemoteLogTailResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tail          string                 `protobuf:"bytes,1,opt,name=tail,proto3" json:"tail,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoteLogTailResponse) Reset() {
+	*x = RemoteLogTailResponse{}
+	mi := &file_executor_proto_msgTypes[93]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoteLogTailResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoteLogTailResponse) ProtoMessage() {}
+
+func (x *RemoteLogTailResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[93]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoteLogTailResponse.ProtoReflect.Descriptor instead.
+func (*RemoteLogTailResponse) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{93}
+}
+
+func (x *RemoteLogTailResponse) GetTail() string {
+	if x != nil {
+		return x.Tail
 	}
 	return ""
 }
@@ -6118,12 +6448,14 @@ const file_executor_proto_rawDesc = "" +
 	"\x12RemoteProbeRequest\x128\n" +
 	"\x06target\x18\x01 \x01(\v2 .rafiki.executor.v1.RemoteTargetR\x06target\x12\x1f\n" +
 	"\vbinary_path\x18\x02 \x01(\tR\n" +
-	"binaryPath\"\x99\x01\n" +
+	"binaryPath\"\xd2\x01\n" +
 	"\x13RemoteProbeResponse\x12\x14\n" +
 	"\x05uname\x18\x01 \x01(\tR\x05uname\x12%\n" +
 	"\x0ebinary_present\x18\x02 \x01(\bR\rbinaryPresent\x12-\n" +
 	"\x12credential_present\x18\x03 \x01(\bR\x11credentialPresent\x12\x16\n" +
-	"\x06marker\x18\x04 \x01(\tR\x06marker\"x\n" +
+	"\x06marker\x18\x04 \x01(\tR\x06marker\x12\x14\n" +
+	"\x05reach\x18\x05 \x01(\tR\x05reach\x12!\n" +
+	"\freach_detail\x18\x06 \x01(\tR\vreachDetail\"x\n" +
 	"\x14RemoteInstallRequest\x12A\n" +
 	"\x06header\x18\x01 \x01(\v2'.rafiki.executor.v1.RemoteInstallHeaderH\x00R\x06header\x12\x16\n" +
 	"\x05chunk\x18\x02 \x01(\fH\x00R\x05chunkB\x05\n" +
@@ -6152,18 +6484,39 @@ const file_executor_proto_rawDesc = "" +
 	"\x04exit\x18\x04 \x01(\v2#.rafiki.executor.v1.RemoteServeExitH\x00R\x04exitB\x05\n" +
 	"\x03msg\"&\n" +
 	"\x12RemoteServeStarted\x12\x10\n" +
-	"\x03pid\x18\x01 \x01(\x05R\x03pid\"m\n" +
+	"\x03pid\x18\x01 \x01(\x05R\x03pid\"\x90\x01\n" +
 	"\x12RemoteCleanRequest\x128\n" +
 	"\x06target\x18\x01 \x01(\v2 .rafiki.executor.v1.RemoteTargetR\x06target\x12\x1d\n" +
 	"\n" +
-	"install_id\x18\x02 \x01(\tR\tinstallId\"/\n" +
+	"install_id\x18\x02 \x01(\tR\tinstallId\x12!\n" +
+	"\fstop_process\x18\x03 \x01(\bR\vstopProcess\"I\n" +
 	"\x13RemoteCleanResponse\x12\x18\n" +
-	"\aremoved\x18\x01 \x01(\bR\aremoved\"^\n" +
+	"\aremoved\x18\x01 \x01(\bR\aremoved\x12\x18\n" +
+	"\astopped\x18\x02 \x01(\bR\astopped\"^\n" +
 	"\x0fRemoteServeExit\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x16\n" +
 	"\x06signal\x18\x02 \x01(\tR\x06signal\x12\x1f\n" +
 	"\vstderr_tail\x18\x03 \x01(\tR\n" +
-	"stderrTail2\xc4\x14\n" +
+	"stderrTail\"s\n" +
+	"\x13RemoteLaunchRequest\x12=\n" +
+	"\x05start\x18\x01 \x01(\v2%.rafiki.executor.v1.RemoteLaunchStartH\x00R\x05start\x12\x16\n" +
+	"\x05stdin\x18\x02 \x01(\fH\x00R\x05stdinB\x05\n" +
+	"\x03msg\"\xa1\x01\n" +
+	"\x11RemoteLaunchStart\x128\n" +
+	"\x06target\x18\x01 \x01(\v2 .rafiki.executor.v1.RemoteTargetR\x06target\x12\x1f\n" +
+	"\vbinary_path\x18\x02 \x01(\tR\n" +
+	"binaryPath\x12\x12\n" +
+	"\x04root\x18\x03 \x01(\tR\x04root\x12\x1d\n" +
+	"\n" +
+	"install_id\x18\x04 \x01(\tR\tinstallId\">\n" +
+	"\x14RemoteLaunchResponse\x12\x14\n" +
+	"\x05state\x18\x01 \x01(\tR\x05state\x12\x10\n" +
+	"\x03pid\x18\x02 \x01(\x05R\x03pid\"f\n" +
+	"\x14RemoteLogTailRequest\x128\n" +
+	"\x06target\x18\x01 \x01(\v2 .rafiki.executor.v1.RemoteTargetR\x06target\x12\x14\n" +
+	"\x05lines\x18\x02 \x01(\x05R\x05lines\"+\n" +
+	"\x15RemoteLogTailResponse\x12\x12\n" +
+	"\x04tail\x18\x01 \x01(\tR\x04tail2\x8f\x16\n" +
 	"\x0fExecutorService\x12U\n" +
 	"\bDescribe\x12#.rafiki.executor.v1.DescribeRequest\x1a$.rafiki.executor.v1.DescribeResponse\x12O\n" +
 	"\x06Health\x12!.rafiki.executor.v1.HealthRequest\x1a\".rafiki.executor.v1.HealthResponse\x12T\n" +
@@ -6193,7 +6546,9 @@ const file_executor_proto_rawDesc = "" +
 	"\vRemoteProbe\x12&.rafiki.executor.v1.RemoteProbeRequest\x1a'.rafiki.executor.v1.RemoteProbeResponse\x12f\n" +
 	"\rRemoteInstall\x12(.rafiki.executor.v1.RemoteInstallRequest\x1a).rafiki.executor.v1.RemoteInstallResponse(\x01\x12b\n" +
 	"\vRemoteServe\x12&.rafiki.executor.v1.RemoteServeRequest\x1a'.rafiki.executor.v1.RemoteServeResponse(\x010\x01\x12^\n" +
-	"\vRemoteClean\x12&.rafiki.executor.v1.RemoteCleanRequest\x1a'.rafiki.executor.v1.RemoteCleanResponseB3Z1go.graveland.dev/rafiki/pkg/executorpb;executorpbb\x06proto3"
+	"\vRemoteClean\x12&.rafiki.executor.v1.RemoteCleanRequest\x1a'.rafiki.executor.v1.RemoteCleanResponse\x12c\n" +
+	"\fRemoteLaunch\x12'.rafiki.executor.v1.RemoteLaunchRequest\x1a(.rafiki.executor.v1.RemoteLaunchResponse(\x01\x12d\n" +
+	"\rRemoteLogTail\x12(.rafiki.executor.v1.RemoteLogTailRequest\x1a).rafiki.executor.v1.RemoteLogTailResponseB3Z1go.graveland.dev/rafiki/pkg/executorpb;executorpbb\x06proto3"
 
 var (
 	file_executor_proto_rawDescOnce sync.Once
@@ -6208,7 +6563,7 @@ func file_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 95)
+var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 100)
 var file_executor_proto_goTypes = []any{
 	(Failure_Code)(0),                // 0: rafiki.executor.v1.Failure.Code
 	(*DescribeRequest)(nil),          // 1: rafiki.executor.v1.DescribeRequest
@@ -6300,124 +6655,136 @@ var file_executor_proto_goTypes = []any{
 	(*RemoteCleanRequest)(nil),       // 87: rafiki.executor.v1.RemoteCleanRequest
 	(*RemoteCleanResponse)(nil),      // 88: rafiki.executor.v1.RemoteCleanResponse
 	(*RemoteServeExit)(nil),          // 89: rafiki.executor.v1.RemoteServeExit
-	nil,                              // 90: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
-	nil,                              // 91: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
-	nil,                              // 92: rafiki.executor.v1.Result.ObservedMtimeEntry
-	nil,                              // 93: rafiki.executor.v1.ProvisionRequest.EnvEntry
-	nil,                              // 94: rafiki.executor.v1.ProxyStart.HeadersEntry
-	nil,                              // 95: rafiki.executor.v1.ProxyHead.HeadersEntry
-	(*durationpb.Duration)(nil),      // 96: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),    // 97: google.protobuf.Timestamp
+	(*RemoteLaunchRequest)(nil),      // 90: rafiki.executor.v1.RemoteLaunchRequest
+	(*RemoteLaunchStart)(nil),        // 91: rafiki.executor.v1.RemoteLaunchStart
+	(*RemoteLaunchResponse)(nil),     // 92: rafiki.executor.v1.RemoteLaunchResponse
+	(*RemoteLogTailRequest)(nil),     // 93: rafiki.executor.v1.RemoteLogTailRequest
+	(*RemoteLogTailResponse)(nil),    // 94: rafiki.executor.v1.RemoteLogTailResponse
+	nil,                              // 95: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	nil,                              // 96: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	nil,                              // 97: rafiki.executor.v1.Result.ObservedMtimeEntry
+	nil,                              // 98: rafiki.executor.v1.ProvisionRequest.EnvEntry
+	nil,                              // 99: rafiki.executor.v1.ProxyStart.HeadersEntry
+	nil,                              // 100: rafiki.executor.v1.ProxyHead.HeadersEntry
+	(*durationpb.Duration)(nil),      // 101: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),    // 102: google.protobuf.Timestamp
 }
 var file_executor_proto_depIdxs = []int32{
-	90, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
-	6,  // 1: rafiki.executor.v1.ContentBlock.image:type_name -> rafiki.executor.v1.ImageBlock
-	91, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
-	96, // 3: rafiki.executor.v1.ExecuteRequest.timeout:type_name -> google.protobuf.Duration
-	9,  // 4: rafiki.executor.v1.ExecuteResponse.output:type_name -> rafiki.executor.v1.OutputChunk
-	10, // 5: rafiki.executor.v1.ExecuteResponse.result:type_name -> rafiki.executor.v1.Result
-	11, // 6: rafiki.executor.v1.ExecuteResponse.failed:type_name -> rafiki.executor.v1.Failure
-	5,  // 7: rafiki.executor.v1.Result.content:type_name -> rafiki.executor.v1.ContentBlock
-	92, // 8: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
-	0,  // 9: rafiki.executor.v1.Failure.code:type_name -> rafiki.executor.v1.Failure.Code
-	14, // 10: rafiki.executor.v1.WatchJobsResponse.running:type_name -> rafiki.executor.v1.JobRunning
-	15, // 11: rafiki.executor.v1.WatchJobsResponse.exited:type_name -> rafiki.executor.v1.JobExited
-	16, // 12: rafiki.executor.v1.WatchJobsResponse.replay_complete:type_name -> rafiki.executor.v1.ReplayComplete
-	97, // 13: rafiki.executor.v1.JobExited.finished_at:type_name -> google.protobuf.Timestamp
-	21, // 14: rafiki.executor.v1.ProvisionRequest.mounts:type_name -> rafiki.executor.v1.Mount
-	93, // 15: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
-	29, // 16: rafiki.executor.v1.ProjectSkillsResponse.skills:type_name -> rafiki.executor.v1.ProjectSkill
-	94, // 17: rafiki.executor.v1.ProxyStart.headers:type_name -> rafiki.executor.v1.ProxyStart.HeadersEntry
-	35, // 18: rafiki.executor.v1.ProxyRequest.start:type_name -> rafiki.executor.v1.ProxyStart
-	95, // 19: rafiki.executor.v1.ProxyHead.headers:type_name -> rafiki.executor.v1.ProxyHead.HeadersEntry
-	37, // 20: rafiki.executor.v1.ProxyResponse.head:type_name -> rafiki.executor.v1.ProxyHead
-	40, // 21: rafiki.executor.v1.MCPStdioRequest.start:type_name -> rafiki.executor.v1.MCPStdioStart
-	42, // 22: rafiki.executor.v1.MCPStdioResponse.started:type_name -> rafiki.executor.v1.MCPStdioStarted
-	43, // 23: rafiki.executor.v1.MCPStdioResponse.stdout:type_name -> rafiki.executor.v1.MCPStdioStdout
-	44, // 24: rafiki.executor.v1.MCPStdioResponse.stderr:type_name -> rafiki.executor.v1.MCPStdioStderr
-	45, // 25: rafiki.executor.v1.MCPStdioResponse.exit:type_name -> rafiki.executor.v1.MCPStdioExit
-	46, // 26: rafiki.executor.v1.SyncSkill.files:type_name -> rafiki.executor.v1.SkillFile
-	47, // 27: rafiki.executor.v1.SkillNamespace.skills:type_name -> rafiki.executor.v1.SyncSkill
-	48, // 28: rafiki.executor.v1.SyncSkillsRequest.namespaces:type_name -> rafiki.executor.v1.SkillNamespace
-	46, // 29: rafiki.executor.v1.MaterializeSkillRequest.files:type_name -> rafiki.executor.v1.SkillFile
-	53, // 30: rafiki.executor.v1.SyncPyModulesRequest.modules:type_name -> rafiki.executor.v1.SyncPyModule
-	56, // 31: rafiki.executor.v1.SyncPyModulesResponse.venv_results:type_name -> rafiki.executor.v1.PyModuleVenvResult
-	57, // 32: rafiki.executor.v1.SyncRepoResponse.scripts:type_name -> rafiki.executor.v1.RepoScript
-	58, // 33: rafiki.executor.v1.SyncRepoResponse.packages:type_name -> rafiki.executor.v1.RepoPackage
-	63, // 34: rafiki.executor.v1.SyncRepoResponse.skills:type_name -> rafiki.executor.v1.RepoSkill
-	46, // 35: rafiki.executor.v1.RepoSkill.files:type_name -> rafiki.executor.v1.SkillFile
-	66, // 36: rafiki.executor.v1.ReadTreeResponse.header:type_name -> rafiki.executor.v1.TreeHeader
-	68, // 37: rafiki.executor.v1.WriteTreeRequest.start:type_name -> rafiki.executor.v1.WriteTreeStart
-	70, // 38: rafiki.executor.v1.GitRefsResponse.heads:type_name -> rafiki.executor.v1.GitRef
-	77, // 39: rafiki.executor.v1.RemoteProbeRequest.target:type_name -> rafiki.executor.v1.RemoteTarget
-	81, // 40: rafiki.executor.v1.RemoteInstallRequest.header:type_name -> rafiki.executor.v1.RemoteInstallHeader
-	77, // 41: rafiki.executor.v1.RemoteInstallHeader.target:type_name -> rafiki.executor.v1.RemoteTarget
-	84, // 42: rafiki.executor.v1.RemoteServeRequest.start:type_name -> rafiki.executor.v1.RemoteServeStart
-	77, // 43: rafiki.executor.v1.RemoteServeStart.target:type_name -> rafiki.executor.v1.RemoteTarget
-	86, // 44: rafiki.executor.v1.RemoteServeResponse.started:type_name -> rafiki.executor.v1.RemoteServeStarted
-	89, // 45: rafiki.executor.v1.RemoteServeResponse.exit:type_name -> rafiki.executor.v1.RemoteServeExit
-	77, // 46: rafiki.executor.v1.RemoteCleanRequest.target:type_name -> rafiki.executor.v1.RemoteTarget
-	1,  // 47: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
-	3,  // 48: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
-	7,  // 49: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
-	19, // 50: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
-	12, // 51: rafiki.executor.v1.ExecutorService.WatchJobs:input_type -> rafiki.executor.v1.WatchJobsRequest
-	17, // 52: rafiki.executor.v1.ExecutorService.AckJobExits:input_type -> rafiki.executor.v1.AckJobExitsRequest
-	33, // 53: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
-	22, // 54: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
-	24, // 55: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
-	26, // 56: rafiki.executor.v1.ExecutorService.ProjectContext:input_type -> rafiki.executor.v1.ProjectContextRequest
-	28, // 57: rafiki.executor.v1.ExecutorService.ProjectSkills:input_type -> rafiki.executor.v1.ProjectSkillsRequest
-	31, // 58: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
-	49, // 59: rafiki.executor.v1.ExecutorService.SyncSkills:input_type -> rafiki.executor.v1.SyncSkillsRequest
-	51, // 60: rafiki.executor.v1.ExecutorService.MaterializeSkill:input_type -> rafiki.executor.v1.MaterializeSkillRequest
-	54, // 61: rafiki.executor.v1.ExecutorService.SyncPyModules:input_type -> rafiki.executor.v1.SyncPyModulesRequest
-	59, // 62: rafiki.executor.v1.ExecutorService.ResolveRepoRef:input_type -> rafiki.executor.v1.ResolveRepoRefRequest
-	61, // 63: rafiki.executor.v1.ExecutorService.SyncRepo:input_type -> rafiki.executor.v1.SyncRepoRequest
-	64, // 64: rafiki.executor.v1.ExecutorService.ReadTree:input_type -> rafiki.executor.v1.ReadTreeRequest
-	67, // 65: rafiki.executor.v1.ExecutorService.WriteTree:input_type -> rafiki.executor.v1.WriteTreeRequest
-	71, // 66: rafiki.executor.v1.ExecutorService.GitRefs:input_type -> rafiki.executor.v1.GitRefsRequest
-	73, // 67: rafiki.executor.v1.ExecutorService.GitBundle:input_type -> rafiki.executor.v1.GitBundleRequest
-	75, // 68: rafiki.executor.v1.ExecutorService.GitFetchBundle:input_type -> rafiki.executor.v1.GitFetchBundleRequest
-	36, // 69: rafiki.executor.v1.ExecutorService.Proxy:input_type -> rafiki.executor.v1.ProxyRequest
-	39, // 70: rafiki.executor.v1.ExecutorService.MCPStdio:input_type -> rafiki.executor.v1.MCPStdioRequest
-	78, // 71: rafiki.executor.v1.ExecutorService.RemoteProbe:input_type -> rafiki.executor.v1.RemoteProbeRequest
-	80, // 72: rafiki.executor.v1.ExecutorService.RemoteInstall:input_type -> rafiki.executor.v1.RemoteInstallRequest
-	83, // 73: rafiki.executor.v1.ExecutorService.RemoteServe:input_type -> rafiki.executor.v1.RemoteServeRequest
-	87, // 74: rafiki.executor.v1.ExecutorService.RemoteClean:input_type -> rafiki.executor.v1.RemoteCleanRequest
-	2,  // 75: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
-	4,  // 76: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
-	8,  // 77: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
-	20, // 78: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
-	13, // 79: rafiki.executor.v1.ExecutorService.WatchJobs:output_type -> rafiki.executor.v1.WatchJobsResponse
-	18, // 80: rafiki.executor.v1.ExecutorService.AckJobExits:output_type -> rafiki.executor.v1.AckJobExitsResponse
-	34, // 81: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
-	23, // 82: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
-	25, // 83: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
-	27, // 84: rafiki.executor.v1.ExecutorService.ProjectContext:output_type -> rafiki.executor.v1.ProjectContextResponse
-	30, // 85: rafiki.executor.v1.ExecutorService.ProjectSkills:output_type -> rafiki.executor.v1.ProjectSkillsResponse
-	32, // 86: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
-	50, // 87: rafiki.executor.v1.ExecutorService.SyncSkills:output_type -> rafiki.executor.v1.SyncSkillsResponse
-	52, // 88: rafiki.executor.v1.ExecutorService.MaterializeSkill:output_type -> rafiki.executor.v1.MaterializeSkillResponse
-	55, // 89: rafiki.executor.v1.ExecutorService.SyncPyModules:output_type -> rafiki.executor.v1.SyncPyModulesResponse
-	60, // 90: rafiki.executor.v1.ExecutorService.ResolveRepoRef:output_type -> rafiki.executor.v1.ResolveRepoRefResponse
-	62, // 91: rafiki.executor.v1.ExecutorService.SyncRepo:output_type -> rafiki.executor.v1.SyncRepoResponse
-	65, // 92: rafiki.executor.v1.ExecutorService.ReadTree:output_type -> rafiki.executor.v1.ReadTreeResponse
-	69, // 93: rafiki.executor.v1.ExecutorService.WriteTree:output_type -> rafiki.executor.v1.WriteTreeResponse
-	72, // 94: rafiki.executor.v1.ExecutorService.GitRefs:output_type -> rafiki.executor.v1.GitRefsResponse
-	74, // 95: rafiki.executor.v1.ExecutorService.GitBundle:output_type -> rafiki.executor.v1.GitBundleResponse
-	76, // 96: rafiki.executor.v1.ExecutorService.GitFetchBundle:output_type -> rafiki.executor.v1.GitFetchBundleResponse
-	38, // 97: rafiki.executor.v1.ExecutorService.Proxy:output_type -> rafiki.executor.v1.ProxyResponse
-	41, // 98: rafiki.executor.v1.ExecutorService.MCPStdio:output_type -> rafiki.executor.v1.MCPStdioResponse
-	79, // 99: rafiki.executor.v1.ExecutorService.RemoteProbe:output_type -> rafiki.executor.v1.RemoteProbeResponse
-	82, // 100: rafiki.executor.v1.ExecutorService.RemoteInstall:output_type -> rafiki.executor.v1.RemoteInstallResponse
-	85, // 101: rafiki.executor.v1.ExecutorService.RemoteServe:output_type -> rafiki.executor.v1.RemoteServeResponse
-	88, // 102: rafiki.executor.v1.ExecutorService.RemoteClean:output_type -> rafiki.executor.v1.RemoteCleanResponse
-	75, // [75:103] is the sub-list for method output_type
-	47, // [47:75] is the sub-list for method input_type
-	47, // [47:47] is the sub-list for extension type_name
-	47, // [47:47] is the sub-list for extension extendee
-	0,  // [0:47] is the sub-list for field type_name
+	95,  // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	6,   // 1: rafiki.executor.v1.ContentBlock.image:type_name -> rafiki.executor.v1.ImageBlock
+	96,  // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	101, // 3: rafiki.executor.v1.ExecuteRequest.timeout:type_name -> google.protobuf.Duration
+	9,   // 4: rafiki.executor.v1.ExecuteResponse.output:type_name -> rafiki.executor.v1.OutputChunk
+	10,  // 5: rafiki.executor.v1.ExecuteResponse.result:type_name -> rafiki.executor.v1.Result
+	11,  // 6: rafiki.executor.v1.ExecuteResponse.failed:type_name -> rafiki.executor.v1.Failure
+	5,   // 7: rafiki.executor.v1.Result.content:type_name -> rafiki.executor.v1.ContentBlock
+	97,  // 8: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
+	0,   // 9: rafiki.executor.v1.Failure.code:type_name -> rafiki.executor.v1.Failure.Code
+	14,  // 10: rafiki.executor.v1.WatchJobsResponse.running:type_name -> rafiki.executor.v1.JobRunning
+	15,  // 11: rafiki.executor.v1.WatchJobsResponse.exited:type_name -> rafiki.executor.v1.JobExited
+	16,  // 12: rafiki.executor.v1.WatchJobsResponse.replay_complete:type_name -> rafiki.executor.v1.ReplayComplete
+	102, // 13: rafiki.executor.v1.JobExited.finished_at:type_name -> google.protobuf.Timestamp
+	21,  // 14: rafiki.executor.v1.ProvisionRequest.mounts:type_name -> rafiki.executor.v1.Mount
+	98,  // 15: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
+	29,  // 16: rafiki.executor.v1.ProjectSkillsResponse.skills:type_name -> rafiki.executor.v1.ProjectSkill
+	99,  // 17: rafiki.executor.v1.ProxyStart.headers:type_name -> rafiki.executor.v1.ProxyStart.HeadersEntry
+	35,  // 18: rafiki.executor.v1.ProxyRequest.start:type_name -> rafiki.executor.v1.ProxyStart
+	100, // 19: rafiki.executor.v1.ProxyHead.headers:type_name -> rafiki.executor.v1.ProxyHead.HeadersEntry
+	37,  // 20: rafiki.executor.v1.ProxyResponse.head:type_name -> rafiki.executor.v1.ProxyHead
+	40,  // 21: rafiki.executor.v1.MCPStdioRequest.start:type_name -> rafiki.executor.v1.MCPStdioStart
+	42,  // 22: rafiki.executor.v1.MCPStdioResponse.started:type_name -> rafiki.executor.v1.MCPStdioStarted
+	43,  // 23: rafiki.executor.v1.MCPStdioResponse.stdout:type_name -> rafiki.executor.v1.MCPStdioStdout
+	44,  // 24: rafiki.executor.v1.MCPStdioResponse.stderr:type_name -> rafiki.executor.v1.MCPStdioStderr
+	45,  // 25: rafiki.executor.v1.MCPStdioResponse.exit:type_name -> rafiki.executor.v1.MCPStdioExit
+	46,  // 26: rafiki.executor.v1.SyncSkill.files:type_name -> rafiki.executor.v1.SkillFile
+	47,  // 27: rafiki.executor.v1.SkillNamespace.skills:type_name -> rafiki.executor.v1.SyncSkill
+	48,  // 28: rafiki.executor.v1.SyncSkillsRequest.namespaces:type_name -> rafiki.executor.v1.SkillNamespace
+	46,  // 29: rafiki.executor.v1.MaterializeSkillRequest.files:type_name -> rafiki.executor.v1.SkillFile
+	53,  // 30: rafiki.executor.v1.SyncPyModulesRequest.modules:type_name -> rafiki.executor.v1.SyncPyModule
+	56,  // 31: rafiki.executor.v1.SyncPyModulesResponse.venv_results:type_name -> rafiki.executor.v1.PyModuleVenvResult
+	57,  // 32: rafiki.executor.v1.SyncRepoResponse.scripts:type_name -> rafiki.executor.v1.RepoScript
+	58,  // 33: rafiki.executor.v1.SyncRepoResponse.packages:type_name -> rafiki.executor.v1.RepoPackage
+	63,  // 34: rafiki.executor.v1.SyncRepoResponse.skills:type_name -> rafiki.executor.v1.RepoSkill
+	46,  // 35: rafiki.executor.v1.RepoSkill.files:type_name -> rafiki.executor.v1.SkillFile
+	66,  // 36: rafiki.executor.v1.ReadTreeResponse.header:type_name -> rafiki.executor.v1.TreeHeader
+	68,  // 37: rafiki.executor.v1.WriteTreeRequest.start:type_name -> rafiki.executor.v1.WriteTreeStart
+	70,  // 38: rafiki.executor.v1.GitRefsResponse.heads:type_name -> rafiki.executor.v1.GitRef
+	77,  // 39: rafiki.executor.v1.RemoteProbeRequest.target:type_name -> rafiki.executor.v1.RemoteTarget
+	81,  // 40: rafiki.executor.v1.RemoteInstallRequest.header:type_name -> rafiki.executor.v1.RemoteInstallHeader
+	77,  // 41: rafiki.executor.v1.RemoteInstallHeader.target:type_name -> rafiki.executor.v1.RemoteTarget
+	84,  // 42: rafiki.executor.v1.RemoteServeRequest.start:type_name -> rafiki.executor.v1.RemoteServeStart
+	77,  // 43: rafiki.executor.v1.RemoteServeStart.target:type_name -> rafiki.executor.v1.RemoteTarget
+	86,  // 44: rafiki.executor.v1.RemoteServeResponse.started:type_name -> rafiki.executor.v1.RemoteServeStarted
+	89,  // 45: rafiki.executor.v1.RemoteServeResponse.exit:type_name -> rafiki.executor.v1.RemoteServeExit
+	77,  // 46: rafiki.executor.v1.RemoteCleanRequest.target:type_name -> rafiki.executor.v1.RemoteTarget
+	91,  // 47: rafiki.executor.v1.RemoteLaunchRequest.start:type_name -> rafiki.executor.v1.RemoteLaunchStart
+	77,  // 48: rafiki.executor.v1.RemoteLaunchStart.target:type_name -> rafiki.executor.v1.RemoteTarget
+	77,  // 49: rafiki.executor.v1.RemoteLogTailRequest.target:type_name -> rafiki.executor.v1.RemoteTarget
+	1,   // 50: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
+	3,   // 51: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
+	7,   // 52: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
+	19,  // 53: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
+	12,  // 54: rafiki.executor.v1.ExecutorService.WatchJobs:input_type -> rafiki.executor.v1.WatchJobsRequest
+	17,  // 55: rafiki.executor.v1.ExecutorService.AckJobExits:input_type -> rafiki.executor.v1.AckJobExitsRequest
+	33,  // 56: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
+	22,  // 57: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
+	24,  // 58: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
+	26,  // 59: rafiki.executor.v1.ExecutorService.ProjectContext:input_type -> rafiki.executor.v1.ProjectContextRequest
+	28,  // 60: rafiki.executor.v1.ExecutorService.ProjectSkills:input_type -> rafiki.executor.v1.ProjectSkillsRequest
+	31,  // 61: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
+	49,  // 62: rafiki.executor.v1.ExecutorService.SyncSkills:input_type -> rafiki.executor.v1.SyncSkillsRequest
+	51,  // 63: rafiki.executor.v1.ExecutorService.MaterializeSkill:input_type -> rafiki.executor.v1.MaterializeSkillRequest
+	54,  // 64: rafiki.executor.v1.ExecutorService.SyncPyModules:input_type -> rafiki.executor.v1.SyncPyModulesRequest
+	59,  // 65: rafiki.executor.v1.ExecutorService.ResolveRepoRef:input_type -> rafiki.executor.v1.ResolveRepoRefRequest
+	61,  // 66: rafiki.executor.v1.ExecutorService.SyncRepo:input_type -> rafiki.executor.v1.SyncRepoRequest
+	64,  // 67: rafiki.executor.v1.ExecutorService.ReadTree:input_type -> rafiki.executor.v1.ReadTreeRequest
+	67,  // 68: rafiki.executor.v1.ExecutorService.WriteTree:input_type -> rafiki.executor.v1.WriteTreeRequest
+	71,  // 69: rafiki.executor.v1.ExecutorService.GitRefs:input_type -> rafiki.executor.v1.GitRefsRequest
+	73,  // 70: rafiki.executor.v1.ExecutorService.GitBundle:input_type -> rafiki.executor.v1.GitBundleRequest
+	75,  // 71: rafiki.executor.v1.ExecutorService.GitFetchBundle:input_type -> rafiki.executor.v1.GitFetchBundleRequest
+	36,  // 72: rafiki.executor.v1.ExecutorService.Proxy:input_type -> rafiki.executor.v1.ProxyRequest
+	39,  // 73: rafiki.executor.v1.ExecutorService.MCPStdio:input_type -> rafiki.executor.v1.MCPStdioRequest
+	78,  // 74: rafiki.executor.v1.ExecutorService.RemoteProbe:input_type -> rafiki.executor.v1.RemoteProbeRequest
+	80,  // 75: rafiki.executor.v1.ExecutorService.RemoteInstall:input_type -> rafiki.executor.v1.RemoteInstallRequest
+	83,  // 76: rafiki.executor.v1.ExecutorService.RemoteServe:input_type -> rafiki.executor.v1.RemoteServeRequest
+	87,  // 77: rafiki.executor.v1.ExecutorService.RemoteClean:input_type -> rafiki.executor.v1.RemoteCleanRequest
+	90,  // 78: rafiki.executor.v1.ExecutorService.RemoteLaunch:input_type -> rafiki.executor.v1.RemoteLaunchRequest
+	93,  // 79: rafiki.executor.v1.ExecutorService.RemoteLogTail:input_type -> rafiki.executor.v1.RemoteLogTailRequest
+	2,   // 80: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
+	4,   // 81: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
+	8,   // 82: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
+	20,  // 83: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
+	13,  // 84: rafiki.executor.v1.ExecutorService.WatchJobs:output_type -> rafiki.executor.v1.WatchJobsResponse
+	18,  // 85: rafiki.executor.v1.ExecutorService.AckJobExits:output_type -> rafiki.executor.v1.AckJobExitsResponse
+	34,  // 86: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
+	23,  // 87: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
+	25,  // 88: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
+	27,  // 89: rafiki.executor.v1.ExecutorService.ProjectContext:output_type -> rafiki.executor.v1.ProjectContextResponse
+	30,  // 90: rafiki.executor.v1.ExecutorService.ProjectSkills:output_type -> rafiki.executor.v1.ProjectSkillsResponse
+	32,  // 91: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
+	50,  // 92: rafiki.executor.v1.ExecutorService.SyncSkills:output_type -> rafiki.executor.v1.SyncSkillsResponse
+	52,  // 93: rafiki.executor.v1.ExecutorService.MaterializeSkill:output_type -> rafiki.executor.v1.MaterializeSkillResponse
+	55,  // 94: rafiki.executor.v1.ExecutorService.SyncPyModules:output_type -> rafiki.executor.v1.SyncPyModulesResponse
+	60,  // 95: rafiki.executor.v1.ExecutorService.ResolveRepoRef:output_type -> rafiki.executor.v1.ResolveRepoRefResponse
+	62,  // 96: rafiki.executor.v1.ExecutorService.SyncRepo:output_type -> rafiki.executor.v1.SyncRepoResponse
+	65,  // 97: rafiki.executor.v1.ExecutorService.ReadTree:output_type -> rafiki.executor.v1.ReadTreeResponse
+	69,  // 98: rafiki.executor.v1.ExecutorService.WriteTree:output_type -> rafiki.executor.v1.WriteTreeResponse
+	72,  // 99: rafiki.executor.v1.ExecutorService.GitRefs:output_type -> rafiki.executor.v1.GitRefsResponse
+	74,  // 100: rafiki.executor.v1.ExecutorService.GitBundle:output_type -> rafiki.executor.v1.GitBundleResponse
+	76,  // 101: rafiki.executor.v1.ExecutorService.GitFetchBundle:output_type -> rafiki.executor.v1.GitFetchBundleResponse
+	38,  // 102: rafiki.executor.v1.ExecutorService.Proxy:output_type -> rafiki.executor.v1.ProxyResponse
+	41,  // 103: rafiki.executor.v1.ExecutorService.MCPStdio:output_type -> rafiki.executor.v1.MCPStdioResponse
+	79,  // 104: rafiki.executor.v1.ExecutorService.RemoteProbe:output_type -> rafiki.executor.v1.RemoteProbeResponse
+	82,  // 105: rafiki.executor.v1.ExecutorService.RemoteInstall:output_type -> rafiki.executor.v1.RemoteInstallResponse
+	85,  // 106: rafiki.executor.v1.ExecutorService.RemoteServe:output_type -> rafiki.executor.v1.RemoteServeResponse
+	88,  // 107: rafiki.executor.v1.ExecutorService.RemoteClean:output_type -> rafiki.executor.v1.RemoteCleanResponse
+	92,  // 108: rafiki.executor.v1.ExecutorService.RemoteLaunch:output_type -> rafiki.executor.v1.RemoteLaunchResponse
+	94,  // 109: rafiki.executor.v1.ExecutorService.RemoteLogTail:output_type -> rafiki.executor.v1.RemoteLogTailResponse
+	80,  // [80:110] is the sub-list for method output_type
+	50,  // [50:80] is the sub-list for method input_type
+	50,  // [50:50] is the sub-list for extension type_name
+	50,  // [50:50] is the sub-list for extension extendee
+	0,   // [0:50] is the sub-list for field type_name
 }
 
 func init() { file_executor_proto_init() }
@@ -6481,13 +6848,17 @@ func file_executor_proto_init() {
 		(*RemoteServeResponse_Stderr)(nil),
 		(*RemoteServeResponse_Exit)(nil),
 	}
+	file_executor_proto_msgTypes[89].OneofWrappers = []any{
+		(*RemoteLaunchRequest_Start)(nil),
+		(*RemoteLaunchRequest_Stdin)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_executor_proto_rawDesc), len(file_executor_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   95,
+			NumMessages:   100,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

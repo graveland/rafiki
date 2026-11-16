@@ -48,6 +48,7 @@ type fakeInstallStore struct {
 	order   []string
 	inserts int
 	sets    int
+	modes   int
 }
 
 func newFakeInstallStore() *fakeInstallStore {
@@ -111,6 +112,21 @@ func (s *fakeInstallStore) SetLauncher(_ context.Context, id, launcherExecutorID
 	r.LauncherExecutorID, r.Platform = launcherExecutorID, platform
 	s.rows[id] = r
 	s.sets++
+	return nil
+}
+
+// SetMode records the transport a live row was installed with, matching the
+// Postgres store: an unknown id is a no-op.
+func (s *fakeInstallStore) SetMode(_ context.Context, id, mode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.rows[id]
+	if !ok || r.RemovedAt != nil {
+		return nil
+	}
+	r.Mode = mode
+	s.rows[id] = r
+	s.modes++
 	return nil
 }
 

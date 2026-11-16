@@ -111,6 +111,12 @@ const (
 	// ExecutorServiceRemoteCleanProcedure is the fully-qualified name of the ExecutorService's
 	// RemoteClean RPC.
 	ExecutorServiceRemoteCleanProcedure = "/rafiki.executor.v1.ExecutorService/RemoteClean"
+	// ExecutorServiceRemoteLaunchProcedure is the fully-qualified name of the ExecutorService's
+	// RemoteLaunch RPC.
+	ExecutorServiceRemoteLaunchProcedure = "/rafiki.executor.v1.ExecutorService/RemoteLaunch"
+	// ExecutorServiceRemoteLogTailProcedure is the fully-qualified name of the ExecutorService's
+	// RemoteLogTail RPC.
+	ExecutorServiceRemoteLogTailProcedure = "/rafiki.executor.v1.ExecutorService/RemoteLogTail"
 )
 
 // ExecutorServiceClient is a client for the rafiki.executor.v1.ExecutorService service.
@@ -245,8 +251,14 @@ type ExecutorServiceClient interface {
 	// its stdio, unparsed. One process per stream; stream end kills it.
 	RemoteServe(context.Context) *connect.BidiStreamForClient[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse]
 	// RemoteClean removes the target's install marker iff its first line equals
-	// install_id. The shared binary cache is left alone.
+	// install_id, and with stop_process also stops that install's detached
+	// executor. The shared binary cache is left alone.
 	RemoteClean(context.Context, *connect.Request[executorpb.RemoteCleanRequest]) (*connect.Response[executorpb.RemoteCleanResponse], error)
+	// RemoteLaunch starts a detached, self-dialling executor on target over ssh;
+	// the ticket is the stdin frame after the start frame.
+	RemoteLaunch(context.Context) *connect.ClientStreamForClient[executorpb.RemoteLaunchRequest, executorpb.RemoteLaunchResponse]
+	// RemoteLogTail returns the last lines of the target's executor.log.
+	RemoteLogTail(context.Context, *connect.Request[executorpb.RemoteLogTailRequest]) (*connect.Response[executorpb.RemoteLogTailResponse], error)
 }
 
 // NewExecutorServiceClient constructs a client for the rafiki.executor.v1.ExecutorService service.
@@ -428,6 +440,18 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("RemoteClean")),
 			connect.WithClientOptions(opts...),
 		),
+		remoteLaunch: connect.NewClient[executorpb.RemoteLaunchRequest, executorpb.RemoteLaunchResponse](
+			httpClient,
+			baseURL+ExecutorServiceRemoteLaunchProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("RemoteLaunch")),
+			connect.WithClientOptions(opts...),
+		),
+		remoteLogTail: connect.NewClient[executorpb.RemoteLogTailRequest, executorpb.RemoteLogTailResponse](
+			httpClient,
+			baseURL+ExecutorServiceRemoteLogTailProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("RemoteLogTail")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -461,6 +485,8 @@ type executorServiceClient struct {
 	remoteInstall    *connect.Client[executorpb.RemoteInstallRequest, executorpb.RemoteInstallResponse]
 	remoteServe      *connect.Client[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse]
 	remoteClean      *connect.Client[executorpb.RemoteCleanRequest, executorpb.RemoteCleanResponse]
+	remoteLaunch     *connect.Client[executorpb.RemoteLaunchRequest, executorpb.RemoteLaunchResponse]
+	remoteLogTail    *connect.Client[executorpb.RemoteLogTailRequest, executorpb.RemoteLogTailResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -603,6 +629,16 @@ func (c *executorServiceClient) RemoteClean(ctx context.Context, req *connect.Re
 	return c.remoteClean.CallUnary(ctx, req)
 }
 
+// RemoteLaunch calls rafiki.executor.v1.ExecutorService.RemoteLaunch.
+func (c *executorServiceClient) RemoteLaunch(ctx context.Context) *connect.ClientStreamForClient[executorpb.RemoteLaunchRequest, executorpb.RemoteLaunchResponse] {
+	return c.remoteLaunch.CallClientStream(ctx)
+}
+
+// RemoteLogTail calls rafiki.executor.v1.ExecutorService.RemoteLogTail.
+func (c *executorServiceClient) RemoteLogTail(ctx context.Context, req *connect.Request[executorpb.RemoteLogTailRequest]) (*connect.Response[executorpb.RemoteLogTailResponse], error) {
+	return c.remoteLogTail.CallUnary(ctx, req)
+}
+
 // ExecutorServiceHandler is an implementation of the rafiki.executor.v1.ExecutorService service.
 type ExecutorServiceHandler interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
@@ -735,8 +771,14 @@ type ExecutorServiceHandler interface {
 	// its stdio, unparsed. One process per stream; stream end kills it.
 	RemoteServe(context.Context, *connect.BidiStream[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse]) error
 	// RemoteClean removes the target's install marker iff its first line equals
-	// install_id. The shared binary cache is left alone.
+	// install_id, and with stop_process also stops that install's detached
+	// executor. The shared binary cache is left alone.
 	RemoteClean(context.Context, *connect.Request[executorpb.RemoteCleanRequest]) (*connect.Response[executorpb.RemoteCleanResponse], error)
+	// RemoteLaunch starts a detached, self-dialling executor on target over ssh;
+	// the ticket is the stdin frame after the start frame.
+	RemoteLaunch(context.Context, *connect.ClientStream[executorpb.RemoteLaunchRequest]) (*connect.Response[executorpb.RemoteLaunchResponse], error)
+	// RemoteLogTail returns the last lines of the target's executor.log.
+	RemoteLogTail(context.Context, *connect.Request[executorpb.RemoteLogTailRequest]) (*connect.Response[executorpb.RemoteLogTailResponse], error)
 }
 
 // NewExecutorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -914,6 +956,18 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("RemoteClean")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceRemoteLaunchHandler := connect.NewClientStreamHandler(
+		ExecutorServiceRemoteLaunchProcedure,
+		svc.RemoteLaunch,
+		connect.WithSchema(executorServiceMethods.ByName("RemoteLaunch")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceRemoteLogTailHandler := connect.NewUnaryHandler(
+		ExecutorServiceRemoteLogTailProcedure,
+		svc.RemoteLogTail,
+		connect.WithSchema(executorServiceMethods.ByName("RemoteLogTail")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.executor.v1.ExecutorService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ExecutorServiceDescribeProcedure:
@@ -972,6 +1026,10 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceRemoteServeHandler.ServeHTTP(w, r)
 		case ExecutorServiceRemoteCleanProcedure:
 			executorServiceRemoteCleanHandler.ServeHTTP(w, r)
+		case ExecutorServiceRemoteLaunchProcedure:
+			executorServiceRemoteLaunchHandler.ServeHTTP(w, r)
+		case ExecutorServiceRemoteLogTailProcedure:
+			executorServiceRemoteLogTailHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1091,4 +1149,12 @@ func (UnimplementedExecutorServiceHandler) RemoteServe(context.Context, *connect
 
 func (UnimplementedExecutorServiceHandler) RemoteClean(context.Context, *connect.Request[executorpb.RemoteCleanRequest]) (*connect.Response[executorpb.RemoteCleanResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.RemoteClean is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) RemoteLaunch(context.Context, *connect.ClientStream[executorpb.RemoteLaunchRequest]) (*connect.Response[executorpb.RemoteLaunchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.RemoteLaunch is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) RemoteLogTail(context.Context, *connect.Request[executorpb.RemoteLogTailRequest]) (*connect.Response[executorpb.RemoteLogTailResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.RemoteLogTail is not implemented"))
 }

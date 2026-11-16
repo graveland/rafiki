@@ -1945,6 +1945,17 @@ pub struct ExecutorRow {
     /// installed_target is its ssh destination.
     #[prost(string, tag = "18")]
     pub installed_target: ::prost::alloc::string::String,
+    /// install_mode is the transport an installed executor reaches the daemon
+    /// over: "direct" (a detached process on the target that dials the daemon
+    /// itself) or "tunnel" (the launcher's ssh relay). Empty for an executor that
+    /// was not installed over ssh.
+    #[prost(string, tag = "19")]
+    pub install_mode: ::prost::alloc::string::String,
+    /// last_launch is the daemon's outcome for the most recent launch of this
+    /// installed executor ("ok: …" or "failed: …"). Empty when it has not been
+    /// launched since the daemon started: the outcome is kept in memory only.
+    #[prost(string, tag = "20")]
+    pub last_launch: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InstallExecutorRequest {
@@ -1966,6 +1977,10 @@ pub struct InstallExecutorRequest {
     >,
     #[prost(string, tag = "6")]
     pub admits: ::prost::alloc::string::String,
+    /// mode is the install transport: "", "auto", "direct" or "tunnel". Empty
+    /// means auto — probe the target and pick, which is the default.
+    #[prost(string, tag = "7")]
+    pub mode: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InstallExecutorResponse {

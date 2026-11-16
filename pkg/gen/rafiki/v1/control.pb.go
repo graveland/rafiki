@@ -5666,8 +5666,17 @@ type ExecutorRow struct {
 	InstalledVia string `protobuf:"bytes,17,opt,name=installed_via,json=installedVia,proto3" json:"installed_via,omitempty"`
 	// installed_target is its ssh destination.
 	InstalledTarget string `protobuf:"bytes,18,opt,name=installed_target,json=installedTarget,proto3" json:"installed_target,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// install_mode is the transport an installed executor reaches the daemon
+	// over: "direct" (a detached process on the target that dials the daemon
+	// itself) or "tunnel" (the launcher's ssh relay). Empty for an executor that
+	// was not installed over ssh.
+	InstallMode string `protobuf:"bytes,19,opt,name=install_mode,json=installMode,proto3" json:"install_mode,omitempty"`
+	// last_launch is the daemon's outcome for the most recent launch of this
+	// installed executor ("ok: …" or "failed: …"). Empty when it has not been
+	// launched since the daemon started: the outcome is kept in memory only.
+	LastLaunch    string `protobuf:"bytes,20,opt,name=last_launch,json=lastLaunch,proto3" json:"last_launch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExecutorRow) Reset() {
@@ -5812,14 +5821,31 @@ func (x *ExecutorRow) GetInstalledTarget() string {
 	return ""
 }
 
+func (x *ExecutorRow) GetInstallMode() string {
+	if x != nil {
+		return x.InstallMode
+	}
+	return ""
+}
+
+func (x *ExecutorRow) GetLastLaunch() string {
+	if x != nil {
+		return x.LastLaunch
+	}
+	return ""
+}
+
 type InstallExecutorRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Target        string                 `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"` // ssh destination
-	Via           string                 `protobuf:"bytes,2,opt,name=via,proto3" json:"via,omitempty"`       // launcher: machine name or id; empty = caller's default
-	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`     // machine name; empty = the destination's host part
-	Root          string                 `protobuf:"bytes,4,opt,name=root,proto3" json:"root,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Admits        string                 `protobuf:"bytes,6,opt,name=admits,proto3" json:"admits,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Target string                 `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"` // ssh destination
+	Via    string                 `protobuf:"bytes,2,opt,name=via,proto3" json:"via,omitempty"`       // launcher: machine name or id; empty = caller's default
+	Name   string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`     // machine name; empty = the destination's host part
+	Root   string                 `protobuf:"bytes,4,opt,name=root,proto3" json:"root,omitempty"`
+	Labels map[string]string      `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Admits string                 `protobuf:"bytes,6,opt,name=admits,proto3" json:"admits,omitempty"`
+	// mode is the install transport: "", "auto", "direct" or "tunnel". Empty
+	// means auto — probe the target and pick, which is the default.
+	Mode          string `protobuf:"bytes,7,opt,name=mode,proto3" json:"mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5892,6 +5918,13 @@ func (x *InstallExecutorRequest) GetLabels() map[string]string {
 func (x *InstallExecutorRequest) GetAdmits() string {
 	if x != nil {
 		return x.Admits
+	}
+	return ""
+}
+
+func (x *InstallExecutorRequest) GetMode() string {
+	if x != nil {
+		return x.Mode
 	}
 	return ""
 }
@@ -18046,7 +18079,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x10\vR\x0fcreated_at_unix\"\x8b\x01\n" +
 	"\x1cConversationFindingsResponse\x124\n" +
 	"\bfindings\x18\x01 \x03(\v2\x18.rafiki.v1.ReviewFindingR\bfindings\x125\n" +
-	"\banalyses\x18\x02 \x03(\v2\x19.rafiki.v1.ReviewAnalysisR\banalyses\"\xa3\x05\n" +
+	"\banalyses\x18\x02 \x03(\v2\x19.rafiki.v1.ReviewAnalysisR\banalyses\"\xe7\x05\n" +
 	"\vExecutorRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\amachine\x18\x02 \x01(\tR\amachine\x12:\n" +
@@ -18064,17 +18097,21 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\fconnected_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\vconnectedAt\x127\n" +
 	"\tlast_seen\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\x12#\n" +
 	"\rinstalled_via\x18\x11 \x01(\tR\finstalledVia\x12)\n" +
-	"\x10installed_target\x18\x12 \x01(\tR\x0finstalledTarget\x1a9\n" +
+	"\x10installed_target\x18\x12 \x01(\tR\x0finstalledTarget\x12!\n" +
+	"\finstall_mode\x18\x13 \x01(\tR\vinstallMode\x12\x1f\n" +
+	"\vlast_launch\x18\x14 \x01(\tR\n" +
+	"lastLaunch\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fR\x0fconnected_at_msR\flast_seen_ms\"\x84\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fR\x0fconnected_at_msR\flast_seen_ms\"\x98\x02\n" +
 	"\x16InstallExecutorRequest\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\tR\x06target\x12\x10\n" +
 	"\x03via\x18\x02 \x01(\tR\x03via\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x12\n" +
 	"\x04root\x18\x04 \x01(\tR\x04root\x12E\n" +
 	"\x06labels\x18\x05 \x03(\v2-.rafiki.v1.InstallExecutorRequest.LabelsEntryR\x06labels\x12\x16\n" +
-	"\x06admits\x18\x06 \x01(\tR\x06admits\x1a9\n" +
+	"\x06admits\x18\x06 \x01(\tR\x06admits\x12\x12\n" +
+	"\x04mode\x18\a \x01(\tR\x04mode\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"M\n" +

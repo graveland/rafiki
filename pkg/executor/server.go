@@ -137,6 +137,13 @@ type Options struct {
 	// ssh_launch) and therefore only ever narrowing — the capability itself
 	// equals what bash on this executor can already do.
 	NoSSHLaunch bool
+
+	// ConnectAddr is the daemon address this executor itself dials, "host:port";
+	// empty when it dials none (unix socket, stdio, or a relay). A launcher uses
+	// it as the address a target should reach: the probe asks the target whether
+	// it can, and a direct launch hands it to the remote executor as its
+	// --connect. It is never sent to the daemon and gates nothing.
+	ConnectAddr string
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.

@@ -938,6 +938,9 @@ type ExecutorInstallResult struct {
 // never been seen; LastSeen survives a reconnect, ConnectedAt does not.
 // InstalledVia and InstalledTarget come from the install RECIPE, so they are
 // empty for an executor that was enrolled or created instead of installed.
+// InstallMode ("direct" or "tunnel") and LastLaunch come from the same recipe
+// and the daemon's launch bookkeeping: LastLaunch is in-memory, so it is empty
+// for a launch this daemon process did not perform.
 //
 // Annotations are the hints another agent left with executor_annotate. They are
 // NEVER an access grant and never consulted for admission; they are shown
@@ -955,6 +958,8 @@ type ExecutorStatus struct {
 	LaunchKinds     []string          `json:"launchKinds,omitempty"`
 	InstalledVia    string            `json:"installedVia,omitempty"`
 	InstalledTarget string            `json:"installedTarget,omitempty"`
+	InstallMode     string            `json:"install_mode,omitempty"`
+	LastLaunch      string            `json:"last_launch,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	Annotations     map[string]string `json:"annotations,omitempty"`
 }

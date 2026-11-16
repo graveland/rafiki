@@ -40,7 +40,7 @@ func New(pool *pgxpool.Pool) *Store {
 
 // columns is the projection every read shares, in scanRow order.
 const columns = `id, owner_user_id, executor_id, launcher_executor_id, target,
-	instance, root, installed_by_child, platform, created_at, removed_at`
+	instance, root, installed_by_child, platform, mode, created_at, removed_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -50,7 +50,7 @@ func scanRow(rs rowScanner) (executorinstall.Row, error) {
 	var r executorinstall.Row
 	if err := rs.Scan(
 		&r.ID, &r.OwnerUserID, &r.ExecutorID, &r.LauncherExecutorID, &r.Target,
-		&r.Instance, &r.Root, &r.InstalledByChild, &r.Platform,
+		&r.Instance, &r.Root, &r.InstalledByChild, &r.Platform, &r.Mode,
 		&r.CreatedAt, &r.RemovedAt); err != nil {
 		return executorinstall.Row{}, err
 	}
@@ -78,13 +78,17 @@ func alreadyInstalled(err error) error {
 // ignored. removed_at is written so a caller may record a row that is already
 // tombstoned.
 func (s *Store) Insert(ctx context.Context, r executorinstall.Row) error {
+	mode := r.Mode
+	if mode == "" {
+		mode = executorinstall.ModeTunnel
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO conversations.executor_install
 		   (id, owner_user_id, executor_id, launcher_executor_id, target,
-		    instance, root, installed_by_child, platform, removed_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		    instance, root, installed_by_child, platform, mode, removed_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		r.ID, r.OwnerUserID, r.ExecutorID, r.LauncherExecutorID, r.Target,
-		r.Instance, r.Root, r.InstalledByChild, r.Platform, r.RemovedAt)
+		r.Instance, r.Root, r.InstalledByChild, r.Platform, mode, r.RemovedAt)
 	if err != nil {
 		if dup := alreadyInstalled(err); dup != nil {
 			return dup
@@ -156,6 +160,22 @@ func (s *Store) SetLauncher(ctx context.Context, id, launcherExecutorID, platfor
 		  WHERE id=$1 AND removed_at IS NULL`,
 		id, launcherExecutorID, platform); err != nil {
 		return fmt.Errorf("set executor install launcher: %w", err)
+	}
+	return nil
+}
+
+// SetMode records the transport a live row was installed with. removed_at IS
+// NULL: a stale writer must not resurrect a tombstoned row, and an unknown id is
+// a silent no-op exactly as SetLauncher treats one.
+func (s *Store) SetMode(ctx context.Context, id, mode string) error {
+	if mode != executorinstall.ModeDirect {
+		mode = executorinstall.ModeTunnel
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE conversations.executor_install SET mode=$2
+		  WHERE id=$1 AND removed_at IS NULL`,
+		id, mode); err != nil {
+		return fmt.Errorf("set executor install mode: %w", err)
 	}
 	return nil
 }

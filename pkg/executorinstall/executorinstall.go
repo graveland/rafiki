@@ -23,7 +23,8 @@ import (
 // user@host), Instance is the remote executor instance name, and Root is the
 // remote root the install lives under. InstalledByChild is the child that asked
 // for the install ("" when a human did), and Platform is the remote OS/arch the
-// daemon learned from the target itself — a LABEL, never an access gate.
+// daemon learned from the target itself — a LABEL, never an access gate. Mode is
+// the install transport (see EffectiveMode).
 type Row struct {
 	ID                 string
 	OwnerUserID        string
@@ -34,8 +35,31 @@ type Row struct {
 	Root               string
 	InstalledByChild   string
 	Platform           string
-	CreatedAt          time.Time
-	RemovedAt          *time.Time
+	// Mode is ModeDirect or ModeTunnel; empty reads as ModeTunnel, which is
+	// what every row written before the column existed behaves like.
+	Mode      string
+	CreatedAt time.Time
+	RemovedAt *time.Time
+}
+
+// The two install transports. A recipe stores exactly one; the requested mode
+// "auto" is resolved to one of them at install and never stored.
+const (
+	// ModeDirect is a detached executor process on the target that dials the
+	// daemon itself, so it survives the launcher going away.
+	ModeDirect = "direct"
+	// ModeTunnel is the launcher's ssh stdio relay: the target dials nothing.
+	ModeTunnel = "tunnel"
+)
+
+// EffectiveMode is the transport this row was installed with. An empty Mode —
+// a row written before the column existed — is ModeTunnel, never "unknown":
+// that is how every such row actually behaves.
+func (r Row) EffectiveMode() string {
+	if r.Mode == ModeDirect {
+		return ModeDirect
+	}
+	return ModeTunnel
 }
 
 // Store is the executor_install table's persistence layer. The implementation
@@ -63,6 +87,9 @@ type Store interface {
 	// SetLauncher records the launcher executor and the remote platform a live
 	// row was installed through.
 	SetLauncher(ctx context.Context, id, launcherExecutorID, platform string) error
+	// SetMode records the transport a live row was installed with. A
+	// tombstoned or unknown id is a silent no-op, like SetLauncher.
+	SetMode(ctx context.Context, id, mode string) error
 	// Tombstone tombstones the row. It is idempotent: a second call leaves the
 	// first timestamp in place, and an unknown id is not an error.
 	Tombstone(ctx context.Context, id string) error

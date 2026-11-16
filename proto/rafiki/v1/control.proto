@@ -1098,6 +1098,15 @@ message ExecutorRow {
   string installed_via = 17;
   // installed_target is its ssh destination.
   string installed_target = 18;
+  // install_mode is the transport an installed executor reaches the daemon
+  // over: "direct" (a detached process on the target that dials the daemon
+  // itself) or "tunnel" (the launcher's ssh relay). Empty for an executor that
+  // was not installed over ssh.
+  string install_mode = 19;
+  // last_launch is the daemon's outcome for the most recent launch of this
+  // installed executor ("ok: …" or "failed: …"). Empty when it has not been
+  // launched since the daemon started: the outcome is kept in memory only.
+  string last_launch = 20;
 
   reserved 13, 14;
   reserved "connected_at_ms", "last_seen_ms";
@@ -1110,6 +1119,9 @@ message InstallExecutorRequest {
   string root = 4;
   map<string, string> labels = 5;
   string admits = 6;
+  // mode is the install transport: "", "auto", "direct" or "tunnel". Empty
+  // means auto — probe the target and pick, which is the default.
+  string mode = 7;
 }
 message InstallExecutorResponse { ExecutorRow executor = 1; }
 message UninstallExecutorRequest { string executor = 1; } // machine name or id
