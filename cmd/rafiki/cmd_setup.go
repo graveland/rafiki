@@ -109,6 +109,14 @@ func cmdOut(cmd *cobra.Command) io.Writer {
 // runSetup is the whole `rafiki setup` flow. r is the subprocess seam (tests
 // inject a fake), and out is where the step log is written.
 func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out io.Writer) error {
+	// FIRST: the executor INSTANCE this command acts on is the DECLARED one,
+	// pinned before any step resolves a service or an instance-scoped path. Step
+	// 8 repoints an installed executor unit and then runs `executor setup`, which
+	// writes the credential, the environment files and the unit name — all per
+	// instance — so the current-profile pointer must not decide which system
+	// service setup touches, and the repoint and the install must agree.
+	applyExecutorInstance(cmd)
+
 	// ── 1. load ─────────────────────────────────────────────────────────────
 	step(out, stepLoad)
 	st, _, err := installstate.Load()

@@ -70,6 +70,14 @@ func newUpgradeCmd() *cobra.Command {
 // reach the child it execs: Profile is the RAW -P/--profile (empty when the
 // operator gave none), which refreshArgv turns into the refresh child's argv.
 func upgradeDepsFromCmd(cmd *cobra.Command) (upgradeDeps, error) {
+	// FIRST: the executor instance this upgrade will refresh, resolved and
+	// pinned before anything irreversible. runUpgrade replaces both binaries and
+	// only then execs `service refresh`, so an instance decision made after the
+	// swap could fail a command whose damage is already done; here it cannot fail
+	// at all (see applyExecutorInstance), and it is settled before the first
+	// subprocess this command runs.
+	applyExecutorInstance(cmd)
+
 	exe, err := os.Executable()
 	if err != nil {
 		return upgradeDeps{}, err

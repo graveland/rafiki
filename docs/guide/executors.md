@@ -98,7 +98,10 @@ machine's executor name from the same declared instance (so the name it reports
 and the unit `executor setup` installs agree), and `service status|stop|…` and
 `executor name` follow it too. `rafiki upgrade` carries its own `-P` into the
 `service refresh` it runs, so `rafiki -P work upgrade` refreshes the `work` unit
-and a bare `rafiki upgrade` refreshes `default`.
+and a bare `rafiki upgrade` refreshes `default`. A declared name that cannot be
+an instance name (it must be a single path component of letters, digits, `-`,
+`_` and `.`) warns once on stderr and uses the `default` instance — it never
+fails a command, and never fails one after it has replaced the binaries.
 
 No certificate is involved for a local socket. **Socket permissions are the
 only access control**: the socket is `0600` from creation (`0177` umask), and

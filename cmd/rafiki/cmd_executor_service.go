@@ -140,9 +140,7 @@ type executorInstallOptions struct {
 func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	// Before any path is read: the credential file, the environment file and
 	// the unit's name are all per instance. See applyExecutorInstance.
-	if err := applyExecutorInstance(cmd); err != nil {
-		return err
-	}
+	applyExecutorInstance(cmd)
 	connect, _ := cmd.Flags().GetString("connect")
 	connectSocket, _ := cmd.Flags().GetString("connect-socket")
 	enrollToken, _ := cmd.Flags().GetString("enroll-token")
@@ -806,9 +804,7 @@ func captureExecutorEnv(environ []string) map[string]string {
 // that skipped the instance would stop, uninstall or tail the DEFAULT
 // instance's service while the operator asked for another one.
 func executorServiceBackend(cmd *cobra.Command) (serviceBackend, error) {
-	if err := applyExecutorInstance(cmd); err != nil {
-		return nil, err
-	}
+	applyExecutorInstance(cmd)
 	return newExecutorServiceBackend(), nil
 }
 

@@ -1145,9 +1145,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// default), never the current-profile pointer that resolveProfile follows —
 	// or create would name this machine out of the pointer's instance and
 	// install the declared instance's unit.
-	if err := applyExecutorInstance(cmd); err != nil {
-		return err
-	}
+	applyExecutorInstance(cmd)
 
 	// Resolve the mode before doing anything: -j and -J together is a
 	// user-input error and must not spawn a child first.

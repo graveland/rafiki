@@ -86,7 +86,7 @@ func TestExecutorInstanceServiceVerbsIgnoreCurrentProfilePointer(t *testing.T) {
 	// No -P: the verb pins the DEFAULT instance, and a later pointer resolution
 	// — exactly what executor setup's enrollment client does — must not move it.
 	resetProfileCache()
-	c.NoError(applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd)), "applyExecutorInstance, no -P")
+	applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd))
 	c.Eq(paths.DefaultInstance, paths.Instance(), "a service verb with no -P must resolve the default instance")
 	c.Eq(filepath.Join(dataHome, "rafiki"), paths.DataDir(), "DataDir with no -P")
 	c.Eq(filepath.Join(dataHome, "rafiki", "executor.cred"),
@@ -105,7 +105,7 @@ func TestExecutorInstanceServiceVerbsIgnoreCurrentProfilePointer(t *testing.T) {
 
 	// A declared name wins over the pointer for the whole process.
 	resetProfileCache()
-	c.NoError(applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd, "-P", "work")), "applyExecutorInstance, -P work")
+	applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd, "-P", "work"))
 	c.Eq("work", paths.Instance(), "an explicit -P must name the instance")
 	c.Eq(filepath.Join(dataHome, "rafiki", "profiles", "work"), paths.DataDir(), "DataDir with -P work")
 	_, err = resolveProfile(executorVerb(c, newExecutorSetupCmd))
@@ -117,7 +117,7 @@ func TestExecutorInstanceServiceVerbsIgnoreCurrentProfilePointer(t *testing.T) {
 	// And the environment form, which the pointer never supplies.
 	resetProfileCache()
 	t.Setenv("RAFIKI_PROFILE", "work")
-	c.NoError(applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd)), "applyExecutorInstance from RAFIKI_PROFILE")
+	applyExecutorInstance(executorVerb(c, newExecutorServiceStatusCmd))
 	_, err = resolveProfile(executorVerb(c, newExecutorSetupCmd))
 	c.NoError(err, "resolveProfile after the env pin")
 	c.Eq("work", paths.Instance(), "RAFIKI_PROFILE names the instance, and the pointer cannot move it")
@@ -269,7 +269,7 @@ func TestExecutorInstanceServeUsesRawFlagNotProfilesFile(t *testing.T) {
 	c.Eq("ublk", executorInstanceName(serve), "executorInstanceName reads the inherited flag")
 
 	// The first thing serve's RunE does, before any path is resolved.
-	c.NoError(applyExecutorInstance(serve), "applyExecutorInstance")
+	applyExecutorInstance(serve)
 
 	c.Eq("ublk", paths.Instance(), "instance")
 	c.Eq(filepath.Join(dataHome, "rafiki", "profiles", "ublk"), paths.DataDir(), "DataDir")
@@ -489,4 +489,188 @@ func TestExecutorInstanceUpgradePassesTheDeclaredProfileToServiceRefresh(t *test
 	c.True(sawRun(r2, self2, "service", "refresh"),
 		"with no -P the refresh child takes no instance flag; runs: %v", r2.runCalls)
 	c.EqDeep([]string{"service", "refresh"}, refreshArgv(""), "no -P means no flag on the child's argv")
+}
+
+// `rafiki setup` resolves the executor service at step 8 — it repoints an
+// installed unit, then runs `executor setup` — so the instance it acts on has to
+// be settled before the FIRST step, from the DECLARED value: the repoint and the
+// install must describe one instance, and the current-profile pointer must not
+// decide which unit setup touches.
+func TestExecutorInstanceSetupPinsBeforeTheExecutorRepoint(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newSetupFixture(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	// The pointer names another profile entirely; -P names the instance. Both
+	// profiles must exist — setup still resolves one for the daemon it targets.
+	set, err := profile.Load()
+	c.NoError(err, "profile.Load")
+	sock := set.Profiles["default"].Socket
+	set.Profiles["personal"] = profile.Profile{Name: "personal", Socket: sock}
+	set.Profiles["work"] = profile.Profile{Name: "work", Socket: sock}
+	c.NoError(profile.Save(set), "save the personal and work profiles")
+	c.NoError(profile.SavePointer("personal"), "point at personal")
+	// Stand in for the root's persistent -P: cobra merges it into the command's
+	// own flag set before RunE, which is what executorInstanceName reads.
+	f.cmd.Flags().StringP("profile", "P", "", "")
+	c.NoError(f.cmd.Flags().Set("profile", "work"), "set -P work")
+
+	// Every executor-backend resolution the setup makes records the instance it
+	// was made under. The step-8 repoint is the FIRST of them.
+	var resolved []string
+	orig := executorServiceBackendFor
+	executorServiceBackendFor = func() serviceBackend {
+		resolved = append(resolved, paths.Instance())
+		return f.execFB
+	}
+	t.Cleanup(func() { executorServiceBackendFor = orig })
+
+	c.Require().NoError(f.runSetup(), "setup with -P work")
+	c.Require().NotEmpty(resolved, "setup must resolve the executor service (the step-8 repoint)")
+	for _, got := range resolved {
+		c.Eq("work", got, "every executor service setup resolves is the DECLARED instance's, pointer or not")
+	}
+	c.Eq("work", paths.Instance(), "the instance stays the declared one")
+}
+
+// A declared profile name outside the instance charset is a mistake about
+// NAMESPACING, not a reason to fail a command: `create` and `service refresh`
+// must warn once and carry on against the default instance — the layout such a
+// profile's install already had.
+func TestExecutorInstanceInvalidDeclaredNameWarnsAndFallsBack(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+	resetInstance(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	t.Setenv(paths.ExecutorName, "")
+	read := captureStderr(t)
+
+	// (a) service refresh: the refresh still runs, on the default unit.
+	stubServiceBackend(t, &fakeServiceBackend{})
+	self, err := os.Executable()
+	c.NoError(err, "os.Executable")
+	var resolved []string
+	orig := executorServiceBackendFor
+	t.Cleanup(func() { executorServiceBackendFor = orig })
+	fake := &fakeServiceBackend{status: serviceStatus{Installed: true, Binary: self}}
+	executorServiceBackendFor = func() serviceBackend {
+		resolved = append(resolved, paths.Instance())
+		return fake
+	}
+
+	c.NoError(refreshServices(context.Background(), executorVerb(c, newServiceRefreshCmd, "-P", "my work"),
+		newFakeRunner(), io.Discard), "an unusable instance name must not fail a refresh")
+	c.True(fake.restarted, "the default instance's executor service is still refreshed")
+	c.Eq(paths.DefaultInstance, paths.Instance(), "an unusable name falls back to the default instance")
+	c.EqDeep([]string{paths.DefaultInstance, paths.DefaultInstance}, resolved,
+		"every executor backend resolution is the default instance's")
+	c.StrContains(read(), `profile "my work" cannot name an executor instance`,
+		"the fallback is reported, naming the declared value")
+
+	// (b) create: the same name, this time through a profile that really exists
+	// (pkg/profile allows the space). Both applyExecutorInstance and
+	// resolveProfile notice it in this one command, and the mistake is reported
+	// ONCE — a second identical line would read as a bug.
+	stub := &createStubControl{executors: []*rafikiv1.ExecutorRow{
+		executorRow("default-box", true, map[string]string{"owner": "brent"}),
+	}}
+	serveCreateStub(t, stub)
+	set, err := profile.Load()
+	c.NoError(err, "profile.Load")
+	sock := set.Profiles["scratch"].Socket
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"scratch": {Name: "scratch", Socket: sock},
+		"my work": {Name: "my work", Socket: sock},
+	}}), "save a profile named like the bad instance")
+	c.NoError(profile.SavePointer("scratch"), "point at scratch")
+	resetProfileCache()
+	seedInstanceMachineName(t, paths.DefaultInstance, "default-box")
+	paths.ResetInstanceForTest()
+
+	before := strings.Count(read(), "cannot name an executor instance")
+	cmd := executorVerb(c, newCreateCmd, "-P", "my work", "--detached", "--executor-selector", "owner=brent")
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	c.Require().NoError(runCreate(cmd, nil), "create must not fail on an unusable instance name")
+	c.Require().NotNil(stub.spawned, "no Spawn reached the daemon")
+	c.Eq("default-box", stub.spawned.GetHomeExecutor(),
+		"the machine name comes from the default instance, not a refused one")
+	c.Eq(before+1, strings.Count(read(), "cannot name an executor instance"),
+		"one warning for one mistake, not one per site that noticed it")
+}
+
+// instanceRecordingRunner records the process instance at every exec, so a test
+// can see whether the upgrade had pinned before the smoke check (which runs
+// BEFORE the binaries are swapped) and the refresh (which runs after).
+type instanceRecordingRunner struct {
+	*fakeRunner
+	tag       string
+	instances []string
+}
+
+var _ runner = (*instanceRecordingRunner)(nil)
+
+func (r *instanceRecordingRunner) Run(ctx context.Context, env []string, argv ...string) ([]byte, []byte, error) {
+	r.instances = append(r.instances, paths.Instance())
+	if len(argv) == 2 && argv[1] == "--version" {
+		return []byte("rafiki version " + r.tag + "\n"), nil, nil
+	}
+	return r.fakeRunner.Run(ctx, env, argv...)
+}
+
+// `rafiki upgrade` replaces both binaries and only then refreshes services, so
+// its instance is resolved before the first subprocess — and an unusable
+// declared name must never fail a command whose damage is already done.
+func TestExecutorInstanceUpgradePinsBeforeTheSwap(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+	seedPointerProfiles(t) // the pointer names another profile throughout
+
+	// -P work: pinned while the deps are built, which is before runUpgrade runs
+	// anything at all.
+	deps, err := upgradeDepsFromCmd(executorVerb(c, newUpgradeCmd, "-P", "work"))
+	c.NoError(err, "upgradeDepsFromCmd with -P work")
+	c.Eq("work", deps.Profile, "the raw -P value")
+	c.Eq("work", paths.Instance(), "the upgrade pins its instance before it swaps anything")
+	// Nothing later can move it: a pointer resolution in the same process is inert.
+	c.NoError(paths.SetInstance("personal"), "SetInstance after the pin")
+	c.Eq("work", paths.Instance(), "the pin predates every step of the upgrade")
+
+	tr := newTestRelease(t, "v0.2.0", runtime.GOOS, runtime.GOARCH, testReleaseOpts{})
+	dir := oldInstall(t)
+	self := filepath.Join(dir, "rafiki")
+	rec := &instanceRecordingRunner{fakeRunner: newFakeRunner(), tag: "v0.2.0"}
+	deps.Runner = rec
+	deps.Client, deps.Keys = tr.Client, tr.Keys
+	deps.Exe, deps.Version, deps.Home = self, "v0.1.0", t.TempDir()
+	c.Require().NoError(runUpgrade(context.Background(), deps, upgradeOpts{}), "upgrade with -P work")
+	c.Require().NotEmpty(rec.instances, "the upgrade must have run subprocesses")
+	for _, got := range rec.instances {
+		c.Eq("work", got, "every subprocess — the pre-swap smoke check included — sees the declared instance")
+	}
+
+	// An unusable declared name: the upgrade still completes, on the default
+	// instance, for every subprocess it runs.
+	resetProfileCache()
+	bad, err := upgradeDepsFromCmd(executorVerb(c, newUpgradeCmd, "-P", "my work"))
+	c.NoError(err, "upgradeDepsFromCmd with an unusable name")
+	c.Eq(paths.DefaultInstance, paths.Instance(), "the fallback is the default instance")
+
+	tr2 := newTestRelease(t, "v0.2.0", runtime.GOOS, runtime.GOARCH, testReleaseOpts{})
+	dir2 := oldInstall(t)
+	self2 := filepath.Join(dir2, "rafiki")
+	rec2 := &instanceRecordingRunner{fakeRunner: newFakeRunner(), tag: "v0.2.0"}
+	bad.Runner = rec2
+	bad.Client, bad.Keys = tr2.Client, tr2.Keys
+	bad.Exe, bad.Version, bad.Home = self2, "v0.1.0", t.TempDir()
+	c.Require().NoError(runUpgrade(context.Background(), bad, upgradeOpts{}),
+		"an unusable instance name must not fail an upgrade after the swap")
+	c.Require().NotEmpty(rec2.instances, "the upgrade must have run subprocesses")
+	for _, got := range rec2.instances {
+		c.Eq(paths.DefaultInstance, got, "the fallback holds for every subprocess")
+	}
 }

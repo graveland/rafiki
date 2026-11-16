@@ -49,14 +49,13 @@ func resolveProfile(cmd *cobra.Command) (profile.Resolved, error) {
 			//
 			// A profile name is only checked as a path component (pkg/profile), so
 			// one outside the instance charset cannot name an instance. That must
-			// not fail a client command which never touches executor state: the
-			// executor verbs validate the DECLARED name loudly instead
-			// (applyExecutorInstance). Such a profile keeps the default layout —
-			// today's — and says so once.
+			// not fail a client command which never touches executor state: it keeps
+			// the default layout — today's — and says so once. See
+			// applyExecutorInstance, which applies the same rule to the DECLARED
+			// name and warns through the same helper, so one mistake prints one
+			// line even when both sites notice it in one command.
 			if verr := paths.ValidateInstance(profileVal.Name); verr != nil {
-				fmt.Fprintf(os.Stderr,
-					"rafiki: profile %q cannot name an executor instance (%v); using the default instance\n",
-					profileVal.Name, verr)
+				warnInvalidInstanceName(profileVal.Name, verr)
 			} else {
 				// Already validated, so this cannot fail. A no-op when an
 				// executor-service verb has already pinned the declared instance —
@@ -120,12 +119,50 @@ func multipleProfilesConfigured() bool {
 // derived from the resolved profile: leaving a previous case's instance behind
 // would move the NEXT case's DataDir under profiles/<that name>, and leaving a
 // pin behind would stop the next case's pointer resolution from applying at all.
+// The invalid-instance-name memo goes too, so a case that asserts the warning
+// cannot be silenced by an earlier case that warned about the same name.
 func resetProfileCache() {
 	profileOnce = sync.Once{}
 	profileVal = profile.Resolved{}
 	profileErr = nil
 	profileResolved = false
 	paths.ResetInstanceForTest()
+	resetInvalidInstanceWarning()
+}
+
+// The invalid-instance-name warning is printed at most once per name per
+// process. `create` pins the declared instance and THEN resolves the profile, so
+// both sites can notice the same unusable name in one command, and two identical
+// lines for one mistake read as a bug.
+var (
+	invalidInstanceMu   sync.Mutex
+	invalidInstanceName string
+	invalidInstanceDone bool
+)
+
+// warnInvalidInstanceName reports a profile name that cannot name an executor
+// instance, and the fallback to the default instance. Non-fatal by design: a
+// name outside the instance charset is a mistake about NAMESPACING, not a reason
+// to fail a command — and never a reason to fail one after an irreversible step
+// (see upgradeDepsFromCmd).
+func warnInvalidInstanceName(name string, err error) {
+	invalidInstanceMu.Lock()
+	defer invalidInstanceMu.Unlock()
+	if invalidInstanceDone && invalidInstanceName == name {
+		return
+	}
+	invalidInstanceName, invalidInstanceDone = name, true
+	fmt.Fprintf(os.Stderr,
+		"rafiki: profile %q cannot name an executor instance (%v); using the default instance\n",
+		name, err)
+}
+
+// resetInvalidInstanceWarning forgets what was warned about, so the next
+// occurrence is reported again. Tests only, through resetProfileCache.
+func resetInvalidInstanceWarning() {
+	invalidInstanceMu.Lock()
+	defer invalidInstanceMu.Unlock()
+	invalidInstanceName, invalidInstanceDone = "", false
 }
 
 // resolvedProfile returns the process's already-resolved profile, if one was

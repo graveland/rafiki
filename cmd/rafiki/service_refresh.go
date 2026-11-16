@@ -48,9 +48,7 @@ which service an upgrade restarts.`,
 // no -P the default unit is refreshed whatever `rafiki profile use` last chose.
 // (The daemon's unit is not per instance, so pinning changes nothing for it.)
 func refreshServices(ctx context.Context, cmd *cobra.Command, r runner, out io.Writer) error {
-	if err := applyExecutorInstance(cmd); err != nil {
-		return err
-	}
+	applyExecutorInstance(cmd)
 
 	daemon, err := serviceBackendFor().Status()
 	if err != nil {

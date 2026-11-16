@@ -119,9 +119,7 @@ func runExecutorSetup(ctx context.Context, w *wizard, out io.Writer) error {
 	// this flow writes the credential, the machine name and the unit. A
 	// declared -P/RAFIKI_PROFILE applies here even when nothing in this flow
 	// resolves a profile (a non-interactive run with --enroll-token does not).
-	if err := applyExecutorInstance(w.cmd); err != nil {
-		return err
-	}
+	applyExecutorInstance(w.cmd)
 
 	st, _, err := installstate.Load()
 	if err != nil {
