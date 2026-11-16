@@ -829,6 +829,12 @@ func installLauncherGate(le execpool.LiveExecutor) error {
 // installReachableExecutors is the child's effective executor set, recomputed
 // from the live pool exactly as a spawn would: an install can only go through a
 // machine the child could already call.
+//
+// Reachable also covers installed executors that are DOWN (they are places to
+// call, and a call relaunches them). A LAUNCHER must be live — it is the machine
+// that will run ssh — so that half is filtered out here rather than leaking into
+// the `via` choice as a candidate that can never be chosen.
+//
 // The request names the caller as its OWN parent on purpose: admissionLabels
 // then reads the child's stored labels, and effectiveExecutorSetFor walks the
 // stored selector chain from the child upward — the child's effective set. An
@@ -845,7 +851,13 @@ func (c *Controller) installReachableExecutors(caller installCaller) ([]executor
 		// caller may install through anyway.
 		return nil, installErr(protocol.ErrFailedPrecondition, "%s", err.Error())
 	}
-	return reach, nil
+	live := make([]executors.Executor, 0, len(reach))
+	for _, e := range reach {
+		if _, ok := c.liveExecutor(e.ID); ok {
+			live = append(live, e)
+		}
+	}
+	return live, nil
 }
 
 // liveExecutorByNameOrID resolves a machine name or an exact executor id among

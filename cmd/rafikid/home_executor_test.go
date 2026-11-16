@@ -659,3 +659,65 @@ func TestHomeExecutorBindFailureStartsUnboundWithCause(t *testing.T) {
 	ck.Eq("unbound", wl.executorState, "executorState")
 	ck.Eq("a", wl.homeExecutorID, "the resolved home is still recorded for a later resume")
 }
+
+// markInstalled gives c an install store holding one LIVE recipe per id — what
+// "this executor was installed over ssh" means to the home resolver.
+func markInstalled(t *testing.T, c *Controller, ids ...string) {
+	t.Helper()
+	c.install = newInstallState(installStoreWith(t, "u1", ids...), nil)
+}
+
+// An executor installed over ssh is never a home. Its lifecycle belongs to the
+// installer — a relaunch replaces the remote process and every workspace on it —
+// so the child's cwd, project instructions and skills must not live there.
+func TestHomeExecutorNeverAnInstalledRow(t *testing.T) {
+	t.Run("the cwd probe never provisions on an installed executor", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"}, &fakeExec{id: "c"})
+		pb := &probeBinder{fakeBinder: fb, provErr: map[string]error{
+			"a": missingWorkdir("/tmp"),
+			"c": missingWorkdir("/tmp"),
+		}}
+		be := newBoundExecutor("c1", pb)
+		reach, err := fb.Reachable("c1")
+		ck.Require().NoError(err, "Reachable")
+		c := newTestController(t)
+		markInstalled(t, c, "b")
+
+		// b is not in provErr, so a probe there would SUCCEED — and become the
+		// home. The refusal is what proves it was never asked.
+		home, warnings, err := c.resolveHomeExecutor(context.Background(),
+			protocol.SpawnRequest{Cwd: "/tmp"}, be, reach)
+		ck.Require().Error(err, "with b excluded, no machine holds the cwd")
+		ck.Eq("", home, "homeID")
+		ck.Len(warnings, 0, "a refusal reports no warning")
+		ck.Eq(0, fb.provisionsOn("b"), "an installed executor must never be probed for the child's cwd")
+	})
+
+	t.Run("an installed executor is not the single reachable home", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		c, fb, be, reach := homeFixture(t, "a", "b")
+		markInstalled(t, c, "b")
+
+		home, warnings, err := c.resolveHomeExecutor(context.Background(),
+			protocol.SpawnRequest{}, be, reach)
+		ck.Require().NoError(err)
+		ck.Eq("a", home, "the only home-capable machine is home; b is excluded")
+		ck.Len(warnings, 0, "warnings")
+		ck.Eq(0, fb.provisions, "no probe is needed once b is excluded")
+	})
+
+	t.Run("naming one refuses the spawn", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		c, fb, be, reach := homeFixture(t, "a", "b")
+		markInstalled(t, c, "b")
+
+		home, warnings, err := c.resolveHomeExecutor(context.Background(),
+			protocol.SpawnRequest{HomeExecutor: "b"}, be, reach)
+		ck.Require().Error(err, "an installed executor can never be a home")
+		ck.EqualError(err, "executor b was installed over ssh and cannot be a home executor")
+		ck.Eq("", home, "homeID")
+		ck.Len(warnings, 0, "a refused spawn reports no warning")
+		ck.Eq(0, fb.provisions, "nothing may be provisioned for a refused home")
+	})
+}

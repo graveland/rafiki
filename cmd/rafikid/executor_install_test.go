@@ -1222,3 +1222,21 @@ func TestExecutorRowShowsInstall(t *testing.T) {
 	c.Eq("", launcher.InstalledVia, "a row that was not installed over ssh has no launcher")
 	c.Eq("", launcher.InstalledTarget, "…and no target")
 }
+
+// A child with one live launcher and one installed executor that is DOWN still
+// installs through the live one by default: a down executor is a place to CALL
+// (a call relaunches it), never a place to run ssh FROM.
+func TestInstallLauncherDefaultIgnoresADownInstalledExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutor()
+	f.ctrl.st.Insert(&childstore.Session{
+		ChildID: "c_kid", Status: protocol.StatusIdle, StartedAt: time.Now(),
+		OwnerUserID: installTestOwner, Labels: map[string]string{"owner": installTestOwnerName},
+	})
+
+	le, err := f.ctrl.resolveInstallLauncher(context.Background(),
+		installCaller{OwnerUserID: installTestOwner, OwnerName: installTestOwnerName, ChildID: "c_kid"}, "")
+	c.Require().NoError(err, "the single LIVE launcher must be the default even though the installed one is reachable")
+	c.Eq(installTestLauncher, le.Executor.ID, "launcher")
+}

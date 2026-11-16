@@ -54,6 +54,13 @@ type executorBinder interface {
 	// connection in the pool.
 	IsLive(executorID string) bool
 
+	// EnsureConnected makes executorID usable before a binding is provisioned on
+	// it: live → nil, an executor installed over ssh that is down → relaunch it
+	// and wait for the connection, anything else → nil. A successful relaunch
+	// records the one-time note the call carries, so the model learns the machine
+	// it asked for was restarted (and what that may have cost).
+	EnsureConnected(ctx context.Context, executorID string) error
+
 	// NoteBinding records the child's current HOME executor and workspace so
 	// the rest of the daemon (labels, prompt visibility, teardown) can see it.
 	// Only the home binding is ever noted: the labels name one workspace, and
@@ -870,6 +877,22 @@ func (b *boundExecutor) noteHomeBinding(bd *binding, execID, wsID string, claimP
 	}
 }
 
+// appendExecutorNote adds one line to the one-time note a tool call carries,
+// joined with a newline when another line already claimed the slot. The slot is
+// ONE field: a relaunch note and a "working from <dir>" note both apply to the
+// same first call, and the second one overwriting the first would hide the more
+// consequential fact.
+func appendExecutorNote(ctx context.Context, note string) {
+	t := tools.ExecutorTargetFrom(ctx)
+	if t == nil || note == "" {
+		return
+	}
+	if t.Note != "" {
+		t.Note += "\n"
+	}
+	t.Note += note
+}
+
 // provision performs one binding's first provision. Called with no lock held;
 // bd is the placeholder already published under it.
 //
@@ -891,6 +914,16 @@ func (b *boundExecutor) noteHomeBinding(bd *binding, execID, wsID string, claimP
 // that still names someone else. Taking the slot HERE does not make it true — a
 // provision that acquires a free slot may still be labelling on a stale read.
 func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID string, wantCwd, held, claimPending bool) (*binding, error) {
+	// An installed executor that is down is brought back BEFORE the workspace is
+	// asked for: a provision is the first thing any call does on a machine, so it
+	// is the one place worth relaunching at. A launch failure is the call's
+	// answer, not the child's death — the binding placeholder is dropped so the
+	// next call tries again.
+	if err := b.binder.EnsureConnected(ctx, execID); err != nil {
+		b.failFirstProvision(bd, execID, err)
+		return nil, err
+	}
+
 	wsID, workdir, cl, err := b.binder.ProvisionOn(ctx, execID, wantCwd)
 	if err != nil {
 		err = fmt.Errorf("workspace on executor %s: %w", shortID(execID), err)
@@ -935,9 +968,7 @@ func (b *boundExecutor) provision(ctx context.Context, bd *binding, execID strin
 		// One-time note, on the first provision of a non-home binding: the
 		// child's cwd does NOT apply here, and a model that assumes it does
 		// writes into the wrong tree.
-		if t := tools.ExecutorTargetFrom(ctx); t != nil {
-			t.Note = fmt.Sprintf("[%s] working from %s", b.binder.DisplayName(execID), workdir)
-		}
+		appendExecutorNote(ctx, fmt.Sprintf("[%s] working from %s", b.binder.DisplayName(execID), workdir))
 	}
 	return bd, nil
 }
@@ -1327,6 +1358,24 @@ func (b *boundExecutor) doRecover(ctx context.Context, bd *binding, execID, stal
 	if execID != "" && b.binder.IsLive(execID) {
 		if b.reprovisionInPlace(ctx, bd, execID, staleWS) {
 			return true
+		}
+	}
+
+	// Still not live — but "not live" is not the same as "gone" for an executor
+	// this daemon installed over ssh: its remote process can be restarted on the
+	// same machine, and a NAMED call must not fail just because the process
+	// ended. EnsureConnected is a no-op for every other executor, and a failed
+	// relaunch falls through to the lost-executor path below rather than failing
+	// the child.
+	if execID != "" {
+		if rerr := b.binder.EnsureConnected(ctx, execID); rerr != nil {
+			slog.Warn("could not relaunch the installed executor a child was using; "+
+				"treating it as lost",
+				"child", b.childID, "executor", shortID(execID), "error", rerr)
+		} else if b.binder.IsLive(execID) {
+			if b.reprovisionInPlace(ctx, bd, execID, staleWS) {
+				return true
+			}
 		}
 	}
 

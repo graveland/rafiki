@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executorinstall"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/sandbox"
@@ -163,4 +167,272 @@ func TestReachableSandboxStoreErrorIsAnError(t *testing.T) {
 	ck.Error(err, "a store error must be reported, not swallowed")
 	ck.StrContains(err.Error(), "sandbox store is down", "the store's error must reach the caller; got %q", err)
 	ck.Empty(got, "and never a fall-through to the ordinary executors")
+}
+
+// --- Reachable: executors installed over ssh --------------------------------
+
+// installStoreWith is an install store holding one LIVE recipe per executor id,
+// all owned by ownerUserID.
+func installStoreWith(t *testing.T, ownerUserID string, executorIDs ...string) *fakeInstallStore {
+	t.Helper()
+	installs := newFakeInstallStore()
+	for i, id := range executorIDs {
+		if err := installs.Insert(context.Background(), executorinstall.Row{
+			ID:                 fmt.Sprintf("recipe-%d", i+1),
+			OwnerUserID:        ownerUserID,
+			ExecutorID:         id,
+			LauncherExecutorID: "exec-launcher",
+			Target:             "someone@" + id,
+			Instance:           "work",
+		}); err != nil {
+			t.Fatalf("seed install row for %s: %v", id, err)
+		}
+	}
+	return installs
+}
+
+// setInstaller records which child asked for an executor's install.
+func setInstaller(t *testing.T, installs *fakeInstallStore, executorID, childID string) {
+	t.Helper()
+	installs.mu.Lock()
+	defer installs.mu.Unlock()
+	for id, row := range installs.rows {
+		if row.ExecutorID == executorID {
+			row.InstalledByChild = childID
+			installs.rows[id] = row
+		}
+	}
+}
+
+// reachController is a Controller wired with exactly what the reachable set
+// reads: a fake pool, a fake executor store and an install store.
+func reachController(ownerUserID string, live []execpool.LiveExecutor, rows map[string]executors.Executor, installs *fakeInstallStore) *Controller {
+	execs := newFakeExecStore()
+	for id, e := range rows {
+		execs.execs[id] = e
+	}
+	return &Controller{
+		st:        childstore.New(),
+		execPool:  &fakePool{live: live},
+		execStore: execs,
+		install:   newInstallState(installs, nil),
+	}
+}
+
+// installedExecRow is the DURABLE row of an executor installed over ssh: its
+// facts are the daemon's, written at Create.
+func installedExecRow(id, machine, ownerUserID string) executors.Executor {
+	return executors.Executor{
+		ID: id, Enabled: true, OwnerUserID: ownerUserID,
+		Labels: map[string]string{"machine": machine},
+	}
+}
+
+// insertChildRow stores a child with a parent link, for the lineage walks.
+func insertChildRow(c *Controller, id, parent, ownerUserID string) {
+	labels := map[string]string{"owner": "u"}
+	if parent != "" {
+		labels[childstore.LabelParent] = parent
+		labels[childstore.LabelRoot] = parent
+	}
+	c.st.Insert(&childstore.Session{
+		ChildID: id, Status: protocol.StatusIdle, StartedAt: time.Now(),
+		OwnerUserID: ownerUserID, Labels: labels,
+	})
+}
+
+// reachIDs is the ids of a reachable set, in its order.
+func reachIDs(set []executors.Executor) []string {
+	out := make([]string, 0, len(set))
+	for _, e := range set {
+		out = append(out, e.ID)
+	}
+	return out
+}
+
+// An executor installed over ssh that is NOT live is still reachable: its row
+// is durable, and the call is what relaunches it. Without this a down installed
+// machine would need a reinstall or a reconnect before anyone could name it.
+func TestReachableIncludesOfflineInstalledRow(t *testing.T) {
+	ck := assert.NewAborting(t)
+	installs := installStoreWith(t, "u1", "exec-ublk")
+	c := reachController("u1",
+		[]execpool.LiveExecutor{nativeExec("exec-grey", "greyshift", "u1")},
+		map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u1")},
+		installs,
+	)
+	b := c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"})
+
+	got, err := b.Reachable("c1")
+	ck.Require().NoError(err, "Reachable")
+	ck.EqDeep([]string{"exec-grey", "exec-ublk"}, reachIDs(got),
+		"the down installed executor must be reachable alongside the live one; got %v", reachIDs(got))
+	ck.False(b.IsLive("exec-ublk"),
+		"it is reachable because of its row, NOT because it is live — the call relaunches it")
+}
+
+// Reachability never widens: an offline installed row is narrowed exactly as a
+// live one is — by the spawn's selector, by the executor row's owner, and by
+// the install row's owner.
+func TestReachableOfflineInstalledStillNarrowed(t *testing.T) {
+	t.Run("a selector that does not match excludes it", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		installs := installStoreWith(t, "u1", "exec-ublk")
+		c := reachController("u1",
+			[]execpool.LiveExecutor{nativeExec("exec-grey", "greyshift", "u1")},
+			map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u1")},
+			installs,
+		)
+		b := c.binderFor(protocol.SpawnRequest{ExecutorSelector: "machine=greyshift"},
+			executorOwner{Name: "u", UserID: "u1"})
+
+		got, err := b.Reachable("c1")
+		ck.Require().NoError(err, "Reachable")
+		ck.EqDeep([]string{"exec-grey"}, reachIDs(got),
+			"an installed executor the spawn's selector excludes is not reachable; got %v", reachIDs(got))
+	})
+
+	t.Run("another owner's install row is never read", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		// The recipe belongs to u2; the executor row would otherwise match u1.
+		installs := installStoreWith(t, "u2", "exec-ublk")
+		c := reachController("u1",
+			[]execpool.LiveExecutor{nativeExec("exec-grey", "greyshift", "u1")},
+			map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u1")},
+			installs,
+		)
+		b := c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"})
+
+		got, err := b.Reachable("c1")
+		ck.Require().NoError(err, "Reachable")
+		ck.EqDeep([]string{"exec-grey"}, reachIDs(got),
+			"ListLive is an EXACT owner match, so a foreign recipe adds nothing; got %v", reachIDs(got))
+	})
+
+	t.Run("an installed executor owned by another user is excluded", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		installs := installStoreWith(t, "u1", "exec-ublk")
+		c := reachController("u1",
+			[]execpool.LiveExecutor{nativeExec("exec-grey", "greyshift", "u1")},
+			// The recipe is ours; the executor row is not.
+			map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u2")},
+			installs,
+		)
+		b := c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"})
+
+		got, err := b.Reachable("c1")
+		ck.Require().NoError(err, "Reachable")
+		ck.EqDeep([]string{"exec-grey"}, reachIDs(got),
+			"the ownership rule applies to a down installed row too; got %v", reachIDs(got))
+	})
+
+	t.Run("a workspace mode the row does not offer excludes it", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		installs := installStoreWith(t, "u1", "exec-ublk")
+		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
+		row.WorkspaceMode = "pinned"
+		c := reachController("u1",
+			[]execpool.LiveExecutor{nativeExec("exec-grey", "greyshift", "u1")},
+			map[string]executors.Executor{"exec-ublk": row},
+			installs,
+		)
+		b := c.binderFor(protocol.SpawnRequest{WorkspaceMode: "ephemeral"},
+			executorOwner{Name: "u", UserID: "u1"})
+
+		got, err := b.Reachable("c1")
+		ck.Require().NoError(err, "Reachable")
+		ck.Empty(got, "a pinned installed executor cannot serve an ephemeral spawn; got %v", reachIDs(got))
+	})
+}
+
+// The installer's own grant: an executor installed by a child's ANCESTOR is
+// reachable to that child whatever the child's selector says, and to no other
+// tree. Authority flows down.
+func TestReachableInstallerLineageBypassesSelector(t *testing.T) {
+	ck := assert.NewAborting(t)
+	installs := installStoreWith(t, "u1", "exec-ublk")
+	c := reachController("u1",
+		[]execpool.LiveExecutor{
+			nativeExec("exec-grey", "greyshift", "u1"),
+			// Live, so this is an ordinary candidate the SELECTOR drops — which
+			// is what makes the second rule's bypass observable.
+			nativeExec("exec-ublk", "ublk-s2", "u1"),
+		},
+		map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u1")},
+		installs,
+	)
+	insertChildRow(c, "c_root", "", "u1")
+	insertChildRow(c, "c_mid", "c_root", "u1")
+	insertChildRow(c, "c_other", "c_root", "u1")
+	insertChildRow(c, "c_otherkid", "c_other", "u1")
+	// The grandparent installed it.
+	setInstaller(t, installs, "exec-ublk", "c_mid")
+
+	b := c.binderFor(protocol.SpawnRequest{ParentChildID: "c_mid", ExecutorSelector: "machine=greyshift"},
+		executorOwner{Name: "u", UserID: "u1"})
+	got, err := b.Reachable("c_gc")
+	ck.Require().NoError(err, "Reachable")
+	ck.EqDeep([]string{"exec-grey", "exec-ublk"}, reachIDs(got),
+		"the installer's grandchild reaches it even though its selector excludes it; got %v", reachIDs(got))
+
+	// A sibling tree under the same root: the installer is not on its chain.
+	other := c.binderFor(protocol.SpawnRequest{ParentChildID: "c_other", ExecutorSelector: "machine=greyshift"},
+		executorOwner{Name: "u", UserID: "u1"})
+	got, err = other.Reachable("c_otherkid")
+	ck.Require().NoError(err, "Reachable")
+	ck.EqDeep([]string{"exec-grey"}, reachIDs(got),
+		"a sibling tree must not inherit the installer's grant; got %v", reachIDs(got))
+
+	// An executor BOTH rules reach appears ONCE: a duplicate would make one
+	// machine look like two and turn every implicit call into "pass executor".
+	both := c.binderFor(protocol.SpawnRequest{ParentChildID: "c_mid"},
+		executorOwner{Name: "u", UserID: "u1"})
+	got, err = both.Reachable("c_gc")
+	ck.Require().NoError(err, "Reachable")
+	ck.EqDeep([]string{"exec-grey", "exec-ublk"}, reachIDs(got),
+		"a live installed executor on the installer's chain must not be listed twice; got %v", reachIDs(got))
+}
+
+// A sandbox-owned child returns its sandbox and nothing else, installed rows
+// included: the same exclusivity that keeps it off ordinary hosts.
+func TestReachableSandboxOwnedChildSeesNoInstalled(t *testing.T) {
+	ck := assert.NewAborting(t)
+	env := newSandboxEnv(t)
+	owner := sandboxOwner()
+	env.pool.live = []execpool.LiveExecutor{
+		spawnedExecutor("exec-sbx", owner.UserID),
+		nativeExec("exec-grey", "greyshift", owner.UserID),
+	}
+	insertSandboxRow(env, sandbox.Row{
+		ID: "sbx-1", Name: "box", OwnerChild: "c1", OwnerUserID: owner.UserID,
+		ExecutorID: "exec-sbx", State: sandboxStateReady, Scope: protocol.ScopeSelf,
+	})
+	env.exec.execs["exec-ublk"] = installedExecRow("exec-ublk", "ublk-s2", owner.UserID)
+	env.ctrl.install = newInstallState(installStoreWith(t, owner.UserID, "exec-ublk"), nil)
+
+	b := env.ctrl.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: owner.UserID})
+	got, err := b.Reachable("c1")
+	ck.Require().NoError(err, "Reachable")
+	ck.EqDeep([]string{"exec-sbx"}, reachIDs(got),
+		"an owned sandbox is the only reachable executor, installed rows included; got %v", reachIDs(got))
+}
+
+// A down installed executor is a machine the child can name, so it counts when
+// an implicit call has to decide it is ambiguous: silently calling the one live
+// machine instead is how work lands on a host the caller did not choose.
+func TestBoundExecutorAmbiguityCountsOfflineInstalled(t *testing.T) {
+	ck := assert.NewAborting(t)
+	installs := installStoreWith(t, "u1", "exec-ublk")
+	c := reachController("u1",
+		[]execpool.LiveExecutor{nativeExec("exec-grey", "greyshift", "u1")},
+		map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u1")},
+		installs,
+	)
+	be := newBoundExecutor("c1", c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"}))
+
+	_, err := be.Execute(context.Background(), "read", nil)
+	ck.Require().Error(err, "two reachable executors, one of them down, is still ambiguous")
+	ck.StrContains(err.Error(), "this agent can reach 2 executors", "the down installed one counts: %v", err)
+	ck.StrContains(err.Error(), "pass executor", "the model must be told to name one: %v", err)
+	ck.Len(c.execPool.(*fakePool).provisionCalls(), 0, "nothing may be provisioned for an ambiguous call")
 }

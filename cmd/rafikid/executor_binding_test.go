@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/skills"
 
 	"github.com/multigres/testkit/assert"
@@ -222,6 +226,13 @@ type fakeBinder struct {
 	// onProvisionCtx is onProvision with the CALL's context, for tests that
 	// need the provision to observe cancellation.
 	onProvisionCtx func(ctx context.Context, execID string)
+
+	// ensureCalls records EnsureConnected calls in order, and ensureErr is what
+	// it answers. ensureFlipsLive makes a successful call bring the executor up,
+	// the way a real relaunch does.
+	ensureCalls     []string
+	ensureErr       error
+	ensureFlipsLive bool
 
 	// clientOverride, when non-nil, is what ProvisionOn returns instead of a
 	// registered fakeExec. The owner-propagation test needs a client that
@@ -453,6 +464,25 @@ func (f *fakeBinder) IsLive(id string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.live && f.liveByID[id]
+}
+
+// EnsureConnected records every call and, when ensureFlipsLive is set, behaves
+// like a real relaunch: the executor becomes live (and reachable) the moment the
+// fake is asked to bring it back.
+func (f *fakeBinder) EnsureConnected(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureCalls = append(f.ensureCalls, id)
+	if f.ensureErr != nil {
+		return f.ensureErr
+	}
+	if f.ensureFlipsLive {
+		f.liveByID[id] = true
+		if !slices.Contains(f.reachable, id) {
+			f.reachable = append(f.reachable, id)
+		}
+	}
+	return nil
 }
 
 func (f *fakeBinder) NoteBinding(_, execID, wsID string) {
@@ -2867,4 +2897,119 @@ func TestHomeProvisionThatAcquiredTheSlotAfterAMigrationNamesTheMigrationExecuto
 	fb.mu.Unlock()
 	c.Eq(1, undos, "exactly one compensation — the write did happen and was then taken back; undos")
 	assertNoWorkspaceLeaked(t, be, fb)
+}
+
+// --- Lazy relaunch of installed executors -----------------------------------
+
+// installedBinder is a controllerBinder over the install fixture's fakes, bound
+// to the fixture's owner. The fixture's pool holds the launcher and nothing
+// else; the target executor is reachable through its install row while down.
+func (f *installFixture) installedBinder() *controllerBinder {
+	return f.ctrl.binderFor(protocol.SpawnRequest{}, executorOwner{
+		Name: installTestOwnerName, UserID: installTestOwner,
+	}).(*controllerBinder)
+}
+
+// A NAMED call to a down installed executor relaunches it once, provisions once,
+// and tells the model what happened in the one-time note slot.
+func TestBoundExecutorRelaunchesOnNamedCall(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutor()
+	// The relayed executor connects as soon as its session opens, which is the
+	// event a real relaunch waits for.
+	f.connectAs = "exec-1"
+
+	be := newBoundExecutor("c1", f.installedBinder())
+	tgt := &tools.ExecutorTarget{Requested: "ublk-s2"}
+	ctx := tools.WithExecutorTarget(context.Background(), tgt)
+
+	_, err := be.Execute(ctx, "read", nil)
+	c.Require().NoError(err, "a named call to a down installed executor must relaunch it and then work")
+	c.Eq(1, f.launcher.serveCalls(), "exactly one ssh session")
+	c.Eq(1, len(f.pool.provisionCalls()), "exactly one provision")
+	c.Eq(1, strings.Count(tgt.Note, "relaunched"),
+		"the relaunch note is written once; note = %q", tgt.Note)
+	c.StrContains(tgt.Note,
+		"[ublk-s2] relaunched (previous session ended unknown); anything not committed there may be gone",
+		"the note names the executor and is honest about not knowing when it ended; note = %q", tgt.Note)
+	c.StrContains(tgt.Note, "[ublk-s2] working from",
+		"the cwd note is JOINED with the relaunch note, not overwritten; note = %q", tgt.Note)
+}
+
+// A relaunch that fails is the call's answer and names the launcher and its ssh
+// text — and it leaves the child usable: the failed placeholder is dropped, so
+// the next call tries again rather than inheriting a sticky failure.
+func TestBoundExecutorRelaunchFailureNamesLauncher(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutor()
+	// The launcher's durable row exists (so its machine name resolves) but it is
+	// not connected: nothing can start the target.
+	f.execs.execs[installTestLauncher] = installLauncherLive(
+		installTestLauncher, installTestLauncherN, "work", "pinned").Executor
+	f.pool.live = nil
+
+	be := newBoundExecutor("c1", f.installedBinder())
+	for i := 0; i < 2; i++ {
+		_, err := be.Execute(namedCall("ublk-s2"), "read", nil)
+		c.Require().Error(err, "call %d: a relaunch with no launcher must fail the call", i)
+		c.Eq("[ublk-s2] relaunch failed via greyshift: launcher greyshift is not connected",
+			err.Error(), "call %d error text", i)
+	}
+	c.Eq(0, len(f.pool.provisionCalls()), "nothing may be provisioned on an executor that never came up")
+	c.Eq(0, f.launcher.serveCalls(), "and no ssh session was opened")
+}
+
+// Eight children of one daemon asking at once cost ONE ssh session: the launch
+// is coalesced per executor id, and every caller shares its outcome.
+func TestBoundExecutorRelaunchCoalescesConcurrentCalls(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutor()
+
+	// Hold the session open and announce nothing: the leader stays inside the
+	// launch, which is the only deterministic way to know a follower joined it
+	// rather than starting a second one.
+	opened := make(chan struct{})
+	var once sync.Once
+	f.state.serve = func(ctx context.Context, _ net.Conn) error {
+		once.Do(func() { close(opened) })
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	binder := f.installedBinder()
+	leader := make(chan error, 1)
+	go func() { leader <- execNamed(newBoundExecutor("c1", binder), "ublk-s2") }()
+	select {
+	case <-opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leader never opened its ssh session")
+	}
+
+	// A second child whose context is already dead: it JOINS the flight and
+	// returns its own cancellation, which is only true if it never opened a
+	// session of its own.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	follower := newBoundExecutor("c2", binder)
+	_, ferr := follower.Execute(tools.WithExecutorTarget(cancelled, &tools.ExecutorTarget{Requested: "ublk-s2"}), "read", nil)
+	c.ErrorIs(ferr, context.Canceled, "a coalesced caller returns its own context's error")
+	c.Eq(1, f.launcher.serveCalls(), "two callers must cost ONE ssh session")
+
+	f.ctrl.installConnected("exec-1")
+	select {
+	case err := <-leader:
+		c.NoError(err, "the leader completes when the executor connects")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leader never returned after the connection was announced")
+	}
+	c.Eq(1, f.launcher.serveCalls(), "still one session")
+}
+
+// execNamed runs one named tool call through be and returns only the error.
+func execNamed(be *boundExecutor, executor string) error {
+	_, err := be.Execute(namedCall(executor), "read", nil)
+	return err
 }

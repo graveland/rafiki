@@ -140,9 +140,21 @@ func (b *controllerBinder) Reachable(childID string) ([]executors.Executor, erro
 		return []executors.Executor{*sandboxExec}, nil
 	}
 
-	candidates, _, _, _, err := b.c.narrowedExecutorCandidates(b.req, b.owner)
+	candidates, _, childLabels, sel, err := b.c.narrowedExecutorCandidates(b.req, b.owner)
 	if err != nil {
 		return nil, err
+	}
+	// The executors installed over ssh: offline rows through the same pipeline,
+	// plus the installer's own grant. Appended BEFORE the ref and ambiguity
+	// handling, so a down installed machine is a name the caller can pass and
+	// counts as one when the call names nothing.
+	installed, ierr := b.c.reachableInstalledCandidates(b.req, childID, childLabels, sel, b.owner)
+	if ierr != nil {
+		return nil, ierr
+	}
+	if len(installed) > 0 {
+		candidates = appendExecutorRows(candidates, installed...)
+		sortCandidates(candidates)
 	}
 	if b.req.ExecutorRef != "" {
 		// An explicit ref bypasses SEARCH, never confinement: the hit must come
@@ -159,6 +171,49 @@ func (b *controllerBinder) Reachable(childID string) ([]executors.Executor, erro
 		candidates = dropSandboxCandidates(candidates)
 	}
 	return candidates, nil
+}
+
+// EnsureConnected makes executorID usable for a call that is about to need it.
+//
+// Live → nil. An executor THIS daemon installed over ssh that is not live →
+// relaunch it through its launcher and wait for it to connect. Anything else →
+// nil: an executor that is merely down is not ours to start, and its own paths
+// (selection, recovery) already own whether it comes back.
+//
+// Relaunching is lazy on purpose. The daemon keeps no fleet of idle ssh
+// sessions; an installed executor is started the moment a call needs it, which
+// is the same moment the caller learns it had been down — through the note the
+// relaunch writes into the call's one-time slot.
+func (b *controllerBinder) EnsureConnected(ctx context.Context, executorID string) error {
+	if executorID == "" || b.IsLive(executorID) {
+		return nil
+	}
+	row, installed := b.c.installRow(ctx, executorID)
+	if !installed {
+		return nil
+	}
+	if err := b.c.launchInstalled(ctx, executorID); err != nil {
+		return fmt.Errorf("[%s] relaunch failed via %s: %w",
+			b.DisplayName(executorID), b.c.launcherName(ctx, row.LauncherExecutorID), err)
+	}
+	appendExecutorNote(ctx, fmt.Sprintf(
+		"[%s] relaunched (previous session ended %s); anything not committed there may be gone",
+		b.DisplayName(executorID), b.c.installAgo(ctx, executorID)))
+	return nil
+}
+
+// installAgo renders how long ago an installed executor was last seen, for the
+// relaunch note: rounded to a second, and "unknown" when the row never recorded
+// one.
+func (c *Controller) installAgo(ctx context.Context, executorID string) string {
+	if c.execStore == nil {
+		return "unknown"
+	}
+	e, err := c.execStore.Get(ctx, executorID)
+	if err != nil || e.LastSeenAt.IsZero() {
+		return "unknown"
+	}
+	return time.Since(e.LastSeenAt).Round(time.Second).String()
 }
 
 // Home reads the child's recorded home executor.
@@ -190,10 +245,24 @@ func (b *controllerBinder) SetHomeLabel(childID, executorID string) {
 // DisplayName names an executor the way an operator and the model see it: its
 // machine label, else a short id (a row without a machine label is an operator
 // error the enrollment flow warns about).
+//
+// The pool only holds CONNECTED executors, so a label lookup that stopped there
+// would name a DOWN installed executor by its id — which is exactly the case a
+// relaunch message or an unreachable-name refusal has to get right. The durable
+// row is the fallback, and only when the pool misses.
 func (b *controllerBinder) DisplayName(executorID string) string {
 	if row, ok := b.c.executorRow(executorID); ok {
 		if machine := row.Labels["machine"]; machine != "" {
 			return machine
+		}
+	}
+	if b.c.execStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), installLookupTimeout)
+		defer cancel()
+		if row, ok := b.c.executorRowByID(ctx, executorID); ok {
+			if machine := row.Labels["machine"]; machine != "" {
+				return machine
+			}
 		}
 	}
 	return shortID(executorID)

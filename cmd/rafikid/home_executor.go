@@ -70,8 +70,10 @@ const homeProbeTimeout = 10 * time.Second
 //     checked.
 //
 // A candidate from rules 2–3 outside reach is skipped, never used: reach is the
-// confinement-narrowed live set, and home is a choice WITHIN it. With an empty
-// reach the caller's own unbound warning covers the diagnostic, and with a home
+// confinement-narrowed live set, and home is a choice WITHIN it. An executor
+// installed over ssh is never a home at all (see withoutInstalled): naming one
+// as home_executor is refused, and rules 2–5 never see one. With an empty reach
+// the caller's own unbound warning covers the diagnostic, and with a home
 // that cannot be bound the runtime warns from spawnHomeInfo — so the no-home
 // warning here is only the fallback for a reach set that is neither empty nor
 // probed (a multi-executor spawn with no cwd).
@@ -82,6 +84,16 @@ func (c *Controller) resolveHomeExecutor(ctx context.Context, req protocol.Spawn
 		// declaration and must not be able to strand the child.
 		persisted := c.persistedHome(be.childID) == req.HomeExecutor
 		if match, ok := matchExecutorRef(req.HomeExecutor, reach); ok {
+			// An executor installed over ssh is never a home: its lifecycle
+			// belongs to the installer, and a relaunch replaces the remote
+			// process — and with it every workspace on that machine. A PERSISTED
+			// home is exempt: this resolver never names one, so such a label can
+			// only come from an older daemon, and refusing it would make the child
+			// unresumable.
+			if !persisted && c.isInstalledExecutor(match.ID) {
+				return "", nil, fmt.Errorf("executor %s was installed over ssh and cannot be a home executor",
+					be.binder.DisplayName(match.ID))
+			}
 			return match.ID, nil, nil
 		}
 		if persisted {
@@ -90,6 +102,11 @@ func (c *Controller) resolveHomeExecutor(ctx context.Context, req protocol.Spawn
 		return "", nil, fmt.Errorf("home executor %q is not in this spawn's reachable executors (%s)",
 			req.HomeExecutor, reachNames(be.binder, reach))
 	}
+
+	// From here down home is a choice WITHIN this set, and an executor installed
+	// over ssh is not in it — so the single-reachable rule and the cwd probe both
+	// skip installed rows without each having to remember to.
+	reach = c.withoutInstalled(reach)
 
 	// Rules 2 and 3 are CANDIDATES, never authority: an executor outside reach
 	// is skipped and resolution carries on, because reach is what confines this
@@ -121,6 +138,31 @@ func (c *Controller) resolveHomeExecutor(ctx context.Context, req protocol.Spawn
 		return "", []string{noHomeWarning}, nil
 	}
 	return c.probeHomeExecutor(ctx, req, be, reach)
+}
+
+// withoutInstalled drops every executor carrying a live install row.
+//
+// An executor installed over ssh is never a home: its lifecycle belongs to the
+// installer (a relaunch replaces the remote process, and with it every workspace
+// on that machine), so a child's cwd, project instructions and skills must not
+// live on one. Home is a choice WITHIN this set; with it empty and no rule naming
+// a home, the child starts with none — which is the direction that fails safely.
+//
+// Narrowing, so a store that cannot be read leaves the set alone
+// (isInstalledExecutor reads an error as "no row"): dropping every executor on a
+// hiccup would leave every spawn with no home.
+func (c *Controller) withoutInstalled(reach []executors.Executor) []executors.Executor {
+	if c.install == nil || c.install.store == nil {
+		return reach
+	}
+	kept := reach[:0:0]
+	for _, e := range reach {
+		if c.isInstalledExecutor(e.ID) {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 // probeHomeExecutor is rule 5: let the machines themselves answer "is this

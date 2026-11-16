@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executorinstall"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -362,18 +365,37 @@ func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor,
 // for; effectiveExecutorSet reads it back from the stored snapshot, and
 // narrowedExecutorCandidates carries the caller's own executorOwner.UserID
 // for a child that has no row yet.
+//
+// The candidate source is the LIVE pool. effectiveExecutorSetOver is the
+// narrowing itself, so a second candidate source (Reachable's offline
+// installed rows) can never drift from this one.
 func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[string]string, ownerUserID string) ([]executors.Executor, error) {
 	if c.execPool == nil {
 		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
 	}
+	live := c.execPool.Live()
+	rows := make([]executors.Executor, 0, len(live))
+	for _, le := range live {
+		rows = append(rows, le.Executor)
+	}
+	return c.effectiveExecutorSetOver(rows, childID, childLabels, ownerUserID)
+}
 
-	// Start from every live executor that ADMITS the child. The executor-side
+// effectiveExecutorSetOver is the whole narrowing, applied to a candidate ROW
+// set the caller supplies: owner, then the executor's own admission selector,
+// then every lineage selector root-first.
+//
+// It exists as a separate function so Reachable can run the executors installed
+// over ssh through EXACTLY the pipeline the live ones get. A second copy of this
+// ordering would be a second place for the confinement rule to be wrong.
+func (c *Controller) effectiveExecutorSetOver(rows []executors.Executor, childID string, childLabels map[string]string, ownerUserID string) ([]executors.Executor, error) {
+	// Start from every candidate that ADMITS the child. The executor-side
 	// selector is evaluated once, against the child's own labels, because an
 	// agent-side selector alone is permissive by default: it says what the
 	// agent wants, not what the executor will take.
 	var set []executors.Executor
-	for _, le := range c.execPool.Live() {
-		if !le.Executor.Enabled {
+	for _, e := range rows {
+		if !e.Enabled {
 			continue
 		}
 		// Ownership is checked BEFORE Admits, and in addition to it, never
@@ -381,10 +403,10 @@ func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[str
 		// own (empty on both sides counts as equal — an unowned executor
 		// serves only unowned children), with no admin exception. Admits can
 		// only narrow this further, never widen past it.
-		if le.Executor.OwnerUserID != ownerUserID {
+		if e.OwnerUserID != ownerUserID {
 			continue
 		}
-		admits, err := executors.ParseSelector(le.Executor.Admits)
+		admits, err := executors.ParseSelector(e.Admits)
 		if err != nil {
 			// A malformed admission selector must EXCLUDE, never admit. An
 			// operator typo that silently opens a machine to every child is
@@ -394,7 +416,7 @@ func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[str
 		if !admits.Matches(childLabels) {
 			continue
 		}
-		set = append(set, le.Executor)
+		set = append(set, e)
 	}
 
 	// Then narrow by every selector from the root down to and including this
@@ -415,6 +437,214 @@ func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[str
 		set = executors.Narrow(set, sel)
 	}
 	return set, nil
+}
+
+// installLookupTimeout bounds the install-table reads the reachable set and the
+// home resolver make. Each is one indexed read, and a wedged store must not
+// wedge a tool call — the same shape (and reason) as sandboxBindTimeout.
+const installLookupTimeout = 3 * time.Second
+
+// installRow returns the LIVE install row for executorID, i.e. the row that says
+// this executor was installed over ssh and has not been taken away again.
+//
+// A store error reads as "no row" and is logged. Every caller asks a NARROWING
+// question (may this row add reach? may this executor be a home?), so failing to
+// find a row withholds reach or a home rather than granting either.
+func (c *Controller) installRow(ctx context.Context, executorID string) (executorinstall.Row, bool) {
+	if c.install == nil || c.install.store == nil || executorID == "" {
+		return executorinstall.Row{}, false
+	}
+	row, ok, err := c.install.store.ByExecutor(ctx, executorID)
+	if err != nil {
+		slog.Warn("could not read an executor's install row; treating it as not installed",
+			"executor", shortID(executorID), "error", err)
+		return executorinstall.Row{}, false
+	}
+	return row, ok
+}
+
+// isInstalledExecutor reports whether executorID carries a live install row.
+//
+// It owns a bounded context of its own rather than taking the caller's: the
+// callers are a reach computation and a home resolution, and neither may spend
+// a spawn's whole budget on one store read.
+func (c *Controller) isInstalledExecutor(executorID string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), installLookupTimeout)
+	defer cancel()
+	_, ok := c.installRow(ctx, executorID)
+	return ok
+}
+
+// executorRowByID reads an executor's DURABLE row, live or not.
+//
+// c.executorRow scans the live pool and cannot answer for an executor that is
+// down, which is exactly the row the installed-executor reach needs.
+func (c *Controller) executorRowByID(ctx context.Context, executorID string) (executors.Executor, bool) {
+	if c.execStore == nil || executorID == "" {
+		return executors.Executor{}, false
+	}
+	e, err := c.execStore.Get(ctx, executorID)
+	if err != nil {
+		if !errors.Is(err, executors.ErrNotFound) {
+			slog.Warn("could not read an executor's row for the reachable set",
+				"executor", shortID(executorID), "error", err)
+		}
+		return executors.Executor{}, false
+	}
+	return e, true
+}
+
+// reachableInstalledCandidates is the part of an agent's reachable set the live
+// pool cannot answer for: the executors installed over ssh.
+//
+// Two rules, both read from the install row and both owned here:
+//
+//  1. an installed executor that is NOT live is still reachable, through the
+//     SAME narrowing the live rows get — owner, admission selector, lineage
+//     selectors, this spawn's own selector, workspace mode. A down machine
+//     therefore stays a name the agent can call, and the call relaunches it
+//     (controllerBinder.EnsureConnected).
+//  2. every installed executor whose InstalledByChild is the agent itself or
+//     one of its ANCESTORS is reachable to that lineage whatever the selector
+//     says: the installer's own grant, checked only against the owner rule.
+//     Authority flows down the tree, so a spawner's install is usable by what
+//     it spawned; a sibling tree's is not, because it is not on this chain.
+//
+// A read failure adds NOTHING and is logged: this path only ever WIDENS reach,
+// so a failure here must never widen it. Ordering is the caller's
+// (sortCandidates over the combined slice).
+func (c *Controller) reachableInstalledCandidates(
+	req protocol.SpawnRequest, childID string, childLabels map[string]string,
+	sel executors.Selector, owner executorOwner,
+) ([]executors.Executor, error) {
+	if c.install == nil || c.install.store == nil || c.execStore == nil {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), installLookupTimeout)
+	defer cancel()
+
+	// The owner's OWN rows, never every owner's: an install is caller-bound, and
+	// ListLive("") means the ownerless rows, not all of them.
+	rows, err := c.install.store.ListLive(ctx, owner.UserID)
+	if err != nil {
+		slog.Warn("could not list installed executors; only live ones are reachable",
+			"owner", owner.Name, "error", err)
+		return nil, nil
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	live := map[string]bool{}
+	if c.execPool != nil {
+		for _, le := range c.execPool.Live() {
+			live[le.Executor.ID] = true
+		}
+	}
+
+	// Rule 1: the offline rows, through the live pipeline.
+	var offline []executors.Executor
+	for _, row := range rows {
+		if live[row.ExecutorID] {
+			continue
+		}
+		if e, ok := c.executorRowByID(ctx, row.ExecutorID); ok {
+			offline = append(offline, e)
+		}
+	}
+	// The same two steps narrowedExecutorCandidates applies to the live rows:
+	// the parent's effective set (which is where lineage narrowing happens),
+	// then this spawn's own selector and workspace mode.
+	narrowed, nerr := c.effectiveExecutorSetOver(offline, req.ParentChildID, childLabels, owner.UserID)
+	if nerr != nil {
+		return nil, nerr
+	}
+	narrowed = executors.Narrow(narrowed, sel)
+	narrowed = narrowByWorkspaceMode(narrowed, req.WorkspaceMode)
+	narrowed = dropChildOwnedSandboxes(narrowed)
+
+	out := make([]executors.Executor, 0, len(narrowed)+len(rows))
+	seen := make(map[string]bool, len(narrowed))
+	add := func(e executors.Executor) {
+		if seen[e.ID] {
+			return
+		}
+		seen[e.ID] = true
+		out = append(out, e)
+	}
+	for _, e := range narrowed {
+		add(e)
+	}
+
+	// Rule 2: the installer's own grant, live or offline.
+	for _, row := range rows {
+		if seen[row.ExecutorID] {
+			continue
+		}
+		if !c.installerOnChain(req, childID, row.InstalledByChild) {
+			continue
+		}
+		e, ok := c.executorRowByID(ctx, row.ExecutorID)
+		if !ok || !e.Enabled || e.OwnerUserID != owner.UserID || isChildOwnedSandboxRow(e) {
+			continue
+		}
+		add(e)
+	}
+	return out, nil
+}
+
+// installerOnChain reports whether installerChildID is childID itself or one of
+// its ANCESTORS.
+//
+// A fresh spawn's own row does not exist yet, so the walk starts at its PARENT
+// in that case — the spawner, which is the only child an install at spawn time
+// can have been made by. Bounded by maxLineageWalk like every other walk of the
+// parent chain: a corrupt record must not wedge selection.
+func (c *Controller) installerOnChain(req protocol.SpawnRequest, childID, installerChildID string) bool {
+	if c.st == nil || installerChildID == "" || childID == "" {
+		return false
+	}
+	cur := childID
+	if _, ok := c.st.Get(cur); !ok {
+		cur = req.ParentChildID
+	}
+	for range maxLineageWalk {
+		if cur == "" {
+			return false
+		}
+		if cur == installerChildID {
+			return true
+		}
+		parent, ok := c.st.ParentOf(cur)
+		if !ok {
+			return false
+		}
+		cur = parent
+	}
+	return false
+}
+
+// appendExecutorRows appends the rows whose id the set does not already hold,
+// preserving both orders.
+//
+// Needed because the two reach rules can name the same executor: a LIVE installed
+// executor the selector already admits satisfies rule 1's narrowing (so it is in
+// the live candidate list) AND rule 2's installer grant. A duplicate would make
+// one reachable machine look like two and turn every implicit call on that host
+// into "pass executor".
+func appendExecutorRows(set []executors.Executor, rows ...executors.Executor) []executors.Executor {
+	have := make(map[string]bool, len(set)+len(rows))
+	for _, e := range set {
+		have[e.ID] = true
+	}
+	for _, e := range rows {
+		if have[e.ID] {
+			continue
+		}
+		have[e.ID] = true
+		set = append(set, e)
+	}
+	return set
 }
 
 // inheritExecutorGrant fills in an executor grant the request left silent,
