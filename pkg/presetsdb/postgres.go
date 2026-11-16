@@ -25,7 +25,9 @@ type pgStore struct{ pool *pgxpool.Pool }
 // executor, system_prompt, append_system_prompt, written_by_child) are
 // COALESCEd to ” because the domain type uses the empty string as its
 // unset marker; tools/skills/mcp_servers are NOT coalesced -- their tri-state
-// nil (kind default) vs non-nil-empty (none) is the whole point.
+// nil (kind default) vs non-nil-empty (none) is the whole point. Neither is
+// workspace_tools: it is scanned into a *string, so SQL NULL stays nil
+// (unset) rather than becoming an empty value the CHECK would refuse.
 const selectCols = `id,
 	COALESCE(owner_user_id::text, ''),
 	name,
@@ -46,6 +48,7 @@ const selectCols = `id,
 	max_depth,
 	max_children,
 	COALESCE(written_by_child, ''),
+	workspace_tools,
 	deleted_at,
 	created_at`
 
@@ -59,7 +62,7 @@ func scanRecord(row pgx.Row) (presets.Record, error) {
 		&r.Labels, &r.Tools, &r.Skills, &r.MCPServers,
 		&r.ContextFiles, &r.SystemPrompt, &r.AppendSystemPrompt,
 		&r.MaxCost, &r.MaxDepth, &r.MaxChildren,
-		&r.WrittenByChild, &r.DeletedAt, &r.CreatedAt)
+		&r.WrittenByChild, &r.WorkspaceTools, &r.DeletedAt, &r.CreatedAt)
 	if err == nil && r.Labels == nil {
 		r.Labels = map[string]string{}
 	}
@@ -87,22 +90,29 @@ func (s *pgStore) Put(ctx context.Context, ownerUserID string, r presets.Record)
 	if labels == nil {
 		labels = map[string]string{}
 	}
+	// workspace_tools is NULLable with no empty-string meaning: the domain
+	// type's nil is the only "unset", so it goes through the same NULLIF as
+	// the other optional text columns.
+	workspaceTools := ""
+	if r.WorkspaceTools != nil {
+		workspaceTools = *r.WorkspaceTools
+	}
 	out, err := scanRecord(s.pool.QueryRow(ctx,
 		`INSERT INTO conversations.presets (
 			owner_user_id, name, description, kind, provider, model, thinking,
 			executor, labels, tools, skills, mcp_servers, context_files,
 			system_prompt, append_system_prompt, max_cost, max_depth, max_children,
-			written_by_child)
+			written_by_child, workspace_tools)
 		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''),
 			NULLIF($8, ''), $9, $10, $11, $12, $13,
 			NULLIF($14, ''), NULLIF($15, ''), $16, $17, $18,
-			NULLIF($19, ''))
+			NULLIF($19, ''), NULLIF($20, ''))
 		 RETURNING `+selectCols,
 		ownerArg(ownerUserID), r.Name, r.Description, r.Kind,
 		r.Provider, r.Model, r.Thinking, r.Executor, labels,
 		r.Tools, r.Skills, r.MCPServers, r.ContextFiles,
 		r.SystemPrompt, r.AppendSystemPrompt, r.MaxCost, r.MaxDepth, r.MaxChildren,
-		r.WrittenByChild))
+		r.WrittenByChild, workspaceTools))
 	if err != nil {
 		return presets.Record{}, fmt.Errorf("put preset: %w", err)
 	}

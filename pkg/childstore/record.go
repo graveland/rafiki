@@ -69,6 +69,11 @@ type ChildRecord struct {
 	// NotifyPolicy is protocol.NotifyResult for a quiet child and empty for the default (all); it is resolved once at spawn and never changes.
 	NotifyPolicy string
 
+	// WorkspaceTools is protocol.WorkspaceToolsRafiki for a claude child using
+	// rafiki's executor-routed tools, and empty for the default (native); it is
+	// resolved once at spawn and never changes.
+	WorkspaceTools string
+
 	MaxDepth    int
 	MaxCost     float64
 	MaxChildren int
@@ -193,6 +198,7 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 		ExecutorSelector: snap.ExecutorSelector,
 		SkipDerivedIndex: snap.SkipDerivedIndex,
 		NotifyPolicy:     snap.NotifyPolicy,
+		WorkspaceTools:   snap.WorkspaceTools,
 		WorkspaceMode:    snap.WorkspaceMode,
 
 		MaxDepth:    snap.MaxDepth,
@@ -270,6 +276,7 @@ func SessionFromRecord(rec ChildRecord) *Session {
 		ExecutorSelector: rec.ExecutorSelector,
 		SkipDerivedIndex: rec.SkipDerivedIndex,
 		NotifyPolicy:     rec.NotifyPolicy,
+		WorkspaceTools:   rec.WorkspaceTools,
 		WorkspaceMode:    rec.WorkspaceMode,
 
 		MaxDepth:    rec.MaxDepth,

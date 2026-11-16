@@ -111,6 +111,30 @@ func TestPresetProtoRoundTripTriState(t *testing.T) {
 	}
 }
 
+// TestPresetProtoRoundTripWorkspaceTools pins workspace_tools across the wire.
+// The proto field is a plain string with no presence of its own, so nil (unset)
+// and "" are the same thing on the wire and nil must come back; each set value
+// must come back as a pointer to exactly itself.
+func TestPresetProtoRoundTripWorkspaceTools(t *testing.T) {
+	c := assert.NewAborting(t)
+	for _, tc := range []struct {
+		name string
+		want *string
+	}{
+		{"unset", nil},
+		{"native", ptr("native")},
+		{"rafiki", ptr("rafiki")},
+	} {
+		got := FromProto(ToProto(Record{Name: "seat", WorkspaceTools: tc.want}))
+		if (got.WorkspaceTools == nil) != (tc.want == nil) {
+			t.Fatalf("%s: nil-ness changed: want %v, got %v", tc.name, tc.want, got.WorkspaceTools)
+		}
+		if tc.want != nil {
+			c.Eq(*tc.want, *got.WorkspaceTools, "%s: workspace_tools value", tc.name)
+		}
+	}
+}
+
 // triStateDiff describes how got lost the tri-state of want, or "" when the
 // nil-ness and contents survived. The assertions it makes are exactly
 // "== nil" and "!= nil && len == 0".

@@ -978,6 +978,7 @@ class SpawnRequest:
     from_tag: str = ""
     notify: str = ""
     home_executor: str = ""
+    workspace_tools: str = ""
     max_depth: Optional[int] = None
     max_cost: Optional[float] = None
     max_children: Optional[int] = None
@@ -1048,6 +1049,8 @@ class SpawnRequest:
             out["notify"] = self.notify
         if self.home_executor != "":
             out["homeExecutor"] = self.home_executor
+        if self.workspace_tools != "":
+            out["workspaceTools"] = self.workspace_tools
         if self.max_depth is not None:
             out["maxDepth"] = self.max_depth
         if self.max_cost is not None:
@@ -1154,6 +1157,9 @@ class SpawnRequest:
         _v = _d.get("homeExecutor")
         if _v is not None:
             obj.home_executor = _v
+        _v = _d.get("workspaceTools")
+        if _v is not None:
+            obj.workspace_tools = _v
         _v = _d.get("maxDepth")
         if _v is not None:
             obj.max_depth = _int_in(_v)
@@ -4537,6 +4543,7 @@ class PresetRow:
     written_by_child: str = ""
     created_at: Optional[datetime.datetime] = None
     deleted_at: Optional[datetime.datetime] = None
+    workspace_tools: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -4582,6 +4589,8 @@ class PresetRow:
             out["createdAt"] = _ts_out(self.created_at)
         if self.deleted_at is not None:
             out["deletedAt"] = _ts_out(self.deleted_at)
+        if self.workspace_tools != "":
+            out["workspaceTools"] = self.workspace_tools
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "PresetRow":
@@ -4649,6 +4658,9 @@ class PresetRow:
         _v = _d.get("deletedAt")
         if _v is not None:
             obj.deleted_at = _ts_in(_v, "deletedAt")
+        _v = _d.get("workspaceTools")
+        if _v is not None:
+            obj.workspace_tools = _v
         return obj
 
 @dataclasses.dataclass

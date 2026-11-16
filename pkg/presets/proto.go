@@ -32,6 +32,7 @@ func ToProto(r Record) *rafikiv1.PresetRow {
 		MaxCost:            copyPtr(r.MaxCost),
 		MaxDepth:           int32Ptr(r.MaxDepth),
 		MaxChildren:        int32Ptr(r.MaxChildren),
+		WorkspaceTools:     stringOrEmpty(r.WorkspaceTools),
 		WrittenByChild:     r.WrittenByChild,
 		CreatedAt:          timestamppb.New(r.CreatedAt),
 	}
@@ -68,6 +69,7 @@ func FromProto(p *rafikiv1.PresetRow) Record {
 		MaxCost:            copyPtr(p.MaxCost),
 		MaxDepth:           intPtr(p.MaxDepth),
 		MaxChildren:        intPtr(p.MaxChildren),
+		WorkspaceTools:     optionalString(p.GetWorkspaceTools()),
 		WrittenByChild:     p.GetWrittenByChild(),
 	}
 	if t := p.GetCreatedAt(); t != nil {
@@ -110,6 +112,25 @@ func copyPtr[T any](p *T) *T {
 	}
 	v := *p
 	return &v
+}
+
+// stringOrEmpty renders an optional record string for the plain proto3 string
+// it maps to: nil is the wire's "" (unset). The preset wire field carries no
+// presence of its own, so "empty = unset" is the one meaning that survives.
+func stringOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// optionalString is stringOrEmpty's inverse: the wire's "" becomes nil (unset)
+// rather than a pointer to an empty value the preset CHECK would refuse.
+func optionalString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func int32Ptr(p *int) *int32 {

@@ -439,6 +439,13 @@ type SpawnRequest struct {
 	// Child-allowed on the Connect wire (SpawnRequest.home_executor = 35).
 	HomeExecutor string `json:"homeExecutor,omitempty"`
 
+	// WorkspaceTools, for a claude child: "" or "native" keeps Claude Code's
+	// built-in file and shell tools on the launch host; "rafiki" disallows them
+	// and serves rafiki's executor-routed tools over MCP instead. Refused for
+	// other kinds. Resolved once at spawn, persisted on the child.
+	// Child-allowed on the Connect wire (SpawnRequest.workspace_tools = 36).
+	WorkspaceTools string `json:"workspaceTools,omitempty"`
+
 	// WorkspaceMode selects how the child's workspace is provisioned:
 	// "ephemeral" (reschedulable) or "pinned" (existing tree).
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
@@ -501,6 +508,25 @@ func NormalizeNotify(s string) (normalized string, ok bool) {
 		return NotifyAll, true
 	case NotifyResult:
 		return NotifyResult, true
+	}
+	return "", false
+}
+
+const (
+	WorkspaceToolsNative = "native"
+	WorkspaceToolsRafiki = "rafiki"
+)
+
+// NormalizeWorkspaceTools resolves a spawn's workspace_tools value: "" and
+// "native" are the stored default (""), WorkspaceToolsRafiki is itself, and any
+// other value reports ok=false. This is the one place the empty string is read
+// as "native".
+func NormalizeWorkspaceTools(s string) (normalized string, ok bool) {
+	switch s {
+	case "", WorkspaceToolsNative:
+		return "", true
+	case WorkspaceToolsRafiki:
+		return WorkspaceToolsRafiki, true
 	}
 	return "", false
 }

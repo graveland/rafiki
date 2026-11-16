@@ -125,7 +125,11 @@ type SpawnParams struct {
 	// HomeExecutor: see SpawnRequest.home_executor; child-allowed. Empty means
 	// the daemon resolves a home itself, or the child has none.
 	HomeExecutor string
-	Labels       map[string]string
+	// WorkspaceTools: see SpawnRequest.workspace_tools; child-allowed. The value
+	// reaches the lifecycle verbatim; the controller normalizes and resolves it
+	// once at spawn.
+	WorkspaceTools string
+	Labels         map[string]string
 
 	// Prefill is the pre-fill list: files (or globs) the child reads through
 	// its own Read tool before its first turn. Nil = none. Validated by the

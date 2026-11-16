@@ -140,6 +140,12 @@ type Session struct {
 	// NotifyPolicy is protocol.NotifyResult for a quiet child and empty for the default (all); it is resolved once at spawn and never changes.
 	NotifyPolicy string
 
+	// WorkspaceTools is protocol.WorkspaceToolsRafiki for a claude child using
+	// rafiki's executor-routed tools, and empty for the default (native). It is
+	// resolved once at spawn and never re-resolved on resume: the mode is launch
+	// argv, so a resumed child must not regain its native tools.
+	WorkspaceTools string
+
 	// WorkspaceMode is "ephemeral" or "pinned" as requested at spawn.
 	// Empty means the default (pinned). Persisted for the same reason.
 	WorkspaceMode string
@@ -275,6 +281,9 @@ type Snapshot struct {
 	// NotifyPolicy is protocol.NotifyResult for a quiet child and empty for the default (all); it is resolved once at spawn and never changes.
 	NotifyPolicy string
 
+	// WorkspaceTools mirrors Session.WorkspaceTools — see its doc comment.
+	WorkspaceTools string
+
 	// WorkspaceMode is "ephemeral" or "pinned".
 	WorkspaceMode string
 
@@ -366,6 +375,7 @@ func (s *Session) Snapshot() Snapshot {
 		ExecutorSelector: s.ExecutorSelector,
 		SkipDerivedIndex: s.SkipDerivedIndex,
 		NotifyPolicy:     s.NotifyPolicy,
+		WorkspaceTools:   s.WorkspaceTools,
 		WorkspaceMode:    s.WorkspaceMode,
 
 		MaxDepth: s.MaxDepth, MaxCost: s.MaxCost, MaxChildren: s.MaxChildren,

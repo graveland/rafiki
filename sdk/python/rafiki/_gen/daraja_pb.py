@@ -129,6 +129,7 @@ class ClaudeParams:
     append_system_prompt: str = ""
     extra_args: list[str] = dataclasses.field(default_factory=list)
     mcp_token: str = ""
+    workspace_tools: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -154,6 +155,8 @@ class ClaudeParams:
             out["extraArgs"] = [x for x in self.extra_args]
         if self.mcp_token != "":
             out["mcpToken"] = self.mcp_token
+        if self.workspace_tools != "":
+            out["workspaceTools"] = self.workspace_tools
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ClaudeParams":
@@ -191,6 +194,9 @@ class ClaudeParams:
         _v = _d.get("mcpToken")
         if _v is not None:
             obj.mcp_token = _v
+        _v = _d.get("workspaceTools")
+        if _v is not None:
+            obj.workspace_tools = _v
         return obj
 
 @dataclasses.dataclass

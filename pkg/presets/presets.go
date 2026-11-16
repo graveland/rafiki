@@ -15,6 +15,10 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	// protocol is stdlib-only, so importing it keeps this package pgx-free
+	// while giving workspace_tools exactly one vocabulary.
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // ErrNotFound means the preset does not exist for the given owner.
@@ -47,9 +51,14 @@ type Record struct {
 	MaxCost            *float64
 	MaxDepth           *int
 	MaxChildren        *int
-	WrittenByChild     string     // "" = written by the operator
-	DeletedAt          *time.Time // non-nil only on rows returned by History
-	CreatedAt          time.Time
+	// WorkspaceTools, for a claude child: nil = unset (the spawn's own choice
+	// stands), "native" = Claude Code's built-in file and shell tools on the
+	// launch host, "rafiki" = those disallowed and rafiki's executor-routed
+	// tools served over MCP instead. Resolved once at spawn, never on resume.
+	WorkspaceTools *string
+	WrittenByChild string     // "" = written by the operator
+	DeletedAt      *time.Time // non-nil only on rows returned by History
+	CreatedAt      time.Time
 }
 
 // Spec is the JSON shape a preset is written in: the CLI's `rafiki preset
@@ -73,6 +82,7 @@ type Spec struct {
 	MaxCost            *float64          `json:"max_cost,omitempty"`
 	MaxDepth           *int              `json:"max_depth,omitempty"`
 	MaxChildren        *int              `json:"max_children,omitempty"`
+	WorkspaceTools     *string           `json:"workspace_tools,omitempty"`
 }
 
 // ParseSpec decodes one JSON object with DisallowUnknownFields and rejects
@@ -115,12 +125,19 @@ func (s Spec) Record() Record {
 		MaxCost:            s.MaxCost,
 		MaxDepth:           s.MaxDepth,
 		MaxChildren:        s.MaxChildren,
+		WorkspaceTools:     s.WorkspaceTools,
 		Tools:              specSlice(s.Tools),
 		Skills:             specSlice(s.Skills),
 		MCPServers:         specSlice(s.MCPServers),
 	}
 	if r.Kind == "" {
 		r.Kind = KindFundi
+	}
+	// An empty workspace_tools is the wire's own encoding of unset, so a
+	// `rafiki preset put -f` document carrying "" stores NULL, not a value the
+	// column's CHECK would refuse.
+	if s.WorkspaceTools != nil && *s.WorkspaceTools == "" {
+		r.WorkspaceTools = nil
 	}
 	if r.Labels == nil {
 		r.Labels = map[string]string{}
@@ -157,6 +174,7 @@ func SpecOf(r Record) Spec {
 		MaxCost:            r.MaxCost,
 		MaxDepth:           r.MaxDepth,
 		MaxChildren:        r.MaxChildren,
+		WorkspaceTools:     r.WorkspaceTools,
 		Tools:              recordSlice(r.Tools),
 		Skills:             recordSlice(r.Skills),
 		MCPServers:         recordSlice(r.MCPServers),
@@ -239,6 +257,12 @@ func Validate(r Record) error {
 	}
 	if r.Thinking != "" && !thinkingLevels[r.Thinking] {
 		return fmt.Errorf("field %q must be one of off|low|medium|high|xhigh, got %q", "thinking", r.Thinking)
+	}
+	// workspace_tools is the same vocabulary the spawn field carries; the
+	// column's CHECK is the backstop, but a preset write should name the rule
+	// rather than surface a raw constraint violation. nil is unset.
+	if r.WorkspaceTools != nil && *r.WorkspaceTools != protocol.WorkspaceToolsNative && *r.WorkspaceTools != protocol.WorkspaceToolsRafiki {
+		return fmt.Errorf("field %q must be %q or %q, got %q", "workspace_tools", protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki, *r.WorkspaceTools)
 	}
 	if r.Kind == KindClaude {
 		for _, bad := range []struct {

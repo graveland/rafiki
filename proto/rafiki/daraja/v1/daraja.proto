@@ -135,6 +135,10 @@ message ClaudeParams {
   // AdminService.Launch, and must never reach any argv, because ps is
   // world-readable. Launch-only, like proxy_token.
   string mcp_token = 11;
+  // workspace_tools mirrors protocol.SpawnRequest.WorkspaceTools for a claude
+  // child on an executor: "rafiki" disallows the local-effect built-ins and
+  // disables deferred tool search. Empty or "native" leaves both alone.
+  string workspace_tools = 12;
 }
 
 // ScriptParams is the script variant of a ChildSpec: a saved pymodule run

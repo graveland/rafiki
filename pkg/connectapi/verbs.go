@@ -342,7 +342,7 @@ func (s *Server) GetChild(
 }
 
 // childAllowedSpawnFields is the set of SpawnRequest field numbers a caller
-// with child provenance may set (fields 1-14, 30-35: the child-reachable
+// with child provenance may set (fields 1-14, 30-36: the child-reachable
 // shape of SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any
 // other set field — including one added in the future — is refused to a child
 // credential by default: firstOperatorOnlySet fails CLOSED on everything not
@@ -369,6 +369,9 @@ var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
 	// 35 (home_executor) is child-allowed: it can only name an executor already
 	// in the caller's reachable set; the daemon refuses anything else.
 	35: true,
+	// 36 (workspace_tools) is child-allowed: it only narrows the child's own
+	// tool set.
+	36: true,
 }
 
 // firstOperatorOnlySet returns the wire name of the lowest-numbered field req
@@ -445,6 +448,10 @@ func (s *Server) Spawn(
 	if _, ok := protocol.NormalizeNotify(req.Msg.GetNotify()); !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("notify must be %q or %q", protocol.NotifyAll, protocol.NotifyResult))
+	}
+	if _, ok := protocol.NormalizeWorkspaceTools(req.Msg.GetWorkspaceTools()); !ok {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("workspace_tools must be %q or %q", protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki))
 	}
 	p := s.lifecycle.Load()
 	if p == nil {
@@ -526,6 +533,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		Notify:           m.GetNotify(),
 		ExecutorRef:      m.GetExecutorRef(),
 		HomeExecutor:     m.GetHomeExecutor(),
+		WorkspaceTools:   m.GetWorkspaceTools(),
 		Labels:           m.GetLabels(),
 
 		ConfigDir:          m.GetConfigDir(),

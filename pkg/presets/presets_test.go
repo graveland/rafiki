@@ -154,6 +154,26 @@ func TestPresetValidate(t *testing.T) {
 	c.NoError(Validate(good), "Validate(labels with full allowed charset)")
 }
 
+// TestPresetValidateWorkspaceTools pins the preset vocabulary and its
+// "empty = unset" conversion: nil passes (unset), "native" and "rafiki" pass,
+// anything else is refused by name, and a Spec pointer to "" normalizes to nil
+// so a put document cannot write a value the column's CHECK would refuse.
+func TestPresetValidateWorkspaceTools(t *testing.T) {
+	c := assert.NewAborting(t)
+	strPtr := func(s string) *string { return &s }
+
+	for _, ok := range []*string{nil, strPtr("native"), strPtr("rafiki")} {
+		c.NoError(Validate(Record{Name: "seat", Kind: KindClaude, WorkspaceTools: ok}))
+	}
+	err := Validate(Record{Name: "seat", Kind: KindClaude, WorkspaceTools: strPtr("none")})
+	c.Error(err, `Validate admitted workspace_tools "none"`)
+	c.StrContains(err.Error(), "workspace_tools", "the refusal names the field")
+
+	rec := (Spec{Name: "seat", Kind: KindClaude, WorkspaceTools: strPtr("")}).Record()
+	c.Nil(rec.WorkspaceTools, "an empty Spec.WorkspaceTools must become nil (unset)")
+	c.NoError(Validate(rec), "Validate(record normalized from an empty workspace_tools)")
+}
+
 func TestPresetSpecRoundTrip(t *testing.T) {
 	tests := []struct {
 		subtest  string

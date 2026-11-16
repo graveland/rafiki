@@ -2322,7 +2322,7 @@ type SpawnRequest struct {
 	Prefill []*PrefillRead           `protobuf:"bytes,13,rep,name=prefill,proto3" json:"prefill,omitempty"`
 	Script  *SpawnRequest_ScriptSpec `protobuf:"bytes,14,opt,name=script,proto3" json:"script,omitempty"`
 	// Fields 15-29 are OPERATOR-ONLY: Spawn refuses them with PermissionDenied when the caller has child provenance.
-	// This is enforced as a child-ALLOWED set (fields 1-14, 30-35, see verbs.go's
+	// This is enforced as a child-ALLOWED set (fields 1-14, 30-36, see verbs.go's
 	// childAllowedSpawnFields), not a literal list of these 15 -- so a NEW
 	// SpawnRequest field is OPERATOR-ONLY by default. Adding one requires an
 	// explicit decision: either add its number to childAllowedSpawnFields (and
@@ -2389,6 +2389,12 @@ type SpawnRequest struct {
 	// home itself (executor_ref, the parent's home, a single reachable
 	// executor, or the one executor where cwd exists) — or the child has none.
 	HomeExecutor string `protobuf:"bytes,35,opt,name=home_executor,json=homeExecutor,proto3" json:"home_executor,omitempty"`
+	// workspace_tools, for a claude child: "" or "native" keeps Claude Code's
+	// built-in file and shell tools on the launch host; "rafiki" disallows them
+	// and serves rafiki's executor-routed tools over MCP instead. Refused for
+	// other kinds. Resolved once at spawn, persisted on the child.
+	// Child-allowed: it only narrows the child's own tool set.
+	WorkspaceTools string `protobuf:"bytes,36,opt,name=workspace_tools,json=workspaceTools,proto3" json:"workspace_tools,omitempty"`
 	// The three budgets are optional because zero and unset differ, in OPPOSITE
 	// directions per field: unset max_depth means 1 and zero means "may not
 	// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
@@ -2651,6 +2657,13 @@ func (x *SpawnRequest) GetNotify() string {
 func (x *SpawnRequest) GetHomeExecutor() string {
 	if x != nil {
 		return x.HomeExecutor
+	}
+	return ""
+}
+
+func (x *SpawnRequest) GetWorkspaceTools() string {
+	if x != nil {
+		return x.WorkspaceTools
 	}
 	return ""
 }
@@ -9665,9 +9678,14 @@ type PresetRow struct {
 	WrittenByChild     string                 `protobuf:"bytes,19,opt,name=written_by_child,json=writtenByChild,proto3" json:"written_by_child,omitempty"`
 	CreatedAt          *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// deleted_at is unset while the preset is live.
-	DeletedAt     *timestamppb.Timestamp `protobuf:"bytes,23,opt,name=deleted_at,json=deletedAt,proto3" json:"deleted_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	DeletedAt *timestamppb.Timestamp `protobuf:"bytes,23,opt,name=deleted_at,json=deletedAt,proto3" json:"deleted_at,omitempty"`
+	// workspace_tools, for a claude child: empty means unset (the spawn's own
+	// choice stands); "native" keeps Claude Code's built-in file and shell tools,
+	// "rafiki" disallows them and serves rafiki's executor-routed tools over MCP
+	// instead. Resolved once at spawn, never on resume.
+	WorkspaceTools string `protobuf:"bytes,24,opt,name=workspace_tools,json=workspaceTools,proto3" json:"workspace_tools,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PresetRow) Reset() {
@@ -9845,6 +9863,13 @@ func (x *PresetRow) GetDeletedAt() *timestamppb.Timestamp {
 		return x.DeletedAt
 	}
 	return nil
+}
+
+func (x *PresetRow) GetWorkspaceTools() string {
+	if x != nil {
+		return x.WorkspaceTools
+	}
+	return ""
 }
 
 type ListPresetsRequest struct {
@@ -17682,7 +17707,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\vPrefillRead\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
 	"\x05start\x18\x02 \x01(\x05R\x05start\x12\x10\n" +
-	"\x03end\x18\x03 \x01(\x05R\x03end\"\xdc\f\n" +
+	"\x03end\x18\x03 \x01(\x05R\x03end\"\x85\r\n" +
 	"\fSpawnRequest\x12\x10\n" +
 	"\x03cwd\x18\x01 \x01(\tR\x03cwd\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
@@ -17722,7 +17747,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\tfork_from\x18  \x01(\v2 .rafiki.v1.SpawnRequest.ForkFromR\bforkFrom\x12\x19\n" +
 	"\bfrom_tag\x18! \x01(\tR\afromTag\x12\x16\n" +
 	"\x06notify\x18\" \x01(\tR\x06notify\x12#\n" +
-	"\rhome_executor\x18# \x01(\tR\fhomeExecutor\x12 \n" +
+	"\rhome_executor\x18# \x01(\tR\fhomeExecutor\x12'\n" +
+	"\x0fworkspace_tools\x18$ \x01(\tR\x0eworkspaceTools\x12 \n" +
 	"\tmax_depth\x18\b \x01(\x05H\x00R\bmaxDepth\x88\x01\x01\x12\x1e\n" +
 	"\bmax_cost\x18\t \x01(\x01H\x01R\amaxCost\x88\x01\x01\x12&\n" +
 	"\fmax_children\x18\n" +
@@ -18298,7 +18324,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x12RemoveRepoResponse\"\"\n" +
 	"\n" +
 	"StringList\x12\x14\n" +
-	"\x05items\x18\x01 \x03(\tR\x05items\"\xb7\a\n" +
+	"\x05items\x18\x01 \x03(\tR\x05items\"\xe0\a\n" +
 	"\tPresetRow\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x03R\aversion\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
@@ -18324,7 +18350,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x16 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"deleted_at\x18\x17 \x01(\v2\x1a.google.protobuf.TimestampR\tdeletedAt\x1a9\n" +
+	"deleted_at\x18\x17 \x01(\v2\x1a.google.protobuf.TimestampR\tdeletedAt\x12'\n" +
+	"\x0fworkspace_tools\x18\x18 \x01(\tR\x0eworkspaceTools\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x10\n" +

@@ -398,3 +398,38 @@ func TestPresetStoreScriptKindRoundTrip(t *testing.T) {
 }
 
 func intPtr(i int) *int { return &i }
+
+// TestPresetStoreWorkspaceToolsNull pins the NULL ↔ nil rule for the preset
+// column: nil means unset (the spawn's own choice stands) and must be stored as
+// SQL NULL, never ”, while each set value round-trips exactly. Get alone
+// cannot prove the NULL half — a missing NULLIF would read back as "" — so the
+// unset case also asserts the RAW column through the pool.
+func TestPresetStoreWorkspaceToolsNull(t *testing.T) {
+	c := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Put(ctx, "", presets.Record{Name: "ws-unset", Kind: presets.KindClaude}); err != nil {
+		t.Fatalf("put ws-unset: %v", err)
+	}
+	got, err := st.Get(ctx, "", "ws-unset")
+	c.Require().NoError(err, "get ws-unset")
+	c.Nil(got.WorkspaceTools, "ws-unset.WorkspaceTools = %v, want nil (unset)", got.WorkspaceTools)
+
+	var storedNull bool
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT workspace_tools IS NULL FROM conversations.presets WHERE name = 'ws-unset'`).Scan(&storedNull),
+		"read raw ws-unset row")
+	c.True(storedNull, "an unset workspace_tools must be stored as SQL NULL, not '' -- a NULLIF is missing from Put")
+
+	for _, want := range []string{"native", "rafiki"} {
+		name := "ws-" + want
+		if _, err := st.Put(ctx, "", presets.Record{Name: name, Kind: presets.KindClaude, WorkspaceTools: &want}); err != nil {
+			t.Fatalf("put %s: %v", name, err)
+		}
+		got, err := st.Get(ctx, "", name)
+		c.Require().NoError(err, "get %s", name)
+		c.Require().NotNil(got.WorkspaceTools, "%s.WorkspaceTools = nil, want %q", name, want)
+		c.Eq(want, *got.WorkspaceTools, "%s.WorkspaceTools", name)
+	}
+}

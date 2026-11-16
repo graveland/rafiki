@@ -1088,7 +1088,7 @@ pub struct SpawnRequest {
     #[prost(message, optional, tag = "14")]
     pub script: ::core::option::Option<spawn_request::ScriptSpec>,
     /// Fields 15-29 are OPERATOR-ONLY: Spawn refuses them with PermissionDenied when the caller has child provenance.
-    /// This is enforced as a child-ALLOWED set (fields 1-14, 30-35, see verbs.go's
+    /// This is enforced as a child-ALLOWED set (fields 1-14, 30-36, see verbs.go's
     /// childAllowedSpawnFields), not a literal list of these 15 -- so a NEW
     /// SpawnRequest field is OPERATOR-ONLY by default. Adding one requires an
     /// explicit decision: either add its number to childAllowedSpawnFields (and
@@ -1179,6 +1179,13 @@ pub struct SpawnRequest {
     /// executor, or the one executor where cwd exists) — or the child has none.
     #[prost(string, tag = "35")]
     pub home_executor: ::prost::alloc::string::String,
+    /// workspace_tools, for a claude child: "" or "native" keeps Claude Code's
+    /// built-in file and shell tools on the launch host; "rafiki" disallows them
+    /// and serves rafiki's executor-routed tools over MCP instead. Refused for
+    /// other kinds. Resolved once at spawn, persisted on the child.
+    /// Child-allowed: it only narrows the child's own tool set.
+    #[prost(string, tag = "36")]
+    pub workspace_tools: ::prost::alloc::string::String,
     /// The three budgets are optional because zero and unset differ, in OPPOSITE
     /// directions per field: unset max_depth means 1 and zero means "may not
     /// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
@@ -2684,6 +2691,12 @@ pub struct PresetRow {
     /// deleted_at is unset while the preset is live.
     #[prost(message, optional, tag = "23")]
     pub deleted_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// workspace_tools, for a claude child: empty means unset (the spawn's own
+    /// choice stands); "native" keeps Claude Code's built-in file and shell tools,
+    /// "rafiki" disallows them and serves rafiki's executor-routed tools over MCP
+    /// instead. Resolved once at spawn, never on resume.
+    #[prost(string, tag = "24")]
+    pub workspace_tools: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListPresetsRequest {

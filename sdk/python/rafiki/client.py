@@ -307,6 +307,7 @@ class Client:
         fork_from: "dict | _gen.control_pb.SpawnRequest.ForkFrom | None" = None,
         from_tag: "str | None" = None,
         notify: "Literal['all', 'result'] | None" = None,
+        workspace_tools: "Literal['native', 'rafiki'] | None" = None,
     ) -> str:
         """Spawn a child; returns its id. ``prompt``, when given, is sent as
         the child's first message (a spawn alone starts no work — fundi
@@ -344,6 +345,15 @@ class Client:
         matters to anything with a parent link or an MCP session, since that
         is who is woken. Any other value raises ``ValueError``.
 
+        ``workspace_tools``, for a claude child, chooses where its file and
+        shell work happens. ``None`` or ``"native"`` (the default) keeps Claude
+        Code's built-in ``Read``/``Write``/``Edit``/``Bash`` on the launch host.
+        ``"rafiki"`` disallows those built-ins and serves rafiki's
+        executor-routed tools over MCP instead, so every local effect names an
+        executor. The mode is fixed at spawn — it is launch argv — and refused
+        for other kinds and without an executor pool. Any other value raises
+        ``ValueError``.
+
         ``home_executor`` names (machine label or id) the executor where
         ``cwd`` applies and project context (CLAUDE.md/AGENTS.md) and project
         skills are read from. It is NOT a default for tool calls, and it must
@@ -356,6 +366,8 @@ class Client:
         """
         if notify is not None and notify not in ("all", "result"):
             raise ValueError('notify must be "all" or "result"')
+        if workspace_tools is not None and workspace_tools not in ("native", "rafiki"):
+            raise ValueError('workspace_tools must be "native" or "rafiki"')
         req = _gen.control_pb.SpawnRequest(
             cwd=cwd if cwd else os.getcwd(),
             name=name or "",
@@ -389,6 +401,8 @@ class Client:
             req.from_tag = from_tag
         if notify is not None:
             req.notify = notify
+        if workspace_tools is not None:
+            req.workspace_tools = workspace_tools
         resp = self._call("Spawn", req, _gen.control_pb.SpawnResponse)
         child_id = resp.child_id
         for w in resp.warnings:

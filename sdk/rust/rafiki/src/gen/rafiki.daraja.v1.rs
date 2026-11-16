@@ -108,6 +108,11 @@ pub struct ClaudeParams {
     /// world-readable. Launch-only, like proxy_token.
     #[prost(string, tag = "11")]
     pub mcp_token: ::prost::alloc::string::String,
+    /// workspace_tools mirrors protocol.SpawnRequest.WorkspaceTools for a claude
+    /// child on an executor: "rafiki" disallows the local-effect built-ins and
+    /// disables deferred tool search. Empty or "native" leaves both alone.
+    #[prost(string, tag = "12")]
+    pub workspace_tools: ::prost::alloc::string::String,
 }
 /// ScriptParams is the script variant of a ChildSpec: a saved pymodule run
 /// hosted on the executor the way pymodule_run runs one.

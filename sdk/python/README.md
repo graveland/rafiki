@@ -68,6 +68,13 @@ coordinator = c.spawn("run the plan", kind="fundi", notify="result")
 # `RafikiSpawnWarning` warnings, never as an exception.
 on_workstation = c.spawn("check the build", kind="fundi", home_executor="greyshift")
 
+# `workspace_tools="rafiki"`, for a claude child, disallows Claude Code's
+# built-in Read/Write/Edit/Bash on the launch host and serves rafiki's
+# executor-routed tools over MCP instead; unset or "native" (the default)
+# leaves them alone. Fixed at spawn (launch argv), refused for other kinds and
+# without an executor pool.
+remote = c.spawn(preset="impl", kind="claude", workspace_tools="rafiki")
+
 c.send(child, "and a second turn")        # prompt (queues), "steer", "abort"
 kids = c.list(labels={"team": "infra"})   # status-filtered server-side,
                                           # label-filtered client-side
