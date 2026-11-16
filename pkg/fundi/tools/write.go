@@ -38,6 +38,10 @@ func (WriteBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
 }
 
 func (WriteBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	// Claude-shaped mode serves Write instead; see read.go's Materialize.
+	if opts.ClaudeShapedWorkspace {
+		return nil, nil
+	}
 	return &writeTool{WriteBlueprint: WriteBlueprint{}, tr: opts.FileTracker, cwd: opts.Cwd, changed: opts.FileChanged}, nil
 }
 

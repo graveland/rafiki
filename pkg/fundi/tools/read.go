@@ -79,6 +79,12 @@ func (ReadBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
 }
 
 func (ReadBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	// A claude child in workspace-tools mode is served the Claude-shaped four
+	// instead (claude_shaped.go), which forward to this same tool on the
+	// executor. Offering both spellings would leave the model guessing.
+	if opts.ClaudeShapedWorkspace {
+		return nil, nil
+	}
 	return &readTool{
 		ReadBlueprint: ReadBlueprint{},
 		tr:            opts.FileTracker,

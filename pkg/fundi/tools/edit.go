@@ -61,6 +61,10 @@ func (EditBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
 }
 
 func (EditBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	// Claude-shaped mode serves Edit instead; see read.go's Materialize.
+	if opts.ClaudeShapedWorkspace {
+		return nil, nil
+	}
 	return &editTool{EditBlueprint: EditBlueprint{}, tr: opts.FileTracker, cwd: opts.Cwd, changed: opts.FileChanged}, nil
 }
 

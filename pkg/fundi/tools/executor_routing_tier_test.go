@@ -32,11 +32,13 @@ func TestEveryBlueprintHasATier(t *testing.T) {
 	}
 }
 
-// The six historical names plus ls and the lsp_* family are the workspace tier.
-// Pinned explicitly rather than derived, so a change to the tier of any one of
-// them is a deliberate edit to this list and not a silent side effect.
+// The six historical names plus ls, the lsp_* family and the Claude-shaped
+// four are the workspace tier. Pinned explicitly rather than derived, so a
+// change to the tier of any one of them is a deliberate edit to this list and
+// not a silent side effect.
 func TestWorkspaceTierMembership(t *testing.T) {
 	want := []string{
+		"Bash", "Edit", "Read", "Write",
 		"bash", "bash_kill", "bash_output", "bash_start",
 		"download", "edit", "glob", "grep", "ls",
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
@@ -51,6 +53,10 @@ func TestWorkspaceTierMembership(t *testing.T) {
 // LsBlueprint.Materialize needs only Cwd and OutputPolicy, and the LSP tools
 // need only the manager newLSPManager builds from the executor's own lsp.json
 // or PATH, both of which the executor's toolOptsFor supplies.
+//
+// The Claude-shaped four are absent from BOTH lists on purpose (notRoutedYet):
+// they are daemon-side translators, so the executor's registry never holds them
+// and the parent never proxies a call for them.
 func TestRoutingLists(t *testing.T) {
 	c := assert.NewCollecting(t)
 	wantLocal := []string{

@@ -69,6 +69,10 @@ func (BashBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
 }
 
 func (BashBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	// Claude-shaped mode serves Bash instead; see read.go's Materialize.
+	if opts.ClaudeShapedWorkspace {
+		return nil, nil
+	}
 	bt := &bashTool{
 		BashBlueprint: BashBlueprint{},
 		p:             opts.OutputPolicy,

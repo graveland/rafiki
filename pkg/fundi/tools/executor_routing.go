@@ -49,6 +49,18 @@ var tierByTool = map[string]Tier{
 	"ls":    TierWorkspace,
 	"bash":  TierWorkspace,
 
+	// Workspace — Claude Code's own four, translated. Each forwards to the
+	// native member of this tier on the executor (Read → read, Bash → bash), so
+	// the effect lands on the same machine as every other workspace tool; the
+	// tier entry is also what gives them the per-call `executor` argument. They
+	// are served only to a claude child in workspace-tools mode — see
+	// claude_shaped.go — and never reach an executor's own registry (see
+	// notRoutedYet).
+	"Read":  TierWorkspace,
+	"Write": TierWorkspace,
+	"Edit":  TierWorkspace,
+	"Bash":  TierWorkspace,
+
 	// Workspace — network AND filesystem. download's effect is a file on a
 	// specific host, so it runs where that file lives; the fetch happens
 	// there too, confined by that host's own egress (a sandbox with
@@ -174,13 +186,26 @@ var tierByTool = map[string]Tier{
 
 // notRoutedYet names workspace tools the parent does not forward to an executor.
 //
-// The three background-job verbs are permanent members: they are parent-side
-// tools implemented as RPCs, so proxying them would dispatch bash_start into
-// the executor's registry, which does not contain it.
+// Two families are permanent members:
+//
+// The three background-job verbs are parent-side tools implemented as RPCs, so
+// proxying them would dispatch bash_start into the executor's registry, which
+// does not contain it.
+//
+// The Claude-shaped four (Read/Write/Edit/Bash) are daemon-side TRANSLATORS: a
+// model calling Bash reaches the executor through `bash`, and `Bash` itself
+// exists nowhere but in the daemon's registry for a claude child. Proxying one
+// would ask the executor's registry for a tool named "Bash", which no
+// MaterializeOnly over ExecutorLocalTools could ever put there.
 var notRoutedYet = map[string]bool{
 	"bash_start":  true,
 	"bash_output": true,
 	"bash_kill":   true,
+
+	"Read":  true,
+	"Write": true,
+	"Edit":  true,
+	"Bash":  true,
 }
 
 // TierOf reports a tool's tier. ok is false for a name no blueprint registers.
@@ -207,9 +232,13 @@ func ExecutorLocalTools() []string {
 	return out
 }
 
-// RoutedToExecutor returns the tool names the PARENT dispatches to an executor
-// when one is configured. It is ExecutorLocalTools plus the background-job
-// verbs, which are parent-side RPCs and never reach the executor's registry.
+// RoutedToExecutor returns the tool names the PARENT proxies to an executor
+// when one is configured: ExecutorLocalTools plus the background-job verbs,
+// which are parent-side RPCs and never reach the executor's registry.
+//
+// A tool ABSENT from this list is not necessarily unrouted — the Claude-shaped
+// four call the executor themselves from the daemon (notRoutedYet), so they are
+// machine-local work the parent dispatches without proxying the call.
 func RoutedToExecutor() []string {
 	out := append(ExecutorLocalTools(), "bash_start", "bash_output", "bash_kill")
 	slices.Sort(out)

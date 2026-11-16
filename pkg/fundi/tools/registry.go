@@ -323,6 +323,15 @@ type ToolOpts struct {
 	// not registered at all.
 	Executor ExecutorClient
 
+	// ClaudeShapedWorkspace, set only for a claude child in rafiki
+	// workspace-tools mode, serves Read/Write/Edit/Bash in Claude Code's shape
+	// and withholds read/write/edit/bash. A model offered both spellings of one
+	// operation picks between them by guesswork, and the native spelling
+	// carries fundi's own descriptions — which a claude child's prompt, its
+	// permission rules and its --disallowedTools list were never written
+	// against. See claude_shaped.go.
+	ClaudeShapedWorkspace bool
+
 	// ExecutorTools, when non-nil, is the exact set of tool names the configured
 	// executor serves (its Describe.tools). nil means the set is unknown — the
 	// legacy socket path, or a pool that has not reported Describe — and routing

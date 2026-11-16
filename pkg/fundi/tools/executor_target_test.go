@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 
@@ -111,12 +112,19 @@ func TestExecutorArgAddedToEveryWorkspaceTool(t *testing.T) {
 	// A vacuous pass would hide the whole tier declining. The job verbs are the
 	// ones most likely to be missed: they are RPC-backed and never appear in the
 	// executor's own registry, so nothing else would notice them dropping out.
-	// Name them, then require the whole tier.
+	// Name them, then require the whole tier — minus the Claude-shaped four,
+	// which are in the tier but decline outside workspace-tools mode
+	// (TestClaudeShapedGetExecutorArgument covers them with the mode on).
 	for _, name := range []string{"bash_start", "bash_output", "bash_kill"} {
 		_, has := defs[name]
 		c.True(has, "%q did not materialize, so its %q coverage silently vanished", name, executorArgName)
 	}
-	c.Eq(len(WorkspaceTools()), present, "workspace tools materialized; want the whole tier under workspaceOpts")
+	for _, name := range claudeShapedNames {
+		_, has := defs[name]
+		c.False(has, "%q materialized outside claude workspace-tools mode", name)
+	}
+	c.Eq(len(WorkspaceTools())-len(claudeShapedNames), present,
+		"workspace tools materialized; want the whole tier except the claude-shaped four")
 }
 
 // TestExecutorArgAbsentOnDaemonTools keeps the argument off the tools that
@@ -549,6 +557,11 @@ func TestNoWorkspaceToolDeclaresExecutor(t *testing.T) {
 
 	present := 0
 	for _, name := range WorkspaceTools() {
+		if slices.Contains(claudeShapedNames, name) {
+			// Declines outside claude workspace-tools mode; the wrapper's same strip
+			// rule is checked for them by TestClaudeShapedGetExecutorArgument.
+			continue
+		}
 		tool := materializeOne(t, opts, name)
 		for _, p := range tool.InputSchema().Properties {
 			c.False(p.Name == executorArgName,
@@ -557,5 +570,5 @@ func TestNoWorkspaceToolDeclaresExecutor(t *testing.T) {
 		}
 		present++
 	}
-	c.Eq(len(WorkspaceTools()), present, "workspace tools materialized")
+	c.Eq(len(WorkspaceTools())-len(claudeShapedNames), present, "workspace tools materialized")
 }
