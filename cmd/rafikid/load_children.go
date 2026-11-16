@@ -294,10 +294,6 @@ func (c *Controller) loadChildren(ctx context.Context) {
 				sess.Status = protocol.StatusExited
 				c.st.Insert(sess)
 			}
-			// These rows were loaded as exited just like the normal path's, so
-			// they owe the same grace deadline: without it they would sit past
-			// their window until the NEXT restart.
-			c.armRecoveredGrace()
 			return
 		}
 		live = l
@@ -350,25 +346,11 @@ func (c *Controller) loadChildren(ctx context.Context) {
 			"count", n, "note", "the sweep fires on every executor connection")
 	}
 
-	c.armRecoveredGrace()
 	// And the pending rate-limit auto-resumes: their timers died with the
 	// previous daemon, but the fire instant rides each child's row, so a child
 	// parked on a 429 when the daemon restarted is re-armed — and its retry
 	// notice re-published — instead of the promise silently evaporating.
 	c.armRecoveredRateLimitResumes()
-}
-
-// armRecoveredGrace re-derives every recovered exited child's grace deadline
-// from its stored ExitedAt: the deadline lived in the previous daemon's
-// memory, so a restart otherwise strands exited rows short of their close
-// forever. The callback re-reads the child, so a row that resumes later (its
-// status is no longer exited) is skipped and a row already past its window
-// fires on the next scheduler wake. Called on every loadChildren path that
-// puts exited rows into c.st.
-func (c *Controller) armRecoveredGrace() {
-	for _, s := range c.st.FindByStatus(protocol.StatusExited) {
-		c.armGrace(s.ChildID, s.ExitedAt)
-	}
 }
 
 // recoverOne loads a single record into the store and decides whether to resume.

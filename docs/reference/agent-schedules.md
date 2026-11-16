@@ -114,15 +114,13 @@ on this daemon (`registerSchedules`, `cmd/rafikid/schedules.go`):
 | daemon restart, auto-resume (catch-up on) | one wake naming N missed fires, then normal cadence | fires once |
 | manual `rafiki resume` (catch-up off) | skips missed fires, advancing to the next FUTURE occurrence | fires once if overdue |
 | child killed (status `exited`) | no delivery — Kill cancels no schedule timer, so an armed timer fires, sees the child exited, and returns without re-arming or tombstoning; the next resume re-registers | stays pending |
-| killed child auto-closed by the grace window | rows tombstoned | tombstoned |
 | child closed | rows tombstoned (`CloseForChild`) | tombstoned |
 
-The grace window defaults to 7 days and is overridden with `RAFIKI_GRACE_HOURS`
-(`NewController`, `cmd/rafikid/controller.go`); its timer is `armGrace`
-(`cmd/rafikid/timers.go`). Closing a child tombstones its jobs
-(`Controller.Close` → `CloseForChild`). The rationale: a daemon outage is not
-the user's choice, so it delays the schedule; a kill is, so it pauses it — for
-at most the grace window, after which the child closes and its jobs go with it.
+Closing a child tombstones its jobs (`Controller.Close` → `CloseForChild`).
+The rationale: a daemon outage is not the user's choice, so it delays the
+schedule; a kill is, so it pauses it until the child is resumed or closed.
+Nothing closes an exited child on its own, so a killed child's jobs stay
+paused until someone closes it.
 A rate-limited child is not killed by the rate-limit path — the daemon
 schedules an auto-resume for the reset instead (`cmd/rafikid/ratelimit_resume.go`),
 so its fires follow the ordinary live-child rules: delivered while it is live,

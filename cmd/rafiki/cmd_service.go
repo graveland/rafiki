@@ -99,7 +99,6 @@ var unitEnvVars = []string{
 	paths.DefaultModel,
 	paths.DefaultPreset,
 	paths.DefaultLabels,
-	paths.GraceHours,
 	paths.URL,
 	paths.ProxyKinds,
 	paths.ProxyListen,

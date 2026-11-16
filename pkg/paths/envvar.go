@@ -22,9 +22,6 @@ const (
 	// `rafikid agent` uses it as the default --ref.
 	ChildID = "RAFIKI_CHILD_ID"
 
-	// GraceHours overrides how long an exited child's record is retained.
-	GraceHours = "RAFIKI_GRACE_HOURS"
-
 	// HeartbeatInterval overrides how often a continuously-working child's
 	// parent gets a check-in push. A Go duration string (e.g. "5m"); "0"
 	// disables the feature entirely.

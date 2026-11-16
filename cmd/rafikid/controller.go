@@ -79,21 +79,20 @@ import (
 // Controller wires together the store, child lifecycle and persistence behind
 // the Connect control plane. It is safe for concurrent use.
 type Controller struct {
-	st          *childstore.Store
-	cm          *ChildManager
-	dumper      *persist.LogDumper
-	startedAt   time.Time
-	socketPath  string
-	logsDir     string
-	stateDir    string
-	graceWindow time.Duration
-	sweeperWg   sync.WaitGroup
+	st         *childstore.Store
+	cm         *ChildManager
+	dumper     *persist.LogDumper
+	startedAt  time.Time
+	socketPath string
+	logsDir    string
+	stateDir   string
+	sweeperWg  sync.WaitGroup
 
 	// clk is the controller's time source and the clock the deadline
 	// scheduler runs on. A zero-value Controller (a test fixture) has none,
 	// and now() reads the wall clock in that case.
 	clk clock.Clock
-	// sched fires grace-window and heartbeat deadlines, replacing by key.
+	// sched fires heartbeat, schedule and sweep deadlines, replacing by key.
 	// Nil-safe: every method is a no-op on a nil *sched.Scheduler, so a
 	// fixture that never sets it never panics.
 	sched *sched.Scheduler
@@ -685,9 +684,6 @@ type workspaceLabels struct {
 // to pre-populate the store from persisted state.
 //
 // dumper may be nil; when nil, no log dumps are written on child exit.
-// The grace window defaults to 7 days but can be overridden with the
-// RAFIKI_GRACE_HOURS environment variable.
-//
 // pool is the shared database pool for in-process agent children (nil means
 // in-memory conversations); baseCtx is the daemon's own context, threaded into
 // every in-process child so cancelling it stops them all at once. Both are
@@ -857,12 +853,6 @@ func wireLineageSource(ctrl *Controller, store childstore.ChildStore) {
 }
 
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, rawTraceAll bool, baseCtx context.Context, execStore executors.Store, userStore users.Store, skillStore skills.Store, prov *providers.Set) *Controller {
-	gw := 7 * 24 * time.Hour
-	if h := paths.Get(paths.GraceHours); h != "" {
-		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
-			gw = time.Duration(n * float64(time.Hour))
-		}
-	}
 	// The heartbeat is a deadline on the scheduler, not a periodic sweep: the
 	// first check-in of a spell lands at exactly this interval after the spell
 	// started. See defaultHeartbeatInterval.
@@ -883,7 +873,6 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		socketPath:        socketPath,
 		logsDir:           logsDir,
 		stateDir:          stateDir,
-		graceWindow:       gw,
 		heartbeatInterval: hb,
 		pool:              pool,
 		rawTrace:          rawTrace,
@@ -1028,7 +1017,7 @@ func eventLogStore(pool *pgxpool.Pool) eventlog.Store {
 // sched.Stop below drains them, and cancelling their context stops them at
 // their next fire.
 func (c *Controller) Stop() {
-	// Close the scheduler to new registration FIRST: a grace/heartbeat
+	// Close the scheduler to new registration FIRST: a heartbeat or schedule
 	// callback that fires during the drain must not arm a successor. Then
 	// drain — a callback already running is bounded by schedAbandonAfter.
 	c.sched.Stop()
@@ -4341,11 +4330,10 @@ func (c *Controller) CloseAllExited(olderThan time.Duration, owns func(childID s
 			closed = append(closed, s.ChildID)
 			continue
 		}
-		// Gated on ownsChildRow, same reasoning as Forget above: the grace
-		// deadline (armGrace, timers.go) closes an exited child after the
-		// configured window, and a recovered record — including one belonging
-		// to a still-live OTHER daemon's child — carries its old ExitedAt, so
-		// this is not merely a hypothetical race.
+		// Gated on ownsChildRow, same reasoning as Forget above: a recovered
+		// record, including one belonging to a still-live OTHER daemon's child,
+		// is loaded as exited and carries its old ExitedAt, so it passes the
+		// olderThan filter and reaches this sweep like any child of ours.
 		ownedRow := c.ownsChildRow(s)
 		// Persist before forgetting: the upsert carries the child's session_id
 		// to conversations.child before the tombstone stamps closed_at. A child
@@ -5295,9 +5283,6 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// atomically under one sess.mu hold so a concurrent Snapshot() cannot
 	// observe Status=Exited with ExitedRing still nil.
 	c.st.MarkExited(childID, now, recCode, exitSignal, ringSnapshot, renderEvents)
-	// The grace clock starts now: this exit's timestamp is what the deadline
-	// and the callback's staleness guard are both derived from.
-	c.armGrace(childID, now)
 
 	// A dead child's per-child MCP secret stops resolving (the proxy face
 	// consults it on every request). handleChildExit is already the one place

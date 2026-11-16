@@ -621,11 +621,10 @@ func TestForgetDropsInboxForAnOwnedChild(t *testing.T) {
 }
 
 // TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne mirrors
-// the Forget-level pair above for the sweep entry point: the grace deadline
-// (armGrace, timers.go) closes an exited child on its own timer, and a
-// recovered record -- including one belonging to a still-live OTHER daemon's
-// child -- carries its old ExitedAt, so this path reaches the identical trap
-// on a timer rather than needing a client to call Forget at the wrong moment.
+// the Forget-level pair above for the sweep entry point: a recovered record
+// -- including one belonging to a still-live OTHER daemon's child -- is loaded
+// as exited with its old ExitedAt, so CloseAllExited's age filter passes it
+// and this path reaches the identical trap.
 func TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne(t *testing.T) {
 	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()

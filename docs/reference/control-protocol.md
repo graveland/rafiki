@@ -3740,15 +3740,12 @@ ones; written once at exit. Persistence is independent of `Close`: closing a
 child removes its in-memory entry and store row but never deletes disk
 artifacts.
 
-### Exit grace window
+### Exited children
 
-Default 7 days (`RAFIKI_GRACE_HOURS` overrides). Exited children stay in the
-store with status `exited` so their history stays replayable via
-`StreamEvents`/`GetHistory`, they can be `Resume`d explicitly, and a
-per-child deadline closes an entry once the window expires past its
-`ExitedAt`; the deadline is re-derived at daemon startup from the stored
-`ExitedAt`, so a restart never strands an expired entry. `Close` and
-`CloseAllExited` are the manual cleanup.
+Exited children stay in the store with status `exited` until they are
+closed, so their history stays replayable via `StreamEvents`/`GetHistory`
+and they can be `Resume`d explicitly. The daemon never closes one on its
+own: `Close` and `CloseAllExited` are the only cleanup.
 
 ### State records (resume support)
 
