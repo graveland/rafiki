@@ -114,8 +114,11 @@ func runSetup(ctx context.Context, cmd *cobra.Command, w *wizard, r runner, out 
 	// 8 repoints an installed executor unit and then runs `executor setup`, which
 	// writes the credential, the environment files and the unit name — all per
 	// instance — so the current-profile pointer must not decide which system
-	// service setup touches, and the repoint and the install must agree.
-	applyExecutorInstance(w.cmd)
+	// service setup touches, and the repoint and the install must agree. STRICT:
+	// a setup that fell back to the default instance would touch the wrong unit.
+	if err := requireExecutorInstance(w.cmd); err != nil {
+		return err
+	}
 
 	// ── 1. load ─────────────────────────────────────────────────────────────
 	step(out, stepLoad)

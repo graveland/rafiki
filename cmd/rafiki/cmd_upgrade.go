@@ -73,10 +73,12 @@ func upgradeDepsFromCmd(cmd *cobra.Command) (upgradeDeps, error) {
 	// FIRST: the executor instance this upgrade will refresh, resolved and
 	// pinned before anything irreversible. runUpgrade replaces both binaries and
 	// only then execs `service refresh`, so an instance decision made after the
-	// swap could fail a command whose damage is already done; here it cannot fail
-	// at all (see applyExecutorInstance), and it is settled before the first
-	// subprocess this command runs.
-	applyExecutorInstance(cmd)
+	// swap could fail a command whose damage is already done. STRICT, and
+	// validated HERE — before the first subprocess and before the swap — so a
+	// name that cannot name an instance fails with nothing changed.
+	if err := requireExecutorInstance(cmd); err != nil {
+		return upgradeDeps{}, err
+	}
 
 	exe, err := os.Executable()
 	if err != nil {

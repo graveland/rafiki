@@ -269,7 +269,7 @@ func TestExecutorInstanceServeUsesRawFlagNotProfilesFile(t *testing.T) {
 	c.Eq("ublk", executorInstanceName(serve), "executorInstanceName reads the inherited flag")
 
 	// The first thing serve's RunE does, before any path is resolved.
-	applyExecutorInstance(serve)
+	c.NoError(requireExecutorInstance(serve), "requireExecutorInstance")
 
 	c.Eq("ublk", paths.Instance(), "instance")
 	c.Eq(filepath.Join(dataHome, "rafiki", "profiles", "ublk"), paths.DataDir(), "DataDir")
@@ -660,8 +660,8 @@ func (r *instanceRecordingRunner) Run(ctx context.Context, env []string, argv ..
 }
 
 // `rafiki upgrade` replaces both binaries and only then refreshes services, so
-// its instance is resolved before the first subprocess — and an unusable
-// declared name must never fail a command whose damage is already done.
+// its instance is resolved — and its declared name validated — before the first
+// subprocess: a name that cannot name an instance fails with nothing changed.
 func TestExecutorInstanceUpgradePinsBeforeTheSwap(t *testing.T) {
 	c := assert.NewAborting(t)
 	isolateProfiles(t)
@@ -696,24 +696,12 @@ func TestExecutorInstanceUpgradePinsBeforeTheSwap(t *testing.T) {
 		c.Eq("work", e.instance, "every subprocess sees the declared instance")
 	}
 
-	// An unusable declared name: the upgrade still completes, on the default
-	// instance, for every subprocess it runs.
+	// An unusable declared name is REFUSED here, before the first subprocess and
+	// before the swap: falling back to the default instance would make the
+	// upgrade restart the default unit instead of the one the operator named. The
+	// refusal's own test — with the recorded step order — is
+	// TestExecutorInstanceUpgradeRefusesAnInvalidDeclaredNameBeforeTheSwap.
 	resetProfileCache()
-	bad, err := upgradeDepsFromCmd(executorVerb(c, newUpgradeCmd, "-P", "my work"))
-	c.NoError(err, "upgradeDepsFromCmd with an unusable name")
-	c.Eq(paths.DefaultInstance, paths.Instance(), "the fallback is the default instance")
-
-	tr2 := newTestRelease(t, "v0.2.0", runtime.GOOS, runtime.GOARCH, testReleaseOpts{})
-	dir2 := oldInstall(t)
-	self2 := filepath.Join(dir2, "rafiki")
-	rec2 := &instanceRecordingRunner{fakeRunner: newFakeRunner(), tag: "v0.2.0"}
-	bad.Runner = rec2
-	bad.Client, bad.Keys = tr2.Client, tr2.Keys
-	bad.Exe, bad.Version, bad.Home = self2, "v0.1.0", t.TempDir()
-	c.Require().NoError(runUpgrade(context.Background(), bad, upgradeOpts{}),
-		"an unusable instance name must not fail an upgrade after the swap")
-	c.Require().NotEmpty(rec2.events, "the upgrade must have run subprocesses")
-	for _, e := range rec2.events {
-		c.Eq(paths.DefaultInstance, e.instance, "the fallback holds for every subprocess")
-	}
+	_, err = upgradeDepsFromCmd(executorVerb(c, newUpgradeCmd, "-P", "my work"))
+	c.Error(err, "an unusable instance name must refuse the upgrade, not fall back")
 }

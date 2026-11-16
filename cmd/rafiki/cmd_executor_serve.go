@@ -525,15 +525,16 @@ func executorInstanceName(cmd *cobra.Command) string {
 
 // applyExecutorInstance sets and PINS this process's executor instance from the
 // RAW name: the -P/--profile flag, else a non-empty RAFIKI_PROFILE, else the
-// default instance. Every verb whose work depends on that instance calls it
-// before resolving a path — the executor-service verbs (`executor serve`,
-// `executor setup`, `executor service install|uninstall|start|stop|restart|
-// status|logs|tail`, `executor name`), and the ordinary client verbs that touch
-// executor state on this machine: `setup`, which repoints the executor unit,
-// `service refresh`, which restarts it, `upgrade`, which execs that refresh
-// after replacing the binaries, and `create`, which reads this machine's
-// executor name and can hand off to `executor setup`. The credential path, the
-// env-file path, the log path and the unit name then all agree on ONE directory.
+// default instance. Every verb whose work depends on that instance calls it —
+// or requireExecutorInstance, its strict form — before resolving a path: the
+// executor-service verbs (`executor serve`, `executor setup`, `executor service
+// install|uninstall|start|stop|restart|status|logs|tail`, `executor name`), and
+// the ordinary client verbs that touch executor state on this machine: `setup`,
+// which repoints the executor unit, `service refresh`, which restarts it,
+// `upgrade`, which execs that refresh after replacing the binaries, and `create`,
+// which reads this machine's executor name and can hand off to `executor setup`.
+// The credential path, the env-file path, the log path and the unit name then all
+// agree on ONE directory.
 //
 // It PINS (paths.PinInstance), so nothing later in the same invocation can move
 // it. That matters because the same process still resolves profiles for other
@@ -546,12 +547,12 @@ func executorInstanceName(cmd *cobra.Command) string {
 // with no -P on a machine whose pointer names `work` installs the `default`
 // unit — exactly what it did before instances existed.
 //
-// It is deliberately NON-FATAL, and uniform with resolveProfile: a profile name
-// outside the instance charset is a mistake about namespacing, not a reason to
-// fail a command — least of all one that has already done something irreversible
-// (`upgrade` swaps the binaries before it refreshes services). Such a name warns
-// once on stderr and falls back to the default instance, which is the layout that
-// name's install already had.
+// It is the LENIENT form, uniform with resolveProfile, and it is for commands
+// that only NAME paths: a profile name outside the instance charset is a mistake
+// about namespacing, so such a name warns once on stderr and falls back to the
+// default instance, which is the layout that name's install already had. A verb
+// that MUTATES executor state must call requireExecutorInstance instead — the
+// fallback would retarget the act at the default instance.
 func applyExecutorInstance(cmd *cobra.Command) {
 	name := executorInstanceName(cmd)
 	if err := paths.PinInstance(name); err != nil {
@@ -559,6 +560,28 @@ func applyExecutorInstance(cmd *cobra.Command) {
 		// Cannot fail: DefaultInstance passes ValidateInstance.
 		_ = paths.PinInstance(paths.DefaultInstance)
 	}
+}
+
+// requireExecutorInstance is applyExecutorInstance's STRICT form, for every verb
+// that MUTATES this machine's executor state or its system service: `executor
+// serve`, `executor setup`, `setup`'s executor steps, `executor service
+// install|uninstall|start|stop|restart`, `executor name <name>` and `upgrade`.
+//
+// An invalid declared name is a hard error, returned BEFORE any side effect — no
+// credential read or write, no environment file, no unit, no backend call, no
+// subprocess and no binary swap. The fallback is only safe when the name just
+// namespaces paths: a mutating verb would silently act on the DEFAULT instance
+// instead of the one the operator named, so `rafiki -P "my work" executor
+// service uninstall` would remove the default unit and `executor setup` would
+// overwrite the default credential, environment file and unit.
+func requireExecutorInstance(cmd *cobra.Command) error {
+	name := executorInstanceName(cmd)
+	if err := paths.PinInstance(name); err != nil {
+		return fmt.Errorf("profile %q cannot name an executor instance (%v); "+
+			"this command changes this machine's executor state, so it refuses "+
+			"rather than act on the default instance", name, err)
+	}
+	return nil
 }
 
 // instanceHint builds a suggested command line for THIS process's instance: the
@@ -629,8 +652,12 @@ every existing install already has; any other name lives under profiles/<name>.`
 
 			// FIRST: every path this command resolves — the credential file,
 			// both environment files, the caches, the machine name — is derived
-			// from the instance.
-			applyExecutorInstance(cmd)
+			// from the instance. STRICT: a serve that fell back to the default
+			// instance would run the default instance's state beside an existing
+			// default executor.
+			if err := requireExecutorInstance(cmd); err != nil {
+				return err
+			}
 
 			// The retired spellings must fail loudly rather than silently do
 			// nothing: an operator's argv or service unit that still says

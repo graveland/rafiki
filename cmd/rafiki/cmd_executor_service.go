@@ -139,8 +139,12 @@ type executorInstallOptions struct {
 
 func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	// Before any path is read: the credential file, the environment file and
-	// the unit's name are all per instance. See applyExecutorInstance.
-	applyExecutorInstance(cmd)
+	// the unit's name are all per instance. See applyExecutorInstance. STRICT:
+	// an install that fell back to the default instance would overwrite the
+	// default credential, environment file and unit.
+	if err := requireExecutorInstance(cmd); err != nil {
+		return err
+	}
 	connect, _ := cmd.Flags().GetString("connect")
 	connectSocket, _ := cmd.Flags().GetString("connect-socket")
 	enrollToken, _ := cmd.Flags().GetString("enroll-token")
@@ -798,13 +802,25 @@ func captureExecutorEnv(environ []string) map[string]string {
 	return out
 }
 
-// executorServiceBackend is the executor's backend for THIS command's instance.
-// Every service verb goes through it rather than calling
-// newExecutorServiceBackend directly: the unit name is per instance, so a verb
-// that skipped the instance would stop, uninstall or tail the DEFAULT
-// instance's service while the operator asked for another one.
+// executorServiceBackend is the executor's backend for THIS command's instance,
+// for the READ-ONLY verbs (status, logs, tail): an unusable declared name warns
+// and falls back to the default instance, because reading the wrong instance's
+// status is recoverable. Every mutating verb goes through
+// executorServiceBackendStrict instead.
 func executorServiceBackend(cmd *cobra.Command) (serviceBackend, error) {
 	applyExecutorInstance(cmd)
+	return newExecutorServiceBackend(), nil
+}
+
+// executorServiceBackendStrict is executorServiceBackend for the verbs that
+// change the service (uninstall, start, stop, restart): an invalid declared
+// instance name refuses BEFORE the backend exists, so nothing is stopped or
+// removed on the default instance because the operator mistyped another
+// instance's name.
+func executorServiceBackendStrict(cmd *cobra.Command) (serviceBackend, error) {
+	if err := requireExecutorInstance(cmd); err != nil {
+		return nil, err
+	}
 	return newExecutorServiceBackend(), nil
 }
 
@@ -833,7 +849,7 @@ func newExecutorServiceSimpleCmd(use, short string, run func(serviceBackend) err
 		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			b, err := executorServiceBackend(cmd)
+			b, err := executorServiceBackendStrict(cmd)
 			if err != nil {
 				return err
 			}
