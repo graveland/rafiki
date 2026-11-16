@@ -24,17 +24,34 @@ executor service it restarts it. A service whose unit launches a different
 binary than this one is repointed first. With neither installed it does nothing,
 so a package manager can call it after every install.
 
-If the migration fails nothing is restarted.`,
+If the migration fails nothing is restarted.
+
+An executor service is per instance: -P/--profile, else a non-empty $RAFIKI_PROFILE,
+else the default instance names the one whose unit is refreshed. The
+current-profile pointer is not consulted, so switching profiles cannot change
+which service an upgrade restarts.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return refreshServices(cmdCtx(cmd), execRunner{}, cmdOut(cmd))
+			return refreshServices(cmdCtx(cmd), cmd, execRunner{}, cmdOut(cmd))
 		},
 	}
 }
 
 // refreshServices migrates, then restarts, whichever of the daemon and executor
 // services are installed.
-func refreshServices(ctx context.Context, r runner, out io.Writer) error {
+//
+// cmd supplies the DECLARED executor instance — -P/--profile, else a non-empty
+// $RAFIKI_PROFILE, else the default instance — and it is pinned before the
+// executor backend is resolved. The unit, its label and its log path are per
+// instance, so the pointer must not decide which one is inspected and
+// restarted: `rafiki -P work service refresh` refreshes the work unit, and with
+// no -P the default unit is refreshed whatever `rafiki profile use` last chose.
+// (The daemon's unit is not per instance, so pinning changes nothing for it.)
+func refreshServices(ctx context.Context, cmd *cobra.Command, r runner, out io.Writer) error {
+	if err := applyExecutorInstance(cmd); err != nil {
+		return err
+	}
+
 	daemon, err := serviceBackendFor().Status()
 	if err != nil {
 		return err

@@ -23,6 +23,11 @@ type refreshFixture struct {
 func newRefreshFixture(t *testing.T) *refreshFixture {
 	t.Helper()
 	binDir := t.TempDir()
+	// refreshServices pins the DECLARED instance, so isolate the declaration and
+	// the process-wide instance: an ambient RAFIKI_PROFILE would both choose the
+	// instance these tests refresh and leave the pin behind for the package.
+	t.Setenv("RAFIKI_PROFILE", "")
+	resetInstance(t)
 	f := &refreshFixture{
 		daemon:   &fakeServiceBackend{},
 		executor: &fakeServiceBackend{},
@@ -39,7 +44,7 @@ func newRefreshFixture(t *testing.T) *refreshFixture {
 }
 
 func (f *refreshFixture) refresh() error {
-	return refreshServices(context.Background(), f.run, &f.out)
+	return refreshServices(context.Background(), nil, f.run, &f.out)
 }
 
 func TestRefreshDoesNothingWhenNothingIsInstalled(t *testing.T) {

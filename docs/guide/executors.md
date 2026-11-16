@@ -82,6 +82,24 @@ hosting a launched child kind, e.g. `claude`); `--lsp-config` / `--no-lsp`
 (language servers auto-detect from `PATH` by default; a configured-but-absent
 server just drops its `lsp_*` tools rather than advertising broken ones).
 
+**Instances.** `-P/--profile` on an executor verb names an executor
+*instance*, not a daemon. For any name but `default`, the data dir, cache, both
+environment files, the log and the service unit are namespaced under
+`profiles/<name>` (unit `rafiki-executor-<name>`, launchd label
+`dev.graveland.rafiki-executor-<name>`), so two instances on one OS user are two
+independent services with two credentials; `default` keeps the unprefixed layout
+every existing install has. The instance comes from the DECLARED value —
+`-P/--profile`, else a non-empty `$RAFIKI_PROFILE`, else `default` — never from
+the `current-profile` pointer, so `rafiki profile use` cannot move an executor's
+state or change which service gets installed, stopped or restarted:
+`rafiki -P work executor setup` installs `rafiki-executor-work`, and
+`rafiki -P work service refresh` restarts it. `rafiki create` reads this
+machine's executor name from the same declared instance (so the name it reports
+and the unit `executor setup` installs agree), and `service status|stop|…` and
+`executor name` follow it too. `rafiki upgrade` runs `service refresh` with no
+`-P`, so it refreshes the `default` unit; refresh another instance's unit with
+`rafiki -P <name> service refresh`.
+
 No certificate is involved for a local socket. **Socket permissions are the
 only access control**: the socket is `0600` from creation (`0177` umask), and
 the daemon refuses a second executor on a path already served by a live one.

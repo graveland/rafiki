@@ -42,6 +42,12 @@ func isolateProfiles(t *testing.T) {
 	for _, v := range []string{paths.URL, paths.Token, paths.Socket, paths.DefaultModel, paths.DefaultPreset, paths.DefaultLabels, "RAFIKI_PROFILE"} {
 		t.Setenv(v, "")
 	}
+	// The executor instance is process state as well, and a verb that PINS it
+	// (every executor-service verb, `service refresh`, `create`) leaves the pin
+	// behind for the rest of the package — a later test's paths.SetInstance would
+	// then be a silent no-op. Start every isolated test from the default,
+	// unpinned instance.
+	paths.ResetInstanceForTest()
 }
 
 // runProfileCmd executes `rafiki profile <args...>` and returns its output.

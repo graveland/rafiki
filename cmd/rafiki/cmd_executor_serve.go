@@ -525,11 +525,14 @@ func executorInstanceName(cmd *cobra.Command) string {
 
 // applyExecutorInstance sets and PINS this process's executor instance from the
 // RAW name: the -P/--profile flag, else a non-empty RAFIKI_PROFILE, else the
-// default instance. Every executor-SERVICE verb calls it before resolving a path
-// — `executor serve`, `executor setup`, `executor service install|uninstall|
-// start|stop|restart|status|logs|tail`, and `executor name` — so the credential
-// path, the env-file path, the log path and the unit name all agree on ONE
-// directory.
+// default instance. Every verb whose work depends on that instance calls it
+// before resolving a path — the executor-service verbs (`executor serve`,
+// `executor setup`, `executor service install|uninstall|start|stop|restart|
+// status|logs|tail`, `executor name`), and the two ordinary client verbs that
+// touch executor state on this machine: `service refresh`, which restarts the
+// executor unit, and `create`, which reads this machine's executor name and can
+// hand off to `executor setup`. The credential path, the env-file path, the log
+// path and the unit name then all agree on ONE directory.
 //
 // It PINS (paths.PinInstance), so nothing later in the same invocation can move
 // it. That matters because the same process still resolves profiles for other

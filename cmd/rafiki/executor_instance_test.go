@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
 
@@ -318,4 +320,123 @@ func TestExecutorInstanceSkillsSyncRefusedForNonDefault(t *testing.T) {
 	c.NoError(refuseSkillsSyncForNonDefaultInstance(explicit, true), "the default instance may always sync")
 	c.True(skillsSyncEnabled(implied, false, []string{"claude"}),
 		"the default instance takes the --launch claude implication")
+}
+
+// seedInstanceMachineName writes this machine's executor name for ONE instance.
+// The name file follows DataDir, so two instances on one OS user can name the
+// same box differently — which is what makes the instance a name was read under
+// observable.
+func seedInstanceMachineName(t *testing.T, instance, name string) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	c.NoError(paths.PinInstance(instance), "PinInstance(%q)", instance)
+	c.NoError(paths.SetMachineName(name), "SetMachineName(%q) for instance %q", name, instance)
+}
+
+// `rafiki service refresh` restarts the installed EXECUTOR unit, whose name,
+// label and log path are all per instance. The instance it acts on is the
+// DECLARED one — -P/--profile, else a non-empty $RAFIKI_PROFILE, else default —
+// never the current-profile pointer: the pointer is a client's convenience, and
+// a refresh that followed it would restart a service the operator did not name
+// while leaving the one they did untouched (`-P work` is the only way to name a
+// per-instance unit at all).
+func TestExecutorInstanceServiceRefreshUsesTheDeclaredInstance(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+	resetInstance(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	seedPointerProfiles(t)
+	c.NoError(profile.SavePointer("work"), "point the current-profile pointer at work")
+
+	// The daemon's unit is not per instance; leave it uninstalled so the refresh
+	// does the executor half only.
+	stubServiceBackend(t, &fakeServiceBackend{})
+
+	self, err := os.Executable()
+	c.NoError(err, "os.Executable")
+
+	// One entry per executor-backend resolution: the instance it was resolved
+	// under, and the log file that instance's unit writes. The unit name itself
+	// is a pure function of the same instance (TestExecutorInstanceUnitNames).
+	var resolved []string
+	orig := executorServiceBackendFor
+	t.Cleanup(func() { executorServiceBackendFor = orig })
+	fake := &fakeServiceBackend{status: serviceStatus{Installed: true, Binary: self}}
+	executorServiceBackendFor = func() serviceBackend {
+		resolved = append(resolved, paths.Instance()+" "+paths.ExecutorServiceLogPath())
+		return fake
+	}
+	// refreshServices resolves a backend twice (Status, then the restart).
+	both := func(instance, logFile string) []string {
+		one := instance + " " + filepath.Join(paths.StateDir(), logFile)
+		return []string{one, one}
+	}
+
+	// No -P, with the pointer's instance already in place — exactly what a caller
+	// that resolved the pointer leaves behind. The DEFAULT instance's unit is the
+	// one to inspect and restart.
+	verb := executorVerb(c, newServiceRefreshCmd)
+	p, err := resolveProfile(verb)
+	c.NoError(err, "resolveProfile")
+	c.Eq("work", p.Name, "the pointer selects the profile")
+	c.Eq("work", paths.Instance(), "an ordinary profile resolution takes the pointer's instance")
+
+	c.NoError(refreshServices(context.Background(), verb, newFakeRunner(), io.Discard), "refresh with no -P")
+	c.True(fake.restarted, "the executor service must be restarted")
+	c.EqDeep(both(paths.DefaultInstance, "executor.log"), resolved,
+		"every executor backend resolution must be the default instance's, not the pointer's")
+
+	// A declared -P names the work instance's unit and log, which is the only way
+	// to reach a per-instance service at all.
+	resolved, fake.restarted = nil, false
+	resetProfileCache()
+	c.NoError(refreshServices(context.Background(), executorVerb(c, newServiceRefreshCmd, "-P", "work"),
+		newFakeRunner(), io.Discard), "refresh with -P work")
+	c.True(fake.restarted, "the work executor service must be restarted")
+	c.EqDeep(both("work", "executor-work.log"), resolved,
+		"-P work must resolve the work instance's unit and log")
+}
+
+// `rafiki create` reads this machine's executor NAME to fill a child's home, and
+// it can hand off to `executor setup`, which installs a system service. Both
+// describe the DECLARED instance — -P, else $RAFIKI_PROFILE, else default — so a
+// pointer naming another profile cannot make the name create reports and the
+// unit setup installs come from different instances.
+func TestExecutorInstanceCreateReadsTheDeclaredInstanceMachineName(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetInstance(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	t.Setenv(paths.ExecutorName, "") // the per-instance FILE decides, not the env
+
+	// Two instances, two names: which one create reads is the whole question.
+	seedInstanceMachineName(t, paths.DefaultInstance, "default-box")
+	seedInstanceMachineName(t, "work", "work-box")
+	paths.ResetInstanceForTest()
+
+	stub := &createStubControl{executors: []*rafikiv1.ExecutorRow{
+		executorRow("default-box", true, map[string]string{"owner": "brent"}),
+		executorRow("work-box", true, map[string]string{"owner": "brent"}),
+	}}
+	serveCreateStub(t, stub)
+
+	// Name the pointer's profile "work" and serve it on the same socket, so the
+	// pointer's instance is the one whose machine name must NOT be reported.
+	set, err := profile.Load()
+	c.NoError(err, "profile.Load")
+	sock := set.Profiles["scratch"].Socket
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"work": {Name: "work", Socket: sock},
+	}}), "save the work profile")
+	c.NoError(profile.SavePointer("work"), "point at work")
+	resetProfileCache()
+
+	cmd := createCmdForRun(t, "--detached", "--executor-selector", "owner=brent")
+	c.Require().NoError(runCreate(cmd, nil), "runCreate")
+	c.Require().NotNil(stub.spawned, "no Spawn reached the daemon")
+	c.Eq("default-box", stub.spawned.GetHomeExecutor(),
+		"create must name this machine from the default instance, not the pointer's")
 }

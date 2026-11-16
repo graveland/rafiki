@@ -1138,6 +1138,17 @@ func spawnWithWarnings(
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
+	// FIRST: this command reads this machine's EXECUTOR NAME (to fill a child's
+	// home, and to join as a session executor) and can hand off to
+	// `executor setup`, which installs a system service. Both must describe ONE
+	// instance — the DECLARED one (-P/--profile, else $RAFIKI_PROFILE, else
+	// default), never the current-profile pointer that resolveProfile follows —
+	// or create would name this machine out of the pointer's instance and
+	// install the declared instance's unit.
+	if err := applyExecutorInstance(cmd); err != nil {
+		return err
+	}
+
 	// Resolve the mode before doing anything: -j and -J together is a
 	// user-input error and must not spawn a child first.
 	mode, _, err := outputOpts(cmd)
