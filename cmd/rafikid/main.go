@@ -1067,15 +1067,22 @@ func runDaemon(opts runDaemonOpts) error {
 			// The new-seam backends: child ops, executor admin, user admin,
 			// raw child I/O and executor sessions. Each adapter is pure
 			// convert-and-delegate to the Controller; a seam left unwired
-			// answers its handler's "not yet wired" Unavailable, so these five
-			// wires are what makes the RPCs reachable (pinned end to end by
-			// TestConnectNewRPCsWired in test/integration).
+			// answers its handler's "not yet wired" Unavailable, so a wire is
+			// what makes its RPCs reachable (pinned end to end by
+			// TestConnectNewRPCsWired in test/integration, which CALLS each new
+			// RPC on a real daemon and fails when one answers Unavailable).
 			face.Control.SetChildOps(connectChildOps{c: ctrl})
 			face.Control.SetSendStepRunner(newSendStepRunner(ctrl))
 			face.Control.SetExecutorAdmin(connectExecutorAdmin{c: ctrl})
 			// The install verbs, wired only where the orchestrator exists: a
 			// daemon with no database has no recipe table and answers
-			// Unavailable from the handler's own "not yet wired" path.
+			// Unavailable from the handler's own "not yet wired" path. That is
+			// the SAME Unavailable a dropped wire produces, which is why this
+			// one is pinned by CALLING InstallExecutor/UninstallExecutor on a
+			// daemon that has the orchestrator (TestConnectNewRPCsWired), and
+			// why their policy classification is pinned separately through the
+			// mounted route (TestConnectInstallExecutorRouteAdmission) — both in
+			// test/integration.
 			if ctrl.install != nil {
 				face.Control.SetExecutorInstaller(connectExecutorInstaller{c: ctrl})
 			}

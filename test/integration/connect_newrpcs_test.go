@@ -4,9 +4,15 @@ package integration_test
 
 // Wiring proof for the Wave-1 Connect seams, on the real daemon: every new
 // Control RPC must answer over the daemon's control socket through the backend main.go
-// wires (cmd/rafikid: SetChildOps, SetExecutorAdmin, SetUserAdmin,
-// SetRawChildIO, SetExecutorSessions) instead of the generated handlers'
-// "not yet wired" Unavailable.
+// wires (cmd/rafikid: SetChildOps, SetExecutorAdmin, SetExecutorInstaller,
+// SetUserAdmin, SetRawChildIO, SetExecutorSessions) instead of the generated
+// handlers' "not yet wired" Unavailable.
+//
+// The install verbs are the reason this list is exercised call by call rather
+// than trusted to the seam setter: main.go wires SetExecutorInstaller only
+// where the orchestrator exists, so a dropped wire there answers the same
+// Unavailable an unwired seam does, and nothing else in the tree calls
+// InstallExecutor/UninstallExecutor against a real daemon.
 //
 // This test checks WIRING, not behaviour — the unit suites pin behaviour —
 // so each call only asserts its error is neither Unimplemented nor
@@ -89,6 +95,27 @@ func TestConnectNewRPCsWired(t *testing.T) {
 		Which:   "in",
 	}))
 	unwired("GetStreams(bogus)", err)
+
+	// InstallExecutor / UninstallExecutor: connectExecutorInstaller →
+	// Controller.InstallExecutor. This boot has the orchestrator (RAFIKI_DB and
+	// the executor pool above), so an unwired seam answers the handler's own
+	// "executor installer not wired" Unavailable and these two calls fail —
+	// which is the whole assertion. No executor is live here, so the
+	// orchestrator refuses before ssh is ever reached: reaching it, not a
+	// successful install, is what proves the wire (and a target that needs no
+	// resolver keeps the refusal from depending on a host's ssh).
+	_, err = client.InstallExecutor(ctx, connect.NewRequest(&rafikiv1.InstallExecutorRequest{
+		Target: "wired-test-host",
+	}))
+	unwired("InstallExecutor", err)
+
+	// UninstallExecutor: connectExecutorInstaller → Controller.UninstallExecutor.
+	// The ref names nothing this daemon ever installed, so the orchestrator
+	// answers not-found — not the seam's Unavailable.
+	_, err = client.UninstallExecutor(ctx, connect.NewRequest(&rafikiv1.UninstallExecutorRequest{
+		Executor: "wired-test-executor",
+	}))
+	unwired("UninstallExecutor", err)
 
 	// EnrollExecutor with a valid machine name: connectExecutorAdmin mints
 	// a one-time enrollment token. A short TTL keeps the shared test DB
