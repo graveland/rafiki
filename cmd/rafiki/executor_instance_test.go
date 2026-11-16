@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -439,4 +440,53 @@ func TestExecutorInstanceCreateReadsTheDeclaredInstanceMachineName(t *testing.T)
 	c.Require().NotNil(stub.spawned, "no Spawn reached the daemon")
 	c.Eq("default-box", stub.spawned.GetHomeExecutor(),
 		"create must name this machine from the default instance, not the pointer's")
+}
+
+// `rafiki upgrade` execs `service refresh`, so the instance that child refreshes
+// has to be the operator's DECLARED one: `rafiki -P work upgrade` must bring the
+// work unit onto the new binary, while with no -P the default unit is refreshed
+// exactly as before. The value crosses the exec boundary RAW — the child derives
+// its own instance from it (applyExecutorInstance), so a current-profile pointer
+// cannot decide which unit an upgrade restarts.
+func TestExecutorInstanceUpgradePassesTheDeclaredProfileToServiceRefresh(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+	seedPointerProfiles(t) // the pointer must not be what crosses the boundary
+	c.Eq("personal", profile.LoadPointer(), "the pointer names another profile")
+
+	// -P work: the child is told the instance the operator named, not the
+	// pointer's.
+	cmd := executorVerb(c, newUpgradeCmd, "-P", "work")
+	wired, err := upgradeDepsFromCmd(cmd)
+	c.NoError(err, "upgradeDepsFromCmd with -P work")
+	c.Eq("work", wired.Profile, "the RAW -P value must cross the exec boundary")
+
+	tr := newTestRelease(t, "v0.2.0", runtime.GOOS, runtime.GOARCH, testReleaseOpts{})
+	r := newFakeRunner()
+	vr := versionRunner{fakeRunner: r, versionTag: "v0.2.0"}
+	dir := oldInstall(t)
+	self := filepath.Join(dir, "rafiki")
+	deps, _, _ := upgradeDepsFor(t, tr, vr, self, "v0.1.0", t.TempDir())
+	deps.Profile = wired.Profile
+	c.Require().NoError(runUpgrade(context.Background(), deps, upgradeOpts{}), "upgrade with -P work")
+	c.True(sawRun(r, self, "-P", "work", "service", "refresh"),
+		"the refresh child must be told the instance the operator named; runs: %v", r.runCalls)
+
+	// No -P: nothing is added, so the child refreshes the default unit.
+	plain, err := upgradeDepsFromCmd(executorVerb(c, newUpgradeCmd))
+	c.NoError(err, "upgradeDepsFromCmd with no -P")
+	c.Eq("", plain.Profile, "no -P must not cross the exec boundary")
+
+	tr2 := newTestRelease(t, "v0.2.0", runtime.GOOS, runtime.GOARCH, testReleaseOpts{})
+	r2 := newFakeRunner()
+	vr2 := versionRunner{fakeRunner: r2, versionTag: "v0.2.0"}
+	dir2 := oldInstall(t)
+	self2 := filepath.Join(dir2, "rafiki")
+	deps2, _, _ := upgradeDepsFor(t, tr2, vr2, self2, "v0.1.0", t.TempDir())
+	deps2.Profile = plain.Profile
+	c.Require().NoError(runUpgrade(context.Background(), deps2, upgradeOpts{}), "upgrade with no -P")
+	c.True(sawRun(r2, self2, "service", "refresh"),
+		"with no -P the refresh child takes no instance flag; runs: %v", r2.runCalls)
+	c.EqDeep([]string{"service", "refresh"}, refreshArgv(""), "no -P means no flag on the child's argv")
 }

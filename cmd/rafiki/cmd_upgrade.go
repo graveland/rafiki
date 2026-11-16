@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -34,6 +35,10 @@ type upgradeDeps struct {
 	Exe          string // symlink-resolved path of the running binary
 	Version      string // the running binary's version (version.String())
 	Home         string
+	// Profile is the RAW -P/--profile the operator supplied, empty when they
+	// supplied none. It rides into the `service refresh` this upgrade execs, so
+	// the refresh acts on the executor instance they named; see refreshArgv.
+	Profile string
 }
 
 func newUpgradeCmd() *cobra.Command {
@@ -47,36 +52,69 @@ func newUpgradeCmd() *cobra.Command {
 			if downloadBase != "" && o.Version == "" {
 				return errors.New("RAFIKI_DOWNLOAD_BASE requires --version")
 			}
-			exe, err := os.Executable()
+			deps, err := upgradeDepsFromCmd(cmd)
 			if err != nil {
 				return err
 			}
-			resolved, err := filepath.EvalSymlinks(exe)
-			if err != nil {
-				return err
-			}
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return err
-			}
-			return runUpgrade(cmd.Context(), upgradeDeps{
-				Out:     cmd.OutOrStdout(),
-				Err:     cmd.ErrOrStderr(),
-				Runner:  execRunner{},
-				Client:  release.NewClient(downloadBase),
-				Keys:    relsign.TrustedKeys,
-				GOOS:    runtime.GOOS,
-				GOARCH:  runtime.GOARCH,
-				Exe:     resolved,
-				Version: version.String(),
-				Home:    home,
-			}, o)
+			return runUpgrade(cmd.Context(), deps, o)
 		},
 	}
 	cmd.Flags().BoolVar(&o.Check, "check", false, "report whether an update is available without installing it")
 	cmd.Flags().StringVar(&o.Version, "version", "", "install this exact tag (vX.Y.Z), including an older one")
 	cmd.Flags().BoolVar(&o.Force, "force", false, "install even when Homebrew- or source-managed, or already up to date")
 	return cmd
+}
+
+// upgradeDepsFromCmd builds one invocation's dependencies. It is a function
+// rather than an inline literal because the flags this command carries have to
+// reach the child it execs: Profile is the RAW -P/--profile (empty when the
+// operator gave none), which refreshArgv turns into the refresh child's argv.
+func upgradeDepsFromCmd(cmd *cobra.Command) (upgradeDeps, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return upgradeDeps{}, err
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return upgradeDeps{}, err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return upgradeDeps{}, err
+	}
+	profile, _ := cmd.Flags().GetString("profile")
+	return upgradeDeps{
+		Out:     cmd.OutOrStdout(),
+		Err:     cmd.ErrOrStderr(),
+		Runner:  execRunner{},
+		Client:  release.NewClient(os.Getenv("RAFIKI_DOWNLOAD_BASE")),
+		Keys:    relsign.TrustedKeys,
+		GOOS:    runtime.GOOS,
+		GOARCH:  runtime.GOARCH,
+		Exe:     resolved,
+		Version: version.String(),
+		Home:    home,
+		Profile: profile,
+	}, nil
+}
+
+// refreshArgv is the `service refresh` invocation this upgrade execs, carrying
+// the operator's RAW -P/--profile through when they supplied one: an upgrade has
+// to bring the service they named onto the new binary, or a `-P work` executor
+// unit keeps running the pre-upgrade one until someone refreshes it by hand.
+// With no -P the child refreshes the default unit, which is what it did before
+// instances existed.
+//
+// The RESOLVED profile name is deliberately not used. The child decides its own
+// instance from the declared value (applyExecutorInstance), so a
+// current-profile pointer cannot move which unit an upgrade restarts; a
+// $RAFIKI_PROFILE reaches the child through the inherited environment, so only
+// the flag has to be spelled out here.
+func refreshArgv(profile string) []string {
+	if profile == "" {
+		return []string{"service", "refresh"}
+	}
+	return []string{"-P", profile, "service", "refresh"}
 }
 
 func runUpgrade(ctx context.Context, d upgradeDeps, o upgradeOpts) error {
@@ -193,11 +231,13 @@ func runUpgrade(ctx context.Context, d upgradeDeps, o upgradeOpts) error {
 	}
 
 	fmt.Fprintln(d.Out, "restarting services")
-	stdout, stderr, err := d.Runner.Run(ctx, nil, filepath.Join(dest, "rafiki"), "service", "refresh")
+	argv := append([]string{filepath.Join(dest, "rafiki")}, refreshArgv(d.Profile)...)
+	stdout, stderr, err := d.Runner.Run(ctx, nil, argv...)
 	fmt.Fprint(d.Out, string(stdout))
 	fmt.Fprint(d.Err, string(stderr))
 	if err != nil {
-		return fmt.Errorf("upgraded to %s, but service refresh failed: %w\nrun: %s service refresh", tag, err, filepath.Join(dest, "rafiki"))
+		return fmt.Errorf("upgraded to %s, but service refresh failed: %w\nrun: %s",
+			tag, err, strings.Join(argv, " "))
 	}
 
 	if channel != installstate.ChannelTarball {

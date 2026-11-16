@@ -96,9 +96,9 @@ state or change which service gets installed, stopped or restarted:
 `rafiki -P work service refresh` restarts it. `rafiki create` reads this
 machine's executor name from the same declared instance (so the name it reports
 and the unit `executor setup` installs agree), and `service status|stop|…` and
-`executor name` follow it too. `rafiki upgrade` runs `service refresh` with no
-`-P`, so it refreshes the `default` unit; refresh another instance's unit with
-`rafiki -P <name> service refresh`.
+`executor name` follow it too. `rafiki upgrade` carries its own `-P` into the
+`service refresh` it runs, so `rafiki -P work upgrade` refreshes the `work` unit
+and a bare `rafiki upgrade` refreshes `default`.
 
 No certificate is involved for a local socket. **Socket permissions are the
 only access control**: the socket is `0600` from creation (`0177` umask), and
