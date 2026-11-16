@@ -734,16 +734,23 @@ var mcpToolDescriptions = func() map[string]string {
 // it inserted, so a session reachable from two registration points —
 // InitializedHandler for legacy-handshake clients, the bridge's tool-call
 // hook for SEP-2575 clients — spawns exactly one goroutine.
+//
+// The registry is captured into the goroutine rather than re-read from the
+// package variable after Wait: a session belongs to the registry it was added
+// to, so the removal must not follow a later swap of mcpSettlements (which a
+// test installing its own registry does — reading the global after Wait raced
+// with that assignment under -race).
 func registerSettlementSession(userID string, ss *mcp.ServerSession) {
 	if ss == nil || userID == "" {
 		return
 	}
-	if !mcpSettlements.Add(userID, ss) {
+	reg := mcpSettlements
+	if !reg.Add(userID, ss) {
 		return
 	}
 	go func() {
 		_ = ss.Wait()
-		mcpSettlements.Remove(userID, ss)
+		reg.Remove(userID, ss)
 	}()
 }
 
