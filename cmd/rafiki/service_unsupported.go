@@ -4,7 +4,6 @@ package main
 
 import (
 	"errors"
-	"os"
 
 	"go.graveland.dev/rafiki/pkg/paths"
 )
@@ -27,7 +26,4 @@ func (b *unsupportedBackend) Status() (serviceStatus, error) {
 	return serviceStatus{}, errUnsupportedOS
 }
 
-func (b *unsupportedBackend) LogPath() string {
-	home, _ := os.UserHomeDir()
-	return paths.ServiceLogPath()
-}
+func (b *unsupportedBackend) LogPath() string { return paths.ServiceLogPath() }

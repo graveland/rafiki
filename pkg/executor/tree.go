@@ -53,11 +53,8 @@ var (
 	// and its hard-link-unavailable fallback.
 	treeLink      = os.Link
 	treeFreeBytes = func(dir string) (int64, error) {
-		var st unix.Statfs_t
-		if err := unix.Statfs(dir, &st); err != nil {
-			return 0, err
-		}
-		return int64(st.Bavail) * int64(st.Bsize), nil
+		free, err := freeBytes(dir)
+		return int64(free), err
 	}
 	// treeWalkDir is filepath.WalkDir, swappable so a test can inject a walk
 	// error mid-tree without depending on a filesystem permission failure.

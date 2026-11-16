@@ -10,6 +10,10 @@ before:
     - make web
 
 builds:
+  # rafiki (the client, and the executor) also ships for OpenBSD: it is the one
+  # binary a remote host needs when the daemon installs an executor there.
+  # rafikid and rafiki-hooks do not — the daemon runs its own PostgreSQL, and
+  # the hook gateway is deployed as a container.
   - id: rafiki
     main: ./cmd/rafiki
     binary: rafiki
@@ -18,6 +22,7 @@ builds:
     goos:
       - darwin
       - linux
+      - openbsd
     goarch:
       - amd64
       - arm64

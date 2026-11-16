@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"golang.org/x/sys/unix"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -357,9 +356,8 @@ func (s *Server) Health(
 	_ *connect.Request[executorpb.HealthRequest],
 ) (*connect.Response[executorpb.HealthResponse], error) {
 	var diskFree int64
-	var stat unix.Statfs_t
-	if err := unix.Statfs(s.opts.Root, &stat); err == nil {
-		diskFree = int64(stat.Bavail) * int64(stat.Bsize)
+	if free, err := freeBytes(s.opts.Root); err == nil {
+		diskFree = int64(free)
 	}
 	return connect.NewResponse(&executorpb.HealthResponse{
 		DiskFreeBytes:  diskFree,
