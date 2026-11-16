@@ -167,6 +167,16 @@ func TestInstallStoreTombstoneFreesTheExecutor(t *testing.T) {
 	insert(t, s, reuse)
 }
 
+// rowIDs is the id set of rows, for containment assertions that never depend on
+// a global row count.
+func rowIDs(rows []executorinstall.Row) map[string]bool {
+	out := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		out[r.ID] = true
+	}
+	return out
+}
+
 func TestInstallStoreListLiveScopesByOwner(t *testing.T) {
 	c := assert.NewAborting(t)
 	s, _ := testStore(t)
@@ -175,38 +185,90 @@ func TestInstallStoreListLiveScopesByOwner(t *testing.T) {
 	a, b := owner(t), owner(t)
 	a1, a2 := newRow(t, a), newRow(t, a)
 	b1 := newRow(t, b)
+	ownerless := newRow(t, "") // the callerless ("" owner) rows
 	insert(t, s, a1)
 	insert(t, s, a2)
 	insert(t, s, b1)
-
-	ids := func(rows []executorinstall.Row) map[string]bool {
-		out := make(map[string]bool, len(rows))
-		for _, r := range rows {
-			out[r.ID] = true
-		}
-		return out
-	}
+	insert(t, s, ownerless)
 
 	rows, err := s.ListLive(ctx, a)
 	c.NoError(err, "list live for owner a")
-	got := ids(rows)
+	got := rowIDs(rows)
 	c.True(got[a1.ID] && got[a2.ID], "ListLive(%s) omitted one of its own rows", a)
 	c.False(got[b1.ID], "ListLive(%s) returned another owner's row", a)
+	c.False(got[ownerless.ID], "ListLive(%s) returned an ownerless row", a)
 	for _, r := range rows {
 		c.Eq(a, r.OwnerUserID, "ListLive returned another owner's row")
 	}
 
-	// "" is every owner, and must contain all three.
+	// "" is EXACTLY the ownerless rows — it must not widen to every owner, or a
+	// UDS (ownerless) caller would enumerate every user's installs.
 	rows, err = s.ListLive(ctx, "")
-	c.NoError(err, "list live for every owner")
-	got = ids(rows)
-	c.True(got[a1.ID] && got[a2.ID] && got[b1.ID], "ListLive(\"\") omitted an inserted live row")
+	c.NoError(err, "list live for the ownerless rows")
+	got = rowIDs(rows)
+	c.True(got[ownerless.ID], "ListLive(\"\") omitted the ownerless row")
+	c.False(got[a1.ID], "ListLive(\"\") returned owner a's row")
+	c.False(got[a2.ID], "ListLive(\"\") returned owner a's row")
+	c.False(got[b1.ID], "ListLive(\"\") returned owner b's row")
+	for _, r := range rows {
+		c.Eq("", r.OwnerUserID, "ListLive(\"\") returned an owned row")
+	}
 
 	// A tombstoned row drops out of its owner's list.
 	c.NoError(s.Tombstone(ctx, a1.ID), "tombstone a1")
 	rows, err = s.ListLive(ctx, a)
 	c.NoError(err, "list live after tombstone")
-	got = ids(rows)
+	got = rowIDs(rows)
 	c.False(got[a1.ID], "ListLive included a tombstoned row")
 	c.True(got[a2.ID], "ListLive dropped a live row")
+}
+
+func TestInstallStoreListLiveAllSeesEveryOwner(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	a, b := owner(t), owner(t)
+	a1, b1 := newRow(t, a), newRow(t, b)
+	ownerless := newRow(t, "")
+	insert(t, s, a1)
+	insert(t, s, b1)
+	insert(t, s, ownerless)
+
+	rows, err := s.ListLiveAll(ctx)
+	c.NoError(err, "list live all")
+	got := rowIDs(rows)
+	c.True(got[a1.ID], "ListLiveAll omitted owner a's row")
+	c.True(got[b1.ID], "ListLiveAll omitted owner b's row")
+	c.True(got[ownerless.ID], "ListLiveAll omitted the ownerless row")
+
+	// A tombstoned row drops out.
+	c.NoError(s.Tombstone(ctx, b1.ID), "tombstone b1")
+	rows, err = s.ListLiveAll(ctx)
+	c.NoError(err, "list live all after tombstone")
+	got = rowIDs(rows)
+	c.False(got[b1.ID], "ListLiveAll included a tombstoned row")
+	c.True(got[a1.ID], "ListLiveAll dropped a live row")
+}
+
+// TestInstallStorePrimaryKeyViolationIsNotErrExists pins the OTHER half of the
+// Insert predicate: only the live executor_id unique index may become
+// ErrExists. A duplicate PRIMARY KEY is a different constraint, so weakening the
+// check to "SQLSTATE 23505" would report an id collision as an install
+// collision, and a caller would answer "already installed" for a bug.
+func TestInstallStorePrimaryKeyViolationIsNotErrExists(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, _ := testStore(t)
+	ctx := context.Background()
+
+	first := newRow(t, owner(t))
+	insert(t, s, first)
+
+	// Same row id, different executor id: the primary key is what rejects it.
+	second := newRow(t, first.OwnerUserID)
+	second.ID = first.ID
+	err := s.Insert(ctx, second)
+	c.Error(err, "a duplicate primary key was accepted")
+	c.NotErrorIs(err, executorinstall.ErrExists,
+		"a primary-key violation was reported as ErrExists: %v", err)
 }

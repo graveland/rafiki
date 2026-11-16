@@ -52,9 +52,14 @@ type Store interface {
 	// ByExecutor returns the LIVE row for an executor id (RemovedAt IS NULL).
 	// ok is false when no live row exists.
 	ByExecutor(ctx context.Context, executorID string) (Row, bool, error)
-	// ListLive returns live rows. An empty ownerUserID means EVERY owner;
-	// a non-empty one scopes to that owner. Oldest first.
+	// ListLive returns live rows for EXACTLY ownerUserID. An empty ownerUserID
+	// matches the ownerless rows (""), NOT every owner: an install is
+	// caller-bound, so "" must never widen a scoped read into a daemon-wide
+	// one. Use ListLiveAll for that. Oldest first.
 	ListLive(ctx context.Context, ownerUserID string) ([]Row, error)
+	// ListLiveAll returns every live row regardless of owner — the
+	// operator/admin surface only, never a caller-bound path. Oldest first.
+	ListLiveAll(ctx context.Context) ([]Row, error)
 	// SetLauncher records the launcher executor and the remote platform a live
 	// row was installed through.
 	SetLauncher(ctx context.Context, id, launcherExecutorID, platform string) error

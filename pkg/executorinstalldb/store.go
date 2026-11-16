@@ -109,16 +109,24 @@ func (s *Store) ByExecutor(ctx context.Context, executorID string) (executorinst
 	return row, true, nil
 }
 
-// ListLive returns live rows, oldest first. An empty ownerUserID returns every
-// owner's rows; a non-empty one scopes to that owner.
+// ListLive returns the live rows for EXACTLY ownerUserID, oldest first. An
+// empty ownerUserID is the ownerless rows (""), never every owner: an install
+// is caller-bound, so "" must not widen a scoped read into a daemon-wide one.
 func (s *Store) ListLive(ctx context.Context, ownerUserID string) ([]executorinstall.Row, error) {
-	sql := `SELECT ` + columns + ` FROM conversations.executor_install WHERE removed_at IS NULL`
-	var args []any
-	if ownerUserID != "" {
-		sql += ` AND owner_user_id=$1`
-		args = append(args, ownerUserID)
-	}
-	sql += ` ORDER BY created_at, id`
+	return s.query(ctx, `SELECT `+columns+` FROM conversations.executor_install
+		 WHERE owner_user_id=$1 AND removed_at IS NULL
+		 ORDER BY created_at, id`, ownerUserID)
+}
+
+// ListLiveAll returns every live row regardless of owner — the operator/admin
+// surface only, never a caller-bound path.
+func (s *Store) ListLiveAll(ctx context.Context) ([]executorinstall.Row, error) {
+	return s.query(ctx, `SELECT `+columns+` FROM conversations.executor_install
+		 WHERE removed_at IS NULL
+		 ORDER BY created_at, id`)
+}
+
+func (s *Store) query(ctx context.Context, sql string, args ...any) ([]executorinstall.Row, error) {
 	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list executor installs: %w", err)
