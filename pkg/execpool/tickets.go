@@ -119,6 +119,26 @@ func (r *TicketRegistry) Redeem(ticket string) (TicketGrant, bool) {
 	return g, ok
 }
 
+// Restore puts a grant back under a ticket a redemption consumed and then could
+// not carry out. It exists for one case: a minting install ticket whose rotation
+// failed, where the ticket bought nothing and the peer was answered with the
+// retryable refusal. Consuming it anyway would make the retry a terminal 401 and
+// take an executor out of service over a database blip.
+//
+// Only the minting install path calls this, never a transient one, and it is a
+// plain re-insert — so it CAN put a grant back under a ticket a launcher Revoked
+// while that rotation was running. The cost is bounded to a late join: the
+// revoked ticket belonged to an install launch whose launcher had given up
+// waiting, the executor it readmits is the machine that install already owns, and
+// its row is durable and launcher-independent, so the executor coming up late is
+// the outcome the operator asked for. A session (transient) ticket is never
+// restored, so nothing here can outlive the control connection that minted it.
+func (r *TicketRegistry) Restore(ticket string, g TicketGrant) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.m[ticket] = g
+}
+
 // Revoke discards an unredeemed ticket. This is how a closed control
 // connection stops its executor from ever connecting.
 func (r *TicketRegistry) Revoke(ticket string) {

@@ -406,8 +406,17 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 				// costs one failed launch — the loser's credential is dead, and its
 				// next relaunch mints a fresh one, so it self-heals.
 				id := e.ID
+				spent, held := secret, grant
 				mint = func(ctx context.Context) (string, error) {
-					return p.store.RotateCredential(ctx, id)
+					cred, err := p.store.RotateCredential(ctx, id)
+					if err != nil {
+						// The redemption bought nothing, so the ticket goes
+						// back: its refusal is the retryable 503, and a retry
+						// presenting a ticket spent by a rotation that never
+						// happened would be a terminal 401.
+						p.tickets.Restore(spent, held)
+					}
+					return cred, err
 				}
 			}
 		}
