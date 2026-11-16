@@ -356,6 +356,13 @@ message ChildSummary {
   // the caller may only read it. Optional because false would otherwise be a
   // claim about callers it does not apply to.
   optional bool in_subtree = 29;
+  // workspace_tools is the workspace tools mode RESOLVED AT SPAWN for a claude
+  // child: "" keeps Claude Code's built-in file and shell tools on the launch
+  // host (native, the default), "rafiki" disallows them and serves rafiki's
+  // executor-routed tools over MCP instead. It is persisted on the child and
+  // never re-resolved on resume, so a client can reconstruct the spawn a child
+  // came from — the cockpit's model switch carries it onto the fork.
+  string workspace_tools = 30;
 }
 
 // ListScope picks which agents a child credential's ListChildren returns.

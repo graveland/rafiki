@@ -873,6 +873,16 @@ func (c *Cockpit) switchModelOf(id, model string) tea.Cmd {
 		}
 		c.form.sourceName = strings.TrimSpace(n.Name)
 		c.form.sourceModel = n.Model
+		// The source's workspace tools mode is part of "the same conversation":
+		// every row of this form opens prefilled from the source's rail row, and
+		// what a row holds is what the fork gets. Seeding it here is what keeps a
+		// continuation on executor-routed tools instead of silently reverting it
+		// to Claude Code's built-ins on the launch host.
+		for i, m := range workspaceModes {
+			if m == n.WorkspaceTools {
+				c.form.workspaceIx = i
+			}
+		}
 		c.form.inputs[fieldName].SetValue(c.form.sourceName)
 		c.form.inputs[fieldModel].SetValue(n.Model)
 		if n.Cwd != "" {

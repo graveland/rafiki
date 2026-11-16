@@ -2565,6 +2565,18 @@ empty for a top-level child. It is read from the `rafiki/parent` label, falling
 back to the legacy `fundi/parent` spelling (`childstore.ParentLabel`), so rows
 written before the rename report it too.
 
+### Child workspace tools
+
+`ChildSummary.workspace_tools` reports the mode RESOLVED AT SPAWN for a claude
+child: `""` for native (Claude Code's built-in file and shell tools on the
+launch host — the default), `rafiki` for those disallowed and rafiki's
+executor-routed tools served over MCP instead. It is read from
+`childstore.Session.WorkspaceTools`, which spawn resolves once and resume never
+re-resolves. The field exists so a client can reconstruct the spawn a child came
+from: the cockpit's model switch seeds its workspace tools row from it, so a
+continuation keeps the source's mode instead of silently reverting to the
+built-ins.
+
 ### Operator display state
 
 `GetChild` and `ListChildren` report three SERVER-DERIVED display fields on

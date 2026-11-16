@@ -56,3 +56,16 @@ func TestChildSummaryCarriesParentChildID(t *testing.T) {
 	ck.Eq("c0", got.GetParentChildId(), "parent_child_id")
 	ck.Eq("", toProtoChild(protocol.ChildSummary{ChildID: "c0"}, nil, nil).GetParentChildId(), "top-level parent_child_id")
 }
+
+// TestChildSummaryCarriesWorkspaceTools pins the mapping that lets a client
+// reconstruct the spawn a child came from: without it the cockpit's model
+// switch reads "native" for a rafiki-mode child and reverts the continuation to
+// Claude Code's built-in tools. The value is the one resolved at spawn, carried
+// verbatim — "" is native (the default), so unset stays empty.
+func TestChildSummaryCarriesWorkspaceTools(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	got := toProtoChild(protocol.ChildSummary{ChildID: "c1", WorkspaceTools: protocol.WorkspaceToolsRafiki}, nil, nil)
+	ck.Eq(protocol.WorkspaceToolsRafiki, got.GetWorkspaceTools(), "workspace_tools")
+	ck.Eq("", toProtoChild(protocol.ChildSummary{ChildID: "c1"}, nil, nil).GetWorkspaceTools(),
+		"a native child's workspace_tools stays empty")
+}

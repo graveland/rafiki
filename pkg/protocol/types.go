@@ -610,6 +610,13 @@ type ChildSummary struct {
 	// the caller spawned this agent, false when it may only read it. Nil
 	// everywhere else.
 	InSubtree *bool `json:"in_subtree,omitempty"`
+	// WorkspaceTools is the workspace tools mode RESOLVED AT SPAWN for a claude
+	// child, mirrored from childstore.Session.WorkspaceTools: "" (native, the
+	// default) or protocol.WorkspaceToolsRafiki. It is persisted on the child and
+	// never re-resolved on resume, so a client reconstructing a spawn — the
+	// cockpit's model switch — carries the same mode rather than silently
+	// reverting a rafiki-mode child to its built-in tools.
+	WorkspaceTools string `json:"workspaceTools,omitempty"`
 }
 
 // SpawnResponseData is the data payload of a Spawn/Resume answer (§6.3).

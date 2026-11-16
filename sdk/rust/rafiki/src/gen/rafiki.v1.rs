@@ -991,6 +991,14 @@ pub struct ChildSummary {
     /// claim about callers it does not apply to.
     #[prost(bool, optional, tag = "29")]
     pub in_subtree: ::core::option::Option<bool>,
+    /// workspace_tools is the workspace tools mode RESOLVED AT SPAWN for a claude
+    /// child: "" keeps Claude Code's built-in file and shell tools on the launch
+    /// host (native, the default), "rafiki" disallows them and serves rafiki's
+    /// executor-routed tools over MCP instead. It is persisted on the child and
+    /// never re-resolved on resume, so a client can reconstruct the spawn a child
+    /// came from — the cockpit's model switch carries it onto the fork.
+    #[prost(string, tag = "30")]
+    pub workspace_tools: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListChildrenRequest {

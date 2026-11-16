@@ -182,6 +182,10 @@ func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 		// the BASE id — the spec lives only here and in the rafiki/routing
 		// label.
 		Routing: snap.Routing,
+		// The workspace tools mode resolved at spawn, mirrored from the
+		// session: a client reconstructing this child's spawn (the cockpit's
+		// model switch) must carry the same mode, not default to native.
+		WorkspaceTools: snap.WorkspaceTools,
 	}
 	if displayState != nil {
 		cs.DisplayState, cs.WaitingOn, cs.DisplayMsg = displayState(snap.ChildID)

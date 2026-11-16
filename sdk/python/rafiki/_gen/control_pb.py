@@ -661,6 +661,7 @@ class ChildSummary:
     display_msg: str = ""
     parent_child_id: str = ""
     in_subtree: Optional[bool] = None
+    workspace_tools: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -718,6 +719,8 @@ class ChildSummary:
             out["parentChildId"] = self.parent_child_id
         if self.in_subtree is not None:
             out["inSubtree"] = self.in_subtree
+        if self.workspace_tools != "":
+            out["workspaceTools"] = self.workspace_tools
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ChildSummary":
@@ -803,6 +806,9 @@ class ChildSummary:
         _v = _d.get("inSubtree")
         if _v is not None:
             obj.in_subtree = _v
+        _v = _d.get("workspaceTools")
+        if _v is not None:
+            obj.workspace_tools = _v
         return obj
 
 @dataclasses.dataclass

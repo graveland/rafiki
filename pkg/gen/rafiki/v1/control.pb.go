@@ -1770,9 +1770,16 @@ type ChildSummary struct {
 	// when the caller spawned this agent (directly or transitively), false when
 	// the caller may only read it. Optional because false would otherwise be a
 	// claim about callers it does not apply to.
-	InSubtree     *bool `protobuf:"varint,29,opt,name=in_subtree,json=inSubtree,proto3,oneof" json:"in_subtree,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	InSubtree *bool `protobuf:"varint,29,opt,name=in_subtree,json=inSubtree,proto3,oneof" json:"in_subtree,omitempty"`
+	// workspace_tools is the workspace tools mode RESOLVED AT SPAWN for a claude
+	// child: "" keeps Claude Code's built-in file and shell tools on the launch
+	// host (native, the default), "rafiki" disallows them and serves rafiki's
+	// executor-routed tools over MCP instead. It is persisted on the child and
+	// never re-resolved on resume, so a client can reconstruct the spawn a child
+	// came from — the cockpit's model switch carries it onto the fork.
+	WorkspaceTools string `protobuf:"bytes,30,opt,name=workspace_tools,json=workspaceTools,proto3" json:"workspace_tools,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ChildSummary) Reset() {
@@ -1992,6 +1999,13 @@ func (x *ChildSummary) GetInSubtree() bool {
 		return *x.InSubtree
 	}
 	return false
+}
+
+func (x *ChildSummary) GetWorkspaceTools() string {
+	if x != nil {
+		return x.WorkspaceTools
+	}
+	return ""
 }
 
 type ListChildrenRequest struct {
@@ -17639,7 +17653,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x10SetResultRequest\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\"\x13\n" +
-	"\x11SetResultResponse\"\xd0\b\n" +
+	"\x11SetResultResponse\"\xf9\b\n" +
 	"\fChildSummary\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -17674,7 +17688,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"displayMsg\x12&\n" +
 	"\x0fparent_child_id\x18\x1c \x01(\tR\rparentChildId\x12\"\n" +
 	"\n" +
-	"in_subtree\x18\x1d \x01(\bH\x05R\tinSubtree\x88\x01\x01\x1a9\n" +
+	"in_subtree\x18\x1d \x01(\bH\x05R\tinSubtree\x88\x01\x01\x12'\n" +
+	"\x0fworkspace_tools\x18\x1e \x01(\tR\x0eworkspaceTools\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x06\n" +

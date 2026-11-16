@@ -112,6 +112,12 @@ type Node struct {
 	// from ListChildren. Empty until seeded.
 	Model string
 
+	// WorkspaceTools is the workspace tools mode the daemon RESOLVED AT SPAWN for
+	// a claude child, from ListChildren: "" (native, the default) or "rafiki".
+	// A rail row is the snapshot a spawn is reconstructed from, so a model switch
+	// reads it here to keep the source's mode instead of reverting to native.
+	WorkspaceTools string
+
 	// Latest is the highest ordinal known to exist for this child; it drives the
 	// activity indicator. RailCursor is the highest ordinal RECEIVED on the rail
 	// stream and is the reconnect resume point. Seen is the highest delivered to
@@ -312,6 +318,7 @@ func (r *Rail) seed(summaries []*rafikiv1.ChildSummary, refreshStatus bool) []No
 			existing.Cwd = s.GetCwd()
 			existing.Model = s.GetModel()
 			existing.Kind = s.GetKind()
+			existing.WorkspaceTools = s.GetWorkspaceTools()
 			existing.MaxCost = s.GetMaxCost()
 			existing.ContextWindow = int(s.GetContextWindow())
 			if refreshStatus {
@@ -325,22 +332,25 @@ func (r *Rail) seed(summaries []*rafikiv1.ChildSummary, refreshStatus bool) []No
 			continue
 		}
 		n := &Node{
-			ChildID:       s.GetChildId(),
-			Name:          s.GetName(),
-			ParentID:      s.GetLabels()[ParentLabel],
-			Status:        s.GetStatus(),
-			Exited:        exited,
-			ExitCode:      s.ExitCode,
-			Kind:          s.GetKind(),
-			Native:        s.GetLabels()[NativeSubagentLabel] == "1",
-			SessionID:     s.GetSessionId(),
-			Cwd:           s.GetCwd(),
-			Model:         s.GetModel(),
-			MaxCost:       s.GetMaxCost(),
-			ContextWindow: int(s.GetContextWindow()),
-			DisplayState:  s.GetDisplayState(),
-			WaitingOn:     s.GetWaitingOn(),
-			DisplayMsg:    s.GetDisplayMsg(),
+			ChildID:   s.GetChildId(),
+			Name:      s.GetName(),
+			ParentID:  s.GetLabels()[ParentLabel],
+			Status:    s.GetStatus(),
+			Exited:    exited,
+			ExitCode:  s.ExitCode,
+			Kind:      s.GetKind(),
+			Native:    s.GetLabels()[NativeSubagentLabel] == "1",
+			SessionID: s.GetSessionId(),
+			Cwd:       s.GetCwd(),
+			Model:     s.GetModel(),
+			// The spawn-resolved workspace tools mode: the row is what a switch
+			// reconstructs a spawn from, so it must survive seeding.
+			WorkspaceTools: s.GetWorkspaceTools(),
+			MaxCost:        s.GetMaxCost(),
+			ContextWindow:  int(s.GetContextWindow()),
+			DisplayState:   s.GetDisplayState(),
+			WaitingOn:      s.GetWaitingOn(),
+			DisplayMsg:     s.GetDisplayMsg(),
 		}
 		// Seeding is a CLEAN BOARD: everything that happened before you attached
 		// counts as read. Attaching is not a claim to have read anything; it is

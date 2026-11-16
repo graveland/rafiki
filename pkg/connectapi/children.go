@@ -76,6 +76,10 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 	out.ExitSignal = c.ExitSignal
 	out.SlashCommands = c.SlashCommands
 	out.Routing = c.Routing
+	// The workspace tools mode resolved at spawn, so a client can reconstruct
+	// the spawn a child came from: the cockpit's model switch carries it onto
+	// the fork instead of reverting the continuation to native.
+	out.WorkspaceTools = c.WorkspaceTools
 	out.MaxCompletionTokens = int32(c.MaxCompletionTokens)
 	out.DisplayState = string(c.DisplayState)
 	out.WaitingOn = string(c.WaitingOn)

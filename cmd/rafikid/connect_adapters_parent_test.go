@@ -44,3 +44,30 @@ func TestChildSummaryCarriesParentChildID(t *testing.T) {
 		ck.EqDeep(want, got, "ParentChildID by child")
 	})
 }
+
+// TestChildSummaryCarriesWorkspaceTools pins the session→summary half of the
+// mapping the cockpit's model switch reconstructs a spawn from: the mode is
+// resolved once at spawn and persisted on the session, so the summary must
+// report the STORED value (never a re-resolution) or a continuation silently
+// reverts a rafiki-mode claude child to its built-in tools.
+func TestChildSummaryCarriesWorkspaceTools(t *testing.T) {
+	st := childstore.New()
+	st.Insert(&childstore.Session{
+		ChildID: "c_ws", Kind: protocol.KindClaude,
+		WorkspaceTools: protocol.WorkspaceToolsRafiki,
+	})
+	st.Insert(&childstore.Session{ChildID: "c_native", Kind: protocol.KindClaude})
+	c := &Controller{st: st}
+
+	ck := assert.NewCollecting(t)
+	got, ok := c.GetChild("c_ws")
+	ck.Require().True(ok, "GetChild(c_ws) ok")
+	ck.Eq(protocol.WorkspaceToolsRafiki, got.WorkspaceTools, "GetChild(c_ws).WorkspaceTools")
+
+	byID := map[string]string{}
+	for _, s := range c.ListChildren(nil) {
+		byID[s.ChildID] = s.WorkspaceTools
+	}
+	ck.Eq(protocol.WorkspaceToolsRafiki, byID["c_ws"], "ListChildren c_ws workspace tools")
+	ck.Eq("", byID["c_native"], "a native child reports no mode")
+}

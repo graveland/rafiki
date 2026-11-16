@@ -36,6 +36,9 @@ type switchClient struct {
 	killed  int
 	// sandboxed marks the fake source as sandboxed.
 	sandboxed bool
+	// workspaceTools is the mode the fake source reports on GetChild (the mode
+	// the daemon resolved at spawn).
+	workspaceTools string
 }
 
 func (f *switchClient) record(ev string) {
@@ -55,7 +58,8 @@ func (f *switchClient) GetChild(_ context.Context, req *connect.Request[rafikiv1
 			"rafiki/preset": "review:fixer",
 			"team":          "x",
 		},
-		Routing: "sort=price",
+		Routing:        "sort=price",
+		WorkspaceTools: f.workspaceTools,
 	}
 	if f.sandboxed {
 		src.Labels["rafiki/sandbox"] = "1"
@@ -199,6 +203,63 @@ func TestSwitchCompositionStopFailureAbortsBeforeClose(t *testing.T) {
 	ck.Require().NoError(sw2.err, "ErrChildExited on the stop must not fail the switch")
 	ck.EqDiff([]string{"getchild:c_src", "spawn", "kill:c_src", "close:c_src", "rename:scout", "routing:sort=price"},
 		client2.events, "the switch proceeds past an already-exited source")
+}
+
+// A model switch reconstructs the source's spawn, so the workspace tools mode
+// the daemon RESOLVED AT SPAWN rides the fork: a rafiki-mode claude child
+// switched onto another model comes back rafiki-mode, and a native source keeps
+// the row's native value. The channel is the rail row — ListChildren carries
+// ChildSummary.workspace_tools, the seed puts it on the node, switchModelOf
+// seeds the form's row from it, and params/buildSpawnRequest put the row on the
+// request. Dropping any link silently reverts the continuation to Claude Code's
+// built-in tools on its launch host.
+//
+// A native source's request carries "native" rather than "": the form sends
+// the row verbatim (see spawnParams.workspaceTools) and the daemon stores
+// "native" as the child's empty mode — so the continuation's persisted mode is
+// empty either way, while a preset's rafiki cannot overrule what the row shows.
+func TestSwitchKeepsTheSourceWorkspaceTools(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{"rafiki-mode source", protocol.WorkspaceToolsRafiki, protocol.WorkspaceToolsRafiki},
+		// The daemon reports "" for a native child; the row seeds to its own
+		// native default and the request carries that value.
+		{"native source", "", protocol.WorkspaceToolsNative},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestCockpit("c_x")
+			client := newSwitchClient()
+			client.workspaceTools = tc.source
+			c.client = client
+			sum := summaryFor("c_src", "scout", 0)
+			sum.Kind = protocol.KindClaude
+			sum.Model = "claude-sonnet-4-5"
+			sum.WorkspaceTools = tc.source
+			c.rail.Seed([]*rafikiv1.ChildSummary{sum})
+			c.selected = "c_src"
+
+			c.switchModelOf("c_src", "claude-opus-4-1")
+			ck.Require().NotNil(c.form, "the switch form must be open")
+			ck.Eq(tc.want, c.form.workspaceTools(), "the form's workspace tools row is seeded from the source")
+
+			// Rename so the switch is a CLONE: a claude-kind switch of a claude
+			// source that keeps its name restarts in place (no spawn), and it is
+			// the spawn this test is about.
+			c.form.inputs[fieldName].SetValue("scout-2")
+			p, problem := c.form.params(nil)
+			ck.Require().Eq("", problem, "form params")
+			ck.Require().True(p.keepSource, "a renamed switch is a clone")
+			_, sw := switchMsg(t, c, p)
+			ck.Require().NoError(sw.err, "switch finish")
+
+			ck.Require().Len(client.spawned, 1, "spawns")
+			ck.Eq(tc.want, client.spawned[0].GetWorkspaceTools(), "workspace_tools on the fork's spawn request")
+		})
+	}
 }
 
 // A sandboxed source refuses the switch outright: the sandbox block cannot be
