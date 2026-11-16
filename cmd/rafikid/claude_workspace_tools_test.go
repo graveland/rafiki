@@ -17,6 +17,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -294,11 +295,38 @@ func schemaHasExecutor(t *testing.T, tl *mcp.Tool) bool {
 	return has
 }
 
+// lspToolNames is the eight lsp_* replacements for Claude Code's built-in LSP
+// tool, which `workspace_tools: "rafiki"` disallows. All eight are
+// TierWorkspace in pkg/fundi/tools, and the executor's Describe omits them when
+// it has no language server.
+var lspToolNames = []string{
+	"lsp_call_hierarchy",
+	"lsp_definition",
+	"lsp_diagnostics",
+	"lsp_references",
+	"lsp_rename",
+	"lsp_replace_symbol",
+	"lsp_restart",
+	"lsp_symbols",
+}
+
+// workspaceTierNames is the whole workspace tier a rafiki-mode claude child is
+// served on this face: Claude Code's own four spellings, the search/list verbs,
+// the job verbs and lsp_*. Both the rafiki-mode test (all served) and the
+// native-mode test (none served) read it, so a tool added to the face's tier is
+// checked against a native child too.
+var workspaceTierNames = func() []string {
+	out := []string{"Bash", "Edit", "Read", "Write", "bash_kill", "bash_output", "glob", "grep", "ls"}
+	out = append(out, lspToolNames...)
+	slices.Sort(out)
+	return out
+}()
+
 // TestMCPFaceWorkspaceToolsRafikiChildSeesClaudeShaped pins the served surface
-// of a rafiki-mode claude child: Claude Code's four spellings plus the
-// search/list/job verbs, each with the per-call `executor` argument; none of the
-// native four; and exactly one pymodule_run (the child-binding one the face
-// already served).
+// of a rafiki-mode claude child: Claude Code's four spellings, the
+// search/list/job verbs and the eight lsp_* replacements, each with the
+// per-call `executor` argument; none of the native four; and exactly one
+// pymodule_run (the child-binding one the face already served).
 func TestMCPFaceWorkspaceToolsRafikiChildSeesClaudeShaped(t *testing.T) {
 	ck := assert.NewAborting(t)
 	face, _ := mcpFaceFixture(t)
@@ -306,8 +334,7 @@ func TestMCPFaceWorkspaceToolsRafikiChildSeesClaudeShaped(t *testing.T) {
 
 	toolsByName := mcpToolsByName(t, mcpConnect(t, face.getServer(req)))
 
-	want := []string{"Read", "Write", "Edit", "Bash", "glob", "grep", "ls", "bash_output", "bash_kill"}
-	for _, name := range want {
+	for _, name := range workspaceTierNames {
 		tl, ok := toolsByName[name]
 		ck.Require().True(ok, "rafiki-mode child is missing %q (has %v)", name, sortedToolNames(toolsByName))
 		ck.True(schemaHasExecutor(t, tl), "workspace tool %q must carry the executor argument", name)
@@ -350,10 +377,64 @@ func TestMCPFaceWorkspaceToolsNativeChildUnchanged(t *testing.T) {
 		face, _ := mcpFaceFixture(t)
 		req := mcpWorkspaceChildRequest(t, face, mode, newFakeBinder(&fakeExec{id: "e-1"}))
 		names := sortedToolNames(mcpToolsByName(t, mcpConnect(t, face.getServer(req))))
-		for _, name := range []string{"Read", "Write", "Edit", "Bash", "glob", "grep", "ls", "bash_output", "bash_kill"} {
+		for _, name := range workspaceTierNames {
 			ck.NotContains(names, name, "native child (mode %q) unexpectedly got the workspace tier", mode)
 		}
 		ck.Contains(names, "task_add", "native child (mode %q) lost the ordinary surface", mode)
+	}
+}
+
+// TestMCPFaceWorkspaceToolsOmitsWhatTheExecutorDoesNotServe pins the served-set
+// filter over the LSP replacements, which is the case it exists for: a machine
+// with no configured language server omits lsp_* from its Describe (pkg/executor
+// builds its registry from the installed servers), and the face must then hand
+// the child none of them rather than eight tools that can only fail. The other
+// direction is pinned beside it, so the filter cannot be satisfied by dropping
+// lsp_* unconditionally. The Claude-shaped four are daemon-side translators and
+// never routed, so no served set can drop them; the parent-side job verbs are
+// RPCs and are not routed either.
+func TestMCPFaceWorkspaceToolsOmitsWhatTheExecutorDoesNotServe(t *testing.T) {
+	fileTools := []string{"read", "write", "edit", "glob", "grep", "ls", "bash"}
+	for _, tc := range []struct {
+		name    string
+		served  []string
+		wantLSP bool
+	}{
+		{name: "machine with no language server", served: fileTools},
+		{
+			name:    "machine with a language server",
+			served:  append(append([]string{}, fileTools...), lspToolNames...),
+			wantLSP: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			face, _ := mcpFaceFixture(t)
+			// homeLabel is what be.homeExecutor() seeds from; it names the
+			// executor the served set is read for.
+			binder := newFakeBinder(&fakeExec{id: "e-1"})
+			binder.homeLabel = "e-1"
+			req := mcpWorkspaceChildRequest(t, face, protocol.WorkspaceToolsRafiki, binder)
+
+			// Exactly what this machine's Describe reports.
+			face.controller().execPool = &fakePool{live: []execpool.LiveExecutor{{
+				Executor: executors.Executor{ID: "e-1"},
+				Describe: &executorpb.DescribeResponse{Tools: tc.served},
+			}}}
+
+			names := sortedToolNames(mcpToolsByName(t, mcpConnect(t, face.getServer(req))))
+			for _, name := range lspToolNames {
+				if tc.wantLSP {
+					ck.Contains(names, name, "this machine serves %q, so it must be advertised (has %v)", name, names)
+					continue
+				}
+				ck.NotContains(names, name,
+					"this machine serves no language server, yet %q was advertised (has %v)", name, names)
+			}
+			for _, name := range []string{"Read", "Write", "Edit", "Bash", "glob", "grep", "ls", "bash_output", "bash_kill"} {
+				ck.Contains(names, name, "the served-set filter dropped %q, which this machine reports serving", name)
+			}
+		})
 	}
 }
 

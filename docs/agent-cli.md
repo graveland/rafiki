@@ -515,9 +515,11 @@ rafiki` moves that work onto an executor instead: Claude Code's built-in
 `Bash`/`Read`/`Write`/`Edit` (and `NotebookEdit`, `LSP`, `EnterWorktree`,
 `ExitWorktree`) are disallowed, deferred tool search is forced off so the
 replacements are not hidden behind it, and the MCP face serves Claude-shaped
-`Read`/`Write`/`Edit`/`Bash` plus the search/list and job verbs — a call names
-an executor when the child reaches more than one. `native`, the default, leaves
-the built-ins alone. The daemon refuses `rafiki` for any other kind (a fundi
+`Read`/`Write`/`Edit`/`Bash`, the search/list and job verbs, and the eight
+`lsp_*` replacements for the disallowed `LSP` tool — a call names an executor
+when the child reaches more than one, and a tool the child's executor does not
+serve (the `lsp_*` eight on a machine with no language server) is never offered.
+`native`, the default, leaves the built-ins alone. The daemon refuses `rafiki` for any other kind (a fundi
 child already runs rafiki's tools), on a daemon with no executor pool, and on a
 daemon that serves the child no MCP face at all; the CLI applies the same kind
 rule before sending, judged against the FINAL kind so a claude preset still

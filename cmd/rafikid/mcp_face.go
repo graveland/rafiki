@@ -401,6 +401,14 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 			if snap, ok := ctrl.st.Get(id.ChildID); ok && snap.WorkspaceTools == protocol.WorkspaceToolsRafiki {
 				opts.Executor = be
 				opts.ClaudeShapedWorkspace = true
+				// What the child's home machine reported serving, so a tool that
+				// machine declines is omitted from the child's tool list rather than
+				// advertised and failing on every call. lsp_* is the case that makes
+				// this load-bearing: the mode disallows the built-in LSP tool, and a
+				// machine with no language server must not be handed replacements it
+				// cannot run. A nil slice leaves routing unfiltered — see
+				// executorToolsFor.
+				opts.ExecutorTools = servedToolSet(ctrl.executorToolsFor(be.homeExecutor()))
 			}
 		}
 	}
@@ -575,13 +583,24 @@ var mcpBlueprints = []tools.Tool{
 }
 
 // mcpWorkspaceBlueprints is the workspace tier a rafiki-mode claude child works
-// through this face: Claude Code's own four spellings, the search/list verbs
-// that go with them, and the job verbs Bash's run_in_background hands work to.
+// through this face: Claude Code's own four spellings, the native spellings
+// ClaudeShapedWorkspace makes decline beside them, the search/list verbs that go
+// with them, the job verbs Bash's run_in_background hands work to, and the lsp_*
+// replacements for the built-in LSP tool the mode disallows.
 //
 // They are served ONLY alongside opts.ClaudeShapedWorkspace (see mcpToolset).
 // The native read/write/edit/bash are listed so the Wave-1 rule keeps holding
 // through this face: ClaudeShapedWorkspace makes them decline, and offering a
 // model both spellings of one operation would leave it guessing.
+//
+// The lsp_* eight decline only when opts.LSP == nil AND opts.Executor == nil
+// (lsp_shared.go), so they materialize for a child this face has bound and
+// tools.BindToExecutor then proxies them to the executor, which runs them
+// against the files it holds. A machine with no language server omits the eight
+// from the served set it reports through Describe, and BindToExecutor drops
+// every routed tool that set omits — getServer supplies it from the child's home
+// executor — so the child is never advertised an lsp_* tool its machine cannot
+// run.
 //
 // pymodule_run is deliberately absent: the face already serves it through
 // newMCPPyModuleExecutor, and a second blueprint of the same name would either
@@ -600,6 +619,14 @@ var mcpWorkspaceBlueprints = []tools.Tool{
 	&tools.LsBlueprint{},
 	&tools.BashOutputBlueprint{},
 	&tools.BashKillBlueprint{},
+	&tools.LSPCallHierarchyBlueprint{},
+	&tools.LSPDefinitionBlueprint{},
+	&tools.LSPDiagnosticsBlueprint{},
+	&tools.LSPReferencesBlueprint{},
+	&tools.LSPRenameBlueprint{},
+	&tools.LSPReplaceSymbolBlueprint{},
+	&tools.LSPRestartBlueprint{},
+	&tools.LSPSymbolsBlueprint{},
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint

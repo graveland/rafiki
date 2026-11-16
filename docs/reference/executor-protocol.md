@@ -405,7 +405,8 @@ Describe() → { executorId, platform, roots[], concurrency, isolation,
 Unary. Called at startup and periodically to discover the executor's
 capabilities. `tools[]` is the executor's *actual* served set — the names its
 registry materialized, not a static list — and it is what the parent builds the
-child's `tools[]` from at spawn, so a name that isn't here never reaches the
+child's `tools[]` from (at spawn, and again on each MCP request for a claude
+child in workspace-tools mode), so a name that isn't here never reaches the
 child's envelope. It includes the `lsp_*` verbs only when a language server is
 installed (or `--lsp-config` names one), and never the parent-side
 `bash_start`/`bash_output`/`bash_kill` RPCs, which the daemon implements itself.
