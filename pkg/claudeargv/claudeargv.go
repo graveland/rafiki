@@ -52,7 +52,8 @@ const CoordinationPrompt = "You are running under rafiki, which exposes its agen
 	"owner's past conversations and saved memories with recall before non-trivial work, expand " +
 	"a promising hit with recall_context, and save durable facts with memory_put." +
 	" For timed work — a reminder, a recurring check, waking yourself later — use rafiki's CronCreate, CronDelete, CronList and ScheduleWakeup tools: their jobs persist with this conversation and survive daemon restarts." +
-	coordinationWaiting
+	coordinationWaiting +
+	coordinationInstall
 
 // coordinationWaiting is the waiting rule, stated on THIS surface because the
 // MCP tool descriptions cannot state it correctly: every one of them carries
@@ -75,6 +76,14 @@ const coordinationWaiting = " Waiting: a subagent you spawn is not announced on 
 	"or scheduling a wakeup to re-check. The \"settlement notification may be dropped\" " +
 	"warnings on MCP tools describe the best-effort log channel a client relies on for a " +
 	"TOP-LEVEL agent it spawned; they are not your channel and are not a reason to poll."
+
+// coordinationInstall names the executor-install capability, for the same reason
+// coordinationWaiting exists: a claude child's own tools stop at the host it runs
+// on, so executor_install buys it nothing DIRECTLY, and its description's "agents
+// you spawn can" describes a tool the model has no occasion to reach for. One
+// sentence, stated where the child's other standing policy lives.
+const coordinationInstall = " executor_install puts a rafiki executor on any machine your executors can ssh to, " +
+	"and agents you spawn can then use it by name."
 
 // ReplayUserMessages makes claude echo every user message it ACCEPTS back onto
 // stdout as `{"type":"user","isReplay":true,"uuid":"<the uuid we sent>"}`.
