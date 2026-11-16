@@ -83,25 +83,107 @@ hosting a launched child kind, e.g. `claude`); `--lsp-config` / `--no-lsp`
 server just drops its `lsp_*` tools rather than advertising broken ones).
 
 **Instances.** `-P/--profile` on an executor verb names an executor
-*instance*, not a daemon. For any name but `default`, the data dir, cache, both
-environment files, the log and the service unit are namespaced under
-`profiles/<name>` (unit `rafiki-executor-<name>`, launchd label
-`dev.graveland.rafiki-executor-<name>`), so two instances on one OS user are two
-independent services with two credentials; `default` keeps the unprefixed layout
-every existing install has. The instance comes from the DECLARED value —
-`-P/--profile`, else a non-empty `$RAFIKI_PROFILE`, else `default` — never from
-the `current-profile` pointer, so `rafiki profile use` cannot move an executor's
-state or change which service gets installed, stopped or restarted:
-`rafiki -P work executor setup` installs `rafiki-executor-work`, and
-`rafiki -P work service refresh` restarts it. `rafiki create` reads this
-machine's executor name from the same declared instance (so the name it reports
-and the unit `executor setup` installs agree), and `service status|stop|…` and
-`executor name` follow it too. `rafiki upgrade` carries its own `-P` into the
-`service refresh` it runs, so `rafiki -P work upgrade` refreshes the `work` unit
-and a bare `rafiki upgrade` refreshes `default`. A declared name that cannot be
-an instance name (it must be a single path component of letters, digits, `-`,
-`_` and `.`) warns once on stderr and uses the `default` instance — it never
-fails a command, and never fails one after it has replaced the binaries.
+*instance*, not a daemon. Only the **data and cache** directories are
+namespaced: for any name but `default` they become
+`<dir>/rafiki/profiles/<name>`, which is where the credential, this machine's
+executor name and the caches the pymodule sync prunes live. The config, state
+and runtime directories stay shared — that is where the daemon's sockets and
+the client's own preferences live — so what differs inside them is the FILE
+NAME: `executor-<name>.env`, `executor-overrides-<name>.env` and
+`executor-<name>.log`, with the unit `rafiki-executor-<name>` and the launchd
+label `dev.graveland.rafiki-executor-<name>`. `default` keeps every unprefixed
+path and unit name, so nothing migrates, and two instances on one OS user are
+two independent services with two credentials. The instance comes from the
+DECLARED value — `-P/--profile`, else a non-empty `$RAFIKI_PROFILE`, else
+`default` — never from the `current-profile` pointer, so `rafiki profile use`
+cannot move an executor's state or change which service gets installed,
+stopped or restarted: `rafiki -P work executor setup` installs
+`rafiki-executor-work`, and `rafiki -P work service refresh` restarts it.
+`rafiki create` reads this machine's executor name from the same declared
+instance (so the name it reports and the unit `executor setup` installs
+agree), and `service status|stop|…`, `executor name` and `rafiki upgrade`
+follow it too — `rafiki -P work upgrade` refreshes the `work` unit and a bare
+`rafiki upgrade` refreshes `default`. A declared name that cannot be an
+instance name (it must be a single path component of letters, digits, `-`, `_`
+and `.`) is FATAL for the verbs that change this machine's executor state —
+`executor serve`, `executor setup`, `executor service install|uninstall|start|stop|restart`,
+`executor name <name>`, `setup` and `upgrade` — because falling back would
+retarget the act at the `default` instance. Everywhere else (the read-only
+`executor service status|logs|tail`, `create`, `executor install`) it warns once
+on stderr and uses `default`.
+
+**Skills sync is off for a non-default instance unless that instance has its
+own `CLAUDE_CONFIG_DIR`.** Every instance writes the same `~/.claude/skills`,
+so a second one would rewrite one corpus under the first one's children: the
+implied forms (`--launch claude`, `RAFIKI_EXECUTOR_SKILLS_SYNC`) are silently
+switched off, and an explicit `--skills-sync=true` without a
+`CLAUDE_CONFIG_DIR` is refused with the variable that fixes it.
+
+### Installing an executor over ssh
+
+If one of your executors can `ssh X`, an executor can be put on X with one
+command — no binary to carry, no token to paste, no route from the daemon to
+the machine:
+
+```sh
+rafiki executor install ublk-s2 --root /srv/work
+rafiki executor uninstall ublk-s2
+```
+
+`<target>` is an ssh destination (`host` or `user@host`). The ssh is run by one
+of YOUR executors — `--via <machine|id>`, defaulting to this machine's executor
+name — with THAT machine's ssh config, so `ProxyJump`, `User`, keys, host-key
+policy and `Include` all come from there. There is no host-key flag and no
+`--force`: if ssh refuses (host key, auth), the error carries ssh's own message
+verbatim, and you fix it on the `--via` machine.
+
+- `--name` is the new executor's machine name (default: the destination's host
+  part). `--root` defaults to the target's home directory, `--label k=v` is
+  repeatable, and `--admits` takes the usual executor-side selector.
+- The new executor runs **exactly this daemon's version** — the daemon is the
+  epoch authority, so it ships its own binary. Source order: an operator build
+  at `$RAFIKI_EXECUTOR_BINARIES/<goos>-<goarch>/rafiki`, else the signed GitHub
+  release for the daemon's own tag, verified against the embedded trusted keys
+  before the archive is fetched. An untagged (dev) daemon with no override
+  refuses, naming the `go build` that fills the directory.
+- **Reinstalling the same name reuses the executor** (same row, same id, so a
+  pinned `executor: <name>` keeps working) and ignores the new labels/root;
+  change those with `rafiki executor label`. An install proceeds only onto a
+  target that is empty for its namespace or that carries this executor's own
+  install; clearing someone else's is the one `ssh <target> rm -f …` command
+  the refusal spells out.
+- Only a NATIVE executor can be a launcher: a container-isolated executor is
+  refused, and `rafiki executor serve --no-ssh-launch` opts a machine out of
+  the install path entirely (self-reported, so it only narrows).
+- A down installed executor **restarts on its next use** — lazily, on the first
+  workspace call that names it, which carries a note saying it was restarted.
+  It is available only while its launcher is: a launcher that is offline is why
+  a relaunch fails.
+- `rafiki executor list` shows where each executor came from in its `VIA`
+  column. `uninstall` ends the ssh session, removes the target's install
+  marker (only when it holds this install's id), and deletes the row; the
+  target keeps the shared binary cache, so installing there again pushes
+  nothing. An executor that was *enrolled* rather than installed is refused
+  here — use `rafiki executor delete`.
+- Agents get the same pair as `executor_install` / `executor_uninstall` on both
+  the fundi and the MCP face, bound to the calling agent, so a coordinator can
+  provision a worker's machine. A child may install only through a launcher in
+  its own reachable set, and may uninstall only what it or an ancestor
+  installed.
+
+On the target the launcher starts `rafiki executor serve --stdio -P <instance>
+[--root <root>] --install-id <id>` over ssh: the one-shot ticket is the FIRST
+LINE of stdin (never argv — `ps` on the target is world-readable), stdout
+carries only the protocol, and `<data dir>/installed-executor` is written once
+the first request is served, which is what marks the target as this install's.
+The target's login shell must be **POSIX sh** — a csh or fish login shell fails
+opaquely. Wire detail: `docs/reference/executor-protocol.md` → "Installing over
+ssh".
+
+**OpenBSD is an executor HOST target only**: the release archive carries just
+`rafiki` there (not `rafikid`, not `rafiki-hooks`), so `rafiki upgrade` and
+`scripts/install.sh` do not support OpenBSD — put an executor on one over ssh,
+but do not run a daemon there.
 
 No certificate is involved for a local socket. **Socket permissions are the
 only access control**: the socket is `0600` from creation (`0177` umask), and
