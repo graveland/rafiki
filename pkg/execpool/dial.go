@@ -40,6 +40,25 @@ type ConnectOptions struct {
 	// because there is nothing durable to keep.
 	Ticket string
 
+	// InstallTicket is a one-shot ticket for an installed executor's FIRST
+	// connect. The daemon answers it with a durable credential on the 101
+	// (Rafiki-Credential); Connect writes it to CredentialFile, clears
+	// InstallTicket, and every later attempt authenticates with that file.
+	// Mutually exclusive with Ticket, Credential and EnrollToken.
+	//
+	// It is checked BEFORE the credential file: a relaunch presents a fresh
+	// ticket while the previous credential is still on disk, and the daemon
+	// rotates that credential when the ticket is redeemed. A failure to write
+	// the returned credential after that rotation is an ordinary error — the
+	// ticket is spent, the next attempt gets a terminal 401 and the process
+	// exits, and the daemon's lazy relaunch recovers.
+	InstallTicket string
+
+	// OnEnrolled is called once, after an install ticket's credential is on
+	// disk, so the caller can record that this target is installed. It is
+	// never called on any other path; nil is a no-op.
+	OnEnrolled func()
+
 	// CredentialFile is where an ENROLLED executor persists the credential it
 	// was issued, and where it reads it back on reconnect. Empty disables both.
 	CredentialFile string
@@ -94,7 +113,8 @@ func Connect(ctx context.Context, o ConnectOptions) error {
 	// tunnel somebody else owns. So there is no redial loop — return exactly
 	// what the one attempt produced, including a terminal refusal.
 	if o.Conn != nil {
-		return connectOnce(ctx, o)
+		_, err := connectOnce(ctx, o)
+		return err
 	}
 
 	initial, ceiling := initialBackoff, maxBackoff
@@ -102,7 +122,12 @@ func Connect(ctx context.Context, o ConnectOptions) error {
 
 	for ctx.Err() == nil {
 		started := time.Now()
-		err := connectOnce(ctx, o)
+		enrolled, err := connectOnce(ctx, o)
+		if enrolled {
+			// The ticket is spent and its credential is on disk; from here on
+			// buildAuth must read that file instead of presenting it again.
+			o.InstallTicket = ""
+		}
 		if errors.Is(err, ErrEnrollmentRejected) {
 			return err
 		}
@@ -120,17 +145,20 @@ func Connect(ctx context.Context, o ConnectOptions) error {
 	return ctx.Err()
 }
 
-func connectOnce(ctx context.Context, o ConnectOptions) error {
+// connectOnce runs one dial, upgrade and serve. It reports whether an install
+// ticket was redeemed (the credential is on disk and the caller must stop
+// presenting the ticket), because that decision outlives the attempt.
+func connectOnce(ctx context.Context, o ConnectOptions) (bool, error) {
 	// Built BEFORE dialling: a bad config (nothing to authenticate with)
 	// must fail without a network round trip.
 	hdr, err := buildAuth(o)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	conn, host, err := dialDaemon(ctx, o)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer conn.Close()
 
@@ -147,30 +175,62 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 	_ = conn.SetDeadline(time.Time{})
 	if !stop() {
 		// ctx fired and closed the connection under the upgrade.
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 	if err != nil {
-		return classifyRefusal(err)
+		return false, classifyRefusal(err)
 	}
 
 	// From here everything reads through upConn — the upgrade's buffer holds
 	// whatever the peer pipelined behind the 101, and discarding it would
 	// start the HTTP/2 preface mid-frame.
 	credential := resp.Get(upgradeconn.HeaderCredential)
-	if credential != "" && o.CredentialFile != "" {
-		// The directory may not exist yet: the default lives under the user's
-		// data dir, deliberately NOT under --root, where the executor's own file
-		// tools could read it.
-		if err := os.MkdirAll(filepath.Dir(o.CredentialFile), 0o700); err != nil {
-			return fmt.Errorf("create credential directory: %w", err)
+	if o.InstallTicket != "" {
+		// The ticket was just spent, so every failure below is TERMINAL: a
+		// retry presents a consumed ticket and earns a 401. A daemon that
+		// answered without a credential predates install tickets; a caller
+		// with nowhere to store one cannot honour the credential the daemon
+		// has already rotated into place.
+		if credential == "" {
+			return false, fmt.Errorf("%w: the daemon issued no credential for the install ticket "+
+				"(is it older than this executor?)", ErrEnrollmentRejected)
 		}
-		if err := os.WriteFile(o.CredentialFile, []byte(credential+"\n"), 0o600); err != nil {
-			return fmt.Errorf("write credential: %w", err)
+		if o.CredentialFile == "" {
+			return false, fmt.Errorf("%w: install ticket requires a credential file", ErrEnrollmentRejected)
+		}
+		if err := storeCredential(o.CredentialFile, credential); err != nil {
+			return false, err
+		}
+		// The id is logged; neither secret ever is.
+		slog.Info("executor: install ticket redeemed; credential stored",
+			"credentialFile", o.CredentialFile, "id", resp.Get(upgradeconn.HeaderExecutorID))
+		if o.OnEnrolled != nil {
+			o.OnEnrolled()
+		}
+		return true, ServeInverted(ctx, upConn, o.Handler)
+	}
+	if credential != "" && o.CredentialFile != "" {
+		if err := storeCredential(o.CredentialFile, credential); err != nil {
+			return false, err
 		}
 		slog.Info("executor: enrolled", "id", resp.Get(upgradeconn.HeaderExecutorID), "credentialFile", o.CredentialFile)
 	}
 
-	return ServeInverted(ctx, upConn, o.Handler)
+	return false, ServeInverted(ctx, upConn, o.Handler)
+}
+
+// storeCredential writes a credential the daemon minted so the next attempt
+// can read it back. The directory may not exist yet: the default lives under
+// the user's data dir, deliberately NOT under --root, where the executor's own
+// file tools could read it.
+func storeCredential(path, credential string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create credential directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(credential+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write credential: %w", err)
+	}
+	return nil
 }
 
 // classifyRefusal turns an upgrade refusal into the one terminal error the
@@ -268,14 +328,29 @@ func credFileHas(path string) bool {
 // buildAuth builds the headers the upgrade request carries, choosing the
 // credential this executor presents.
 //
-// The ticket case is FIRST and returns immediately: a ticket is mutually
-// exclusive with the durable paths, and an interactive client on a machine that
-// also runs `rafiki executor serve` will have that executor's credential file
-// on disk. Falling through to it would silently connect the session executor as
-// the durable one — two identities, one row, and whichever reconnects last wins.
+// An install ticket is checked FIRST and wins over the credential file: a
+// relaunch presents a fresh ticket while the previous credential is still on
+// disk, and the daemon rotates that credential on redemption, so falling
+// through to the file would present one that is about to be invalidated and
+// never redeem the ticket. It is mutually exclusive with the other three paths
+// because each is a different identity, and choosing between two of them would
+// come down to header order.
+//
+// The session ticket case is also FIRST and returns immediately: a ticket is
+// mutually exclusive with the durable paths, and an interactive client on a
+// machine that also runs `rafiki executor serve` will have that executor's
+// credential file on disk. Falling through to it would silently connect the
+// session executor as the durable one — two identities, one row, and whichever
+// reconnects last wins.
 func buildAuth(o ConnectOptions) (http.Header, error) {
 	var auth string
 	switch {
+	case o.InstallTicket != "":
+		if o.Ticket != "" || o.Credential != "" || o.EnrollToken != "" {
+			return nil, errors.New("install ticket cannot be combined with a session ticket, " +
+				"a credential or an enrollment token")
+		}
+		auth = string(upgradeconn.SchemeTicket) + " " + o.InstallTicket
 	case o.Ticket != "":
 		auth = string(upgradeconn.SchemeTicket) + " " + o.Ticket
 	case o.Credential != "":

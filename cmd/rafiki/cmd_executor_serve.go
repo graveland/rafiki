@@ -191,6 +191,90 @@ func validateRelayFoothold(image, relayDir string, relayDirSet bool, proxies map
 	return nil
 }
 
+// ticketServeFlags is the slice of `executor serve`'s flags the install-ticket
+// transport reads. Kept separate from the cobra command so the validation is
+// testable on its own.
+type ticketServeFlags struct {
+	TicketStdin   bool
+	Detach        bool
+	TicketFD      *int // nil unless --detach's re-exec named it
+	LockFD        *int // nil unless --detach's re-exec named it
+	Connect       string
+	ConnectSocket string
+	Stdio         bool
+	EnrollToken   string
+	Credential    string
+	InstallID     string
+}
+
+// validateTicketFlags refuses the combinations that cannot work, naming the
+// conflicting flag in every error. It runs before anything resolves a path or
+// reads a byte: a launcher whose argv still says --stdio needs to be told which
+// flag conflicts, not handed a process that silently ignores it.
+func validateTicketFlags(f ticketServeFlags) error {
+	// The two inherited descriptors are one mechanism: a ticket with no lock
+	// would let a second launch start a second executor, and a lock with no
+	// ticket would start one that cannot authenticate. They are POINTERS so an
+	// unset descriptor cannot be confused with fd 0 — stdin, which is never an
+	// inherited ticket pipe or lock.
+	if f.TicketFD != nil || f.LockFD != nil {
+		if f.TicketFD == nil {
+			return errors.New("--lock-fd requires --ticket-fd: the inherited ticket pipe is what the " +
+				"detached child reads its one ticket from")
+		}
+		if f.LockFD == nil {
+			return errors.New("--ticket-fd requires --lock-fd: the lock descriptor must be inherited " +
+				"with the ticket, or a second launch would start a second executor")
+		}
+		if f.Detach {
+			return errors.New("--detach cannot be combined with --ticket-fd/--lock-fd: those describe " +
+				"the detached child, which this process already is")
+		}
+		if f.TicketStdin {
+			return errors.New("--ticket-stdin cannot be combined with --ticket-fd: the detached child " +
+				"reads its ticket from the inherited pipe, not from stdin")
+		}
+		return nil
+	}
+
+	if !f.TicketStdin {
+		if f.Detach {
+			return errors.New("--detach requires --ticket-stdin: there would be no ticket to carry " +
+				"and nothing to start")
+		}
+		return nil
+	}
+
+	if f.Connect == "" {
+		return errors.New("--ticket-stdin requires --connect: the ticket is presented on a dial, " +
+			"and --connect names the daemon to dial")
+	}
+	if f.InstallID == "" {
+		return errors.New("--ticket-stdin requires --install-id: the executor records the install it " +
+			"belongs to once its credential is on disk")
+	}
+	if !stdioInstallIDRE.MatchString(f.InstallID) {
+		return fmt.Errorf("--install-id %q must be 1-64 characters of letters, digits, '-' or '_'", f.InstallID)
+	}
+	if f.Stdio {
+		return errors.New("--ticket-stdin cannot be combined with --stdio: a --stdio executor speaks " +
+			"the protocol on stdin/stdout and cannot dial")
+	}
+	if f.ConnectSocket != "" {
+		return errors.New("--ticket-stdin cannot be combined with --connect-socket: an install ticket " +
+			"authenticates a dial over TCP, and a socket peer is already local and trusted")
+	}
+	if f.EnrollToken != "" {
+		return errors.New("--ticket-stdin cannot be combined with --enroll-token: enrollment creates a " +
+			"row, while a ticket redeems the row an install already made")
+	}
+	if f.Credential != "" {
+		return errors.New("--ticket-stdin cannot be combined with --credential: the ticket's whole " +
+			"purpose is to obtain the credential from the daemon")
+	}
+	return nil
+}
+
 // bindFootholdRelay binds the launcher's loopback TCP relay and returns the
 // listener and the port the foothold container dials back to. Loopback ONLY: a
 // foothold reaches it as host.docker.internal, which is the docker host's
@@ -625,6 +709,10 @@ func newExecutorServeCmd() *cobra.Command {
 		noSSHLaunch        bool
 		stdio              bool
 		installID          string
+		ticketStdin        bool
+		detach             bool
+		ticketFD           int
+		lockFD             int
 	)
 
 	cmd := &cobra.Command{
@@ -670,6 +758,38 @@ every existing install already has; any other name lives under profiles/<name>.`
 				return errors.New("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC is now RAFIKI_EXECUTOR_REPO_SYNC")
 			}
 
+			// Refuse the ticket flag combinations BEFORE anything resolves a path
+			// or reads a byte, naming the conflicting flag: a launcher's argv that
+			// still carries --stdio or --credential must be told why, not handed a
+			// process that silently ignores it.
+			ticketFlags := ticketServeFlags{
+				TicketStdin:   ticketStdin,
+				Detach:        detach,
+				Connect:       connectAddr,
+				ConnectSocket: connectSocket,
+				Stdio:         stdio,
+				EnrollToken:   enrollToken,
+				Credential:    credential,
+				InstallID:     installID,
+			}
+			if ticketFD >= 0 {
+				ticketFlags.TicketFD = &ticketFD
+			}
+			if lockFD >= 0 {
+				ticketFlags.LockFD = &lockFD
+			}
+			if err := validateTicketFlags(ticketFlags); err != nil {
+				return err
+			}
+
+			// --detach is the launcher-facing half of a direct install: take the
+			// instance lock, read the one ticket line, re-exec detached and return.
+			// Nothing below runs in the parent, and the parent reads no stdin except
+			// inside runDetach — a second launch must not spend a ticket.
+			if detach {
+				return runDetach(cmd, detachConfig{})
+			}
+
 			// --stdio is a different transport, not a flag on the reverse-dial
 			// path: a launcher started this process over ssh, the daemon writes
 			// the one-shot ticket to stdin, and the protocol speaks on
@@ -688,6 +808,56 @@ every existing install already has; any other name lives under profiles/<name>.`
 			}
 
 			pinnedEnv := executorPinnedEnv()
+
+			// The one-shot install ticket this process presents on its FIRST connect,
+			// and the hook that records the install marker once the credential is on
+			// disk. --ticket-fd is the detached child's inherited pipe; --ticket-stdin
+			// is a process a launcher started directly.
+			var installTicket string
+			switch {
+			case ticketFD >= 0:
+				t, err := readInheritedTicket(ticketFD)
+				if err != nil {
+					return err
+				}
+				installTicket = t
+				// Info, onto this process's stderr — which the detaching parent
+				// pointed at executor.log. It is how an operator tells a launched
+				// executor from one that never started.
+				slog.Info("executor: started detached", "pid", os.Getpid(), "dataDir", paths.DataDir())
+			case ticketStdin:
+				t, err := readTicketLine(os.Stdin, detachTicketMax)
+				if err != nil {
+					return fmt.Errorf("--ticket-stdin: %w", err)
+				}
+				if t == "" {
+					return errors.New("--ticket-stdin: no install ticket on stdin; the launcher writes it as the first line")
+				}
+				installTicket = t
+			}
+			var onEnrolled func()
+			if installTicket != "" {
+				onEnrolled = func() {
+					if err := writeInstallMarker(installID); err != nil {
+						// Not fatal: the marker is the clobber guard, not the protocol —
+						// the same rule the --stdio path follows.
+						slog.Error("executor: could not record the install marker",
+							"installId", installID, "error", err)
+					}
+				}
+			}
+
+			// The detached child holds the instance lock for its whole life. The
+			// descriptor is ADOPTED, never re-opened: the flock lives on the open
+			// file description, so this process must keep its copy open until it
+			// exits or a second launch would start a second executor.
+			var instanceLock *os.File
+			if lockFD >= 0 {
+				instanceLock = holdInheritedLock(lockFD)
+				if instanceLock == nil {
+					return fmt.Errorf("--lock-fd %d is not an open descriptor", lockFD)
+				}
+			}
 
 			// After executorPinnedEnv, so a CLAUDE_CONFIG_DIR the operator put in
 			// executor.env counts as having one. See
@@ -799,7 +969,11 @@ every existing install already has; any other name lives under profiles/<name>.`
 				SandboxRelayVolume:  relayVolume,
 				BeforeSandboxCreate: beforeCreate,
 				NoSSHLaunch:         noSSHLaunch,
-				Env:                 pinnedEnv,
+				// The address this executor itself dials, "host:port", so a
+				// launcher can hand it to a target that should reach the same
+				// daemon. Empty on the socket transport, which has no address.
+				ConnectAddr: resolvedConnect,
+				Env:         pinnedEnv,
 			})
 			defer func() { _ = srv.Close() }()
 
@@ -854,8 +1028,13 @@ every existing install already has; any other name lives under profiles/<name>.`
 
 			// resolveExecutorConnectFlags already guarantees exactly one of
 			// these is set, or returned an error above.
-			return serveWithRelay(cmdCtx(cmd), resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
-				enrollToken, credential, credentialFile, resolvedRelayDir, footholdLn, handler)
+			err = serveWithRelay(cmdCtx(cmd), resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
+				enrollToken, credential, credentialFile, installTicket, resolvedRelayDir, footholdLn, onEnrolled, handler)
+			// The inherited lock descriptor must stay open until serve returns: the
+			// flock lives on the open file description, so a finalizer closing it
+			// here would release this instance's claim while the executor runs.
+			runtime.KeepAlive(instanceLock)
+			return err
 		},
 	}
 
@@ -935,8 +1114,21 @@ every existing install already has; any other name lives under profiles/<name>.`
 		"speak the executor protocol on stdin/stdout, for an ssh launcher: the one-shot ticket is "+
 			"the first line of stdin, stdout carries only the protocol, and every log line goes to stderr")
 	cmd.Flags().StringVar(&installID, "install-id", "",
-		"the daemon's executor-install id this --stdio executor records in <data dir>/installed-executor "+
-			"once it has upgraded (required with --stdio)")
+		"the daemon's executor-install id this executor records in <data dir>/installed-executor "+
+			"once it has upgraded (required with --stdio and --ticket-stdin)")
+	cmd.Flags().BoolVar(&ticketStdin, "ticket-stdin", false,
+		"read one install ticket line from stdin and present it on the FIRST connect only, then "+
+			"reconnect with the credential the daemon returns; requires --connect and --install-id")
+	cmd.Flags().BoolVar(&detach, "detach", false,
+		"with --ticket-stdin: start the executor as a detached process and exit; prints "+
+			"`started pid=<n>` or `running pid=<n>`")
+	// Set only by --detach's re-exec: the inherited ticket pipe and the inherited
+	// instance lock. Hidden, because offering them to an operator would invite
+	// passing a ticket in argv — the one place fd 3 exists to keep it out of.
+	cmd.Flags().IntVar(&ticketFD, "ticket-fd", -1, "inherited descriptor carrying the install ticket (set by --detach)")
+	cmd.Flags().IntVar(&lockFD, "lock-fd", -1, "inherited descriptor holding the instance lock (set by --detach)")
+	_ = cmd.Flags().MarkHidden("ticket-fd")
+	_ = cmd.Flags().MarkHidden("lock-fd")
 
 	return cmd
 }
@@ -999,13 +1191,22 @@ func serveReverseDial(ctx context.Context, opts execpool.ConnectOptions) error {
 // stops takes the reverse dial down with it rather than leaving a socket that
 // accepts connections into nothing. The caller owns relayLn and closes it on
 // every return path.
-func serveWithRelay(ctx context.Context, addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, relayDir string, relayLn net.Listener, handler http.Handler) error {
+//
+// installTicket and onEnrolled are the install path's two pieces: the one-shot
+// ticket the FIRST connect presents, and the hook that records the install
+// marker once its credential is on disk. Both are empty on every other path, and
+// the relay's own dials carry neither — a relay connection is not the executor.
+func serveWithRelay(ctx context.Context, addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, installTicket, relayDir string, relayLn net.Listener, onEnrolled func(), handler http.Handler) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	o := executorConnectOptions(addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, handler)
+	o.InstallTicket = installTicket
+	o.OnEnrolled = onEnrolled
+
 	connErr := make(chan error, 1)
 	go func() {
-		connErr <- serveReverseDial(ctx, executorConnectOptions(addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile, handler))
+		connErr <- serveReverseDial(ctx, o)
 	}()
 
 	if relayDir == "" && relayLn == nil {

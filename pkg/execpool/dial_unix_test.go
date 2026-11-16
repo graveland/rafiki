@@ -60,7 +60,7 @@ func TestConnectOverUnixSocketReachesTheUpgradeEndpoint(t *testing.T) {
 	// connectOnce, not Connect: Connect retries forever and this test wants the
 	// single attempt's outcome. The error is expected — the handler closes the
 	// connection immediately — so assert on having REACHED the endpoint.
-	_ = connectOnce(ctx, ConnectOptions{
+	_, _ = connectOnce(ctx, ConnectOptions{
 		SocketPath:  sock,
 		EnrollToken: "t_test",
 		Handler:     http.NewServeMux(),

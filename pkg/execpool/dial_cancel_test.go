@@ -82,7 +82,8 @@ func TestConnectOnceReturnsWhenCtxIsCancelledDuringTheUpgrade(t *testing.T) {
 	defer cancel()
 
 	_, returned := returnsWithin(3*time.Second, func() error {
-		return connectOnce(ctx, ConnectOptions{SocketPath: sock, Credential: "cred"})
+		_, err := connectOnce(ctx, ConnectOptions{SocketPath: sock, Credential: "cred"})
+		return err
 	})
 
 	ck.True(returned, "connectOnce waited out the fixed upgrade deadline after ctx was done")
