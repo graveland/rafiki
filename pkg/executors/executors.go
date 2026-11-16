@@ -78,6 +78,11 @@ type Store interface {
 	// machine can keep a file.
 	Create(ctx context.Context, t NewToken) (Executor, string, error)
 	Authenticate(ctx context.Context, credential string) (Executor, error)
+	// RotateCredential mints a new durable credential for the live row id,
+	// replaces the stored digest in one statement, and returns the plaintext
+	// exactly once. The previous credential stops authenticating at once.
+	// ErrNotFound when the row does not exist.
+	RotateCredential(ctx context.Context, id string) (plaintext string, err error)
 	Get(ctx context.Context, id string) (Executor, error)
 	List(ctx context.Context) ([]Executor, error)
 	SetLabels(ctx context.Context, id string, set map[string]string, remove []string) (Executor, error)

@@ -311,8 +311,10 @@ func (p *Pool) StartSweeper(ctx context.Context) { go p.parkSweep(ctx) }
 // admission is what authorize hands serve: an authenticated identity, plus
 // whether it arrived without a row.
 type admission struct {
-	executor   executors.Executor
-	credential string // non-empty only on enrollment
+	executor executors.Executor
+	// credential is non-empty on enrollment and on a minting install ticket,
+	// and the 101's header is the only place it may travel.
+	credential string
 	transient  bool
 }
 
@@ -367,11 +369,28 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 			if !e.Enabled {
 				// The row exists and is switched off. Admitting it anyway would
 				// let a control connection's ticket undo `rafiki executor
-				// disable`, which is a revocation.
+				// disable`, which is a revocation. The enabled check sits BEFORE
+				// the rotation on purpose: a refused ticket must not invalidate
+				// the credential a running executor still holds.
 				return admission{}, nil, &upgradeconn.Refusal{
 					Status: http.StatusUnauthorized,
 					Reason: "executor is disabled",
 				}
+			}
+			if grant.MintCredential {
+				// The install path's direct mode: every launch presents a fresh
+				// one-shot ticket and leaves with a durable credential it keeps,
+				// so it never has to be handed a secret out of band. Rotating
+				// here — after the row was read and found admissible — means a
+				// refused ticket never spends a working credential.
+				cred, rerr := p.store.RotateCredential(r.Context(), e.ID)
+				if rerr != nil {
+					// The same mapping every other credential check uses: an
+					// outage stays 503-class (retried), never a terminal 401
+					// that would take the executor out of service.
+					return admission{}, nil, authRefusal(rerr)
+				}
+				credential = cred
 			}
 		}
 	case upgradeconn.SchemeEnroll:
@@ -420,7 +439,10 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 
 	hdr := http.Header{upgradeconn.HeaderExecutorID: {e.ID}}
 	if credential != "" {
-		hdr.Set(upgradeconn.HeaderCredential, credential) // empty except on first enrollment
+		// The 101 is the credential's ONE carrier: enrollment mints one, and so
+		// does a minting install ticket. Nothing logs it and no other response
+		// field carries it.
+		hdr.Set(upgradeconn.HeaderCredential, credential)
 	}
 	return admission{executor: e, credential: credential, transient: transient}, hdr, nil
 }

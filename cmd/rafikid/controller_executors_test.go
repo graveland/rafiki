@@ -114,6 +114,13 @@ func (f *fakeExecStore) Annotate(_ context.Context, id string, set map[string]st
 }
 func (f *fakeExecStore) TouchSeen(_ context.Context, id string) error { return nil }
 
+func (f *fakeExecStore) RotateCredential(_ context.Context, id string) (string, error) {
+	if _, ok := f.execs[id]; !ok {
+		return "", executors.ErrNotFound
+	}
+	return "rotated-credential", nil
+}
+
 func TestExecutorEnrollMintsATokenWithTheGivenLabels(t *testing.T) {
 	ck := assert.NewAborting(t)
 	s := newFakeExecStore()

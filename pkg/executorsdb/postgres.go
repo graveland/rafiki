@@ -243,6 +243,36 @@ func (s *pgStore) Create(ctx context.Context, t executors.NewToken) (executors.E
 	return e, credential, err
 }
 
+// RotateCredential replaces the credential digest of an existing row and
+// returns the new plaintext exactly once. The previous credential stops
+// authenticating the moment the statement commits.
+//
+// The generator and the digest are Create's, not a second pair: a credential
+// that authenticated once must keep the same shape and the same hash, or an
+// executor that rotates in cleanly would be rejected on its next Bearer.
+func (s *pgStore) RotateCredential(ctx context.Context, id string) (string, error) {
+	if malformedID(id) {
+		return "", ErrNotFound
+	}
+	credential, err := newToken()
+	if err != nil {
+		return "", err
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE conversations.executors SET credential_hash = $2 WHERE id = $1`,
+		id, hashToken(credential))
+	if err != nil {
+		// Unwrapped, and never folded into ErrNotFound: a failed statement is
+		// "I could not check", which IsTerminalAuthError must classify as
+		// retryable.
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return "", ErrNotFound
+	}
+	return credential, nil
+}
+
 func (s *pgStore) Authenticate(ctx context.Context, credential string) (executors.Executor, error) {
 	return s.authenticateByHash(ctx, hashToken(credential))
 }

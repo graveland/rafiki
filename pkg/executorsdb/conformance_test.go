@@ -398,3 +398,66 @@ func TestRelabellingOntoAnotherOwnersMachineNameIsAllowed(t *testing.T) {
 	c.NoError(err, "sam holding %q must not stop brent using it", shared)
 	c.Eq(shared, e.Labels["machine"], "machine")
 }
+
+// An id that names no row is an ANSWER, not a read failure: ErrNotFound is what
+// IsTerminalAuthError classifies as terminal, so an absent row must stop the
+// reconnect loop rather than send the executor round it forever.
+func TestRotateCredentialUnknownIDIsNotFound(t *testing.T) {
+	s := testStore(t)
+	_, err := s.RotateCredential(context.Background(), "00000000-0000-0000-0000-000000000000")
+	assert.NewAborting(t).ErrorIs(err, executors.ErrNotFound,
+		"want ErrNotFound for an absent row, got")
+}
+
+// The point of the rotation is that the OLD credential stops working at once
+// and the new one authenticates the same row. Returning the plaintext while
+// leaving the old digest in place would make an install ticket mint a
+// credential nobody can use and leave the previous one live on the machine that
+// was just uninstalled.
+func TestRotateCredentialReplacesTheStoredCredential(t *testing.T) {
+	c := assert.NewAborting(t)
+	s := testStore(t)
+	ctx := context.Background()
+
+	e, old, err := s.Create(ctx, executors.NewToken{
+		Labels: map[string]string{"machine": machineName(t)},
+		Roots:  []string{},
+	})
+	c.NoError(err, "seed executor")
+	t.Cleanup(func() { _ = s.Delete(context.Background(), e.ID) })
+
+	fresh, err := s.RotateCredential(ctx, e.ID)
+	c.NoError(err, "rotate")
+	c.NotEq(old, fresh, "RotateCredential returned the credential it replaced")
+
+	_, err = s.Authenticate(ctx, old)
+	c.ErrorIs(err, executors.ErrNotFound, "the previous credential must stop authenticating at once, got")
+
+	got, err := s.Authenticate(ctx, fresh)
+	c.NoError(err, "Authenticate(the new credential)")
+	c.Eq(e.ID, got.ID, "Authenticate(the new credential) returned row %q, want %q", got.ID, e.ID)
+}
+
+// Every relaunch mints a new credential, so two rotations of one row must not
+// produce the same secret — otherwise the second launch hands the executor a
+// credential the first launch already holds.
+func TestRotateCredentialTwiceMintsDifferentSecrets(t *testing.T) {
+	c := assert.NewAborting(t)
+	s := testStore(t)
+	ctx := context.Background()
+
+	e, _, err := s.Create(ctx, executors.NewToken{
+		Labels: map[string]string{"machine": machineName(t)},
+		Roots:  []string{},
+	})
+	c.NoError(err, "seed executor")
+	t.Cleanup(func() { _ = s.Delete(context.Background(), e.ID) })
+
+	first, err := s.RotateCredential(ctx, e.ID)
+	c.NoError(err, "first rotation")
+	second, err := s.RotateCredential(ctx, e.ID)
+	c.NoError(err, "second rotation")
+	c.NotEq(first, second, "two rotations of one row minted the same plaintext")
+	_, err = s.Authenticate(ctx, first)
+	c.ErrorIs(err, executors.ErrNotFound, "the first rotation must stop authenticating after the second, got")
+}

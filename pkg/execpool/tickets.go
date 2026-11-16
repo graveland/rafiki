@@ -37,6 +37,11 @@ type TicketGrant struct {
 	// same authority a Bearer credential carries, only minted by a control
 	// connection instead of issued at enrollment.
 	RowID string
+	// MintCredential is set only for a row-bound grant minted by the ssh
+	// install path in its direct mode: redeeming it rotates the row's
+	// credential and returns the new one on the 101 so the executor can
+	// reconnect on its own. Ignored without RowID.
+	MintCredential bool
 	// OwnerUserID is the durable id of the identity this session executor
 	// serves — "" for the UDS's unowned fallback, exactly like a child's own
 	// OwnerUserID. It is what selection's ownership check compares against,

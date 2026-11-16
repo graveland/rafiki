@@ -75,6 +75,10 @@ func (f *fakeStore) Create(context.Context, executors.NewToken) (executors.Execu
 
 func (f *fakeStore) TouchSeen(context.Context, string) error { return nil }
 
+func (f *fakeStore) RotateCredential(context.Context, string) (string, error) {
+	return "", errors.New("fakeStore: RotateCredential not used by the pool")
+}
+
 func (f *fakeStore) Get(_ context.Context, id string) (executors.Executor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -331,6 +331,9 @@ func (relayFakeStore) Create(context.Context, executors.NewToken) (executors.Exe
 func (relayFakeStore) Authenticate(context.Context, string) (executors.Executor, error) {
 	return executors.Executor{}, nil
 }
+func (relayFakeStore) RotateCredential(context.Context, string) (string, error) {
+	return "", fmt.Errorf("relayFakeStore: RotateCredential is not used here")
+}
 func (relayFakeStore) Get(context.Context, string) (executors.Executor, error) {
 	return executors.Executor{}, nil
 }
