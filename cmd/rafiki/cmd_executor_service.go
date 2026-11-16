@@ -793,13 +793,29 @@ func captureExecutorEnv(environ []string) map[string]string {
 	return out
 }
 
+// executorServiceBackend is the executor's backend for THIS command's instance.
+// Every service verb goes through it rather than calling
+// newExecutorServiceBackend directly: the unit name is per instance, so a verb
+// that skipped the instance would stop, uninstall or tail the DEFAULT
+// instance's service while the operator asked for another one.
+func executorServiceBackend(cmd *cobra.Command) (serviceBackend, error) {
+	if err := applyExecutorInstance(cmd); err != nil {
+		return nil, err
+	}
+	return newExecutorServiceBackend(), nil
+}
+
 func newExecutorServiceUninstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "uninstall",
 		Short: "Stop and remove the executor service",
 		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			if err := newExecutorServiceBackend().Uninstall(); err != nil {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			b, err := executorServiceBackend(cmd)
+			if err != nil {
+				return err
+			}
+			if err := b.Uninstall(); err != nil {
 				return err
 			}
 			fmt.Println("rafiki executor service uninstalled.")
@@ -813,8 +829,12 @@ func newExecutorServiceSimpleCmd(use, short string, run func(serviceBackend) err
 		Use:   use,
 		Short: short,
 		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			if err := run(newExecutorServiceBackend()); err != nil {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			b, err := executorServiceBackend(cmd)
+			if err != nil {
+				return err
+			}
+			if err := run(b); err != nil {
 				return err
 			}
 			fmt.Printf("rafiki executor service %sed.\n", use)
@@ -828,8 +848,12 @@ func newExecutorServiceStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show whether the executor service is installed and running",
 		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			st, err := newExecutorServiceBackend().Status()
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			b, err := executorServiceBackend(cmd)
+			if err != nil {
+				return err
+			}
+			st, err := b.Status()
 			if err != nil {
 				return err
 			}
@@ -847,7 +871,11 @@ func newExecutorServiceLogsCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			follow, _ := cmd.Flags().GetBool("follow")
-			return streamLogFile(cmdCtx(cmd), newExecutorServiceBackend().LogPath(), follow)
+			b, err := executorServiceBackend(cmd)
+			if err != nil {
+				return err
+			}
+			return streamLogFile(cmdCtx(cmd), b.LogPath(), follow)
 		},
 	}
 	cmd.Flags().BoolP("follow", "f", false, "Keep streaming new log output instead of exiting at EOF")
@@ -860,7 +888,11 @@ func newExecutorServiceTailCmd() *cobra.Command {
 		Short: "Follow the executor service log",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return streamLogFile(cmdCtx(cmd), newExecutorServiceBackend().LogPath(), true)
+			b, err := executorServiceBackend(cmd)
+			if err != nil {
+				return err
+			}
+			return streamLogFile(cmdCtx(cmd), b.LogPath(), true)
 		},
 	}
 	return cmd
