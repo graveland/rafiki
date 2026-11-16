@@ -576,20 +576,6 @@ func checkRTK(mode tools.RTKMode) error {
 	return nil
 }
 
-// executorToolSet converts a Describe.tools slice into the lookup map the
-// registry's routing filter uses. A nil slice stays nil — the distinction
-// between "unknown" and "empty" is what keeps the socket path unfiltered.
-func executorToolSet(served []string) map[string]bool {
-	if served == nil {
-		return nil
-	}
-	out := make(map[string]bool, len(served))
-	for _, name := range served {
-		out[name] = true
-	}
-	return out
-}
-
 // filterMCPServers narrows cfg to the comma-separated allowlist. Empty or
 // "*" means all (no filtering, cfg returned as-is); any other value keeps
 // only the named servers, dropping the rest before ConnectMCP ever dials
@@ -827,7 +813,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Presets:                    opts.Presets,
 		Recall:                     opts.Recall,
 		Executor:                   opts.Executor,
-		ExecutorTools:              executorToolSet(opts.ExecutorTools),
+		ExecutorTools:              tools.ServedSet(opts.ExecutorTools),
 		RemoteSkillBody:            opts.RemoteSkillBody,
 		InlineSkillBody:            opts.InlineSkillBody,
 	}

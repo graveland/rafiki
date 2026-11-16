@@ -408,7 +408,7 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 				// machine with no language server must not be handed replacements it
 				// cannot run. A nil slice leaves routing unfiltered — see
 				// executorToolsFor.
-				opts.ExecutorTools = servedToolSet(ctrl.executorToolsFor(be.homeExecutor()))
+				opts.ExecutorTools = tools.ServedSet(ctrl.executorToolsFor(be.homeExecutor()))
 			}
 		}
 	}

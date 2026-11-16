@@ -48,22 +48,6 @@ func (c *Controller) executorToolsFor(executorID string) []string {
 	return nil
 }
 
-// servedToolSet turns a Describe.tools slice into the lookup map
-// tools.BindToExecutor's routing filter reads. A nil slice stays nil, so
-// "unknown" leaves routing unfiltered; an EMPTY non-nil slice means the machine
-// reported serving nothing, and every routed tool is dropped — the same
-// distinction executorToolSet draws in pkg/fundi/runtime.go.
-func servedToolSet(served []string) map[string]bool {
-	if served == nil {
-		return nil
-	}
-	out := make(map[string]bool, len(served))
-	for _, name := range served {
-		out[name] = true
-	}
-	return out
-}
-
 // provisionWorkspace provisions a workspace on the executor. The ordering
 // matters: provision BEFORE the child is registered, so a provisioning failure
 // refuses the spawn with nothing to clean up.

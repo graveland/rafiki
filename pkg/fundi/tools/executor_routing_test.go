@@ -76,3 +76,24 @@ func TestNoExecutorMeansNoWorkspaceTools(t *testing.T) {
 		c.False(!names[name], "%q is missing; a workspace-less agent still has the daemon tier", name)
 	}
 }
+
+// TestServedSetKeepsUnknownDistinguishableFromNothing pins the nil-vs-empty
+// contract every routing filter depends on: nil (no Describe) must leave a
+// caller unfiltered, while an EMPTY non-nil slice means the machine reported
+// serving nothing and every routed tool is dropped. Collapsing the two would
+// silently unadvertise the whole workspace tier on a machine that merely has
+// not answered yet.
+func TestServedSetKeepsUnknownDistinguishableFromNothing(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	c.True(tools.ServedSet(nil) == nil, "nil must stay nil: unknown is not 'serves nothing'")
+
+	empty := tools.ServedSet([]string{})
+	c.True(empty != nil, "an empty non-nil slice is a real answer and must not collapse to nil")
+	c.Eq(0, len(empty))
+
+	got := tools.ServedSet([]string{"read", "glob", "read"})
+	c.True(got["read"])
+	c.True(got["glob"])
+	c.Eq(2, len(got), "duplicates collapse to one entry")
+}

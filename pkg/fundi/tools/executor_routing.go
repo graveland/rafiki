@@ -2,6 +2,26 @@ package tools
 
 import "slices"
 
+// ServedSet converts a Describe.tools slice into the lookup map the routing
+// filter reads. A nil slice stays nil — the distinction between "unknown" and
+// "empty" is what keeps a caller with no Describe (the socket path) unfiltered;
+// an EMPTY non-nil slice means the machine reported serving nothing, so every
+// routed tool is dropped.
+//
+// The ONE implementation: pkg/fundi and the daemon's MCP face both filter
+// through this, so a tool advertised-but-unrunnable on one face cannot be
+// served on the other.
+func ServedSet(served []string) map[string]bool {
+	if served == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(served))
+	for _, name := range served {
+		out[name] = true
+	}
+	return out
+}
+
 // Tier says what a tool needs in order to run at all.
 //
 // The distinction is not "where the code lives" but "whose machine the effect
