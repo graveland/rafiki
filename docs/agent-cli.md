@@ -768,6 +768,50 @@ step failing after the spawn says which: both conversations exist, and the
 printed `rafiki close`/`rafiki rename`/`rafiki route set` line finishes the
 switch by hand (re-running the whole switch would spawn a SECOND fork).
 
+## `rafiki executor install` / `uninstall`
+
+Put a rafiki executor on a machine reachable over ssh, or take one away:
+
+```sh
+rafiki executor install <target> [--via <machine|id>] [--name <name>]
+                               [--root <dir>] [--label k=v]… [--admits <sel>]
+rafiki executor uninstall <name|id>
+```
+
+`<target>` is an ssh destination (`host` or `user@host`). The ssh is run by one
+of YOUR executors — `--via`, defaulting to this machine's executor name (read
+from the same declared executor instance the rest of your verbs use; omit it
+and, with no name here, the daemon uses the single native launcher you own —
+several candidates make that an error listing them, so pass `--via`).
+`ProxyJump`, `User`, keys and host-key policy come from that machine's ssh
+config; there is no host-key flag and no `--force`. ssh's own refusal is
+returned verbatim.
+
+`--name` defaults to the destination's host part. Reinstalling the same name
+REUSES that executor — same row, same id, so a pinned `executor: <name>` keeps
+working — and ignores the new `--label`/`--root`/`--admits`; change those with
+`rafiki executor label`. An install proceeds only onto a target that is empty
+for its namespace or that carries this executor's own install.
+
+`uninstall` refuses an executor that was enrolled or created rather than
+installed over ssh — `rafiki executor delete` is the same end state without a
+target to clean up. The target keeps the shared binary cache, so installing
+there again pushes nothing.
+
+`rafiki executor list` gains a `VIA` column naming the launcher each installed
+executor came from. `-j`/`-J` emit the row's canonical protojson, the same
+message `rafiki executor list` emits per row.
+
+`-P/--profile` names an executor INSTANCE (data/cache under `profiles/<name>`,
+its own env files, log and service unit), not a daemon — see
+[Executors](guide/executors.md). An installed executor's instance on the TARGET
+is the launcher's: a reinstall keeps the one its recipe recorded.
+
+Agents reach the same pair as the `executor_install` / `executor_uninstall`
+tools on both the fundi and the MCP face; a child may install only through a
+launcher in its own reachable set and may uninstall only what it or an ancestor
+installed.
+
 ## `rafiki tag`
 
 Tags are named handles to a node in a child's history; creating or moving one
