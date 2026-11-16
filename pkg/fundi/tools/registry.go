@@ -372,6 +372,16 @@ type ToolOpts struct {
 	// the caller's machines runs the ssh.
 	ExecutorInstaller ExecutorInstaller
 
+	// Executors, when non-nil, gives this agent executor_list — the health and
+	// provenance of the executors the bound caller may inspect: for a child, its
+	// own lineage's installs plus the machine it runs on; for a human, its
+	// owner's fleet. nil means the daemon has no executor store (a DB-less
+	// daemon), so the tool declines — the same nil-means-decline rule as
+	// Sandboxes. Kept SEPARATE from ExecutorInstaller because a listing needs no
+	// launch recipe: a daemon that can answer one may not be able to answer the
+	// other. Bound to ONE caller at construction; see ExecutorLister.
+	Executors ExecutorLister
+
 	// CannotUseInstalledExecutor appends a sentence to executor_install's
 	// description for a caller that cannot run workspace tools on the executor
 	// it installs: only the agents it spawns can. Set for a claude-kind child,

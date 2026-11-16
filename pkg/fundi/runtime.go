@@ -335,6 +335,13 @@ type RuntimeOptions struct {
 	// tools.ExecutorInstaller.
 	ExecutorInstaller tools.ExecutorInstaller
 
+	// Executors, when non-nil, gives this child executor_list — the executors it
+	// may inspect, with their live health. Supplied by the daemon as a per-child
+	// adapter over the Controller; nil when no executor store is wired (a
+	// DB-less daemon) or for the standalone `rafikid fundi` process. Same
+	// no-caller-identity rule as Sandboxes — see tools.ExecutorLister.
+	Executors tools.ExecutorLister
+
 	// CannotUseInstalledExecutor appends a sentence to executor_install's
 	// description for a caller that cannot run workspace tools on the executor
 	// it installs. The daemon sets it for a claude-kind child on the MCP face;
@@ -803,6 +810,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Agents:                     opts.Agents,
 		Sandboxes:                  opts.Sandboxes,
 		ExecutorInstaller:          opts.ExecutorInstaller,
+		Executors:                  opts.Executors,
 		CannotUseInstalledExecutor: opts.CannotUseInstalledExecutor,
 		Parent:                     opts.Parent,
 		Schedules:                  opts.Schedules,

@@ -928,6 +928,37 @@ type ExecutorInstallResult struct {
 	Connected bool   `json:"connected,omitempty"`
 }
 
+// ExecutorStatus is one executor as an AGENT's listing reports it: the health
+// and provenance an agent needs to check in on a machine, or to choose one.
+//
+// Every field is daemon-written. Connected and ConnectedAt are the pool's LIVE
+// view — a store row cannot answer either, and ConnectedAt is nil for an
+// executor with no current connection, because the zero time is not "empty" to
+// JSON. LastSeen is the row's persisted last_seen_at, nil when the executor has
+// never been seen; LastSeen survives a reconnect, ConnectedAt does not.
+// InstalledVia and InstalledTarget come from the install RECIPE, so they are
+// empty for an executor that was enrolled or created instead of installed.
+//
+// Annotations are the hints another agent left with executor_annotate. They are
+// NEVER an access grant and never consulted for admission; they are shown
+// because "this was true when it was written" is exactly what a listing is for.
+type ExecutorStatus struct {
+	ID              string            `json:"id"`
+	Name            string            `json:"name,omitempty"`
+	Connected       bool              `json:"connected"`
+	Enabled         bool              `json:"enabled"`
+	ConnectedAt     *time.Time        `json:"connectedAt,omitempty"`
+	LastSeen        *time.Time        `json:"lastSeen,omitempty"`
+	Isolation       string            `json:"isolation,omitempty"`
+	WorkspaceMode   string            `json:"workspaceMode,omitempty"`
+	Roots           []string          `json:"roots,omitempty"`
+	LaunchKinds     []string          `json:"launchKinds,omitempty"`
+	InstalledVia    string            `json:"installedVia,omitempty"`
+	InstalledTarget string            `json:"installedTarget,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
+}
+
 // ─── Identity ────────────────────────────────────────────────────────────────
 
 // UserCreateResponseData carries the plaintext token. It is the only time it

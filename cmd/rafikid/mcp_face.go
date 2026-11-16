@@ -343,6 +343,15 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		opts.ExecutorInstaller = newExecutorInstallBinding(ctrl, installCallerFromContext(r.Context(), ctrl))
 		opts.CannotUseInstalledExecutor = isChild && childIsClaude(ctrl, id.ChildID)
 	}
+	// executor_list needs only the executor STORE, so it declines on a DB-less
+	// daemon -- the same nil-means-decline rule, but a separate guard from the
+	// recipe table above: reading a machine's health is not an ability to install
+	// one, and a daemon that can answer one need not answer the other. The caller
+	// is resolved the SAME way the install verbs resolve theirs, so a credential
+	// sees exactly the machines it could install onto or uninstall.
+	if ctrl.execStore != nil {
+		opts.Executors = newExecutorStatusBinding(ctrl, installCallerFromContext(r.Context(), ctrl))
+	}
 	// Recall + memory tools, bound to the caller's owner the same way the
 	// conversation reader is: an admin's conversation-derived hits cover the
 	// whole daemon, but only for a real user credential; a named user's are
@@ -580,6 +589,12 @@ var mcpBlueprints = []tools.Tool{
 	// install recipe table (getServer's installStoreReady guard).
 	&tools.ExecutorInstallBlueprint{},
 	&tools.ExecutorUninstallBlueprint{},
+	// The listing those two leave a caller wanting: an install reports the
+	// connection it observed, and nothing else on this face would ever say
+	// whether the machine came up later. Declines when the daemon has no executor
+	// store (getServer's execStore guard), which is a SEPARATE guard from the
+	// recipe table above — a machine's health is not an ability to install one.
+	&tools.ExecutorListBlueprint{},
 }
 
 // mcpWorkspaceBlueprints is the workspace tier a rafiki-mode claude child works

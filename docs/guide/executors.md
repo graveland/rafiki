@@ -172,6 +172,20 @@ verbatim, and you fix it on the `--via` machine.
   provision a worker's machine. A child may install only through a launcher in
   its own reachable set, and may uninstall only what it or an ancestor
   installed.
+- `executor_list` is the read that goes with that pair, on both faces: each
+  executor the caller can see, with whether it is connected right now, when it
+  last joined the pool and when it was last seen, its roots, the child kinds it
+  can launch, its labels and annotations, and — for an installed one — the
+  launcher and ssh destination it came from. It takes no arguments and is scoped
+  by the daemon. A **child** sees the machine it is bound to plus the executors
+  its own lineage installed (the rule uninstall enforces), never its owner's
+  wider fleet — the borrowed identity Connect's `userOnly` `ListExecutors`
+  refuses a child. A **human** sees the executors it owns — what
+  `rafiki executor list` shows that credential, except that an admin's extra
+  view of the unowned rows is not included, because this is the read half of the
+  install pair and install authority is owner-scoped. A down executor is not
+  necessarily broken: an installed one restarts on its next use while its
+  launcher is reachable, and a disabled one never connects.
 
 On the target the launcher starts `rafiki executor serve --stdio -P <instance>
 [--root <root>] --install-id <id>` over ssh: the one-shot ticket is the FIRST

@@ -1261,15 +1261,18 @@ type installDisplay struct {
 // caller-bound paths never come through here (they resolve one executor id
 // inside the caller's own rows first).
 func (c *Controller) installDisplays(ctx context.Context) map[string]installDisplay {
-	if c.install == nil {
-		return nil
-	}
-	rows, err := c.install.store.ListLiveAll(ctx)
-	if err != nil {
-		slog.Warn("could not read executor installs; listing executors without their launcher",
-			"error", err)
-		return nil
-	}
+	return c.installDisplaysFor(ctx, c.liveInstallRows(ctx))
+}
+
+// installDisplaysFor is installDisplays over rows the caller already read.
+//
+// A caller that needs BOTH the recipes and their decoration — the agent
+// listing, which scopes a child by who installed what — reads ListLiveAll once
+// and passes it here, so the two halves can never disagree about which rows are
+// live.
+func (c *Controller) installDisplaysFor(
+	ctx context.Context, rows []executorinstall.Row,
+) map[string]installDisplay {
 	if len(rows) == 0 {
 		return nil
 	}

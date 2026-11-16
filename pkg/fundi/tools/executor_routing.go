@@ -190,6 +190,11 @@ var tierByTool = map[string]Tier{
 	// the target itself.
 	"executor_install":   TierDaemon,
 	"executor_uninstall": TierDaemon,
+	// Daemon — a read of the executor store plus the pool's live health view.
+	// Nothing in the caller's workspace is touched, and the answer is the same
+	// wherever the agent runs, which is what lets a machine-hosted agent check
+	// on a machine it provisioned from elsewhere.
+	"executor_list": TierDaemon,
 
 	// Daemon — the sandbox verbs touch the daemon's sandbox table and the
 	// executor pool, never the caller's filesystem: the container they name

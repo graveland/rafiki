@@ -664,6 +664,18 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 			ChildID:     childID,
 		})
 	}
+	// executor_list: the same per-child binding rule once more, but guarded on
+	// the executor STORE rather than the install recipe table — a listing is a
+	// read of the rows plus the pool's health and needs no recipe to answer. The
+	// caller is the same one the install binding closes over, so the two can
+	// never disagree about whose machines this child may see.
+	if c.execStore != nil {
+		ro.Executors = newExecutorStatusBinding(c, installCaller{
+			OwnerUserID: ownerUserID,
+			OwnerName:   ownerName,
+			ChildID:     childID,
+		})
+	}
 	// Same binding rule for the child→parent verbs: agent_report and
 	// agent_result report from THIS child's position in the tree, through the
 	// same hub the Connect verbs run.
