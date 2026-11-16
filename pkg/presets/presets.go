@@ -240,10 +240,14 @@ var thinkingLevels = map[string]bool{
 //   - when r.Kind == KindClaude: Thinking == "", Tools == nil, Skills == nil,
 //     MCPServers == nil, ContextFiles == nil, SystemPrompt == "" -- the error
 //     names the first offending field: `field "tools" does not apply to kind "claude"`
+//   - when r.Kind == KindFundi: WorkspaceTools == nil. fundi ALWAYS uses rafiki's
+//     own workspace tools, so a mode pinned here describes a spawn the daemon
+//     refuses outright; the write fails rather than storing such a row.
 //   - when r.Kind == KindScript: the same LLM-shaping fields as claude, plus
 //     Model and Provider — a script child has no engine to shape and no model
-//     to think with. Budgets, labels and executor remain meaningful: a script
-//     spawns, spends against a grant and may be pinned to a machine.
+//     to think with, and no tools to route. Budgets, labels and executor remain
+//     meaningful: a script spawns, spends against a grant and may be pinned to a
+//     machine.
 //   - MaxCost/MaxDepth/MaxChildren, when non-nil, are >= 0
 //   - every Labels key mirrors validateUserLabelKeys (cmd/rafikid/labels.go,
 //     the source of truth): non-empty, [A-Za-z0-9_./-] only, not "owner",
@@ -281,6 +285,15 @@ func Validate(r Record) error {
 			}
 		}
 	}
+	if r.Kind == KindFundi && r.WorkspaceTools != nil {
+		// workspace_tools applies to a claude child alone: fundi always uses
+		// rafiki's own workspace tools and a script child has none. A preset that
+		// pins a mode for either kind would be stored-but-unusable — the daemon
+		// refuses every spawn from it ("workspace_tools applies to claude
+		// children") — so the write is refused instead, in the same wording the
+		// per-kind tables below use.
+		return fmt.Errorf("field %q does not apply to kind %q", "workspace_tools", KindFundi)
+	}
 	if r.Kind == KindScript {
 		for _, bad := range []struct {
 			field string
@@ -294,6 +307,7 @@ func Validate(r Record) error {
 			{"mcp_servers", r.MCPServers != nil},
 			{"context_files", r.ContextFiles != nil},
 			{"system_prompt", r.SystemPrompt != ""},
+			{"workspace_tools", r.WorkspaceTools != nil},
 		} {
 			if bad.set {
 				return fmt.Errorf("field %q does not apply to kind %q", bad.field, KindScript)

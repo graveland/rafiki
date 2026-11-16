@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/protocol"
+
 	"github.com/multigres/testkit/assert"
 )
 
@@ -172,6 +174,28 @@ func TestPresetValidateWorkspaceTools(t *testing.T) {
 	rec := (Spec{Name: "seat", Kind: KindClaude, WorkspaceTools: strPtr("")}).Record()
 	c.Nil(rec.WorkspaceTools, "an empty Spec.WorkspaceTools must become nil (unset)")
 	c.NoError(Validate(rec), "Validate(record normalized from an empty workspace_tools)")
+}
+
+// TestPresetValidateWorkspaceToolsKinds pins workspace_tools' KIND rule: it
+// applies to a claude child alone. fundi always uses rafiki's own workspace
+// tools and a script child has none, so a preset that pinned a mode for either
+// would be stored-but-unusable — the daemon refuses every spawn from it. Every
+// kind accepts nil (unset, "the spawn decides").
+func TestPresetValidateWorkspaceToolsKinds(t *testing.T) {
+	c := assert.NewAborting(t)
+	strPtr := func(s string) *string { return &s }
+
+	for _, kind := range []string{KindFundi, KindClaude, KindScript} {
+		c.NoError(Validate(Record{Name: "seat", Kind: kind}), "Validate(%s, unset workspace_tools)", kind)
+	}
+	for _, kind := range []string{KindFundi, KindScript} {
+		for _, mode := range []string{protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki} {
+			err := Validate(Record{Name: "seat", Kind: kind, WorkspaceTools: strPtr(mode)})
+			c.Error(err, "Validate(%s, workspace_tools=%q) = nil, want a refusal", kind, mode)
+			c.StrContains(err.Error(), "workspace_tools", "the refusal names the field")
+			c.StrContains(err.Error(), kind, "the refusal names the kind")
+		}
+	}
 }
 
 func TestPresetSpecRoundTrip(t *testing.T) {

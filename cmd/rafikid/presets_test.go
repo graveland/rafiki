@@ -558,6 +558,19 @@ func TestPutPresetRejectsUnknownToolAndWrapsInvalid(t *testing.T) {
 	_, err = c.putPreset(ctx, "owner-1", "", presets.Spec{Name: "has space"})
 	ck.Error(err, "expected an error for an invalid name")
 	ck.ErrorIs(err, errPresetInvalid, "error does not wrap errPresetInvalid")
+
+	// A workspace-tools mode on a non-claude preset is refused at the WRITE:
+	// the stored row would be valid but unusable, because the daemon refuses
+	// every spawn from it (workspace_tools applies to claude children alone).
+	// This is the path `rafiki preset put --workspace-tools rafiki` takes.
+	mode := protocol.WorkspaceToolsRafiki
+	for _, kind := range []string{presets.KindFundi, presets.KindScript} {
+		_, err = c.putPreset(ctx, "owner-1", "", presets.Spec{Name: "seat", Kind: kind, WorkspaceTools: &mode})
+		ck.Error(err, "putPreset(%s, workspace_tools=rafiki) = nil, want a refusal", kind)
+		ck.ErrorIs(err, errPresetInvalid, "the refusal must wrap errPresetInvalid for %s", kind)
+		ck.StrContains(err.Error(), "workspace_tools", "the refusal names the field for %s: %v", kind, err)
+		ck.StrContains(err.Error(), kind, "the refusal names the kind for %s: %v", kind, err)
+	}
 }
 
 func TestPutPresetStampsWrittenByChild(t *testing.T) {
