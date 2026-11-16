@@ -523,19 +523,23 @@ func executorInstanceName(cmd *cobra.Command) string {
 	return paths.DefaultInstance
 }
 
-// applyExecutorInstance namespaces this process's executor paths under the raw
-// instance name. Called before anything resolves a path — by `executor serve`,
-// which never resolves a profile, and by the executor verbs that can run without
-// one (`service install`, `executor name`).
+// applyExecutorInstance sets this process's executor instance from the RAW name:
+// the -P/--profile flag, else a non-empty RAFIKI_PROFILE, else the default
+// instance. Every executor-SERVICE verb calls it before resolving a path —
+// `executor serve`, `executor setup`, `executor service install|uninstall|
+// start|stop|restart|status|logs|tail`, and `executor name` — so the credential
+// path, the env-file path, the log path and the unit name all agree on ONE
+// directory.
 //
-// A raw name of DefaultInstance leaves an instance that resolveProfile already
-// set alone: with no flag and no RAFIKI_PROFILE, the pointer-resolved profile
-// still decides, so only a DECLARED name outranks it.
+// It always sets, including the default instance. That is what makes the rule
+// hold when an ordinary client command has already run in the same process:
+// resolveProfile follows the current-profile pointer, and ambient profile state
+// must not decide which system service gets installed or stopped. The cost is
+// that `rafiki executor setup` with no -P on a machine whose pointer names
+// `work` installs the `default` unit — exactly what it did before instances
+// existed.
 func applyExecutorInstance(cmd *cobra.Command) error {
 	name := executorInstanceName(cmd)
-	if name == paths.DefaultInstance {
-		return nil
-	}
 	if err := paths.SetInstance(name); err != nil {
 		return fmt.Errorf("cannot use %q as the executor instance: %w", name, err)
 	}

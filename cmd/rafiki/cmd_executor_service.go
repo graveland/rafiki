@@ -57,7 +57,14 @@ Install needs to know where to connect and how to authenticate:
 The token is used ONCE, at first connect; the credential it is exchanged for is
 written to the credential file and used for every reconnect thereafter. For a
 machine that cannot keep a file, use --credential instead (see
-` + "`rafiki executor create`" + `).`,
+` + "`rafiki executor create`" + `).
+
+Every verb here — and executor setup and executor name — takes its INSTANCE
+from -P/--profile, else $RAFIKI_PROFILE, else the default instance: the
+credential, the environment files, the log and the unit name all come from that
+one directory. The current-profile pointer is deliberately NOT consulted, so a
+rafiki profile use on this machine cannot change which service gets installed or
+stopped.`,
 	}
 	cmd.AddCommand(
 		newExecutorServiceInstallCmd(),

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
 
@@ -19,6 +21,66 @@ import (
 func resetInstance(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() { _ = paths.SetInstance(paths.DefaultInstance) })
+}
+
+// A service's on-disk state must not move when someone runs `rafiki profile
+// use`: every executor-service verb takes its instance from the RAW -P /
+// RAFIKI_PROFILE, else default — never the current-profile pointer that
+// resolveProfile follows. Otherwise the "already enrolled?" check, the write and
+// a later `service stop` could each land in a different directory.
+func TestExecutorInstanceServiceVerbsIgnoreCurrentProfilePointer(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetInstance(t)
+	dataHome := filepath.Join(t.TempDir(), "data")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	// A pointer naming "work", and the instance resolveProfile already set from
+	// it — exactly the state a `service stop` issued in that process inherits.
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"work": {Name: "work", Socket: filepath.Join(t.TempDir(), "work.sock")},
+	}}), "Save")
+	c.NoError(profile.SavePointer("work"), "SavePointer")
+	c.NoError(paths.SetInstance("work"), "SetInstance(work)")
+
+	// The production shape: the verb under a root carrying the persistent -P.
+	verb := func(newVerb func() *cobra.Command, args ...string) *cobra.Command {
+		root := &cobra.Command{Use: "rafiki"}
+		root.PersistentFlags().StringP("profile", "P", "", "")
+		cmd := newVerb()
+		root.AddCommand(cmd)
+		c.NoError(cmd.ParseFlags(args), "parse %v", args)
+		return cmd
+	}
+
+	// No -P: the pointer must not choose the service's instance.
+	c.NoError(applyExecutorInstance(verb(newExecutorServiceStatusCmd)), "applyExecutorInstance, no -P")
+	c.Eq(paths.DefaultInstance, paths.Instance(), "a service verb with no -P must resolve the default instance")
+	c.Eq(filepath.Join(dataHome, "rafiki"), paths.DataDir(), "DataDir with no -P")
+	c.Eq(filepath.Join(dataHome, "rafiki", "executor.cred"),
+		filepath.Join(paths.DataDir(), "executor.cred"),
+		"the credential the enrolment check reads is the one the write uses")
+	c.Eq(filepath.Join(paths.ConfigDir(), "executor.env"), paths.ExecutorEnvFile(),
+		"the env file install writes with no -P")
+
+	// The same rule for `executor setup`, whose RunE installs the unit.
+	c.NoError(applyExecutorInstance(verb(newExecutorSetupCmd)), "applyExecutorInstance for setup, no -P")
+	c.Eq(paths.DefaultInstance, paths.Instance(), "executor setup with no -P must resolve the default instance")
+
+	// A declared name still wins, over the pointer and over the default.
+	c.NoError(applyExecutorInstance(verb(newExecutorServiceStatusCmd, "-P", "work")), "applyExecutorInstance, -P work")
+	c.Eq("work", paths.Instance(), "an explicit -P must name the instance")
+	c.Eq(filepath.Join(dataHome, "rafiki", "profiles", "work"), paths.DataDir(), "DataDir with -P work")
+	c.Eq(filepath.Join(paths.ConfigDir(), "executor-work.env"), paths.ExecutorEnvFile(),
+		"the env file install writes with -P work")
+	c.Eq(filepath.Join(dataHome, "rafiki", "profiles", "work", "executor.cred"), filepath.Join(paths.DataDir(), "executor.cred"),
+		"the credential check and the write agree on the instance")
+
+	// And the environment form, which the pointer never supplies.
+	t.Setenv("RAFIKI_PROFILE", "work")
+	c.NoError(applyExecutorInstance(verb(newExecutorServiceStatusCmd)), "applyExecutorInstance from RAFIKI_PROFILE")
+	c.Eq("work", paths.Instance(), "RAFIKI_PROFILE names the instance")
 }
 
 // `executor serve` takes its instance from the RAW -P value, never from
