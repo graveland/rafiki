@@ -965,6 +965,46 @@ func TestRelaunchTimeoutRevokesTicket(t *testing.T) {
 	c.Eq(0, len(f.cancels()), "the serve context was cancelled and dropped")
 }
 
+// A caller that gives up while its launch is waiting ends the launch, and the
+// one-shot ticket goes with it: a credential for a session nobody is waiting for
+// is one an ssh that finally starts could still redeem.
+func TestRelaunchCancelDiscardsTicket(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutor()
+	f.state.connectTimeout = time.Minute // the cancel, not the deadline, ends this
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.ctrl.launchInstalled(ctx, "exec-1") }()
+	select {
+	case <-f.serveEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the relay session never started")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		c.ErrorIs(err, context.Canceled, "a cancelled caller learns its own context ended the launch")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the launch did not return after the caller cancelled")
+	}
+
+	stream := f.launcher.firstStream()
+	c.Require().NotNil(stream, "the session was opened")
+	ticket := ""
+	for _, msg := range stream.sentRequests() {
+		if stdin := msg.GetStdin(); len(stdin) > 0 {
+			ticket = strings.TrimSuffix(string(stdin), "\n")
+		}
+	}
+	c.NotEq("", ticket, "a ticket was minted")
+	if _, ok := f.pool.Tickets().Redeem(ticket); ok {
+		t.Fatal("the abandoned launch left its ticket redeemable")
+	}
+	c.Eq(0, len(f.cancels()), "the abandoned session was cancelled rather than left running")
+}
+
 // The launcher gate runs on the RELAUNCH path too. Its facts are live: an
 // operator who adds --no-ssh-launch after an install must not be routed around
 // by the next relaunch.
@@ -1037,40 +1077,120 @@ func TestUninstallSucceedsWhenLauncherDown(t *testing.T) {
 	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the executor row is still deleted")
 }
 
-// An agent may uninstall only what its own lineage installed, and a refusal is
-// the SAME sentence the policy layer uses for a foreign row — so a sibling's
-// executor and a stranger's read alike.
+// An agent may uninstall what ITS OWN LINEAGE installed — the row it installed
+// itself, or one an ANCESTOR installed. Authority flows down the tree, so the
+// installer's parent and the installer's sibling are both refused, with the same
+// sentence the policy layer uses for a foreign row.
 func TestUninstallChildOutsideLineageRefused(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
-	f.seedInstalledExecutor()
 
+	// c_root → c_kid, c_root → c_sib.
 	now := time.Now()
+	f.ctrl.st.Insert(&childstore.Session{
+		ChildID: "c_root", Status: protocol.StatusIdle, StartedAt: now,
+		OwnerUserID: installTestOwner,
+		Labels:      map[string]string{"owner": installTestOwnerName, childstore.LabelRoot: "c_root"},
+	})
 	for _, id := range []string{"c_kid", "c_sib"} {
 		f.ctrl.st.Insert(&childstore.Session{
 			ChildID: id, Status: protocol.StatusIdle, StartedAt: now,
 			OwnerUserID: installTestOwner,
-			Labels:      map[string]string{"owner": installTestOwnerName, childstore.LabelRoot: "c_root"},
+			Labels: map[string]string{
+				"owner":                installTestOwnerName,
+				childstore.LabelParent: "c_root",
+				childstore.LabelRoot:   "c_root",
+			},
 		})
 	}
-	// c_sib installed it.
-	f.installs.mu.Lock()
-	row := f.installs.rows["recipe-1"]
-	row.InstalledByChild = "c_sib"
-	f.installs.rows["recipe-1"] = row
-	f.installs.mu.Unlock()
+	caller := func(childID string) installCaller {
+		return installCaller{OwnerUserID: installTestOwner, OwnerName: installTestOwnerName, ChildID: childID}
+	}
+	const refused = "executor exec-1 belongs to another user"
 
-	caller := installCaller{OwnerUserID: installTestOwner, OwnerName: installTestOwnerName, ChildID: "c_kid"}
-	err := f.ctrl.UninstallExecutor(context.Background(), caller, "ublk-s2")
-	expectControllerError(t, err, protocol.ErrPermissionDenied,
-		"executor exec-1 belongs to another user")
+	// reseed gives the fixture one installed executor whose installer is named.
+	reseed := func(installedBy string) {
+		f.execs.execs["exec-1"] = executors.Executor{
+			ID: "exec-1", Labels: map[string]string{"machine": "ublk-s2"},
+			OwnerUserID: installTestOwner, Enabled: true, Isolation: "none",
+			WorkspaceMode: "pinned", Roots: []string{"~"},
+		}
+		f.execs.deleted = nil
+		f.installs.mu.Lock()
+		f.installs.rows = map[string]executorinstall.Row{}
+		f.installs.order = nil
+		f.installs.mu.Unlock()
+		c.Require().NoError(f.installs.Insert(context.Background(), executorinstall.Row{
+			ID: "recipe-1", OwnerUserID: installTestOwner, ExecutorID: "exec-1",
+			LauncherExecutorID: installTestLauncher, Target: "brent@ublk-s2",
+			Instance: "work", Platform: "linux/amd64", InstalledByChild: installedBy,
+		}), "seed recipe installed by %q", installedBy)
+	}
+
+	// A SIBLING's install is not the caller's to remove.
+	reseed("c_sib")
+	expectControllerError(t, f.ctrl.UninstallExecutor(context.Background(), caller("c_kid"), "ublk-s2"),
+		protocol.ErrPermissionDenied, refused)
 	c.Eq(0, len(f.execs.deleted), "a refused uninstall changes nothing")
 
-	// The installer itself may.
-	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(),
-		installCaller{OwnerUserID: installTestOwner, OwnerName: installTestOwnerName, ChildID: "c_sib"},
-		"ublk-s2"), "the installer may uninstall what it installed")
+	// The installer's PARENT may not remove it either: the walk goes downward,
+	// never up.
+	reseed("c_kid")
+	expectControllerError(t, f.ctrl.UninstallExecutor(context.Background(), caller("c_root"), "ublk-s2"),
+		protocol.ErrPermissionDenied, refused)
+	c.Eq(0, len(f.execs.deleted), "the installer's parent may not uninstall it")
+
+	// A DESCENDANT of the installer may: the row was provisioned for its subtree.
+	reseed("c_root")
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), caller("c_kid"), "ublk-s2"),
+		"a descendant of the installer may uninstall what its ancestor installed")
+	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the descendant's uninstall went through")
+
+	// And so may the installer itself.
+	reseed("c_kid")
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), caller("c_kid"), "ublk-s2"),
+		"the installer may uninstall what it installed")
 	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the installer's uninstall went through")
+}
+
+// Uninstall takes the SAME per-(owner, machine) lock Install does, so the two
+// serialise instead of interleaving into a launch for a row that is being
+// deleted.
+func TestUninstallTakesTheInstallLock(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutor()
+
+	// A lock for a DIFFERENT name must not block it: the fix is one lock per
+	// executor, not a global one.
+	other := f.state.lockInstall(installTestOwner, "some-other-machine")
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"),
+		"an unrelated name's lock must not block this uninstall")
+	other()
+
+	// The row's own (owner, machine) lock does block it, and releasing the lock
+	// lets it finish — which is only true if the uninstall takes that key.
+	f.seedInstalledExecutor()
+	f.execs.deleted = nil
+	release := f.state.lockInstall(installTestOwner, "ublk-s2")
+	done := make(chan error, 1)
+	go func() { done <- f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2") }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("the uninstall did not wait for the (owner, machine) lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// Still blocked, which is the answer a lock means. A negative check can
+		// only be wrong in the direction of passing a buggy tree whose uninstall
+		// is slower than this bound; the release below is what pins the positive.
+	}
+	release()
+	select {
+	case err := <-done:
+		c.NoError(err, "the uninstall completes once the lock is released")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the uninstall never completed after the lock was released")
+	}
 }
 
 // ─── The listing ────────────────────────────────────────────────────────────

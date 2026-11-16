@@ -1044,6 +1044,18 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) error {
 		return installErr(protocol.ErrUnavailable, "executor %s did not connect within %s; ssh said: %s",
 			installNameOf(launcher.Executor), c.install.connectTimeout, conn.stderrTail())
 	case <-ctx.Done():
+		// The caller gave up, and it was the leader whose context this flight
+		// rides, so the flight is over: nobody is waiting on this session.
+		//
+		// If the executor nevertheless CONNECTED, report the success rather than
+		// tearing down a row that is already up; otherwise discard the ticket (a
+		// credential for a session nobody awaits, which an ssh that finally starts
+		// could still redeem) and end the session.
+		if _, live := c.liveExecutor(executorID); live {
+			return nil
+		}
+		discardTicket()
+		c.install.cancelServe(executorID)
 		return ctx.Err()
 	}
 }
@@ -1055,7 +1067,25 @@ func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller
 	if err := c.requireInstaller(); err != nil {
 		return err
 	}
-	e, err := c.resolveInstallExecutor(ctx, caller, strings.TrimSpace(ref))
+	ref = strings.TrimSpace(ref)
+
+	// The SAME per-(owner, machine) lock InstallExecutor takes, so installing and
+	// uninstalling one name serialise instead of interleaving: without it an
+	// uninstall could tombstone and delete the row a reinstall was already
+	// launching, and the ssh session would come up for a row that no longer
+	// exists.
+	//
+	// The key names the row, so the ref has to be resolved first, and the row is
+	// then resolved AGAIN under the lock: what this call acts on must be what the
+	// lock protects, not what it saw on the way in.
+	key, err := c.resolveInstallExecutor(ctx, caller, ref)
+	if err != nil {
+		return err
+	}
+	release := c.install.lockInstall(key.OwnerUserID, installLockName(key))
+	defer release()
+
+	e, err := c.resolveInstallExecutor(ctx, caller, ref)
 	if err != nil {
 		return err
 	}
@@ -1087,7 +1117,7 @@ func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller
 	if terr := c.install.store.Tombstone(ctx, row.ID); terr != nil {
 		return executorinstallErr(terr)
 	}
-	if derr := c.execStore.Delete(ctx, e.ID); derr != nil {
+	if derr := c.execStore.Delete(ctx, e.ID); derr != nil && !errors.Is(derr, executors.ErrNotFound) {
 		return translateExecutorErr(derr)
 	}
 	return nil
@@ -1128,17 +1158,38 @@ func (c *Controller) cleanInstallMarker(ctx context.Context, row executorinstall
 		"target", row.Target, "install", row.ID, "removed", removed)
 }
 
-// installedByLineage reports whether installerChild is the caller or one of its
-// descendants. A row installed by a human has no installer child, so no child
-// may uninstall it.
-func (c *Controller) installedByLineage(callerChildID, installerChildID string) bool {
-	if installerChildID == "" || callerChildID == "" {
+// installedByLineage reports whether a caller may uninstall a row whose
+// installer is installedByChild: it may when IT installed the row, or when one
+// of its ANCESTORS did.
+//
+// Authority flows DOWN the tree, which is why the walk is IsDescendant(installer,
+// caller) and not the other way round. A subtree may tidy up what its ancestors
+// provisioned FOR it — a coordinator installs a machine, a worker cleans it up —
+// while a sibling's or a descendant's install is not the caller's to remove. It
+// is also symmetric with install-time launcher reach: an agent installs through
+// a machine it may reach, and uninstalls what the same lineage put there.
+//
+// A row a human installed has no installer child, so no child may uninstall it;
+// the owner's own credential is the way to remove that one.
+func (c *Controller) installedByLineage(callerChildID, installedByChild string) bool {
+	if installedByChild == "" || callerChildID == "" {
 		return false
 	}
-	if installerChildID == callerChildID {
+	if installedByChild == callerChildID {
 		return true
 	}
-	return c.st != nil && c.st.IsDescendant(callerChildID, installerChildID)
+	return c.st != nil && c.st.IsDescendant(installedByChild, callerChildID)
+}
+
+// installLockName is the (owner, machine) lock's name half for an existing row:
+// its machine label, which is exactly what InstallExecutor locks on. The id is
+// only a fallback — no installed row lacks a machine label, since the install
+// writes it — so that the lock can never silently become a no-op.
+func installLockName(e executors.Executor) string {
+	if m := e.Labels["machine"]; m != "" {
+		return m
+	}
+	return e.ID
 }
 
 // resolveInstallExecutor resolves a name or id among the caller's OWN rows. A
