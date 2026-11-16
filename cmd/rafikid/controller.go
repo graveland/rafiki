@@ -575,6 +575,14 @@ type Controller struct {
 	// listener is not configured (require the pool to mint tokens).
 	execStore executors.Store
 
+	// install is the executor-install orchestrator: the launch-recipe store,
+	// this daemon's binary depot, and the two seams into the executor pool (a
+	// launcher's ExecutorService client and the tunnel server). Nil when the
+	// daemon has no database or no executor pool — InstallExecutor and
+	// UninstallExecutor then answer Unavailable rather than half-working. See
+	// executor_install.go.
+	install *installState
+
 	// sandboxStore is the durable sandbox registry (conversations.sandbox).
 	// Nil on a database-less daemon: every sandbox verb then returns
 	// ErrInternal "sandboxes require a database" — there is no DB-less path.

@@ -530,6 +530,28 @@ func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]con
 	return e.c.ListExecutorRows(ctx, kind, o.Username, o.UserID)
 }
 
+// connectExecutorInstaller adapts the Controller's install orchestrator to
+// connectapi.ExecutorInstaller.
+//
+// Both methods resolve the caller from the CONTEXT — the request has no owner
+// field and must never grow one — and hand the Controller an installCaller. A
+// distinct type for the same reason connectExecutorAdmin is one: the Controller
+// methods take the caller explicitly so the MCP face can pass a child's own,
+// and the adapter is where a Connect connection turns into that caller.
+type connectExecutorInstaller struct{ c *Controller }
+
+var _ connectapi.ExecutorInstaller = connectExecutorInstaller{}
+
+func (a connectExecutorInstaller) Install(
+	ctx context.Context, req *rafikiv1.InstallExecutorRequest,
+) (*rafikiv1.ExecutorRow, error) {
+	return a.c.InstallExecutor(ctx, installCallerFromContext(ctx, a.c), req)
+}
+
+func (a connectExecutorInstaller) Uninstall(ctx context.Context, ref string) error {
+	return a.c.UninstallExecutor(ctx, installCallerFromContext(ctx, a.c), ref)
+}
+
 // connectSkills adapts the daemon's skills.Store to connectapi.SkillManager.
 // The translation exists so pkg/connectapi — which cmd/rafiki links — never
 // imports pkg/skills' store half.

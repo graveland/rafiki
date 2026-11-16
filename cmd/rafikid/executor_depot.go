@@ -13,8 +13,10 @@ import (
 	"strings"
 	"sync"
 
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/release"
 	"go.graveland.dev/rafiki/pkg/relsign"
+	"go.graveland.dev/rafiki/pkg/version"
 )
 
 // depotBinary is one verified `rafiki` binary the daemon can ship to another
@@ -52,6 +54,19 @@ type executorDepot struct {
 	release  *release.Client
 	keys     []relsign.Key
 	mu       sync.Mutex // one fetch per (goos, goarch) at a time
+}
+
+// newExecutorDepot builds the depot from this process's version, environment
+// and cache directory. Everything it reads is resolved once, here, so a later
+// os.Setenv cannot make two calls disagree about where a binary came from.
+func newExecutorDepot() *executorDepot {
+	return &executorDepot{
+		tag:      version.String(),
+		override: paths.Get(paths.ExecutorBinariesDir),
+		cacheDir: filepath.Join(paths.CacheDir(), "executor-binaries"),
+		release:  release.NewClient(""),
+		keys:     relsign.TrustedKeys,
+	}
 }
 
 // Binary returns a verified `rafiki` binary for goos/goarch.

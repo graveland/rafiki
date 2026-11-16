@@ -29,6 +29,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executorinstalldb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/executorsdb"
 	"go.graveland.dev/rafiki/pkg/llm"
@@ -854,6 +855,26 @@ func runDaemon(opts runDaemonOpts) error {
 		// It used to start inside the TLS branch, which was correct only while
 		// that was the sole way in; the unix listener below is the second.
 		execPool.StartSweeper(ctx)
+
+		// The executor-install orchestrator. It needs BOTH a database (the
+		// launch recipes) and this pool (the launcher's client and the tunnel
+		// server); with either missing the two RPCs stay Unavailable rather than
+		// half-working. Its two seams are the pool's own: one executor's
+		// ExecutorService client — the launcher that runs ssh — and ServeConn,
+		// which puts a tunnelled connection on the SAME upgrade handler a dialled
+		// one reaches, so the two differ in how they arrived and in nothing else.
+		if pool != nil {
+			install := newInstallState(executorinstalldb.New(pool), newExecutorDepot())
+			install.launcher = func(executorID string) (installLauncher, error) {
+				cl, err := execPool.ConnectClientFor(executorID)
+				if err != nil {
+					return nil, err
+				}
+				return launcherRemote{cl: cl}, nil
+			}
+			install.serve = execPool.ServeConn
+			ctrl.install = install
+		}
 	}
 
 	// Both pushers are constructed before skill-manager registration so
@@ -950,6 +971,9 @@ func runDaemon(opts runDaemonOpts) error {
 		// runs on every connect and leaves still-unsatisfied children pended.
 		execPool.SetOnConnect(func(id string) {
 			ctrl.sweepPendingResumes()
+			// A launch waits on the connection ARRIVING, never on a poll: the
+			// installer's one-shot waiters for this executor fire here.
+			ctrl.installConnected(id)
 			if ctrl.skillPusher != nil {
 				if err := ctrl.skillPusher.pushIfEligible(baseCtx, id); err != nil {
 					slog.Warn("skill sync on connect failed", "executor", id, "error", err)
@@ -1049,6 +1073,12 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetChildOps(connectChildOps{c: ctrl})
 			face.Control.SetSendStepRunner(newSendStepRunner(ctrl))
 			face.Control.SetExecutorAdmin(connectExecutorAdmin{c: ctrl})
+			// The install verbs, wired only where the orchestrator exists: a
+			// daemon with no database has no recipe table and answers
+			// Unavailable from the handler's own "not yet wired" path.
+			if ctrl.install != nil {
+				face.Control.SetExecutorInstaller(connectExecutorInstaller{c: ctrl})
+			}
 			face.Control.SetUserAdmin(connectUserAdmin{c: ctrl, loginConfigured: face.Control.LoginConfigured})
 			face.Control.SetRawChildIO(connectRawChildIO{c: ctrl})
 			face.Control.SetExecutorSessions(connectExecutorSessions{c: ctrl})

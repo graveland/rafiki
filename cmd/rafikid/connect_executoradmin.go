@@ -197,6 +197,16 @@ func (a connectExecutorAdmin) List(ctx context.Context, selector string, limit i
 		}
 		out = append(out, executorRowFrom(e))
 	}
+	// An executor installed over ssh carries the launch recipe the listing must
+	// show: the launcher machine and the ssh destination. Applied AFTER the
+	// owner filter, so the decoration can never widen what a caller sees.
+	if views := a.c.installDisplays(ctx); views != nil {
+		for i := range out {
+			if v, ok := views[out[i].ID]; ok {
+				out[i].InstalledVia, out[i].InstalledTarget = v.Via, v.Target
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -207,10 +217,13 @@ func (a connectExecutorAdmin) List(ctx context.Context, selector string, limit i
 // not perform. What a plain listing leaves ZERO is deliberate, and pinned by
 // TestExecutorAdminListLeavesEligibilityUnevaluated: LaunchKinds is a
 // live-pool observation the store row does not carry, and Eligible/Reason are
-// unset on this path by ListExecutorsRequest's contract. The timestamps ride
-// the row's own fields: ConnectedAt from the live pool's join time (the zero
-// time when the executor has no current connection) and LastSeen from the
-// store's last_seen_at (the zero time when the row has never been seen).
+// unset on this path by ListExecutorsRequest's contract. InstalledVia and
+// InstalledTarget are also left empty HERE: they come from the install recipe,
+// not the executor row, so List decorates them from c.installDisplays. The
+// timestamps ride the row's own fields: ConnectedAt from the live pool's join
+// time (the zero time when the executor has no current connection) and LastSeen
+// from the store's last_seen_at (the zero time when the row has never been
+// seen).
 func executorRowFrom(e executors.Executor) connectapi.ExecutorRow {
 	return connectapi.ExecutorRow{
 		ID:            e.ID,
