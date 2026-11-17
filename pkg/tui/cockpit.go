@@ -2529,8 +2529,8 @@ func (c *Cockpit) searchRailView(width int) string {
 	top, vis := railWindow(len(rows), c.search.cursor, c.searchTop, c.bodyHeight()-1)
 	c.searchTop = top
 	text := renderSearchRail(rows[top:top+vis], c.search.query,
-		searchSortName(c.search.sort), c.search.selectedID(), width,
-		c.focus == focusRail && !c.searchReading)
+		c.search.sort, c.search.selectedID(), width,
+		c.focus == focusRail && !c.searchReading, time.Now())
 	if vis < len(rows) {
 		// The query line is the pane's first line, not a row; the markers
 		// bracket the row list below it. No style spans a newline here, so the
@@ -3473,7 +3473,7 @@ func (c *Cockpit) railCols() int {
 		return 0
 	}
 	if c.searchOpen {
-		return searchRailWidth(c.search.rows, c.search.query, searchSortName(c.search.sort), c.width)
+		return searchRailWidth(c.search.rows, c.search.query, c.search.sort, c.width, time.Now())
 	}
 	if c.railHidden ||
 		c.rail.Len() == 0 || (c.rail.Len() < 2 && !c.railPeek) {
@@ -3505,8 +3505,10 @@ func (c *Cockpit) agentIdentity() string {
 		if l == nil {
 			return ""
 		}
-		name := searchName(l)
-		id := styleAgentName.Render(name) + styleMeta.Render(" · search")
+		id := styleAgentName.Render(searchName(l)) + styleMeta.Render(" · search")
+		if when := searchCreatedLine(l, time.Now()); when != "" {
+			id += styleMeta.Render(" · " + when)
+		}
 		return id
 	}
 	v := c.viewing()

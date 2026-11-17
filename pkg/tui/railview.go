@@ -5,6 +5,7 @@ package tui
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -234,6 +235,87 @@ func searchStateTag(l *rafikiv1.ConversationListing) string {
 	return ""
 }
 
+// searchRowTime is the time a row's age column shows: the one the list is
+// ordered by, so the column explains the order on screen. CREATED shows when
+// the conversation began; RECENT shows its last activity, and so does best
+// match, which has no time of its own. Zero when the listing carries none.
+func searchRowTime(l *rafikiv1.ConversationListing, sort rafikiv1.ConversationSort) time.Time {
+	ts := l.GetLastActivity()
+	if sort == rafikiv1.ConversationSort_CONVERSATION_SORT_CREATED {
+		ts = l.GetCreatedAt()
+	}
+	if ts == nil {
+		return time.Time{}
+	}
+	return ts.AsTime()
+}
+
+// searchAgeTag is a row's right-aligned age, " 5m", " 3h", " 2d", and past
+// two weeks the date, " Nov 9", or " 2025" for an earlier year, so the column
+// stays at most six columns wide. Empty when the row has no time to show.
+func searchAgeTag(l *rafikiv1.ConversationListing, sort rafikiv1.ConversationSort, now time.Time) string {
+	t := searchRowTime(l, sort)
+	if t.IsZero() {
+		return ""
+	}
+	d := now.Sub(t)
+	switch {
+	case d < time.Minute:
+		return " now"
+	case d < time.Hour:
+		return " " + strconv.Itoa(int(d/time.Minute)) + "m"
+	case d < 24*time.Hour:
+		return " " + strconv.Itoa(int(d/time.Hour)) + "h"
+	case d < 14*24*time.Hour:
+		return " " + strconv.Itoa(int(d/(24*time.Hour))) + "d"
+	}
+	local := t.In(now.Location())
+	if local.Year() != now.Year() {
+		return " " + strconv.Itoa(local.Year())
+	}
+	return " " + local.Format("Jan 2")
+}
+
+// searchSpan renders how long a conversation ran, from creation to its last
+// activity, in its two largest units: "8d 1h", "3h 12m", "4m", "<1m".
+func searchSpan(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	days := int(d / (24 * time.Hour))
+	hours := int(d % (24 * time.Hour) / time.Hour)
+	mins := int(d % time.Hour / time.Minute)
+	switch {
+	case days > 0:
+		return strconv.Itoa(days) + "d " + strconv.Itoa(hours) + "h"
+	case hours > 0:
+		return strconv.Itoa(hours) + "h " + strconv.Itoa(mins) + "m"
+	}
+	return strconv.Itoa(mins) + "m"
+}
+
+// searchCreatedLine is the status line's timing for the row under the search
+// cursor: when the conversation was created, in full, and how long it has run
+// from then to its last activity. Empty when the listing carries no creation
+// time. The year appears only when it is not the current one.
+func searchCreatedLine(l *rafikiv1.ConversationListing, now time.Time) string {
+	if l.GetCreatedAt() == nil {
+		return ""
+	}
+	created := l.GetCreatedAt().AsTime().In(now.Location())
+	layout := "Jan 2 15:04"
+	if created.Year() != now.Year() {
+		layout = "Jan 2 2006 15:04"
+	}
+	out := "created " + created.Format(layout)
+	if last := l.GetLastActivity(); last != nil {
+		if span := last.AsTime().Sub(created); span >= 0 {
+			out += " · ran " + searchSpan(span)
+		}
+	}
+	return out
+}
+
 // searchSortName is the right-aligned label on the query line: the sort the
 // rail is currently ordered by, in the short lowercase form. UNSPECIFIED
 // means RECENT on the wire, so the label says recent rather than showing a
@@ -278,7 +360,8 @@ func searchRowStyle(l *rafikiv1.ConversationListing) lipgloss.Style {
 // clamp stops one long name eating the transcript. The budget counts
 // everything the render puts in the plain row (cursor, indent, fold, name,
 // kid count, state tag), because those are what get clipped.
-func searchRailWidth(rows []searchRow, query, sortName string, total int) int {
+func searchRailWidth(rows []searchRow, query string, sort rafikiv1.ConversationSort, total int, now time.Time) int {
+	sortName := searchSortName(sort)
 	want := railMin
 	if q := 2 + ansi.StringWidth(query) + ansi.StringWidth(" "+sortName); q > want {
 		want = q
@@ -287,7 +370,8 @@ func searchRailWidth(rows []searchRow, query, sortName string, total int) int {
 		w := 2 + 2*r.depth + ansi.StringWidth(searchFold(r)) + 1 +
 			ansi.StringWidth(searchName(r.l)) +
 			ansi.StringWidth(searchKidsTag(r.l)) +
-			ansi.StringWidth(searchStateTag(r.l))
+			ansi.StringWidth(searchStateTag(r.l)) +
+			ansi.StringWidth(searchAgeTag(r.l, sort, now))
 		if w > want {
 			want = w
 		}
@@ -302,9 +386,10 @@ func searchRailWidth(rows []searchRow, query, sortName string, total int) int {
 // per conversation, expanded children inline at their depth. Rows are
 // clipped BEFORE styling, so the width budget is measured on plain text and
 // lipgloss escape sequences never count against it.
-func renderSearchRail(rows []searchRow, query, sortName, selected string, width int, paneFocused bool) string {
+func renderSearchRail(rows []searchRow, query string, sort rafikiv1.ConversationSort, selected string,
+	width int, paneFocused bool, now time.Time) string {
 	var sb strings.Builder
-	sb.WriteString(searchQueryLine(query, sortName, width))
+	sb.WriteString(searchQueryLine(query, searchSortName(sort), width))
 	sb.WriteString("\n")
 	for _, r := range rows {
 		id := r.l.GetId()
@@ -318,8 +403,19 @@ func renderSearchRail(rows []searchRow, query, sortName, selected string, width 
 		fold := searchFold(r)
 		left := cursor + strings.Repeat("  ", r.depth) + fold + " " + searchName(r.l) +
 			searchKidsTag(r.l) + searchStateTag(r.l)
-		row := clip(left, width)
-		sb.WriteString(searchRowStyle(r.l).Render(row))
+		// The age sits flush right and survives a narrow pane: the name is what
+		// gets clipped, because the age is the column a reader scans down.
+		age := searchAgeTag(r.l, sort, now)
+		if ansi.StringWidth(age) >= width/2 {
+			age = ""
+		}
+		if age == "" {
+			sb.WriteString(searchRowStyle(r.l).Render(clip(left, width)))
+		} else {
+			nameCols := width - ansi.StringWidth(age)
+			sb.WriteString(searchRowStyle(r.l).Render(padTo(left, nameCols)))
+			sb.WriteString(styleRailDim.Render(age))
+		}
 		sb.WriteString("\n")
 	}
 	return sb.String()

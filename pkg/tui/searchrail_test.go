@@ -9,10 +9,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"connectrpc.com/connect"
 	"github.com/charmbracelet/x/ansi"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	rafikiv1connect "go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -291,7 +293,7 @@ func TestSearchRailRenderShowsFoldKidCountAndDimClosedRows(t *testing.T) {
 		"p's page applies")
 	ck.Require().Eq("p", s.selectedID(), "cursor on p")
 
-	out := renderSearchRail(s.rows, "que", "recent", "p", 60, true)
+	out := renderSearchRail(s.rows, "que", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, "p", 60, true, time.Time{})
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	ck.Require().Eq(5, len(lines), "query line plus four rows")
 
@@ -303,7 +305,7 @@ func TestSearchRailRenderShowsFoldKidCountAndDimClosedRows(t *testing.T) {
 
 	// The same rail, collapsed again: + on the parent, nothing on the leaf.
 	ck.Require().Nil(s.toggle("p"), "collapse p")
-	out = renderSearchRail(s.rows, "que", "recent", "p", 60, false)
+	out = renderSearchRail(s.rows, "que", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, "p", 60, false, time.Time{})
 	lines = strings.Split(strings.TrimRight(out, "\n"), "\n")
 	ck.Eq("▸ + parent (2) ●", ansi.Strip(lines[1]), "collapsed parent row, unfocused cursor")
 }
@@ -320,7 +322,7 @@ func TestSearchRailRenderNameFallbacks(t *testing.T) {
 
 	s := newSearchRail()
 	s.applyPage(0, "", searchPageResp(named, agentNamed, bare))
-	out := renderSearchRail(s.rows, "", "recent", "", 80, false)
+	out := renderSearchRail(s.rows, "", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, "", 80, false, time.Time{})
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	ck.StrContains(lines[1], "conversation name", "the conversation's name wins")
 	ck.StrContains(lines[2], "worker-1", "the agent's name is the second fallback")
@@ -334,7 +336,7 @@ func TestSearchRailRenderFoldShapes(t *testing.T) {
 	s := newSearchRail()
 	s.applyPage(0, "", searchPageResp(
 		searchListing("leaf", "leaf", 0), searchListing("node", "node", 1)))
-	out := renderSearchRail(s.rows, "", "recent", "", 40, false)
+	out := renderSearchRail(s.rows, "", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, "", 40, false, time.Time{})
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	ck.NotStrContains(ansi.Strip(lines[1]), "+", "a leaf has no fold mark")
 	ck.NotStrContains(ansi.Strip(lines[1]), "(", "a leaf has no count")
@@ -362,17 +364,109 @@ func TestSearchRailWidthCountsRowsAndTheQueryLine(t *testing.T) {
 		{l: searchListing("a", "alpha", 0)},
 		{l: searchListing("b", "beta-conv", 2), depth: 2, folded: true},
 	}
-	ck.Eq(searchRailWidth(rows, "q", "recent", 400), searchRailWidth(rows, "q", "recent", 2000),
+	ck.Eq(searchRailWidth(rows, "q", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, 400, time.Time{}), searchRailWidth(rows, "q", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, 2000, time.Time{}),
 		"the width tracked the window; that reflows the transcript on every drag")
-	ck.Eq(railMin, searchRailWidth(rows, "", "recent", 2000), "a short list sits at the floor")
+	ck.Eq(railMin, searchRailWidth(rows, "", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, 2000, time.Time{}), "a short list sits at the floor")
 
 	deep := []searchRow{{l: searchListing("b", "beta-conv", 2), depth: 5, folded: true}}
-	ck.Greater(railMin, searchRailWidth(deep, "", "recent", 2000),
+	ck.Greater(railMin, searchRailWidth(deep, "", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, 2000, time.Time{}),
 		"indentation counts against the width budget")
 
 	long := []searchRow{{l: searchListing("x", strings.Repeat("x", 300), 0)}}
-	got := searchRailWidth(long, "", "recent", 100)
+	got := searchRailWidth(long, "", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, 100, time.Time{})
 	ck.LessOrEqual(100*railMaxPct/100, got, "width = %d, want it clamped to %d%% of a 100-col window", got, railMaxPct)
+}
+
+// timedListing is a listing with both of its times set relative to now.
+func timedListing(id string, created, last time.Duration, now time.Time) *rafikiv1.ConversationListing {
+	l := searchListing(id, id, 0)
+	l.CreatedAt = timestamppb.New(now.Add(-created))
+	l.LastActivity = timestamppb.New(now.Add(-last))
+	return l
+}
+
+// The age column shows the time the list is ordered by, so it explains the
+// order on screen: creation under the created sort, last activity under
+// recent and under best match, which has no time of its own.
+func TestSearchAgeFollowsTheSort(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	l := timedListing("c", 3*24*time.Hour, 5*time.Minute, now)
+	ck.Eq(" 5m", searchAgeTag(l, rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, now), "recent shows last activity")
+	ck.Eq(" 3d", searchAgeTag(l, rafikiv1.ConversationSort_CONVERSATION_SORT_CREATED, now), "created shows creation")
+	ck.Eq(" 5m", searchAgeTag(l, rafikiv1.ConversationSort_CONVERSATION_SORT_RELEVANCE, now), "best match shows last activity")
+	ck.Eq("", searchAgeTag(searchListing("bare", "bare", 0), rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, now),
+		"a listing with no time shows no age")
+}
+
+// Each unit boundary, and the switch to a date past two weeks and to a year
+// for an earlier one.
+func TestSearchAgeUnits(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	created := rafikiv1.ConversationSort_CONVERSATION_SORT_CREATED
+	for _, tc := range []struct {
+		ago  time.Duration
+		want string
+	}{
+		{30 * time.Second, " now"},
+		{time.Minute, " 1m"},
+		{59 * time.Minute, " 59m"},
+		{time.Hour, " 1h"},
+		{23 * time.Hour, " 23h"},
+		{24 * time.Hour, " 1d"},
+		{13 * 24 * time.Hour, " 13d"},
+		{14 * 24 * time.Hour, " Nov 3"},
+		{330 * 24 * time.Hour, " 2025"},
+	} {
+		ck.Eq(tc.want, searchAgeTag(timedListing("c", tc.ago, 0, now), created, now), "age of %v", tc.ago)
+	}
+}
+
+// The age sits flush right on its row, and a pane too narrow for both keeps
+// the age and clips the name.
+func TestSearchRailRendersTheAgeFlushRight(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	l := timedListing("a-rather-long-conversation-name", time.Hour, 5*time.Minute, now)
+	rows := []searchRow{{l: l}}
+
+	out := renderSearchRail(rows, "", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, "", 60, false, now)
+	line := ansi.Strip(strings.Split(out, "\n")[1])
+	ck.Eq(60, ansi.StringWidth(line), "the row does not fill the pane")
+	ck.True(strings.HasSuffix(line, " 5m"), "the age is not flush right: %q", line)
+
+	out = renderSearchRail(rows, "", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, "", 20, false, now)
+	line = ansi.Strip(strings.Split(out, "\n")[1])
+	ck.True(strings.HasSuffix(line, " 5m"), "a narrow pane dropped the age: %q", line)
+	ck.StrContains(line, "…", "a narrow pane did not clip the name")
+
+	ck.Eq(2+1+len("a-rather-long-conversation-name")+len(" 5m"),
+		searchRailWidth(rows, "", rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED, 2000, now),
+		"the width does not count the age column")
+}
+
+// The status line gives the browsed conversation's creation in full and how
+// long it ran from there to its last activity; the year only when it is not
+// this one.
+func TestSearchCreatedLine(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	l := searchListing("c", "c", 0)
+	l.CreatedAt = timestamppb.New(time.Date(2026, 11, 9, 10, 29, 0, 0, time.UTC))
+	l.LastActivity = timestamppb.New(time.Date(2026, 11, 17, 11, 45, 0, 0, time.UTC))
+	ck.Eq("created Nov 9 10:29 · ran 8d 1h", searchCreatedLine(l, now), "this year")
+
+	l.CreatedAt = timestamppb.New(time.Date(2025, 12, 31, 23, 0, 0, 0, time.UTC))
+	l.LastActivity = timestamppb.New(time.Date(2026, 1, 1, 2, 30, 0, 0, time.UTC))
+	ck.Eq("created Dec 31 2025 23:00 · ran 3h 30m", searchCreatedLine(l, now), "an earlier year names it")
+
+	l.LastActivity = nil
+	ck.Eq("created Dec 31 2025 23:00", searchCreatedLine(l, now), "no activity, no span")
+	ck.Eq("", searchCreatedLine(searchListing("bare", "bare", 0), now), "no creation time, nothing")
+
+	ck.Eq("<1m", searchSpan(20*time.Second), "under a minute")
+	ck.Eq("4m", searchSpan(4*time.Minute+10*time.Second), "minutes")
 }
 
 // ── the cockpit wiring ──────────────────────────────────────────────────────
