@@ -80,6 +80,10 @@ type ConversationRef struct {
 	// message row: its history is the source's up to the node, by reference.
 	// It is written once, at creation, and never updated.
 	ForkFromNodeID string
+	// ParentConversationID is the root conversation of the agent that
+	// started this one; empty is top level. Written once, at creation, and
+	// never updated: an existing row keeps whatever parent it has.
+	ParentConversationID string
 }
 
 // EnsureConversation creates the conversation row if it doesn't already exist
@@ -184,11 +188,43 @@ func (s *CaptureStore) checkForkNode(ctx context.Context, id string) error {
 // therefore a distinct ordinal space. That separation is the whole fix: the
 // dropped replies, the phantom compaction boundaries and the ordinal
 // collisions are one bug, concurrent writers sharing an ordinal space.
+//
+// A thread row created here also records its session's root conversation as
+// parent_conversation_id, written once at insert; a row that already exists
+// keeps whatever parent it has.
 func (s *CaptureStore) ResolveThreadConversation(ctx context.Context, ref ConversationRef, threadID string) (string, error) {
 	if threadID != "" && ref.ExternalRef != "" {
-		ref.ExternalRef = ref.ExternalRef + ":" + threadID
+		session := ref.ExternalRef
+		root, err := s.threadRoot(ctx, session, ref.DrivenBy)
+		if err != nil {
+			return "", err
+		}
+		ref.ParentConversationID = root
+		ref.ExternalRef = session + ":" + threadID
 	}
 	return s.EnsureConversationByExternalRef(ctx, ref)
+}
+
+// threadRoot returns the id of the session's root conversation, the row whose
+// external_ref is the bare session and whose driven_by matches, or "" when no
+// such row exists yet. It exists so a thread conversation points at the root
+// the moment it is created; the root may legitimately still be missing (a
+// thread captured before its session's founding turn resolves), and that is an
+// empty parent, never an error.
+func (s *CaptureStore) threadRoot(ctx context.Context, session, drivenBy string) (string, error) {
+	var root string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id::text FROM conversations.conversation
+		  WHERE external_ref = $1 AND driven_by = $2
+		  ORDER BY created_at LIMIT 1`,
+		session, drivenBy).Scan(&root)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("capture: thread root for %s: %w", session, err)
+	}
+	return root, nil
 }
 
 // ThreadOfPredecessorInSession is ThreadOfPredecessor across every conversation
@@ -271,13 +307,13 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 		if ref.ForkFromNodeID != "" {
 			var id string
 			err := s.pool.QueryRow(ctx,
-				`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root, fork_from, next_ordinal)
-				 SELECT $1::uuid,$2,$3,$4,$5,$6,$7,$8,$9, m.id, m.ordinal + 1
-				   FROM conversations.conversation_message m WHERE m.id = $10::uuid
+				`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root, fork_from, next_ordinal, parent_conversation_id)
+				 SELECT $1::uuid,$2,$3,$4,$5,$6,$7,$8,$9, m.id, m.ordinal + 1, $10::uuid
+				   FROM conversations.conversation_message m WHERE m.id = $11::uuid
 				 ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
 				 RETURNING id::text`,
 				nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), ref.ExternalRef,
-				nullify(ref.Cwd), nullify(ref.RepoRoot), ref.ForkFromNodeID,
+				nullify(ref.Cwd), nullify(ref.RepoRoot), nullUUID(ref.ParentConversationID), ref.ForkFromNodeID,
 			).Scan(&id)
 			if err == nil {
 				return id, nil
@@ -301,11 +337,11 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 		// loser gets no row and falls through to SELECT the existing one.
 		var id string
 		err := s.pool.QueryRow(ctx,
-			`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
-			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
+			`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root, parent_conversation_id)
+			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
 			 RETURNING id::text`,
 			nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), ref.ExternalRef,
-			nullify(ref.Cwd), nullify(ref.RepoRoot),
+			nullify(ref.Cwd), nullify(ref.RepoRoot), nullUUID(ref.ParentConversationID),
 		).Scan(&id)
 		if err == nil {
 			return id, nil

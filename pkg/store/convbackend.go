@@ -356,8 +356,10 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 	if c.NewHead != "" {
 		newHead = c.NewHead
 	}
+	// updated_at doubles as the conversation's last activity; ListConversations sorts by it.
 	if _, err := tx.Exec(ctx, `
 		UPDATE conversations.conversation SET
+			updated_at     = now(),
 			next_ordinal   = next_ordinal + $2,
 			head_id        = $3::uuid,
 			node_count     = node_count + $2,
