@@ -201,8 +201,12 @@ re-probes, so a network that changed under you is an operator's reinstall.
   `last_launch` (the daemon's outcome for the most recent launch — kept in
   memory, so empty after a daemon restart until it launches again). `uninstall`
   ends the ssh session, removes the target's install marker (only when it holds
-  this install's id), and deletes the row; the target keeps the shared binary
-  cache, so installing there again pushes nothing. An executor that was
+  this install's id), and deletes the row; for a `direct` executor it also stops
+  the detached process first, and when that stop cannot be CONFIRMED it leaves
+  the marker, the credential and the pid file in place and says so — a removed
+  marker beside an orphan credential is what makes a later install fail with
+  nothing to explain it. The target keeps the shared binary cache, so installing
+  there again pushes nothing. An executor that was
   *enrolled* rather than installed is refused here — use `rafiki executor
   delete`.
 - **Uninstalling while the launcher is unreachable still works**: the row is
