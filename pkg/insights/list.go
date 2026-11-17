@@ -106,6 +106,33 @@ func normalizeListSort(s ListSort) ListSort {
 	}
 }
 
+// strictUUID accepts only the canonical lowercase hyphenated form. uuid.Parse
+// also takes urn-prefixed, braced and hyphenless spellings that Postgres'
+// ::uuid cast refuses, so a value admitted by the parser alone would reach SQL
+// and fail with SQLSTATE 22P02 instead of the malformed answer.
+func strictUUID(s string) bool {
+	id, err := uuid.Parse(s)
+	return err == nil && id.String() == s
+}
+
+// ilikePattern renders v as an ILIKE pattern matching v literally: the three
+// pattern metacharacters are escaped, and every condition using the pattern
+// writes ESCAPE '\' so the match does not depend on the server's escape
+// default.
+func ilikePattern(v string) string {
+	var b strings.Builder
+	b.WriteByte('%')
+	for _, r := range v {
+		switch r {
+		case '\\', '%', '_':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('%')
+	return b.String()
+}
+
 // ListConversations lists one level of the conversation tree under scope.
 // The visible set is the matched set (every eligible conversation satisfying
 // f) plus every ancestor of a matched conversation, so a filter that hits a
@@ -131,10 +158,12 @@ func (i *Insights) ListConversations(ctx context.Context, scope Scope, f ListFil
 
 	// A malformed parent matches nothing, the same answer an unknown
 	// well-formed parent gives, so callers cannot distinguish the two the
-	// same way Visible cannot.
+	// same way Visible cannot. The check is strict: spellings uuid.Parse
+	// tolerates but Postgres' ::uuid cast refuses must land here too, not in
+	// a SQL error.
 	parent := ""
 	if f.ParentConversationID != "" {
-		if _, err := uuid.Parse(f.ParentConversationID); err != nil {
+		if !strictUUID(f.ParentConversationID) {
 			return nil, "", nil
 		}
 		parent = f.ParentConversationID
@@ -200,7 +229,16 @@ func (i *Insights) ListConversations(ctx context.Context, scope Scope, f ListFil
 	       END AS state
 	FROM conversations.conversation c
 	LEFT JOIN conversations.users u ON u.id = c.owner_user_id
-	LEFT JOIN conversations.child k1 ON k1.conversation_id = c.id
+	-- child_conversation_idx is not unique: two child rows can share one
+	-- conversation, and a plain join would duplicate the row, double its
+	-- ChildCount and double its listing. Take one child deterministically,
+	-- the lowest child_id.
+	LEFT JOIN LATERAL (
+	    SELECT ch.* FROM conversations.child ch
+	    WHERE ch.conversation_id = c.id
+	    ORDER BY ch.child_id
+	    LIMIT 1
+	) k1 ON true
 	LEFT JOIN conversations.child k2 ON k2.child_id = split_part(c.external_ref, ':', 1)
 	WHERE ` + scopeCond + `
 	  AND coalesce(c.origin_entrypoint, '') <> ALL(` + exclArg + `::text[])
@@ -220,12 +258,12 @@ func (i *Insights) ListConversations(ctx context.Context, scope Scope, f ListFil
 		mConds = append(mConds, "e.child_kind = ANY("+a.next(f.Kinds)+")")
 	}
 	if f.NameContains != "" {
-		pat := a.next("%" + f.NameContains + "%")
-		mConds = append(mConds, "(e.name ILIKE "+pat+" OR coalesce(e.child_name, '') ILIKE "+pat+")")
+		pat := a.next(ilikePattern(f.NameContains))
+		mConds = append(mConds, "(e.name ILIKE "+pat+" ESCAPE '\\' OR coalesce(e.child_name, '') ILIKE "+pat+" ESCAPE '\\')")
 	}
 	if f.CwdContains != "" {
-		pat := a.next("%" + f.CwdContains + "%")
-		mConds = append(mConds, "(coalesce(e.cwd, '') ILIKE "+pat+" OR coalesce(e.child_cwd, '') ILIKE "+pat+")")
+		pat := a.next(ilikePattern(f.CwdContains))
+		mConds = append(mConds, "(coalesce(e.cwd, '') ILIKE "+pat+" ESCAPE '\\' OR coalesce(e.child_cwd, '') ILIKE "+pat+" ESCAPE '\\')")
 	}
 	if len(f.Labels) > 0 {
 		b, err := json.Marshal(f.Labels)
@@ -332,13 +370,20 @@ func (i *Insights) ListConversations(ctx context.Context, scope Scope, f ListFil
 	limArg := a.next(limit + 1)
 
 	order := ""
+	// outerOrder qualifies every term: a bare id would resolve to the
+	// p.id::text output column and order ties by text, while the page and the
+	// keyset order by uuid.
+	outerOrder := ""
 	switch sort {
 	case ListSortCreated:
 		order = "created_at DESC, id DESC"
+		outerOrder = "p.created_at DESC, p.id DESC"
 	case ListSortRelevance:
 		order = "score ASC, id ASC"
+		outerOrder = "p.score ASC, p.id ASC"
 	default:
 		order = "updated_at DESC, id DESC"
+		outerOrder = "p.updated_at DESC, p.id DESC"
 	}
 
 	query := `WITH RECURSIVE elig AS (` + elig + `
@@ -383,7 +428,7 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT count(*)::int AS n FROM vrow vv WHERE vv.parent_id = p.id
 ) cc ON true
-ORDER BY p.` + order
+ORDER BY ` + outerOrder
 
 	rows, err := i.pool.Query(ctx, query, a.args...)
 	if err != nil {
@@ -467,7 +512,7 @@ func (i *Insights) bm25WindowAvailable(ctx context.Context) (bool, error) {
 // Visible reports whether conversationID is inside scope. Unknown and
 // malformed ids answer identically: (false, nil).
 func (i *Insights) Visible(ctx context.Context, scope Scope, conversationID string) (bool, error) {
-	if _, err := uuid.Parse(conversationID); err != nil {
+	if !strictUUID(conversationID) {
 		return false, nil
 	}
 	var a argList

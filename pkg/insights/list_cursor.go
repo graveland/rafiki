@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // listCursorState is the JSON payload carried by a ListConversations cursor:
@@ -54,8 +52,11 @@ func decodeListCursor(raw string, sort ListSort, parent string) (listCursorState
 	if cs.P != parent {
 		return cs, fmt.Errorf("%w: cursor parent %q does not match request parent %q", ErrBadCursor, cs.P, parent)
 	}
-	if _, err := uuid.Parse(cs.ID); err != nil {
-		return cs, fmt.Errorf("%w: cursor row id %q: %v", ErrBadCursor, cs.ID, err)
+	// Strict, not uuid.Parse: an urn-prefixed or braced spelling parses here
+	// but Postgres' ::uuid cast refuses it, and the cursor must fail as bad
+	// rather than surface a SQL error mid-page.
+	if !strictUUID(cs.ID) {
+		return cs, fmt.Errorf("%w: cursor row id %q is not a canonical uuid", ErrBadCursor, cs.ID)
 	}
 	switch sort {
 	case ListSortCreated, ListSortRecent:

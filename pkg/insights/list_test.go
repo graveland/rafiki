@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ func listOwnerUser(t *testing.T, pool *pgxpool.Pool, label string) string {
 // listConvSeed is one conversations.conversation fixture row.
 type listConvSeed struct {
 	ownerID   string    // users.id; "" leaves owner_user_id NULL
+	id        string    // explicit id, for tests that need a controlled uuid; uuidv7() when empty
 	name      string    // NULL when empty
 	model     string    // NULL when empty
 	entry     string    // origin_entrypoint; 'test' when empty
@@ -70,16 +72,20 @@ func listConversation(t *testing.T, pool *pgxpool.Pool, s listConvSeed) string {
 	if updated.IsZero() {
 		updated = time.Now()
 	}
+	var idArg any
+	if s.id != "" {
+		idArg = s.id
+	}
 	var id string
 	err := pool.QueryRow(context.Background(), `
 INSERT INTO conversations.conversation
     (owner_user_id, name, model, origin_entrypoint, driven_by, external_ref, cwd,
-     node_count, fork_from, parent_conversation_id, created_at, updated_at, closed_at)
+     node_count, fork_from, parent_conversation_id, created_at, updated_at, closed_at, id)
 VALUES ($1::uuid, NULLIF($2,''), NULLIF($3,''), $4, 'client', NULLIF($5,''), NULLIF($6,''),
-        $7, $8::uuid, $9::uuid, $10, $11, $12)
+        $7, $8::uuid, $9::uuid, $10, $11, $12, coalesce($13::uuid, uuidv7()))
 RETURNING id::text`,
 		ownerArg, s.name, s.model, entry, s.ref, s.cwd, nodeCnt, forkArg, parentArg,
-		created, updated, s.closedAt).Scan(&id)
+		created, updated, s.closedAt, idArg).Scan(&id)
 	assert.NewAborting(t).NoError(err, "insert conversation fixture")
 	return id
 }
@@ -550,4 +556,470 @@ func TestVisible(t *testing.T) {
 	ok, err = ins.Visible(ctx, ScopeOwner(owner), "not-a-uuid")
 	c.NoError(err, "visible malformed id")
 	c.False(ok, "a malformed id must not be visible")
+
+	// Spellings uuid.Parse tolerates but Postgres' ::uuid cast refuses must
+	// answer exactly like any other malformed id: (false, nil), never a SQL
+	// error.
+	for _, spelling := range []string{
+		"urn:uuid:" + conv,
+		"{" + conv + "}",
+		strings.ReplaceAll(conv, "-", ""),
+		strings.ToUpper(conv),
+		"urn:uuid:0b1e2f3a-1111-4222-8333-444455556666",
+	} {
+		ok, err = ins.Visible(ctx, ScopeOwner(owner), spelling)
+		c.NoError(err, "visible non-canonical spelling %q", spelling)
+		c.False(ok, "non-canonical spelling %q must not be visible", spelling)
+	}
+}
+
+// TestListConversationsSharedConversationChildPickedOnce pins the fan-out
+// guard: child_conversation_idx is not unique, so two child rows can share one
+// conversation. The conversation lists once, its parent's ChildCount counts it
+// once, and the linked child is the deterministic pick, the lowest child_id.
+func TestListConversationsSharedConversationChildPickedOnce(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "fanout")
+	root := listConversation(t, pool, listConvSeed{ownerID: owner, name: "root"})
+	shared := listConversation(t, pool, listConvSeed{ownerID: owner, name: "shared", parentID: root})
+	listChild(t, pool, listChildSeed{childID: "c-bbb-shared", convID: shared, kind: "fundi", name: "second"})
+	listChild(t, pool, listChildSeed{childID: "c-aaa-shared", convID: shared, kind: "fundi", name: "first"})
+	ins := New(pool)
+
+	top, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Excluded: listExcluded})
+	c.Require().NoError(err, "top-level list")
+	c.Require().Len(top, 1, "top-level rows = %d, want the root once", len(top))
+	c.Eq(1, top[0].ChildCount, "root ChildCount with a twice-linked child")
+
+	kids, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{ParentConversationID: root, Excluded: listExcluded})
+	c.Require().NoError(err, "expand root")
+	c.Require().Len(kids, 1, "rows under root = %d, want the shared conversation once", len(kids))
+	c.Eq(shared, kids[0].ID, "row under root")
+	c.Eq("c-aaa-shared", kids[0].ChildID, "the lowest child_id wins the link")
+	c.Eq("fundi", kids[0].Kind, "kind of the picked child")
+}
+
+// TestListConversationsIlikeEscapesWildcards pins that NameContains matches
+// the literal text: %, _ and \ in the filter are escaped, so foo_bar does not
+// match fooxbar.
+func TestListConversationsIlikeEscapesWildcards(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	tok := time.Now().UnixNano()
+	owner := listOwnerUser(t, pool, "ilike")
+	underscore := listConversation(t, pool, listConvSeed{ownerID: owner, name: fmt.Sprintf("foo_bar-%d", tok)})
+	decoy := listConversation(t, pool, listConvSeed{ownerID: owner, name: fmt.Sprintf("fooxbar-%d", tok)})
+	pct := listConversation(t, pool, listConvSeed{ownerID: owner, name: fmt.Sprintf("50%%off-%d", tok)})
+	pctDecoy := listConversation(t, pool, listConvSeed{ownerID: owner, name: fmt.Sprintf("50Xoff-%d", tok)})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{NameContains: "foo_bar", Excluded: listExcluded})
+	c.Require().NoError(err, "name filter with an underscore")
+	c.EqDeep([]string{underscore}, listIDs(got), "foo_bar must match only the literal name")
+	c.NotContains(listIDs(got), decoy, "the underscore acted as a wildcard")
+
+	got, _, err = ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{NameContains: "50%off", Excluded: listExcluded})
+	c.Require().NoError(err, "name filter with a percent")
+	c.EqDeep([]string{pct}, listIDs(got), "50%off must match only the literal name")
+	c.NotContains(listIDs(got), pctDecoy, "the percent acted as a wildcard")
+}
+
+// TestListConversationsOuterOrderBreaksTiesByUUID pins the outer ORDER BY's
+// tie-break: rows tied on the sort key finish in uuid order, the same ordering
+// the page and the keyset use, so the row the cursor is minted from is the
+// page's true last row. The two ids tie on updated_at and differ only in their
+// uuids. On this cluster's builtin C.UTF-8 provider a canonical lowercase uuid
+// renders as text in the same order as its bytes, so the pre-fix unqualified
+// id (resolving to the p.id::text output column) is outcome-equivalent here;
+// the test still fails if the outer sort loses or flips the uuid tie-break.
+func TestListConversationsOuterOrderBreaksTiesByUUID(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "tiebreak")
+	idLow := "0a000000-0000-7000-8000-000000000000"
+	idHigh := "0b000000-0000-7000-8000-000000000000"
+	ts := time.Now().Add(-time.Hour).Truncate(time.Second)
+	listConversation(t, pool, listConvSeed{ownerID: owner, id: idLow, name: "tie-a", updatedAt: ts})
+	listConversation(t, pool, listConvSeed{ownerID: owner, id: idHigh, name: "tie-b", updatedAt: ts})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Excluded: listExcluded})
+	c.Require().NoError(err, "tied listing")
+	c.EqDeep([]string{idHigh, idLow}, listIDs(got), "ties must break by uuid descending")
+}
+
+// TestListConversationsKindsFilter pins the kind filter and that a non-empty
+// list excludes no-agent rows.
+func TestListConversationsKindsFilter(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "kinds")
+	fundiConv := listConversation(t, pool, listConvSeed{ownerID: owner, name: "fundi-one"})
+	claudeConv := listConversation(t, pool, listConvSeed{ownerID: owner, name: "claude-one"})
+	listConversation(t, pool, listConvSeed{ownerID: owner, name: "no-agent"})
+	listChild(t, pool, listChildSeed{childID: "c-kinds-fundi", convID: fundiConv, kind: "fundi"})
+	listChild(t, pool, listChildSeed{childID: "c-kinds-claude", convID: claudeConv, kind: "claude"})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Kinds: []string{"fundi"}, Excluded: listExcluded})
+	c.Require().NoError(err, "kinds filter fundi")
+	c.EqDeep([]string{fundiConv}, listIDs(got), "kinds fundi")
+
+	got, _, err = ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Kinds: []string{"fundi", "claude"}, Excluded: listExcluded})
+	c.Require().NoError(err, "kinds filter both")
+	c.ElementsMatch([]string{fundiConv, claudeConv}, listIDs(got), "kinds fundi+claude must list both children and exclude the no-agent row")
+}
+
+// TestListConversationsLabelsFilter pins the jsonb containment against the
+// linked child's labels.
+func TestListConversationsLabelsFilter(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "labels")
+	matched := listConversation(t, pool, listConvSeed{ownerID: owner, name: "labelled"})
+	other := listConversation(t, pool, listConvSeed{ownerID: owner, name: "other labels"})
+	bare := listConversation(t, pool, listConvSeed{ownerID: owner, name: "no labels"})
+	listChild(t, pool, listChildSeed{childID: "c-labels-a", convID: matched, kind: "fundi", labels: map[string]string{"rafiki/parent": "p-1"}})
+	listChild(t, pool, listChildSeed{childID: "c-labels-b", convID: other, kind: "fundi", labels: map[string]string{"other": "x"}})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{
+		Labels: map[string]string{"rafiki/parent": "p-1"}, Excluded: listExcluded,
+	})
+	c.Require().NoError(err, "labels filter")
+	c.EqDeep([]string{matched}, listIDs(got), "labels containment must match only the child holding the pair")
+	c.NotContains(listIDs(got), other, "a child without the pair must not match")
+	c.NotContains(listIDs(got), bare, "a no-agent row must not match a labels filter")
+}
+
+// TestListConversationsCwdContainsArms pins both cwd arms of the filter: the
+// conversation's own cwd and the linked child's cwd.
+func TestListConversationsCwdContainsArms(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "cwd")
+	tok := time.Now().UnixNano()
+	convCwd := listConversation(t, pool, listConvSeed{ownerID: owner, name: "conv cwd", cwd: fmt.Sprintf("/repo/alpha-%d/work", tok)})
+	childCwd := listConversation(t, pool, listConvSeed{ownerID: owner, name: "child cwd"})
+	listChild(t, pool, listChildSeed{childID: "c-cwd-child", convID: childCwd, kind: "fundi", cwd: fmt.Sprintf("/repo/beta-%d/work", tok)})
+	other := listConversation(t, pool, listConvSeed{ownerID: owner, name: "elsewhere", cwd: fmt.Sprintf("/elsewhere-%d", tok)})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{CwdContains: fmt.Sprintf("/repo/alpha-%d", tok), Excluded: listExcluded})
+	c.Require().NoError(err, "cwd filter, conversation arm")
+	c.EqDeep([]string{convCwd}, listIDs(got), "the conversation cwd arm")
+
+	got, _, err = ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{CwdContains: fmt.Sprintf("/repo/beta-%d", tok), Excluded: listExcluded})
+	c.Require().NoError(err, "cwd filter, child arm")
+	c.EqDeep([]string{childCwd}, listIDs(got), "the child cwd arm")
+	c.NotContains(listIDs(got), other, "an unrelated cwd must not match")
+}
+
+// TestListConversationsSinceUntilBounds pins the updated_at window: Since is
+// inclusive, Until exclusive, and each bound works alone.
+func TestListConversationsSinceUntilBounds(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "window")
+	base := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+	first := listConversation(t, pool, listConvSeed{ownerID: owner, updatedAt: base})
+	middle := listConversation(t, pool, listConvSeed{ownerID: owner, updatedAt: base.Add(time.Hour)})
+	last := listConversation(t, pool, listConvSeed{ownerID: owner, updatedAt: base.Add(2 * time.Hour)})
+	ins := New(pool)
+
+	since := base.Add(30 * time.Minute)
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Since: &since, Excluded: listExcluded})
+	c.Require().NoError(err, "since only")
+	c.ElementsMatch([]string{middle, last}, listIDs(got), "since must keep rows at and after the bound")
+
+	until := base.Add(90 * time.Minute)
+	got, _, err = ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Until: &until, Excluded: listExcluded})
+	c.Require().NoError(err, "until only")
+	c.ElementsMatch([]string{first, middle}, listIDs(got), "until must exclude the bound itself")
+
+	got, _, err = ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Since: &since, Until: &until, Excluded: listExcluded})
+	c.Require().NoError(err, "since and until")
+	c.EqDeep([]string{middle}, listIDs(got), "the combined window keeps only the middle row")
+}
+
+// TestListConversationsNameMatchesChildName pins the child-name arm of
+// NameContains: a conversation whose own name misses but whose linked child's
+// name hits is listed.
+func TestListConversationsNameMatchesChildName(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "childname")
+	needle := fmt.Sprintf("childname-%d", time.Now().UnixNano())
+	conv := listConversation(t, pool, listConvSeed{ownerID: owner, name: "plain conversation"})
+	listChild(t, pool, listChildSeed{childID: "c-childname", convID: conv, kind: "fundi", name: needle})
+	other := listConversation(t, pool, listConvSeed{ownerID: owner, name: "another conversation"})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{NameContains: needle, Excluded: listExcluded})
+	c.Require().NoError(err, "name filter over the child arm")
+	c.EqDeep([]string{conv}, listIDs(got), "the child's name must match for its conversation")
+	c.NotContains(listIDs(got), other, "a conversation without the name must not match")
+}
+
+// TestListConversationsScopeExcludesOtherOwners puts two owners in the SAME
+// scratch database and pins that the scope predicate keeps the listing to the
+// scoped owner's rows.
+func TestListConversationsScopeExcludesOtherOwners(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ownerA := listOwnerUser(t, pool, "scope-a")
+	ownerB := listOwnerUser(t, pool, "scope-b")
+	convA := listConversation(t, pool, listConvSeed{ownerID: ownerA, name: "a's"})
+	convB := listConversation(t, pool, listConvSeed{ownerID: ownerB, name: "b's"})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(ownerA), ListFilter{Excluded: listExcluded})
+	c.Require().NoError(err, "scoped listing")
+	c.EqDeep([]string{convA}, listIDs(got), "scope owner a")
+	c.NotContains(listIDs(got), convB, "another owner's conversation in the same database must never list")
+
+	got, _, err = ins.ListConversations(ctx, ScopeOwner(ownerB), ListFilter{Excluded: listExcluded})
+	c.Require().NoError(err, "scoped listing, other owner")
+	c.EqDeep([]string{convB}, listIDs(got), "scope owner b")
+}
+
+// TestListConversationsClosedOutranksExited pins the state precedence: a child
+// carrying both timestamps is closed, never exited.
+func TestListConversationsClosedOutranksExited(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "precedence")
+	past := time.Now().Add(-time.Hour)
+	conv := listConversation(t, pool, listConvSeed{ownerID: owner, name: "both stamps"})
+	listChild(t, pool, listChildSeed{childID: "c-both-stamps", convID: conv, kind: "fundi", exitedAt: &past, closedAt: &past})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Excluded: listExcluded})
+	c.Require().NoError(err, "list")
+	c.Require().Len(got, 1, "rows = %d, want the stamped conversation", len(got))
+	c.Eq(ListStateClosed, got[0].State, "closed_at must outrank exited_at")
+}
+
+// TestListConversationsConversationArmWinsOverRefArm pins COALESCE(k1, k2):
+// when both join arms match, the conversation_id-linked child is the one shown.
+func TestListConversationsConversationArmWinsOverRefArm(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "arms")
+	conv := listConversation(t, pool, listConvSeed{ownerID: owner, name: "both arms", ref: "c-ref-child"})
+	listChild(t, pool, listChildSeed{childID: "c-conv-child", convID: conv, kind: "fundi", name: "by conversation"})
+	listChild(t, pool, listChildSeed{childID: "c-ref-child", kind: "claude", name: "by external_ref"})
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Excluded: listExcluded})
+	c.Require().NoError(err, "list")
+	c.Require().Len(got, 1, "rows = %d, want the conversation once (both arms match)", len(got))
+	c.Eq("c-conv-child", got[0].ChildID, "the conversation_id arm must win")
+	c.Eq("by conversation", got[0].ChildName, "the winning child's columns must ride along")
+}
+
+// TestListConversationsLimitDefault pins Limit <= 0 listing 50 rows.
+func TestListConversationsLimitDefault(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "default-limit")
+	_, err := pool.Exec(ctx, `
+INSERT INTO conversations.conversation (owner_user_id, name, node_count, origin_entrypoint, driven_by)
+SELECT $1::uuid, 'row-' || g, 1, 'test', 'client' FROM generate_series(1, 51) g`, owner)
+	c.Require().NoError(err, "seed 51 rows")
+	ins := New(pool)
+
+	rows, next, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Excluded: listExcluded})
+	c.Require().NoError(err, "default listing")
+	c.Len(rows, 50, "the default limit must be 50")
+	c.NotEq("", next, "one row must remain for the next page")
+}
+
+// TestListConversationsLimitClampsToMax pins that a Limit above 500 is clamped
+// to 500.
+func TestListConversationsLimitClampsToMax(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "clamp-limit")
+	_, err := pool.Exec(ctx, `
+INSERT INTO conversations.conversation (owner_user_id, name, node_count, origin_entrypoint, driven_by)
+SELECT $1::uuid, 'row-' || g, 1, 'test', 'client' FROM generate_series(1, 501) g`, owner)
+	c.Require().NoError(err, "seed 501 rows")
+	ins := New(pool)
+
+	rows, next, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Limit: 1000, Excluded: listExcluded})
+	c.Require().NoError(err, "clamped listing")
+	c.Len(rows, 500, "a Limit above 500 must clamp to 500")
+	c.NotEq("", next, "one row must remain for the next page")
+}
+
+// TestListConversationsParentFilterBadIDIsEmptyPage pins the parent filter's
+// refusal shape: a malformed spelling, a non-canonical spelling and an unknown
+// uuid all return an empty page with no error.
+func TestListConversationsParentFilterBadIDIsEmptyPage(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "badparent")
+	listConversation(t, pool, listConvSeed{ownerID: owner, name: "top"})
+	ins := New(pool)
+
+	for _, bad := range []string{
+		"not-a-uuid",
+		"urn:uuid:0b1e2f3a-1111-4222-8333-444455556666",
+		"{0b1e2f3a-1111-4222-8333-444455556666}",
+		"0b1e2f3a111142228333444455556666",
+		"0b1e2f3a-1111-4222-8333-444455556666",
+	} {
+		rows, next, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{ParentConversationID: bad, Excluded: listExcluded})
+		c.NoError(err, "parent %q", bad)
+		c.Empty(rows, "parent %q must return no rows", bad)
+		c.Eq("", next, "parent %q must return no cursor", bad)
+	}
+}
+
+// TestListConversationsCursorMismatchesRefused pins ErrBadCursor through the
+// listing call itself: a cursor minted for one sort or parent cannot page
+// another request's shape.
+func TestListConversationsCursorMismatchesRefused(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "cursorguard")
+	ts := time.Now().Add(-time.Hour)
+	listConversation(t, pool, listConvSeed{ownerID: owner, updatedAt: ts})
+	ins := New(pool)
+
+	at := ts
+	raw := encodeListCursor(ListSortRecent, "", "0b1e2f3a-1111-4222-8333-444455556666", &at, nil)
+
+	_, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{
+		Sort: ListSortCreated, Cursor: raw, Excluded: listExcluded,
+	})
+	c.ErrorIs(err, ErrBadCursor, "a recent cursor cannot page a created request")
+
+	_, _, err = ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{
+		ParentConversationID: owner, Cursor: raw, Excluded: listExcluded,
+	})
+	c.ErrorIs(err, ErrBadCursor, "a top-level cursor cannot page under a parent")
+}
+
+// TestListConversationsPagingUnderParent pins keyset paging below a non-empty
+// parent and that the parent's ChildCount equals what the expansion returns.
+func TestListConversationsPagingUnderParent(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "pageparent")
+	root := listConversation(t, pool, listConvSeed{ownerID: owner, name: "root"})
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for i := 0; i < 5; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		listConversation(t, pool, listConvSeed{
+			ownerID: owner, name: fmt.Sprintf("kid-%d", i), parentID: root, updatedAt: ts,
+		})
+	}
+	ins := New(pool)
+
+	var expected []string
+	oracle, err := pool.Query(ctx, `
+SELECT id::text FROM conversations.conversation
+WHERE parent_conversation_id = $1::uuid
+ORDER BY updated_at DESC, id DESC`, root)
+	c.Require().NoError(err, "order oracle")
+	for oracle.Next() {
+		var id string
+		c.Require().NoError(oracle.Scan(&id), "scan oracle row")
+		expected = append(expected, id)
+	}
+	c.Require().NoError(oracle.Err(), "oracle rows")
+	c.Require().Eq(5, len(expected), "oracle rows = %d, want the five children", len(expected))
+
+	got := listPagingWalk(c, ctx, ins, ScopeOwner(owner), ListFilter{ParentConversationID: root, Excluded: listExcluded}, 2)
+	c.EqDeep(expected, got, "paging under a parent must walk every child exactly once, in order")
+
+	top, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{Excluded: listExcluded})
+	c.Require().NoError(err, "top-level listing for the count")
+	c.Require().Len(top, 1, "top-level rows = %d, want the root", len(top))
+	c.Eq(len(expected), top[0].ChildCount, "ChildCount must equal what the expansion returns")
+}
+
+// TestListConversationsRelevanceAncestorScore pins ancestor-score propagation:
+// a top-level conversation with no window of its own sorts by its best
+// descendant's score, ahead of a matched conversation with a weaker hit.
+func TestListConversationsRelevanceAncestorScore(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	if !listBM25Ready(t, pool) {
+		t.Skip("conversation_window_bm25 missing on this database")
+	}
+	owner := listOwnerUser(t, pool, "ancestor-score")
+	token := fmt.Sprintf("zqxwv%d", time.Now().UnixNano())
+	// The ids force the defensive case: with M's uuid below R's, a tie would
+	// order M first under the relevance sort's id-ASC tiebreak, so the test
+	// fails unless R takes T1's strictly better score.
+	root := "0f000000-0000-7000-8000-000000000000"
+	rival := "0e000000-0000-7000-8000-000000000000"
+	listConversation(t, pool, listConvSeed{ownerID: owner, id: root, name: "ancestor only"})
+	rivalConv := listConversation(t, pool, listConvSeed{ownerID: owner, id: rival, name: "rival"})
+	best := listConversation(t, pool, listConvSeed{ownerID: owner, name: "best hit", parentID: root})
+	worse := listConversation(t, pool, listConvSeed{ownerID: owner, name: "weaker hit", parentID: root})
+	listWindow(t, pool, best, owner, "aa "+token+" "+token+" bb", 0)
+	listWindow(t, pool, worse, owner, "aa "+token+" bb cc", 0)
+	listWindow(t, pool, rivalConv, owner, "aa "+token+" bb cc", 0)
+	ins := New(pool)
+
+	got, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{
+		Query: token, Sort: ListSortRelevance, Excluded: listExcluded,
+	})
+	c.Require().NoError(err, "top-level relevance listing")
+	c.EqDeep([]string{root, rival}, listIDs(got), "the ancestor must sort with its best descendant's score, ahead of the weaker rival")
+
+	kids, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{
+		Query: token, Sort: ListSortRelevance, ParentConversationID: root, Excluded: listExcluded,
+	})
+	c.Require().NoError(err, "expansion under the ancestor")
+	c.EqDeep([]string{best, worse}, listIDs(kids), "the descendants order by their own scores")
+}
+
+// TestListConversationsChildCountUnderFilter pins ChildCount against the
+// filtered visible set: children the filter drops must not be counted, and the
+// count must equal what an expansion with the same filter returns.
+func TestListConversationsChildCountUnderFilter(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "filteredcount")
+	needle := fmt.Sprintf("countme-%d", time.Now().UnixNano())
+	root := listConversation(t, pool, listConvSeed{ownerID: owner, name: "root"})
+	matching := listConversation(t, pool, listConvSeed{ownerID: owner, name: needle, parentID: root})
+	hidden := listConversation(t, pool, listConvSeed{ownerID: owner, name: "unmatched child", parentID: root})
+	ins := New(pool)
+
+	top, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{NameContains: needle, Excluded: listExcluded})
+	c.Require().NoError(err, "filtered top-level listing")
+	c.Require().Len(top, 1, "filtered top-level rows = %d, want the root", len(top))
+	c.Eq(1, top[0].ChildCount, "ChildCount must exclude the child the filter drops")
+
+	kids, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{NameContains: needle, ParentConversationID: root, Excluded: listExcluded})
+	c.Require().NoError(err, "filtered expansion")
+	c.Require().Len(kids, 1, "filtered rows under root = %d, want the match only", len(kids))
+	c.Eq(matching, kids[0].ID, "the matched child")
+	c.Eq(top[0].ChildCount, len(kids), "ChildCount must equal the expansion's row count")
+	c.NotContains(listIDs(kids), hidden, "the filtered-out child must not be returned")
 }
