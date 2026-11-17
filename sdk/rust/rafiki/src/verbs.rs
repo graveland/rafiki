@@ -13,12 +13,33 @@ use crate::{pb, Client, Error, Streaming};
 impl Client {
     /// One page of a conversation's transcript. Paging is `limit` + `before`:
     /// ask for the newest N, then keep asking with `before` set to the oldest
-    /// timestamp you already hold.
+    /// timestamp you already hold. The request names the conversation by child
+    /// id or directly by `conversation_id`: exactly one of the two must be
+    /// set. A conversation-keyed read is authorized by the same server-derived
+    /// scope every conversation verb uses, never by a child relationship, so a
+    /// conversation outside it is indistinguishable from an unknown one.
     pub async fn get_history(
         &self,
         req: &pb::GetHistoryRequest,
     ) -> Result<pb::GetHistoryResponse, Error> {
         self.unary("GetHistory", req).await
+    }
+
+    /// One tree level of the caller's visible conversations. An empty
+    /// `parent_conversation_id` means the TOP LEVEL, so there is no
+    /// "everything" answer: walk the tree level by level through `child_count`
+    /// and each row's id. The opaque `next_cursor` continues the same level
+    /// and is refused for a request whose `sort` or `parent_conversation_id`
+    /// no longer matches the one that produced it. Zero `limit` is the server
+    /// default; `sort` `Unspecified` means most recently active first, and
+    /// `Relevance` orders by best match for `query` and is refused without
+    /// one. Each row carries the conversation, the agent linked to it (when
+    /// one exists) and the aggregates the page needs.
+    pub async fn list_conversations(
+        &self,
+        req: &pb::ListConversationsRequest,
+    ) -> Result<pb::ListConversationsResponse, Error> {
+        self.unary("ListConversations", req).await
     }
 
     /// One open of the daemon's event feed. A quiet stream ends with

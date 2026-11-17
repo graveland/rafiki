@@ -30,7 +30,7 @@ import shutil
 import subprocess
 import time
 import warnings
-from typing import Iterable, Literal
+from typing import Iterable, Iterator, Literal
 
 from . import _gen
 from .connect import ConnectClient
@@ -148,6 +148,43 @@ def _labels_wire(labels: dict | None) -> dict:
     if labels is None:
         return {}
     return {str(k): str(v) for k, v in labels.items()}
+
+
+def _conversation_sort_wire(sort) -> str:
+    """Accept a sort name ("recent", "created", "relevance", with or without
+    its CONVERSATION_SORT_ prefix) and return the proto enum name; ``None``
+    stays the unset the daemon reads as RECENT."""
+    if sort is None:
+        return _gen.control_pb.ConversationSort.CONVERSATION_SORT_UNSPECIFIED
+    name = str(sort).strip().replace("-", "_").upper()
+    if not name.startswith("CONVERSATION_SORT_"):
+        name = "CONVERSATION_SORT_" + name
+    known = name == "CONVERSATION_SORT_UNSPECIFIED" or hasattr(
+        _gen.control_pb.ConversationSort, name
+    )
+    if not known:
+        raise ValueError('sort %r is not "recent", "created" or "relevance"' % (sort,))
+    return name
+
+
+def _conversation_states_wire(states) -> list:
+    """Map an iterable of state names ("open", "exited", "closed", "no_agent",
+    with or without their CONVERSATION_STATE_ prefix) to the proto enum names.
+    UNSPECIFIED is refused here rather than forwarded: the daemon refuses it
+    too, since it is not a state and silently dropping it would widen the
+    answer."""
+    names = []
+    for state in states or ():
+        name = str(state).strip().replace("-", "_").upper()
+        if not name.startswith("CONVERSATION_STATE_"):
+            name = "CONVERSATION_STATE_" + name
+        known = name != "CONVERSATION_STATE_UNSPECIFIED" and hasattr(
+            _gen.control_pb.ConversationState, name
+        )
+        if not known:
+            raise ValueError('state %r is not "open", "exited", "closed" or "no_agent"' % (state,))
+        names.append(name)
+    return names
 
 
 def _as_timedelta(value: "datetime.timedelta | float | int | None") -> "datetime.timedelta | None":
@@ -470,21 +507,34 @@ class Client:
 
     def get_history(
         self,
-        child_id: str,
+        child_id: "str | None" = None,
         *,
+        conversation_id: "str | None" = None,
         limit: "int | None" = None,
         before: "datetime.datetime | None" = None,
         after_ordinal: "int | None" = None,
     ) -> "list":
-        """One page of a child's transcript as durable events, oldest first,
-        each carrying ``ts`` (its row's created_at). Page backwards with
-        ``limit`` for the newest N, then again with ``before`` set to the
-        oldest ``ts`` held; an empty page is the start. A page never splits
-        events that share a ``ts``, so it can hold more than ``limit``.
-        ``before`` is an aware ``datetime``. Ordinals here are
-        conversation_message ordinals, never the event feed's."""
+        """One page of a conversation's transcript as durable events, oldest
+        first, each carrying ``ts`` (its row's created_at). The conversation is
+        named by a child id or directly by ``conversation_id`` (the ``id`` of a
+        :meth:`list_conversations` or :meth:`conversation_search` row):
+        exactly one of the two, ``ValueError`` otherwise, before any call.
+        Page backwards with ``limit`` for the newest N, then again with
+        ``before`` set to the oldest ``ts`` held; an empty page is the start.
+        A page never splits events that share a ``ts``, so it can hold more
+        than ``limit``. ``before`` is an aware ``datetime``. Ordinals here are
+        conversation_message ordinals, never the event feed's. A
+        conversation-keyed read answers through the same server-derived scope
+        every conversation verb uses, never a child relationship, so a
+        conversation outside it is ``not_found`` like an unknown one."""
+        if bool(child_id) == bool(conversation_id):
+            raise ValueError("exactly one of child_id and conversation_id is required")
         req = _gen.control_pb.GetHistoryRequest(
-            child_id=child_id, limit=limit, before=before, after_ordinal=after_ordinal
+            child_id=child_id or "",
+            conversation_id=conversation_id or "",
+            limit=limit,
+            before=before,
+            after_ordinal=after_ordinal,
         )
         return list(self._call("GetHistory", req, _gen.control_pb.GetHistoryResponse).events)
 
@@ -579,6 +629,88 @@ class Client:
             limit=limit,
         )
         return self._call("ConversationSearch", req, _gen.control_pb.ConversationSearchResponse).rows
+
+    def list_conversations(
+        self,
+        *,
+        limit: int = 0,
+        cursor: str = "",
+        sort=None,
+        parent_conversation_id: str = "",
+        query: str = "",
+        states: "Iterable[str] | None" = (),
+        kinds: "Iterable[str] | None" = (),
+        name_contains: str = "",
+        cwd_contains: str = "",
+        labels: "dict | None" = None,
+        since: "datetime.datetime | None" = None,
+        until: "datetime.datetime | None" = None,
+    ) -> _gen.control_pb.ListConversationsResponse:
+        """One tree level of the conversations the caller may read, as
+        ``ConversationListing`` rows (``id``, ``name``, ``model``, ``owner``,
+        ``created_at``, ``last_activity``, ``closed_at``, ``turns``,
+        ``cost_usd``, ``parent_conversation_id``, ``child_count``, and the
+        linked agent's ``child_id``/``child_name``/``kind``/``state``;
+        datetimes are tz-aware UTC, ``closed_at`` is ``None`` while the
+        conversation is open) plus ``next_cursor``, empty on the last page. 0
+        for ``limit`` is the daemon default (50; the server clamps to a
+        maximum), negative is refused.
+
+        ``parent_conversation_id`` lists one level's members: the rows whose
+        parent is that conversation. Empty means the TOP LEVEL, so there is no
+        "everything" answer: walk the tree level by level through
+        ``child_count`` and each row's id. ``cursor`` continues after the
+        previous page's last row (the opaque ``next_cursor`` it returned) and
+        is valid only for a request whose ``sort`` and
+        ``parent_conversation_id`` match the one that produced it.
+
+        ``sort`` is ``None`` (most recently active first), ``"recent"``,
+        ``"created"`` or ``"relevance"``; relevance orders by best match for
+        ``query`` and is refused without one. ``states`` narrows to
+        conversations whose linked agent is in one of
+        ``"open"``/``"exited"``/``"closed"``/``"no_agent"``; ``kinds`` to ones
+        whose linked agent has one of those child kinds (a non-empty list
+        excludes conversations with no linked agent); ``name_contains`` and
+        ``cwd_contains`` are case-insensitive substring matches; ``labels``
+        requires every given pair on the linked agent; ``since``/``until``
+        bound last activity (``None`` is unbounded). An unknown ``sort`` or
+        ``state`` name raises ``ValueError``. The scope is the server-derived
+        one every conversation verb uses: a user credential reads all of its
+        owner's conversations, and a child credential reads its owner's whole
+        corpus (its own, its subtree's and other agents' alike) or only its
+        subtree when its lineage has no owner."""
+        req = _gen.control_pb.ListConversationsRequest(
+            limit=limit,
+            cursor=cursor,
+            sort=_conversation_sort_wire(sort),
+            parent_conversation_id=parent_conversation_id,
+            query=query,
+            states=_conversation_states_wire(states),
+            kinds=[str(k) for k in kinds] if kinds else [],
+            name_contains=name_contains,
+            cwd_contains=cwd_contains,
+            labels=_labels_wire(labels),
+            since=since,
+            until=until,
+        )
+        return self._call("ListConversations", req, _gen.control_pb.ListConversationsResponse)
+
+    def iter_conversations(self, **kwargs) -> "Iterator[_gen.control_pb.ConversationListing]":
+        """Every conversation of one tree level,
+        :meth:`list_conversations` page by page: yields each page's rows, then
+        follows ``next_cursor`` until it is empty. Takes the same keyword
+        arguments; a ``cursor`` starts the walk there instead of at the
+        level's first page. The cursor is valid only for the ``sort`` and
+        ``parent_conversation_id`` that produced it, so keep those identical
+        across the walk."""
+        kwargs = dict(kwargs)
+        cursor = kwargs.pop("cursor", "") or ""
+        while True:
+            page = self.list_conversations(cursor=cursor, **kwargs)
+            yield from page.rows
+            if not page.next_cursor:
+                return
+            cursor = page.next_cursor
 
     def status(self) -> _gen.control_pb.StatusResponse:
         """The daemon's status: ``version``, ``started_at`` (a tz-aware UTC

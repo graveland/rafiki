@@ -69,6 +69,65 @@ async fn unary_success() {
 }
 
 #[tokio::test]
+async fn list_conversations_round_trips_the_page() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorded = seen.clone();
+    let stub: Stub = Arc::new(move |req: Request<Incoming>| {
+        let recorded = recorded.clone();
+        Box::pin(async move {
+            let path = req.uri().path().to_string();
+            let body = req
+                .into_body()
+                .collect()
+                .await
+                .expect("the request body")
+                .to_bytes();
+            let request =
+                pb::ListConversationsRequest::decode(body).expect("a ListConversationsRequest");
+            recorded.lock().expect("lock").push((
+                path,
+                request.parent_conversation_id,
+                request.states.clone(),
+            ));
+            let reply = pb::ListConversationsResponse {
+                rows: vec![pb::ConversationListing {
+                    id: "conv-1".to_string(),
+                    name: "rewrite".to_string(),
+                    child_count: 2,
+                    state: pb::ConversationState::Open as i32,
+                    ..Default::default()
+                }],
+                next_cursor: "cur-1".to_string(),
+            };
+            Ok(with_epoch(Response::new(full(reply.encode_to_vec()))))
+        })
+    });
+    let url = serve(stub).await;
+
+    let client = Client::new(&url, None).expect("a client");
+    let request = pb::ListConversationsRequest {
+        parent_conversation_id: "conv-0".to_string(),
+        states: vec![pb::ConversationState::Open as i32],
+        ..Default::default()
+    };
+    let response = client
+        .list_conversations(&request)
+        .await
+        .expect("list_conversations");
+    assert_eq!(response.rows.len(), 1, "the response message decodes");
+    assert_eq!(response.rows[0].id, "conv-1");
+    assert_eq!(response.rows[0].state, pb::ConversationState::Open as i32);
+    assert_eq!(response.next_cursor, "cur-1");
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.len(), 1);
+    let (path, parent, states) = &seen[0];
+    assert_eq!(path, "/rafiki.v1.Control/ListConversations");
+    assert_eq!(parent, "conv-0", "the request message encodes");
+    assert_eq!(states, &vec![pb::ConversationState::Open as i32]);
+}
+
+#[tokio::test]
 async fn unary_without_the_epoch_header_is_a_protocol_mismatch() {
     // A 200 with a valid body: only the missing epoch marks the daemon stale.
     let stub: Stub = Arc::new(|_req: Request<Incoming>| {

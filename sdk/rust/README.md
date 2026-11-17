@@ -72,7 +72,7 @@ normal token for a local daemon.
 ## Verbs
 
 Typed wrappers over `Client::unary` and `Client::server_stream`, taking and
-returning the generated `pb::` types: `get_history`, `stream_events(req,
+returning the generated `pb::` types: `get_history`, `list_conversations`, `stream_events(req,
 idle)`, `follow_events(req, policy)` (see below), `send`, `spawn`, `get_child`, `list_children`, `kill`, `close`,
 `resume`, `rename`, `set_budget`, `list_presets`, `list_models`,
 `list_model_aliases`, `put_model_alias`, `delete_model_alias`, `tag`, `untag`, `list_tags`, `list_executors`, `install_executor`, `uninstall_executor`, `begin_provider_login`, `complete_provider_login`,
@@ -218,11 +218,54 @@ caller with no owner of its own keeps subtree-only reads.
 `get_history` pages backwards: ask with `limit` for the newest N, then again
 with `before` set to the oldest `ts` you hold. A page never splits events that
 share a `ts`, so it can hold more than `limit`; an empty page is the start of
-the conversation. A stored `system`-role row comes back as `SystemMessage`, not
+the conversation. The request names the conversation by child id or directly by
+`conversation_id`: exactly one of the two must be set. A conversation-keyed
+read is authorized by the same server-derived scope every conversation verb
+uses, never by a child relationship, so a conversation outside it is
+indistinguishable from an unknown one. A stored `system`-role row comes back as
+`SystemMessage`, not
 `UserMessage`. A `UserMessage` splits the text its child's harness injected
 (Claude Code's `<system-reminder>` context) out of `content` into `injected`,
 with the wrapper removed; a client that ignores the field shows the user's own
 text.
+
+`list_conversations` answers one tree level of the caller's visible
+conversations as `ConversationListing` rows (the conversation, the agent linked
+to it when one exists, `turns`, `cost_usd`, `child_count`) plus `next_cursor`,
+empty on the last page. An empty `parent_conversation_id` is the TOP LEVEL, so
+there is no "everything" answer: walk the tree level by level through
+`child_count` and each row's id, keeping `sort` and `parent_conversation_id`
+identical across the walk (the cursor is refused for a request that changed
+either). `sort` `Unspecified` is most-recently-active-first; `Relevance`
+orders by best match for `query` and is refused without one.
+
+```rust
+let mut cursor = String::new();
+let mut row_id = String::new();
+loop {
+    let page = client.list_conversations(&pb::ListConversationsRequest {
+        parent_conversation_id: String::new(), // empty = the tree's top level
+        states: vec![pb::ConversationState::Open as i32],
+        limit: 50,
+        cursor: cursor.clone(),
+        ..Default::default()
+    }).await?;
+    for row in &page.rows {
+        row_id = row.id.clone();
+        println!("{} ({} children)", row.name, row.child_count);
+    }
+    if page.next_cursor.is_empty() {
+        break;
+    }
+    cursor = page.next_cursor;
+}
+
+// Read a listing row's transcript directly, by conversation id.
+let history = client.get_history(&pb::GetHistoryRequest {
+    conversation_id: row_id,
+    ..Default::default()
+}).await?;
+```
 
 `begin_provider_login` / `complete_provider_login` / `delete_provider_credential`
 manage the CALLING USER's own provider credentials. `provider` is the NAME of a

@@ -109,6 +109,21 @@ rows = c.conversation_search(text="x", source="claude", limit=50)
                                           # its subtree's and other agents' alike
 rows = c.conversation_search(since=dt, until=dt)  # datetime bounds on turn
                                                   # activity; None means unbounded
+page = c.list_conversations(limit=50)     # one tree level of ConversationListing rows
+                                          #   (id, name, model, owner, created_at,
+                                          #   last_activity, closed_at, turns,
+                                          #   cost_usd, child_count, and the linked
+                                          #   agent's child_id/child_name/kind/state)
+                                          #   plus next_cursor; parent_conversation_id=""
+                                          #   is the TOP LEVEL, so walk the tree level by
+                                          #   level through each row's id and child_count
+rows = c.iter_conversations(states=["open"], name_contains="review")
+                                          # the same filters, paged for you: yields
+                                          #   rows, following next_cursor to the level's end
+hist = c.get_history(conversation_id=rows[0].id)  # read a transcript directly
+                                              #   by its conversation id (exactly
+                                              #   one of that and the child id,
+                                              #   ValueError otherwise)
 ver  = c.status().version                 # daemon version (user credential only)
 c.stop(child)                             # graceful, then the kill ladder;
                                           # carries a per-call read timeout of
@@ -286,8 +301,9 @@ token gets `permission_denied` naming the child for any id it does not own
 own agents only. Admin tokens and the local unix socket are unrestricted.
 
 An agent's credential READS any agent its owner owns: `get()`,
-`get_history()`, `export()`/`export_conversation()` and
-`conversation_search()` answer for its own subtree, its siblings and its
+`get_history()`, `export()`/`export_conversation()`,
+`conversation_search()` and `list_conversations()` answer for its own
+subtree, its siblings and its
 owner's other trees alike, and `list(scope="owner")` enumerates them
 (`in_subtree` is `False` for one outside the caller's subtree). Acting stays
 on the tree — `send()`, `stop()` and every other verb that changes an agent
