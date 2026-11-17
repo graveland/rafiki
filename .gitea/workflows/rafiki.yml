@@ -5,6 +5,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '*.md'
+    tags: ['v*']
 
 env:
   REGISTRY: ${{ secrets.REGISTRY_URL }}/brent
@@ -14,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Log in to registry
         run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login ${{ env.REGISTRY }} -u push --password-stdin
@@ -22,12 +25,20 @@ jobs:
         run: |
           SHORT_SHA=$(echo "${{ gitea.sha }}" | cut -c1-8)
           IMAGE=${{ env.REGISTRY }}/rafiki
-          docker build --build-arg VERSION="$SHORT_SHA" -t "$IMAGE:sha-$SHORT_SHA" -t "$IMAGE:latest" .
+          VERSION=$(git describe --tags --exact-match 2>/dev/null || echo "$SHORT_SHA")
+          docker build --build-arg VERSION="$VERSION" -t "$IMAGE:sha-$SHORT_SHA" -t "$IMAGE:latest" .
           docker push "$IMAGE:sha-$SHORT_SHA"
           docker push "$IMAGE:latest"
           echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+          # A tagged commit deploys from the tag's run (its image carries the
+          # tag as its version); an untagged push deploys from the branch run.
+          case "${{ gitea.ref }}" in
+            refs/tags/*) echo "DEPLOY=true" >> "$GITHUB_ENV" ;;
+            *) [ "$VERSION" = "$SHORT_SHA" ] && echo "DEPLOY=true" >> "$GITHUB_ENV" || true ;;
+          esac
 
       - name: Bump rafiki image tag in graveland-iac
+        if: ${{ env.DEPLOY == 'true' }}
         run: |
           curl -sf -X POST \
             "https://git.graveland.dev/api/v1/repos/graveland.dev/graveland-iac/actions/workflows/bump-chart.yaml/dispatches" \
