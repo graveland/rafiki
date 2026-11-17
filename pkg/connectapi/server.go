@@ -219,7 +219,7 @@ func historyError(err error, conversationID string) error {
 //
 // A request may name the conversation DIRECTLY by conversation_id instead of
 // by a child: exactly one of the two must be set. The conversation-keyed read
-// skips every child relationship check — there is no child to authorize — and
+// skips every child relationship check (there is no child to authorize) and
 // answers through the same server-derived scope every conversation verb uses,
 // so a conversation outside it is indistinguishable from an unknown one and
 // carries no child identity on its events.
@@ -248,7 +248,11 @@ func (s *Server) GetHistory(
 		}
 		visible, err := (*p).Visible(ctx, conversationID)
 		if err != nil {
-			return nil, err
+			// queryError, the conversation reads' shared mapper: an error the
+			// source already coded keeps its code, anything else is logged and
+			// redacted, so a store failure here is never a raw driver string
+			// and never an uncoded answer.
+			return nil, queryError(err)
 		}
 		if !visible {
 			// One refusal for a foreign scope and an unknown id alike: a

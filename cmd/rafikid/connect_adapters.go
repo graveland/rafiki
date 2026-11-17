@@ -1044,13 +1044,21 @@ func (a connectConversations) List(ctx context.Context, f connectapi.Conversatio
 
 // Visible adapts Controller.ConversationVisible behind the same scope rule as
 // every other conversation read, so a child's answer covers exactly the
-// corpus its listing covers.
+// corpus its listing covers. An error the seam returns is coded here, before
+// it reaches the handler: a store failure is a redacted internal answer, an
+// unwired pool the same Unavailable the other reads give, and the cause stays
+// in the daemon's log.
 func (a connectConversations) Visible(ctx context.Context, conversationID string) (bool, error) {
 	scope, err := childConversationScope(ctx, a.c)
 	if err != nil {
 		return false, err
 	}
-	return a.c.ConversationVisible(ctx, scope, conversationID)
+	ok, err := a.c.ConversationVisible(ctx, scope, conversationID)
+	if err != nil {
+		logIfUncoded("connect: conversation visible failed", err)
+		return false, connectapi.ConnectErr(err)
+	}
+	return ok, nil
 }
 
 func (a connectConversations) Export(ctx context.Context, conversationID string) (connectapi.TranscriptRow, bool, error) {

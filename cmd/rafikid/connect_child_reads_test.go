@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -375,4 +376,55 @@ func TestListConversationsAdapterMapsTheListingSentinels(t *testing.T) {
 		_, _, err := a.List(childTokenCtx("c_d0"), connectapi.ConversationListFilter{})
 		ck.Eq(tc.want, connect.CodeOf(err), "%s: err = %v, want code", tc.name, err)
 	}
+}
+
+// TestListConversationsAdapterSortMappingPinsBothIotaBlocks pins the sort's
+// second hop: the connectapi sort reaches insights.ListSort under its OWN
+// name, so reordering either iota block, or replacing the named mapping with
+// a numeric cast that assumes the two blocks align, fails here. (The first
+// hop, proto enum to connectapi, is pinned by name in pkg/connectapi.)
+func TestListConversationsAdapterSortMappingPinsBothIotaBlocks(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		in   connectapi.ConversationListSort
+		want insights.ListSort
+	}{
+		{"recent", connectapi.ConversationListSortRecent, insights.ListSortRecent},
+		{"created", connectapi.ConversationListSortCreated, insights.ListSortCreated},
+		{"relevance", connectapi.ConversationListSortRelevance, insights.ListSortRelevance},
+	} {
+		c := limitsFixture(t, 3, 3)
+		fb := &fakeListReads{}
+		c.listInsights = fb
+		a := connectConversations{c: c}
+		_, _, err := a.List(childTokenCtx("c_d0"), connectapi.ConversationListFilter{Sort: tc.in})
+		ck.Require().NoError(err, "%s: List", tc.name)
+		ck.Eq(tc.want, fb.gotFilter.Sort, "%s: sort = %v, want the insights constant", tc.name, fb.gotFilter.Sort)
+	}
+}
+
+// TestListConversationsAdapterVisibleCodesAStoreError pins Visible's error
+// leg at the adapter: a store failure is a redacted internal answer, never
+// the raw driver text and never an uncoded error.
+func TestListConversationsAdapterVisibleCodesAStoreError(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := limitsFixture(t, 3, 3)
+	c.listInsights = &fakeListReads{err: errors.New("pq: could not connect to host=db.internal")}
+	a := connectConversations{c: c}
+
+	_, err := a.Visible(childTokenCtx("c_d0"), "01a0-worker")
+	ck.Eq(connect.CodeInternal, connect.CodeOf(err), "store error err = %v, want coded internal", err)
+	ck.NotStrContains(err.Error(), "db.internal", "the driver text must not reach the peer")
+}
+
+// TestListConversationsAdapterVisibleUnwiredPoolIsUnavailable pins the no-DB
+// answer: an unwired listing seam is the same Unavailable every other
+// conversation read gives, not a raw sentinel.
+func TestListConversationsAdapterVisibleUnwiredPoolIsUnavailable(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	a := connectConversations{c: &Controller{st: childstore.New(), cm: newChildManager()}}
+
+	_, err := a.Visible(childTokenCtx("c_d0"), "01a0-worker")
+	ck.Eq(connect.CodeUnavailable, connect.CodeOf(err), "unwired pool err = %v, want unavailable", err)
 }

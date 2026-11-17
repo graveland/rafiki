@@ -137,6 +137,27 @@ func TestGetHistoryByConversationRefusesInvisible(t *testing.T) {
 	c.Eq(0, loader.calls, "an invisible conversation must not be paged")
 }
 
+// TestGetHistoryByConversationVisibleErrorIsCodedAndRedacted pins the error
+// leg of the scope probe: a store failure behind Visible is a CODED answer
+// with the driver text redacted, never an uncoded raw error string, and the
+// transcript store is never read on the way out.
+func TestGetHistoryByConversationVisibleErrorIsCodedAndRedacted(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s, f, loader, _, _ := conversationKeyedFixture(t)
+	f.err = errors.New("db down: host=db.internal user=rafiki")
+	conversationID := "0198c0de-0000-7000-8000-000000000006"
+
+	_, err := s.GetHistory(context.Background(),
+		connect.NewRequest(&rafikiv1.GetHistoryRequest{ConversationId: conversationID}))
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "store error err = %v, want a coded internal", err)
+	var ce *connect.Error
+	c.Require().True(errors.As(err, &ce), "want a *connect.Error, got %T", err)
+	c.Eq("internal error; see the daemon log", ce.Message(), "redacted message")
+	c.NotStrContains(err.Error(), "db.internal", "the driver text must not reach the peer")
+	c.Eq(conversationID, f.gotVisible, "the requested id must reach Visible")
+	c.Eq(0, loader.calls, "a failed scope probe must not page the store")
+}
+
 // TestGetHistoryByConversationSkipsTheChildGuards pins the authorization
 // shape of a conversation-keyed read: the child relationship checks are not
 // consulted at all, because there is no child to authorize.

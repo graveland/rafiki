@@ -311,6 +311,12 @@ type Controller struct {
 	// reaches them. Nil exactly when pool is nil.
 	listInsights conversationListReads
 
+	// stampedParents holds the children whose conversation this daemon has
+	// already stamped with its parent conversation, so writeRecordLastStatus's
+	// stamp costs no lookups on later row writes. It only grows with children
+	// this daemon stamped; a zero value is ready to use.
+	stampedParents sync.Map
+
 	// baseCtx is the daemon's own context, threaded into inproc.Options.Parent
 	// so cancelling it stops every in-process agent child at once. Distinct
 	// from the per-request ctx passed to Spawn/Resume/RespawnChild, which only
@@ -1784,9 +1790,13 @@ func (c *Controller) ConversationList(ctx context.Context, scope insights.Scope,
 
 func (c *Controller) ConversationVisible(ctx context.Context, scope insights.Scope, conversationID string) (bool, error) {
 	if c.listInsights == nil {
-		return false, local.ErrNoPool
+		return false, translateInsightsErr(local.ErrNoPool)
 	}
-	return c.listInsights.Visible(ctx, scope, conversationID)
+	ok, err := c.listInsights.Visible(ctx, scope, conversationID)
+	if err != nil {
+		return false, translateInsightsErr(err)
+	}
+	return ok, nil
 }
 
 // agentRunnerError classifies a runner-construction failure: a hosting

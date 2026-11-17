@@ -139,8 +139,9 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"StreamEvents": ownerGuarded, // child/subtree subject; the All subject is filtered below
 	// GetHistory is guarded on its child_id. Its conversation_id form carries
 	// no child to authorize: that read skips the guard and is owner-scoped by
-	// scopeFor to insights.ScopeOwner for a non-admin user, the conversation
-	// verbs' boundary, with a scope miss reading exactly like an unknown id.
+	// childConversationScope to insights.ScopeOwner for a non-admin user (the
+	// conversation verbs' boundary), with a scope miss reading exactly like an
+	// unknown id.
 	"GetHistory": ownerGuarded,
 	// Spawn is guarded on parent_child_id only: the owner stamp itself comes
 	// from the credential, so a top-level spawn needs no target check, while a
