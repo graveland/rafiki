@@ -139,6 +139,34 @@ policy and `Include` all come from there. There is no host-key flag and no
 `--force`: if ssh refuses (host key, auth), the error carries ssh's own message
 verbatim, and you fix it on the `--via` machine.
 
+**`--mode` picks how the installed executor reaches the daemon**, and the choice
+is made once, at install, then stored:
+
+- **`direct`** — what `auto` picks when the target can reach the daemon: a
+  detached process on the target that dials the daemon itself, over TLS, with a
+  credential minted for that launch.
+- **`tunnel`**: the launcher relays the executor's stdio over its own ssh
+  session, so the target dials nothing at all.
+- **`auto`** (the default) probes the target from ITS side — the address probed
+  is the launcher's own `--connect`, so it asks the right question — and picks
+  `direct` only on a clean answer. **Force `tunnel` when the target cannot dial
+  the daemon**: a cloud VM with no route back, a launcher that dials the daemon
+  over a unix socket (it has no address to hand over, and its probe says so), or
+  a network you would rather not open. A `direct` executor verifies the daemon
+  against the target's **system roots** — a self-signed daemon certificate is not
+  an installable option, so the probe answers `no` and `auto` relays. Forcing
+  `direct` onto a target that fails the probe is refused with the probe's own
+  words, which name `--mode tunnel` as the way forward.
+
+**What survives what.** A launcher that sleeps, restarts or disconnects no
+longer takes a `direct` executor down: once started it is on its own. A
+target reboot or VM reset does kill it, and the next call that names the
+executor relaunches it lazily with a fresh ticket — which still needs the
+launcher, in both modes, because the launcher is what runs the ssh. A `tunnel`
+executor lives exactly as long as that session, so a sleeping launcher takes it
+with it. Reinstalling re-probes and may pick a different mode; a relaunch never
+re-probes, so a network that changed under you is an operator's reinstall.
+
 - `--name` is the new executor's machine name (default: the destination's host
   part). `--root` defaults to the target's home directory, `--label k=v` is
   repeatable, and `--admits` takes the usual executor-side selector.
@@ -159,14 +187,29 @@ verbatim, and you fix it on the `--via` machine.
   the install path entirely (self-reported, so it only narrows).
 - A down installed executor **restarts on its next use** — lazily, on the first
   workspace call that names it, which carries a note saying it was restarted.
-  It is available only while its launcher is: a launcher that is offline is why
-  a relaunch fails.
+  The restart goes through the launcher, so a launcher that is offline is why a
+  RELAUNCH fails; an executor that is already running is unaffected in `direct`
+  mode.
+- **The remote executor keeps a log at `<data dir>/executor.log` on the target**
+  (rotated to `executor.log.1` at 4 MiB), and that is where a `direct` launch's
+  failure is read from: when the executor does not connect in time, the error
+  carries the tail of that file rather than an empty relay. `--mode direct` also
+  leaves `<data dir>/executor.pid`, `executor.lock` and `executor.cred` beside
+  it, all under the target's data dir for the instance.
 - `rafiki executor list` shows where each executor came from in its `VIA`
-  column. `uninstall` ends the ssh session, removes the target's install
-  marker (only when it holds this install's id), and deletes the row; the
-  target keeps the shared binary cache, so installing there again pushes
-  nothing. An executor that was *enrolled* rather than installed is refused
-  here — use `rafiki executor delete`.
+  column, and `-j`/`-J` carry each installed row's `install_mode` and
+  `last_launch` (the daemon's outcome for the most recent launch — kept in
+  memory, so empty after a daemon restart until it launches again). `uninstall`
+  ends the ssh session, removes the target's install marker (only when it holds
+  this install's id), and deletes the row; the target keeps the shared binary
+  cache, so installing there again pushes nothing. An executor that was
+  *enrolled* rather than installed is refused here — use `rafiki executor
+  delete`.
+- **Uninstalling while the launcher is unreachable still works**: the row is
+  deleted and the recipe tombstoned, and a `direct` executor left running on the
+  target stops itself on its next reconnect — its credential now names a deleted
+  row, and the daemon answers 401. The leftover install marker is named by the
+  next install's clobber guard, with the command that clears it.
 - Agents get the same pair as `executor_install` / `executor_uninstall` on both
   the fundi and the MCP face, bound to the calling agent, so a coordinator can
   provision a worker's machine. A child may install only through a launcher in
@@ -176,25 +219,33 @@ verbatim, and you fix it on the `--via` machine.
   executor the caller can see, with whether it is connected right now, when it
   last joined the pool and when it was last seen, its roots, the child kinds it
   can launch, its labels and annotations, and — for an installed one — the
-  launcher and ssh destination it came from. It takes no arguments and is scoped
-  by the daemon. A **child** sees the machine it is bound to plus the executors
-  its own lineage installed (the rule uninstall enforces), never its owner's
-  wider fleet — the borrowed identity Connect's `userOnly` `ListExecutors`
-  refuses a child. A **human** sees the executors it owns — what
+  launcher and ssh destination it came from, the transport it was installed
+  with (`direct`/`tunnel`) and the daemon's last launch outcome. It takes no
+  arguments and is scoped by the daemon. A **child** sees the machine it is bound
+  to plus the executors its own lineage installed (the rule uninstall enforces),
+  never its owner's wider fleet — the borrowed identity Connect's `userOnly`
+  `ListExecutors` refuses a child. A **human** sees the executors it owns — what
   `rafiki executor list` shows that credential, except that an admin's extra
   view of the unowned rows is not included, because this is the read half of the
   install pair and install authority is owner-scoped. A down executor is not
   necessarily broken: an installed one restarts on its next use while its
   launcher is reachable, and a disabled one never connects.
 
-On the target the launcher starts `rafiki executor serve --stdio -P <instance>
-[--root <root>] --install-id <id>` over ssh: the one-shot ticket is the FIRST
-LINE of stdin (never argv — `ps` on the target is world-readable), stdout
-carries only the protocol, and `<data dir>/installed-executor` is written once
-the first request is served, which is what marks the target as this install's.
-The target's login shell must be **POSIX sh** — a csh or fish login shell fails
-opaquely. Wire detail: `docs/reference/executor-protocol.md` → "Installing over
-ssh".
+On the target the launcher starts one of two commands. `--mode direct` runs
+`rafiki executor serve --connect <the launcher's own address> -P <instance>
+[--root <root>] --install-id <id> --ticket-stdin --detach`: it takes the
+instance lock, reads the one-shot ticket as the FIRST LINE of stdin (never argv
+— `ps` on the target is world-readable), re-execs itself detached with its
+output appended to `<data dir>/executor.log`, and prints `started pid=<n>` — or
+`running pid=<n>` when an executor is already there, in which case no ticket is
+spent. `--mode tunnel` runs `rafiki executor serve --stdio -P <instance>
+[--root <root>] --install-id <id>` and relays its stdio, so stdout there carries
+only the protocol. Either way `<data dir>/installed-executor` names the install
+— written once a request has been served for a relayed executor, and once its
+credential is on disk for a direct one — which is what marks the target as this
+install's. The target's login shell must be **POSIX sh** — a csh or fish login
+shell fails opaquely. Wire detail: `docs/reference/executor-protocol.md` →
+"Installing over ssh".
 
 **OpenBSD is an executor HOST target only**: the release archive carries just
 `rafiki` there (not `rafikid`, not `rafiki-hooks`), so `rafiki upgrade` and

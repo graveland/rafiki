@@ -844,7 +844,7 @@ call at all — and is described under "Owner isolation between users" below.
 | `LabelExecutor` | unary · userOnly | exempt — executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection | Set or remove labels on an executor's row; `executor_id` may be the full id or a unique trailing fragment. Ownership-scoped: a non-admin user credential is refused `CodePermissionDenied` (`permission_denied`) when the row belongs to another user (§"Executor administration") |
 | `DisableExecutor` / `EnableExecutor` | unary · userOnly | exempt — executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection | Disable (its credential stops authenticating) or re-enable an executor. Ownership-scoped like `LabelExecutor` |
 | `DeleteExecutor` | unary · userOnly | exempt — executorAuthority scopes to the caller's rows; enroll/create stamp the owner from the connection | Permanently remove an executor row — no tombstone; a connected row is evicted from the live pool within one health interval. Ownership-scoped like `LabelExecutor` |
-| `InstallExecutor` | unary · childScoped | exempt — the installer derives the owner from the connection and checks the executor's owner itself | Put an executor on a machine reachable over ssh, through a LAUNCHER executor — the daemon never runs ssh itself. `target` (required) is an ssh destination, `via` a launcher machine name or id, `name` the new executor's machine name (empty = the destination's host part), plus `root`, `labels` and `admits`. A child caller is bounded to a launcher in its own reachable set; a container-isolated, disabled or `--no-ssh-launch` launcher is refused for every caller, and the row is created OWNED by the connection's user with the daemon-written `rafiki/installed-via`/`rafiki/installed-target` labels. Answers once the executor has connected; refuses a target that carries another install (§"Installing executors over ssh" below) |
+| `InstallExecutor` | unary · childScoped | exempt — the installer derives the owner from the connection and checks the executor's owner itself | Put an executor on a machine reachable over ssh, through a LAUNCHER executor — the daemon never runs ssh itself. `target` (required) is an ssh destination, `via` a launcher machine name or id, `name` the new executor's machine name (empty = the destination's host part), plus `root`, `labels`, `admits` and `mode` (the install transport: empty or `auto` = probe the target and pick, `direct`, or `tunnel`; an unknown spelling is refused before any ssh runs). A child caller is bounded to a launcher in its own reachable set; a container-isolated, disabled or `--no-ssh-launch` launcher is refused for every caller, and the row is created OWNED by the connection's user with the daemon-written `rafiki/installed-via`/`rafiki/installed-target` labels. Answers once the executor has connected, with the mode that was actually used in `install_mode`; refuses a target that carries another install (§"Installing executors over ssh" below) |
 | `UninstallExecutor` | unary · childScoped | exempt — the installer derives the owner from the connection and checks the executor's owner itself | Remove an executor installed over ssh, by machine name or id: the ssh session ends, the target's install marker is removed through the launcher when it holds this install's id, the recipe is tombstoned and the executor row deleted. A child credential may uninstall only an install made by itself or an ANCESTOR of it — authority flows down the tree, and a human's install is no child's to remove (§"Installing executors over ssh" below) |
 | `ExecutorSession` | server-streaming · userOnly | exempt — executor surface; owner checks are the executor admin seam's concern (out of scope) | The session-executor stream: mint or find the caller's own executor for this machine (§"ExecutorSession" below) |
 | `CreateUser` | unary · userOnly (admin-gated) | exempt — admin check in the handler | Mint a user row and, conditionally, a bearer token: `mint_token` ABSENT means the daemon mints iff OIDC login is NOT configured on it (so the user can authenticate at all); PRESENT is honoured as given. `email` stores a normalized, unique-among-active-users address. The response carries `created_at` (a `Timestamp`), `token` (empty when none), `token_reason` ("requested" / "oidc not configured" / "") and `login_configured`, so a client can word its hint without guessing. NEVER mints an admin — admins come only from `rafikid user create --admin` (§"User administration") |
@@ -2855,11 +2855,30 @@ already do. Full wire detail is in
 `InstallExecutorRequest` is `target` (the ssh destination; required), `via` (a
 launcher machine name or id; empty = the caller's default), `name` (machine
 name; empty = the destination's host part, validated by the same rule as
-`EnrollExecutor`), `root` (defaults to the target's home directory), `labels`
-and `admits`. `owner` and any `rafiki/`/`fundi/` label are refused — the daemon
-writes those — and the row is created with `isolation=none` and
-`workspace_mode=pinned`. The answer is the `ExecutorRow`, once the executor has
-connected (or the failure carries ssh's own message verbatim).
+`EnrollExecutor`), `root` (defaults to the target's home directory), `labels`,
+`admits` and `mode` (the install transport; see below). `owner` and any
+`rafiki/`/`fundi/` label are refused — the daemon writes those — and the row is
+created with `isolation=none` and `workspace_mode=pinned`. The answer is the
+`ExecutorRow`, once the executor has connected (or the failure carries ssh's own
+message verbatim).
+
+**`mode` is `""`/`auto`, `direct` or `tunnel`, and `auto` is REQUEST-ONLY** —
+the recipe stores `direct` or `tunnel` and nothing else. It is resolved once, at
+install, from the request or from the probe's `reach` answer (`reach=yes` is the
+only thing that chooses `direct`), then written to the recipe; a relaunch reads
+the stored mode and never re-probes, while a reinstall resolves it again. An
+unknown spelling is refused `CodeInvalidArgument` before any ssh round trip, and
+a requested `direct` onto a target that cannot reach the daemon is
+`CodeFailedPrecondition` carrying the probe's own `reach_detail` and naming
+`mode=tunnel`.
+
+Two `ExecutorRow` fields report the result: `install_mode` is the stored transport
+(`direct`/`tunnel`, empty on an executor that was not installed over ssh, where
+`installed_via`/`installed_target` are empty too), and `last_launch` is the
+daemon's outcome for the most recent launch — `ok: <mode> launch <state> in
+<took>`, or `failed: <first line>`. **`last_launch` is IN-MEMORY:** it describes
+what THIS daemon process did, so it is empty after a restart until the next
+launch — a stored stale outcome would be a claim about a launch nobody watched.
 
 The launcher must be a NATIVE, enabled executor that reports `sshLaunch`; a
 container-isolated one is never a launcher, and `--no-ssh-launch` takes a
@@ -2870,9 +2889,11 @@ several candidates and no `via` is an error listing them.
 
 The install writes a second row, `conversations.executor_install` (migration
 0070), which is the launch RECIPE: launcher, destination, target instance,
-root, remote platform, and the child that asked (`""` for a human). Executor
-rows hard-delete and the recipe is tombstoned instead, so one live recipe per
-executor id is the unique index and history survives a delete.
+root, remote platform, the transport (`mode`, migration 0072 — `direct` or
+`tunnel`, with an older row reading as `tunnel`), and the child that asked (`""`
+for a human). Executor rows hard-delete and the recipe is tombstoned instead, so
+one live recipe per executor id is the unique index and history survives a
+delete.
 
 **Reinstalling the same name reuses the executor** — the same row and id, so
 anything pinned to `executor: <name>` keeps meaning that machine — and it
@@ -2888,7 +2909,7 @@ Two `ExecutorRow` fields carry the provenance: `installed_via` is the
 launcher's machine name (falling back to the machine name the install stamped
 on the executor's own row when the launcher row is gone) and `installed_target`
 is the ssh destination. Both are empty on an executor that was not installed
-this way.
+this way, and so are `install_mode` and `last_launch`.
 
 ### User administration
 
@@ -3408,7 +3429,7 @@ transport error, and never a successful result carrying the text.
 | `agent_tag` | Create a tag — a named, scoped handle others in its scope may fork from — or move one by `tag_id` + `expect_node_id` (a stale expected node is `FailedPrecondition`); `replace` is a user credential's alone |
 | `agent_untag` | Tombstone a live tag by `tag_id`; only its creator, that child's ancestors (closed included) or a user credential may |
 | `agent_tags` | Live tags visible to the caller, in resolution order (its own lineage, then its ancestors', then tree, then owner, then tags rooted at its descendants), filtered by `name_prefix` and `limit`; with `tag_id`, that tag's whole history |
-| `executor_install` | Put a rafiki executor on a machine reachable over ssh from one of your executors: `target` (required), `via`, `name`, `root`, `labels`, `admits`. Returns once it has connected, and a down installed executor restarts on its next use. Declined when the daemon has no install recipe table (a DB-less daemon) — the same nil-means-decline rule as the sandbox family |
+| `executor_install` | Put a rafiki executor on a machine reachable over ssh from one of your executors: `target` (required), `via`, `name`, `root`, `labels`, `admits`, `mode` (`auto`/`direct`/`tunnel`, the closed set the schema advertises; the daemon decides which are accepted and what they mean for a given target). Returns once it has connected, and a down installed executor restarts on its next use. Declined when the daemon has no install recipe table (a DB-less daemon) — the same nil-means-decline rule as the sandbox family |
 | `executor_uninstall` | Remove an executor you installed over ssh, by `executor` (machine name or id); the target keeps the shared binary cache. Only an install of the caller's own lineage can be removed |
 | `task_add` | Add a task (imperative `content`, present-continuous `active_form`; optional `parent` handle to nest); returns the full list with handles |
 | `task_update` | Change task statuses (pending, in_progress, blocked, completed, failed), touching only the named handles |

@@ -10,9 +10,9 @@ carries the bytes:
 
 | Transport | Command | Used when |
 |---|---|---|
-| Reverse-dialled TLS | `rafiki executor serve --connect` | the daemon cannot reach the executor's host (NAT, a laptop) |
+| Reverse-dialled TLS | `rafiki executor serve --connect` | the daemon cannot reach the executor's host (NAT, a laptop), or a launcher installed the executor on another machine with `mode=direct` — see "Installing over ssh" |
 | Unix socket (reverse) | `rafiki executor serve --connect-socket` | executor and daemon on one host, enrolling as a fully rowed member of the pool |
-| ssh stdio relay | `rafiki executor serve --stdio` | a launcher installed the executor on another machine — see "Installing over ssh" |
+| ssh stdio relay | `rafiki executor serve --stdio` | a launcher installed the executor on another machine with `mode=tunnel` — see "Installing over ssh" |
 
 There was once another form: the executor listened on a unix socket and the daemon dialled
 it with `rafiki create --executor-socket`. It is gone. It produced an executor with **no
@@ -326,7 +326,7 @@ The scheme selects what the secret is:
 |---|---|---|
 | `Bearer` | the executor's durable credential, or the daraja's in-memory reconnect credential | every connection after the first |
 | `Enroll` | a one-time enrollment token minted by `EnrollExecutor` | an executor's first join |
-| `Ticket` | a one-shot session ticket (transient executor), a launch ticket (daraja), or an installed executor's per-launch ticket (row-bound) | the first connection for something with no durable identity |
+| `Ticket` | a one-shot session ticket (transient executor), a launch ticket (daraja), or an installed executor's per-launch ticket (row-bound) | the first connection for something with no durable identity, and the first connection of every installed executor's launch |
 
 A missing, repeated, schemeless, unknown-scheme or empty-secret header is
 refused 401 with a body that names the header form, so a peer still speaking
@@ -1591,11 +1591,56 @@ TOMBSTONED (`removed_at`); one live recipe per executor id is a unique index.
 Nothing the target reports gates access: the probe chooses a binary and refuses
 a clobber, and decides nothing about who may use the result.
 
-**A remote executor is available only while its launcher is.** The relaunch is
-lazy — no fleet of idle ssh sessions is kept — so a down installed executor is
-still a name a caller may pass, and the first call that needs it opens the ssh
-session, records a one-time note on that call, and waits for the connection to
-ARRIVE (the pool's on-connect hook, never a poll).
+**A relaunch always needs the launcher; the mode decides whether the RUNNING
+executor does.** The relaunch is lazy — no fleet of idle ssh sessions is kept —
+so a down installed executor is still a name a caller may pass, and the first
+call that needs it opens the ssh session, records a one-time note on that call,
+and waits for the connection to ARRIVE (the pool's on-connect hook, never a
+poll). In `tunnel` mode that ssh session IS the executor's lifetime, so a
+launcher that sleeps takes the executor with it; in `direct` mode the ssh has
+ended long before and the detached process keeps dialling the daemon on its own.
+
+### Direct or tunnel: the transport is chosen once
+
+An installed executor reaches the daemon one of two ways, and the RECIPE stores
+which (`conversations.executor_install.mode`, migration 0072; a row written
+before the column existed reads as `tunnel`, because that is how it behaves):
+
+| Mode | What runs on the target | Lifetime |
+|---|---|---|
+| `direct` | a detached `executor serve --ticket-stdin --detach` that dials the daemon over TLS itself, with the credential its first ticket minted | its own: a launcher that sleeps, restarts or disconnects leaves it running. A reboot or VM reset kills it, and the next call's lazy relaunch starts a fresh one |
+| `tunnel` | `executor serve --stdio`, whose stdio `RemoteServe` relays into `Pool.ServeConn` | that ssh session, and no longer — the launcher is in every byte's path |
+
+`direct` also answers a diagnostic question: a detached process leaves only a
+file, so a failed launch is reported with the target's own `executor.log` tail
+instead of the relay's silence.
+
+**`auto` is a request spelling, never a stored value.** `InstallExecutor`'s
+`mode` is `""`/`auto`, `direct` or `tunnel`, resolved once at install by one
+decision function (`chooseInstallMode`, `cmd/rafikid/executor_install.go`): only
+`reach=yes` from the probe chooses `direct`; `reach=no` and `reach=unavailable`
+fall back to `tunnel`; a requested `direct` the target cannot satisfy is refused
+with the probe's own detail, naming `mode=tunnel` as the alternative; a
+requested `tunnel` is always accepted. The choice is written to the recipe, and
+a RELAUNCH reads it rather than re-probing — a changed network is an operator's
+reinstall, and a reinstall does re-probe.
+
+**A launcher built before these RPCs answers `Unimplemented`.** Under `auto` the
+install falls back to the relay and records `tunnel`; under a requested `direct`
+it refuses and names the machine that has to be upgraded.
+
+**A direct launch's ticket mints the credential the process will reconnect
+with.** `Pool.authorize`'s `Ticket` branch, for a row-bound grant flagged
+`MintCredential` (set only by the install path), rotates the row's credential and
+returns the new one on the 101's `Rafiki-Credential`, exactly as enrollment does.
+The rotation is deferred until admission has SUCCEEDED — a ticket refused for a
+disabled row (checked before it) or a 409 against a healthy incumbent therefore
+costs nothing — and a store failure puts the ticket back
+(`TicketRegistry.Restore`) and answers the retryable 503-class refusal. Two
+consequences to keep: every relaunch mints a new credential and invalidates the
+previous one, so a credential found on the target belongs to the current launch
+and is never a durable identity (the ROW is that), and a spent ticket is a
+terminal 401, never a retry.
 
 ### Who may launch
 
@@ -1642,11 +1687,11 @@ non-absolute `root`, and an instance name that fails `paths.ValidateInstance`.
 or fish login shell they fail opaquely — the probe's output is parsed, so a
 syntax error surfaces as a malformed answer rather than as a shell problem.
 
-### The four RPCs
+### The six RPCs
 
 ```
 RemoteProbe(RemoteTarget{destination, instance}, binary_path) →
-    { uname, binary_present, credential_present, marker }
+    { uname, binary_present, credential_present, marker, reach, reach_detail }
 
 RemoteInstall(stream { header{target, binary_path, sha256} | chunk(bytes) }) → {}
 
@@ -1654,13 +1699,35 @@ RemoteServe(stream { start{target, binary_path, root, install_id} | stdin(bytes)
     stream { started{pid} | stdout(bytes) | stderr(bytes)
              | exit{code, signal, stderr_tail} }
 
-RemoteClean(RemoteTarget{destination, instance}, install_id) → { removed }
+RemoteClean(RemoteTarget{destination, instance}, install_id, stop_process) →
+    { removed, stopped }
+
+RemoteLaunch(stream { start{target, binary_path, root, install_id}
+                    | stdin(bytes) }) → { state, pid }
+
+RemoteLogTail(RemoteTarget{destination, instance}, lines) → { tail }
 ```
 
 `RemoteProbe` is ONE ssh whose script prints exactly four lines (`uname=`,
-`binary=`, `cred=`, `marker=`); any other shape is refused with the raw output
-rather than half-parsed. `marker` is the first line of
-`<data dir>/installed-executor`, empty when absent.
+`binary=`, `cred=`, `marker=`), or those four plus two reach lines; any other
+shape is refused with the raw output rather than half-parsed. `marker` is the
+first line of `<data dir>/installed-executor`, empty when absent.
+
+**`reach` is the target's own answer to "can I dial the daemon?"** — `yes`,
+`no`, or `unavailable` — and `reach_detail` is one line: the tool that answered
+(`via curl`, `via bash`, `via nc`), that tool's first stderr line when it could
+not, or why the question was never asked. The address is the LAUNCHER's own
+(`executor.Options.ConnectAddr`, its `--connect`): it is never a request field
+and never travels through the daemon. A launcher with no dialable address
+answers `unavailable` from the four-line shape; one whose address is not a plain
+`host:port` answers `unavailable` with the address named, because nothing about
+that address is rendered into a remote script.
+
+On the target the probe tries the first of `curl` (5s bound, no `-k`: a remote
+executor dials with the system roots only, so a certificate curl cannot verify is
+one the executor cannot use either — and any HTTP answer counts), bash's
+`/dev/tcp` under `timeout` (it has no connect timeout of its own), and
+`nc -z -w 5`, reporting which one answered.
 
 `RemoteInstall` pipes the binary to the target over the SAME ssh channel: no
 scp, no sftp, no internet on the target, and no copy kept by the launcher. The
@@ -1679,9 +1746,56 @@ signal killed it. Half-closing the request stream closes the remote process's
 stdin. One process per stream, in its own process group, swept the instant the
 leader is reaped, so nothing it forked outlives the session.
 
+`RemoteLaunch` starts a detached, self-dialling executor. The frames are one
+`start`, then exactly ONE `stdin` carrying the install ticket line — the only
+place the ticket travels, which is why a second `stdin` frame is refused before
+any ssh runs (two tickets would mean two remote executors and one spent
+credential). One ssh runs `<binary> executor serve --connect <addr> -P
+<instance> [--root R] --install-id ID --ticket-stdin --detach`, with `addr`
+again the launcher's own `ConnectAddr`; a launcher that has none refuses
+`FailedPrecondition`, because it has nothing to hand a self-dialling executor.
+That command's stdout must be exactly one line — `started pid=<n>` or `running
+pid=<n>` — and anything else is refused with the raw output. Every byte of text
+this call returns is scrubbed of the ticket first (ssh's stderr, and any raw
+output quoted in a parse error), since a target's shell can echo what it read.
+
+`RemoteLogTail` returns the last lines of `<data dir>/executor.log` — `lines` 0
+means 40, the request is clamped to 1..200, and the answer keeps the log's END
+(16 KiB at most), which is where the failure is. A target with no log answers
+the sentinel `(no executor.log)` rather than an error: the launch that produced
+it may be exactly the one that failed before writing anything.
+
 `RemoteClean` removes `<data dir>/installed-executor` **iff its first line is
-this install's id**, and answers `removed=false` otherwise. The shared binary
-cache is content-addressed and is left alone.
+this install's id**, and answers `removed=false` otherwise; a marker naming
+another install leaves that install's process, pid file and credential alone and
+prints neither word. The shared binary cache is content-addressed and is left
+alone.
+
+With `stop_process` it stops that same install's detached executor FIRST, under
+the same marker match, and answers `stopped`. The rule, as implemented
+(`remoteStopScript`, `pkg/executor/remote_ssh.go`):
+
+- The pid comes from `<data dir>/executor.pid` and must be `2..9999999` — a
+  `0`-leading or non-numeric value, `0` or `1` is no pid at all, because
+  `kill -TERM -0` would signal the remote shell's OWN process group and
+  `kill -TERM -1` every process the remote user may signal, this ssh session
+  included.
+- The signal goes to `-pid` (the whole group) only when `ps -o pgid=` says that
+  pid IS its group's leader — which a detached executor, `setsid`'d, always is.
+  Everything else is signalled as a plain pid, and a `ps` that cannot answer is
+  no evidence of a group: nothing here guesses.
+- TERM, then up to 10 polls 0.5s apart, then KILL and the same again.
+- `stopped` is printed, and `executor.pid`/`executor.cred`/`executor.lock`
+  removed, only once the process is confirmed gone. A process that survives KILL
+  keeps its credential and its lock and the target reports neither word: telling
+  the daemon an executor stopped while it is still running is worse than saying
+  nothing.
+
+Residual, recorded rather than eliminated: the pid file may name a pid the
+kernel has since reused. A reused pid that is not a session leader is signalled
+single-file — one unrelated process, never a group — and a reused pid that
+leads some OTHER group cannot be told apart from the executor's at all, so the
+pid bound and the `ps` check bound the damage instead of removing it.
 
 ### `executor serve --stdio`
 
@@ -1711,6 +1825,59 @@ exec <binary> executor serve --stdio -P <instance> [--root <root>] --install-id 
   only once a request has been served — i.e. only after the upgrade succeeded.
   A process that never connects leaves the target looking empty, which is the
   truth.
+
+### `executor serve --ticket-stdin --detach`
+
+```
+exec <binary> executor serve --connect <addr> -P <instance> [--root <root>] \
+    --install-id <id> --ticket-stdin --detach
+```
+
+- It reads ONE ticket line from stdin (at most 4096 bytes) and presents it as
+  `Authorization: Ticket` on the FIRST connect only; every later connect is
+  `Bearer`, with the credential the daemon returned on the 101, persisted to
+  `--credential-file` (default `<data dir>/executor.cred` — deliberately NOT
+  under `--root`, where the executor's own file tools could read it).
+- `--connect` and `--install-id` are required, and it refuses `--stdio`,
+  `--connect-socket`, `--enroll-token` and `--credential` by name: a ticket
+  authenticates a TCP dial, and enrollment creates a row while a ticket redeems
+  one that already exists.
+- `--detach` takes a non-blocking `flock` on an open descriptor of
+  `<data dir>/executor.lock` BEFORE it reads stdin. Held ⇒ an executor is already
+  running here: it prints `running pid=<n>`, reads no stdin (so no ticket is
+  spent), and exits 0. Otherwise it reads the one ticket line, re-execs itself
+  (`setsid`, stdin `/dev/null`, stdout and stderr appended to
+  `<data dir>/executor.log`, rotated to `executor.log.1` at 4 MiB), handing the
+  child the ticket on an inherited pipe (fd 3) and the locked descriptor
+  (fd 4) — never argv, never the environment, both of which are world-readable
+  on the target — records `<data dir>/executor.pid` atomically, prints
+  `started pid=<n>`, and exits without waiting.
+- The lock is a flock on an OPEN DESCRIPTOR, not the existence of a file: a lock
+  file left behind by a crashed executor is inert, so a relaunch after a crash
+  is not refused. The child holds it for life and marks it close-on-exec, so
+  nothing the executor spawns can keep the instance "running".
+- **stdout is exactly one line** — `started pid=<n>` or `running pid=<n>` — and
+  that line is the whole contract the daemon parses.
+- The child writes `<data dir>/installed-executor` once its credential is on
+  disk, which is what marks the target as this install's.
+
+Everything it keeps lives in the target's data directory (`paths.DataDir()`,
+per instance via `-P`), so two instances on one machine never collide:
+
+| File | What it is |
+|---|---|
+| `executor.lock` | the flock holder for "an executor is running in this instance" |
+| `executor.pid` | the detached executor's pid, which uninstall signals |
+| `executor.log` | its stdout and stderr, rotated to `executor.log.1` at 4 MiB |
+| `executor.cred` | its durable credential (the default `--credential-file`) |
+| `installed-executor` | the install marker: this install's id, as the first line |
+
+Inside `--detach` the parent reshapes its own argv for the child: `--detach`
+and `--ticket-stdin` are dropped and `--ticket-fd=3`/`--lock-fd=4` added, so the
+child never detaches twice and reads its ticket from the inherited pipe. Both of
+those descriptor flags are hidden from help: offering them to an operator would
+invite passing a ticket in argv, which is the one place fd 3 exists to keep it
+out of.
 
 ### The binary depot
 
@@ -1780,6 +1947,11 @@ when it holds this install's id and the launcher is live, then tombstones the
 recipe and deletes the executor row. A failure to clean the marker does NOT
 fail the uninstall: the leftover is named by the next install's clobber guard,
 with the command that clears it.
+
+**Deleting the row is what ends a `direct` executor whose launcher could not be
+reached at uninstall.** Its next reconnect presents a credential for a row that
+no longer exists, is refused a terminal 401, and the process exits. `RemoteClean`'s
+`stop_process` is how a reachable launcher stops it sooner than that.
 
 ## Failure codes
 

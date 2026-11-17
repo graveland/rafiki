@@ -811,6 +811,7 @@ Put a rafiki executor on a machine reachable over ssh, or take one away:
 ```sh
 rafiki executor install <target> [--via <machine|id>] [--name <name>]
                                [--root <dir>] [--label k=v]… [--admits <sel>]
+                               [--mode auto|direct|tunnel]
 rafiki executor uninstall <name|id>
 ```
 
@@ -829,6 +830,18 @@ working — and ignores the new `--label`/`--root`/`--admits`; change those with
 `rafiki executor label`. An install proceeds only onto a target that is empty
 for its namespace or that carries this executor's own install.
 
+`--mode` picks how the installed executor reaches the daemon, and is stored on
+the recipe once: `direct` starts a detached executor on the target that dials
+the daemon itself (so a launcher that sleeps no longer takes it down), `tunnel`
+relays its stdio through the launcher's ssh session (the fallback for a target
+with no route to the daemon), and `auto` — the default — probes the target and
+picks, choosing `direct` only on a clean answer. The flag's value is validated by
+the DAEMON, not the shell: an unknown spelling is refused before any ssh runs,
+and `--mode direct` onto a target that fails the probe is refused with the
+probe's own words, naming `--mode tunnel`. Completion offers the three values
+without enforcing them. A launcher whose rafiki predates the direct transport
+falls back to `tunnel` under `auto` and is refused by name under `direct`.
+
 `uninstall` refuses an executor that was enrolled or created rather than
 installed over ssh — `rafiki executor delete` is the same end state without a
 target to clean up. The target keeps the shared binary cache, so installing
@@ -836,7 +849,10 @@ there again pushes nothing.
 
 `rafiki executor list` gains a `VIA` column naming the launcher each installed
 executor came from. `-j`/`-J` emit the row's canonical protojson, the same
-message `rafiki executor list` emits per row.
+message `rafiki executor list` emits per row, and an installed row's carries
+`install_mode` (`direct`/`tunnel`) and `last_launch` — the daemon's outcome for
+the most recent launch, which is kept in memory only, so it is absent after a
+daemon restart until that executor launches again.
 
 `-P/--profile` names an executor INSTANCE (data/cache under `profiles/<name>`,
 its own env files, log and service unit), not a daemon — see
