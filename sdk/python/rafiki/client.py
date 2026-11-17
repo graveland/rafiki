@@ -678,7 +678,19 @@ class Client:
         one every conversation verb uses: a user credential reads all of its
         owner's conversations, and a child credential reads its owner's whole
         corpus (its own, its subtree's and other agents' alike) or only its
-        subtree when its lineage has no owner."""
+        subtree when its lineage has no owner.
+
+        ``states`` and ``kinds`` each take one state or kind as a bare string,
+        the same as a list of them: a string is one value, never a sequence of
+        its characters (``kinds="fundi"`` is the fundi kind, not
+        ``["f", "u", "n", "d", "i"]``)."""
+        # A bare string is ONE value. Iterating it would filter on its
+        # characters: kinds="fundi" silently matched nothing, and states="open"
+        # at least raised.
+        if isinstance(states, str):
+            states = [states]
+        if isinstance(kinds, str):
+            kinds = [kinds]
         req = _gen.control_pb.ListConversationsRequest(
             limit=limit,
             cursor=cursor,

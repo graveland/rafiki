@@ -117,9 +117,12 @@ page = c.list_conversations(limit=50)     # one tree level of ConversationListin
                                           #   plus next_cursor; parent_conversation_id=""
                                           #   is the TOP LEVEL, so walk the tree level by
                                           #   level through each row's id and child_count
-rows = c.iter_conversations(states=["open"], name_contains="review")
-                                          # the same filters, paged for you: yields
-                                          #   rows, following next_cursor to the level's end
+rows = list(c.iter_conversations(states=["open"], name_contains="review"))
+                                          # the same filters, paged for you: a
+                                          #   GENERATOR of rows, following
+                                          #   next_cursor to the level's end, so
+                                          #   materialise it before indexing
+                                          #   (or `for row in ...:` it)
 hist = c.get_history(conversation_id=rows[0].id)  # read a transcript directly
                                               #   by its conversation id (exactly
                                               #   one of that and the child id,

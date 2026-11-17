@@ -187,3 +187,30 @@ def test_get_history_keeps_the_positional_child_form():
     client.get_history("c_1")
     assert seen["request"].child_id == "c_1"
     assert seen["request"].conversation_id == ""
+
+
+def test_list_conversations_takes_a_bare_string_for_states_and_kinds():
+    """A string is ONE value, not a sequence of its characters.
+
+    Before the wrapper, ``kinds="fundi"`` reached the wire as
+    ``["f", "u", "n", "d", "i"]`` and silently filtered to nothing; a bare
+    ``states="open"`` at least raised.
+    """
+    seen = _capture(states="open", kinds="fundi")
+    req = seen["request"]
+    assert req.states == [control_pb.ConversationState.CONVERSATION_STATE_OPEN]
+    assert req.to_dict()["kinds"] == ["fundi"]
+
+
+def test_iter_conversations_takes_a_bare_string_too():
+    client = Client("unix:///nonexistent/rafiki.sock")
+    seen = []
+
+    def fake_call(method, request, response_cls, timeout=None):
+        seen.append(request)
+        return control_pb.ListConversationsResponse()
+
+    client._call = fake_call
+    assert list(client.iter_conversations(kinds="fundi", states="open")) == []
+    assert seen[0].to_dict()["kinds"] == ["fundi"]
+    assert seen[0].states == [control_pb.ConversationState.CONVERSATION_STATE_OPEN]
