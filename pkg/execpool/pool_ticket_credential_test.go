@@ -403,9 +403,62 @@ func TestRedeemInstallTicketRevokedBeforeConsumeIsTerminal(t *testing.T) {
 		"a refused redemption must carry no %s header, got", upgradeconn.HeaderCredential)
 	c.Empty(a.credential, "a refused redemption must admit nothing, got %+v", a)
 	c.Eq(1, store.rotateCount(),
-		"the rotation runs BEFORE the consume, so it has already happened here, rotations =")
-	_, still := p.Tickets().Peek(ticket)
-	c.False(still, "a revoked ticket must stay revoked; the consume must not put it back")
+		"the rotation runs before the commit, so it has already happened here, rotations =")
+	_, still := p.Tickets().Claim(ticket)
+	c.False(still, "a revoked ticket must stay revoked; no release may put it back")
+}
+
+// A ticket is presented by one process, but a REPLAY is not ours to refuse by
+// convention: two connections holding the same ticket must not both rotate the
+// row's credential, because the second rotation would invalidate the plaintext
+// the first was just handed and the executor that won would exit on its next
+// reconnect. The claim is what makes that impossible.
+func TestRedeemInstallTicketConcurrentPresentationsRotateOnce(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newTicketCredStore("exec-1", "durable-credential")
+	p := New(store)
+	ticket, err := p.Tickets().Mint(TicketGrant{
+		ExecutorID: "exec-1", RowID: "exec-1", MintCredential: true,
+	})
+	c.NoError(err, "mint")
+
+	type result struct {
+		hdr http.Header
+		err error
+	}
+	const racers = 4
+	start := make(chan struct{})
+	results := make(chan result, racers)
+	for range racers {
+		go func() {
+			<-start
+			_, hdr, aerr := p.authorize(ticketRequest(t, ticket))
+			results <- result{hdr: hdr, err: aerr}
+		}()
+	}
+	close(start)
+
+	var admitted, refused int
+	for range racers {
+		res := <-results
+		if res.err == nil {
+			admitted++
+			c.NotEq("", res.hdr.Get(upgradeconn.HeaderCredential),
+				"the one admitted presentation must leave with the minted credential, got")
+			continue
+		}
+		var ref *upgradeconn.Refusal
+		c.True(errors.As(res.err, &ref), "a losing presentation must be refused, got %v", res.err)
+		c.Eq(http.StatusUnauthorized, ref.Status, "a spent ticket is terminal, got status")
+		c.Eq("", res.hdr.Get(upgradeconn.HeaderCredential),
+			"a refused presentation must carry no credential header, got")
+		refused++
+	}
+	c.Eq(1, admitted, "exactly one presentation of one ticket may be admitted, admitted =")
+	c.Eq(racers-1, refused, "every other presentation is refused, refused =")
+	c.Eq(1, store.rotateCount(),
+		"the row's credential must be rotated ONCE for one ticket; a second rotation "+
+			"invalidates what the winner was handed, rotations =")
 }
 
 // joinAsCredential performs the full executor link against p with a Bearer

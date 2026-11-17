@@ -27,39 +27,55 @@ func TestTicketRedeemsOnceThenIsSpent(t *testing.T) {
 	}
 }
 
-// Peek is the read that lets admission finish before the one-shot gate closes:
-// it must not consume, or a retryable refusal would spend the ticket it is
-// answering "retry" to, and it must be the same grant Redeem would return.
-func TestTicketPeekDoesNotConsume(t *testing.T) {
+// Claim is what lets admission finish before the one-shot gate commits: it must
+// not spend the ticket, and it must be ATOMIC, because two connections
+// presenting one ticket must not both rotate the row's credential.
+func TestTicketClaimIsAtomicAndReleasable(t *testing.T) {
 	c := assert.NewAborting(t)
 	r := NewTicketRegistry()
 	g := TicketGrant{ExecutorID: "e1", Owner: "brent", RowID: "row-1", MintCredential: true}
 	tk, err := r.Mint(g)
 	c.NoError(err)
 
-	peeked, ok := r.Peek(tk)
-	c.True(ok, "a freshly minted ticket must be peekable")
-	c.True(sameGrant(g, peeked), "Peek must return the grant that was minted, got %+v", peeked)
+	held, ok := r.Claim(tk)
+	c.True(ok, "a freshly minted ticket must be claimable")
+	c.Eq(g.RowID, held.RowID, "the claim returns the grant that was minted, got")
 
-	// Repeated peeks leave the ticket redeemable: that is what makes several
-	// attempts on one ticket possible, with the atomic Redeem deciding which
-	// of them wins.
-	if _, again := r.Peek(tk); !again {
-		t.Fatal("Peek consumed the ticket; a retryable refusal would then answer " +
-			"a retry with a terminal 401")
+	// A second presentation of the SAME ticket loses, or two connections would
+	// both rotate the credential and the first one's plaintext would be dead.
+	if _, again := r.Claim(tk); again {
+		t.Fatal("a held ticket was claimable twice: two concurrent redemptions would " +
+			"both rotate the row's credential and strand the winner")
 	}
-	redeemed, ok := r.Redeem(tk)
-	c.True(ok, "a peeked ticket must still redeem")
-	c.True(sameGrant(peeked, redeemed), "Redeem must return the peeked grant, got %+v", redeemed)
+	if _, redeemed := r.Redeem(tk); redeemed {
+		t.Fatal("a held ticket was redeemable: the one-shot gate must be the claim")
+	}
 
-	_, gone := r.Peek(tk)
-	c.False(gone, "a redeemed ticket must not be peekable")
-	revokedTicket, err := r.Mint(TicketGrant{ExecutorID: "e2"})
+	// Release hands it back for the peer that was told to retry.
+	r.Release(tk)
+	held, ok = r.Claim(tk)
+	c.True(ok, "a released ticket must be claimable again, or every retry is a 401")
+	c.Eq(g.RowID, held.RowID, "the re-claim returns the same grant, got")
+
+	// Commit spends it for good.
+	r.Commit(tk)
+	if _, again := r.Claim(tk); again {
+		t.Fatal("a committed ticket was claimable; one ticket is one connection")
+	}
+
+	// Revocation during a hold WINS over a late release: otherwise a launched
+	// the daemon had given up on would become redeemable again.
+	revoked, err := r.Mint(TicketGrant{ExecutorID: "e2"})
 	c.NoError(err)
-	r.Revoke(revokedTicket)
-	_, peekable := r.Peek(revokedTicket)
-	c.False(peekable, "revocation must make a ticket unpeekable too, or admission would "+
-		"do all its work for a launch the daemon has given up on")
+	if _, ok := r.Claim(revoked); !ok {
+		t.Fatal("a fresh ticket must be claimable")
+	}
+	r.Revoke(revoked)
+	r.Release(revoked)
+	if _, ok := r.Claim(revoked); ok {
+		t.Fatal("release resurrected a revoked ticket: a launch the daemon gave up on " +
+			"must never become redeemable again")
+	}
 }
 
 func TestTicketRevokeBeforeRedeem(t *testing.T) {

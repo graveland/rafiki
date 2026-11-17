@@ -1633,15 +1633,20 @@ it refuses and names the machine that has to be upgraded.
 with.** `Pool.authorize`'s `Ticket` branch, for a row-bound grant flagged
 `MintCredential` (set only by the install path), rotates the row's credential and
 returns the new one on the 101's `Rafiki-Credential`, exactly as enrollment does.
-The ticket is PEEKED, never consumed up front: it is spent only once the
-connection is admissible AND the credential is minted, so a refusal anywhere
-before that — a disabled row, a store outage resolving the row, a failed
-rotation, a 409 against a healthy incumbent — answers with a retryable status
-and leaves the ticket redeemable, and no retryable failure can strand an
-executor. Two consequences to keep: every relaunch mints a new credential and
-invalidates the previous one, so a credential found on the target belongs to the
-current launch and is never a durable identity (the ROW is that), and a spent
-ticket is a terminal 401, never a retry.
+The ticket is CLAIMED atomically, never consumed up front, and committed only
+once the connection is admissible AND the credential is minted. The claim is what
+makes a replay harmless — two connections presenting one ticket cannot both get
+past it, so exactly one can rotate the credential, and a second rotation can
+never invalidate the plaintext the winner was just handed. The claim is BOOKED,
+not spent: a refusal anywhere before the commit either hands it back for a retry
+(a store outage resolving the row, a failed rotation, a 409 against a healthy
+incumbent) or drops it when retrying cannot help (the row is gone or disabled),
+so no retryable failure can strand an executor. Three consequences to keep: every
+relaunch mints a new credential and invalidates the previous one, so a credential
+found on the target belongs to the current launch and is never a durable identity
+(the ROW is that); a spent ticket is a terminal 401, never a retry; and a ticket
+REVOKED while a connection holds it is refused at the commit — revocation wins
+over an in-flight claim, or a launch the daemon abandoned would connect anyway.
 
 ### Who may launch
 

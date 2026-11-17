@@ -85,11 +85,20 @@ func (g TicketGrant) Executor() executors.Executor {
 // would outlive the connection whose authentication it stands for.
 type TicketRegistry struct {
 	mu sync.Mutex
-	m  map[string]TicketGrant
+	m  map[string]*ticketEntry
+}
+
+// ticketEntry is one unredeemed or in-flight ticket. Claimed means a connection
+// has taken it and is deciding whether to admit it; the entry is still here so
+// a RETRYABLE refusal can hand it back, and it is deleted outright once the
+// redemption commits or the control connection revokes it.
+type ticketEntry struct {
+	grant TicketGrant
+	held  bool
 }
 
 func NewTicketRegistry() *TicketRegistry {
-	return &TicketRegistry{m: map[string]TicketGrant{}}
+	return &TicketRegistry{m: map[string]*ticketEntry{}}
 }
 
 // Mint issues a one-shot ticket for g.
@@ -102,56 +111,76 @@ func (r *TicketRegistry) Mint(g TicketGrant) (string, error) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.m[ticket] = g
+	r.m[ticket] = &ticketEntry{grant: g}
 	return ticket, nil
 }
 
-// Redeem consumes a ticket. A ticket redeems exactly once: replaying one must
-// not authenticate a second executor onto the same identity, which is the same
-// rule Pool.admit enforces for durable credentials.
+// Redeem consumes a ticket and returns its grant. A ticket redeems exactly
+// once: replaying one must not authenticate a second executor onto the same
+// identity, which is the same rule Pool.admit enforces for durable
+// credentials.
 //
-// This is the ONE-SHOT GATE, and it closes last: Pool.authorize calls it only
-// once the connection is admissible and the credential has been minted, so
-// every retryable refusal on the way there leaves the ticket redeemable.
-// Peek is how it reads the grant before that point.
+// This is the cheap one-shot primitive for a caller that needs nothing between
+// the read and the consumption. Pool.authorize uses Claim/Commit instead,
+// because it has work that can fail in between.
 func (r *TicketRegistry) Redeem(ticket string) (TicketGrant, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	g, ok := r.m[ticket]
-	if ok {
-		delete(r.m, ticket)
+	e, ok := r.m[ticket]
+	if !ok || e.held {
+		return TicketGrant{}, false
 	}
-	return g, ok
+	delete(r.m, ticket)
+	return e.grant, true
 }
 
-// Peek reads a ticket's grant WITHOUT consuming it.
+// Claim takes the ticket ATOMICALLY, returning its grant, and holds it until the
+// caller Commits or Releases it.
 //
-// It exists so admission can do everything that can fail — resolve the row,
-// check it is enabled, admit the connection, mint the credential — before the
-// one-shot gate closes. Every one of those refusals is retryable, and each is
-// only retryable because nothing has been consumed: a ticket spent by a
-// connection that was then refused makes the retry a terminal 401 and takes the
-// executor out of service over a database blip.
+// The claim is what makes the credential exchange safe: two connections
+// presenting the same ticket cannot both get past this point, so exactly one of
+// them can rotate the row's credential — a second rotation would invalidate the
+// credential the first was just handed, which is a way to strand a legitimate
+// executor by replaying its ticket.
 //
-// It is NOT an alternative to Redeem for deciding one-shot-ness. Two concurrent
-// attempts can both peek the same ticket; exactly one of them Redeems it, and
-// the other is refused there — see Pool.authorize's SchemeTicket branch.
-func (r *TicketRegistry) Peek(ticket string) (TicketGrant, bool) {
+// A claim is BOOKED, not spent: Pool.authorize Releases it on any refusal the
+// peer may retry (a store outage, a 409 against a live incumbent, a failed
+// rotation), so the retry presents a ticket that still works, and Commits it on
+// success or on a refusal that retrying cannot fix. A ticket REVOKED while held
+// is deleted, and Release then finds nothing to hand back — revocation always
+// wins over a late release.
+func (r *TicketRegistry) Claim(ticket string) (TicketGrant, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	g, ok := r.m[ticket]
-	return g, ok
+	e, ok := r.m[ticket]
+	if !ok || e.held {
+		return TicketGrant{}, false
+	}
+	e.held = true
+	return e.grant, true
 }
 
-// sameGrant reports whether the grant a redemption returned is the one
-// admission was decided against: the same row, the same executor, the same
-// minting flag. Redeem is what makes a ticket one-shot, so a value that differs
-// here is not the ticket this connection was authenticated on — admitting it
-// would authorise against facts nobody checked.
-func sameGrant(peeked, redeemed TicketGrant) bool {
-	return peeked.RowID == redeemed.RowID &&
-		peeked.ExecutorID == redeemed.ExecutorID &&
-		peeked.MintCredential == redeemed.MintCredential
+// Commit spends a claimed ticket for good. It reports whether the ticket was
+// still there: false means it was REVOKED while held (a launch the daemon gave
+// up on), and the caller must not admit the connection that claimed it.
+func (r *TicketRegistry) Commit(ticket string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.m[ticket]
+	delete(r.m, ticket)
+	return ok
+}
+
+// Release hands a claimed ticket back, so a peer told to RETRY has something to
+// retry with. It acts only on a ticket that is still held: a revoked (deleted)
+// or already committed ticket stays gone, so a late release cannot resurrect
+// one the daemon gave up on.
+func (r *TicketRegistry) Release(ticket string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.m[ticket]; ok && e.held {
+		e.held = false
+	}
 }
 
 // Revoke discards an unredeemed ticket. This is how a closed control
