@@ -202,6 +202,25 @@ func TestCoordinationPromptMentionsPresets(t *testing.T) {
 	}
 }
 
+// TestCoordinationPromptNamesTheMCPPrefix pins the sentence that keeps a child
+// from calling a tool it does not have: the surface's tools are
+// mcp__rafiki__<name>, so a child told to "finish with agent_result" must be
+// told the prefix and that a bare name is not a tool. Its own two outcome verbs
+// are named for the same reason, since nothing else in its instructions says
+// they exist.
+func TestCoordinationPromptNamesTheMCPPrefix(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, want := range []string{
+		"prefixed mcp__rafiki__",
+		"mcp__rafiki__agent_spawn",
+		"mcp__rafiki__agent_result",
+		"mcp__rafiki__agent_report",
+		"a bare name is not a tool",
+	} {
+		c.StrContains(CoordinationPrompt, want, "CoordinationPrompt")
+	}
+}
+
 // The flag is last-wins, so the merge must land as ONE --append-system-prompt
 // element carrying both texts — a second element would silently drop whichever
 // text came first.

@@ -39,9 +39,20 @@ const PermissionModeBypass = "bypassPermissions"
 // delivered through two channels — this one to daemon-spawned children, that
 // one to any MCP client. It is deliberately NOT injected for interactive
 // `rafiki claude` sessions: a human drives those and builds Params by hand.
+//
+// Every name it lists is prefixed mcp__rafiki__ on this surface, and the prompt
+// says so: a child whose own instructions say "finish with agent_result" has
+// only that bare word to go on, and a bare name is not in its tools[] at all, so
+// the call never reaches the daemon. Its two outcome verbs are named here for
+// the same reason: a child is otherwise never told they exist.
 const CoordinationPrompt = "You are running under rafiki, which exposes its agent-control " +
 	"surface as MCP tools (agent_spawn, agent_send, agent_list, agent_view, agent_kill, " +
-	"agent_models, preset_*, task_*). When you delegate work to a subagent, use rafiki's agent_spawn " +
+	"agent_models, preset_*, task_*). On this surface every one of them is prefixed " +
+	"mcp__rafiki__ (mcp__rafiki__agent_spawn, mcp__rafiki__agent_result), and a bare name is " +
+	"not a tool. Your own outcome verbs are mcp__rafiki__agent_report (a short note to your " +
+	"parent that does not end your turn) and mcp__rafiki__agent_result (the verdict your parent " +
+	"sees when your turn ends; set it before you stop). " +
+	"When you delegate work to a subagent, use rafiki's agent_spawn " +
 	"rather than your built-in Task tool: a rafiki agent is a separate daemon-managed " +
 	"process, visible in the operator's cockpit, budgetable in dollars, steerable and " +
 	"stoppable mid-flight, and it outlives this conversation. Spawn workers by preset " +
