@@ -87,7 +87,10 @@ func TestCommandAliases(t *testing.T) {
 		{[]string{"executor"}, []string{"exec", "ex"}},
 		{[]string{"user"}, []string{"usr"}},
 		// Subcommands.
-		{[]string{"conversations", "search"}, []string{"ls", "list"}},
+		// conversations list owns the ls/list names; search gave them up when
+		// the listing verb arrived (cobra resolves a sibling match by add
+		// order, so a search alias would shadow it).
+		{[]string{"conversations", "list"}, []string{"ls"}},
 		{[]string{"executor", "list"}, []string{"ls"}},
 		{[]string{"token", "list"}, []string{"ls"}},
 		{[]string{"sandbox", "list"}, []string{"ls"}},

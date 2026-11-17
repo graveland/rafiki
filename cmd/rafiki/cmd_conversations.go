@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/conversationview"
+	"go.graveland.dev/rafiki/pkg/costfmt"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/table"
@@ -39,6 +42,7 @@ at a terminal, JSON when piped.`,
 	cmd.AddCommand(
 		newConversationsStatsCmd(),
 		newConversationsSearchCmd(),
+		newConversationsListCmd(),
 		newConversationsExportCmd(),
 		newConversationsQueryCmd(),
 		newConversationsReviewCmd(),
@@ -195,11 +199,13 @@ func runConversationsStats(cmd *cobra.Command, args []string) error {
 
 func newConversationsSearchCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "search",
-		Aliases: []string{"ls", "list"},
-		Short:   "Search persisted conversation history",
-		Args:    cobra.NoArgs,
-		RunE:    runConversationsSearch,
+		Use: "search",
+		// No "ls"/"list" aliases: `conversations list` owns those names, and
+		// cobra resolves a sibling match by add order, so a search alias would
+		// shadow the listing verb for whoever is added first.
+		Short: "Search persisted conversation history",
+		Args:  cobra.NoArgs,
+		RunE:  runConversationsSearch,
 	}
 	bindConversationFilterFlags(cmd)
 	cmd.Flags().String("status", "", "filter by status")
@@ -296,6 +302,279 @@ func summaryFromProto(r *rafikiv1.ConversationSummary) insightstypes.Conversatio
 		s.ClosedAt = &closed
 	}
 	return s
+}
+
+// ─── list ───────────────────────────────────────────────────────────────────
+
+func newConversationsListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List conversations one tree level at a time",
+		Args:    cobra.NoArgs,
+		RunE:    runConversationsList,
+	}
+	f := cmd.Flags()
+	f.Int("limit", 50, "max rows per page (0 = the daemon's default)")
+	f.String("cursor", "", "continue after the previous page's last row (its next_cursor)")
+	f.String("sort", "recent", `row order: "recent", "created" or "relevance" (relevance needs --query)`)
+	_ = cmd.RegisterFlagCompletionFunc("sort", cobra.FixedCompletions(
+		[]string{"recent", "created", "relevance"}, cobra.ShellCompDirectiveNoFileComp))
+	f.String("parent", "", "list the members whose parent is this conversation id")
+	f.StringP("query", "q", "", "narrow to conversations whose extracted content matches")
+	f.StringArray("state", nil, `filter by linked agent state, repeatable or comma-separated: open, exited, closed, no-agent`)
+	_ = cmd.RegisterFlagCompletionFunc("state", cobra.FixedCompletions(
+		[]string{"open", "exited", "closed", "no-agent"}, cobra.ShellCompDirectiveNoFileComp))
+	f.StringArray("kind", nil, "filter by linked agent child kind, repeatable")
+	f.String("name", "", "case-insensitive substring match on the conversation or agent name")
+	f.String("cwd", "", "case-insensitive substring match on the conversation or agent working directory")
+	f.StringArray("label", nil, "filter by child label k=v, repeatable; a row must carry ALL of them")
+	f.String("since", "", "RFC3339 timestamp or duration like 24h")
+	f.String("until", "", "RFC3339 timestamp or duration like 24h")
+	f.Bool("all", false, "follow next_cursor until empty and print every row")
+	return cmd
+}
+
+// conversationListSortFlag maps --sort onto the wire enum. The accepted set
+// is the flag's closed set, and anything else, including an explicitly empty
+// value, errors before any dial (same shape as reviewStageFlag).
+func conversationListSortFlag(cmd *cobra.Command) (rafikiv1.ConversationSort, error) {
+	s, _ := cmd.Flags().GetString("sort")
+	switch s {
+	case "recent":
+		return rafikiv1.ConversationSort_CONVERSATION_SORT_RECENT, nil
+	case "created":
+		return rafikiv1.ConversationSort_CONVERSATION_SORT_CREATED, nil
+	case "relevance":
+		return rafikiv1.ConversationSort_CONVERSATION_SORT_RELEVANCE, nil
+	default:
+		return rafikiv1.ConversationSort_CONVERSATION_SORT_UNSPECIFIED,
+			fmt.Errorf(`--sort must be "recent", "created" or "relevance", got %q`, s)
+	}
+}
+
+// conversationListStatesFlag reads --state values, each repeatable and/or
+// comma-separated, onto the wire enums. An unknown value errors before any
+// dial: the daemon refuses an UNSPECIFIED inside the states list, so a
+// silently dropped value would widen the answer past what was asked for.
+func conversationListStatesFlag(cmd *cobra.Command) ([]rafikiv1.ConversationState, error) {
+	vals, err := cmd.Flags().GetStringArray("state")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]rafikiv1.ConversationState, 0, len(vals))
+	for _, v := range vals {
+		for _, s := range strings.Split(v, ",") {
+			switch s {
+			case "open":
+				out = append(out, rafikiv1.ConversationState_CONVERSATION_STATE_OPEN)
+			case "exited":
+				out = append(out, rafikiv1.ConversationState_CONVERSATION_STATE_EXITED)
+			case "closed":
+				out = append(out, rafikiv1.ConversationState_CONVERSATION_STATE_CLOSED)
+			case "no-agent":
+				out = append(out, rafikiv1.ConversationState_CONVERSATION_STATE_NO_AGENT)
+			default:
+				return nil, fmt.Errorf(
+					`--state must be one of "open", "exited", "closed" or "no-agent", got %q`, s)
+			}
+		}
+	}
+	return out, nil
+}
+
+// conversationListLabelsFlag reads --label k=v values onto the request's
+// label map. The split is on the FIRST '=', so a value may itself carry '=';
+// a member without one, or with an empty key, is refused before any dial
+// rather than silently narrowing to nothing.
+func conversationListLabelsFlag(cmd *cobra.Command) (map[string]string, error) {
+	vals, err := cmd.Flags().GetStringArray("label")
+	if err != nil {
+		return nil, err
+	}
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(vals))
+	for _, v := range vals {
+		k, val, found := strings.Cut(v, "=")
+		if !found || k == "" {
+			return nil, fmt.Errorf("--label must be k=v, got %q", v)
+		}
+		out[k] = val
+	}
+	return out, nil
+}
+
+// buildConversationListRequest reads the list flags onto the wire request.
+// Every user-input error (sort, state, label, limit, since/until) resolves
+// here, before the endpoint is resolved and anything dials.
+func buildConversationListRequest(cmd *cobra.Command) (*rafikiv1.ListConversationsRequest, error) {
+	sort, err := conversationListSortFlag(cmd)
+	if err != nil {
+		return nil, err
+	}
+	states, err := conversationListStatesFlag(cmd)
+	if err != nil {
+		return nil, err
+	}
+	labels, err := conversationListLabelsFlag(cmd)
+	if err != nil {
+		return nil, err
+	}
+	limit, err := cmd.Flags().GetInt("limit")
+	if err != nil {
+		return nil, err
+	}
+	if limit < 0 {
+		return nil, fmt.Errorf("--limit must not be negative")
+	}
+	if limit > math.MaxInt32 {
+		return nil, fmt.Errorf("--limit must be at most %d", int32(math.MaxInt32))
+	}
+	kinds, err := cmd.Flags().GetStringArray("kind")
+	if err != nil {
+		return nil, err
+	}
+	// Since/Until parse through the same helper search binds with, so both
+	// verbs accept RFC3339 and durations alike and refuse the rest with the
+	// same message shape ("since: ..." / "until: ...").
+	sinceStr, _ := cmd.Flags().GetString("since")
+	untilStr, _ := cmd.Flags().GetString("until")
+	since, err := conversationview.ParseTime(sinceStr)
+	if err != nil {
+		return nil, fmt.Errorf("since: %w", err)
+	}
+	until, err := conversationview.ParseTime(untilStr)
+	if err != nil {
+		return nil, fmt.Errorf("until: %w", err)
+	}
+	name, _ := cmd.Flags().GetString("name")
+	cwd, _ := cmd.Flags().GetString("cwd")
+	parent, _ := cmd.Flags().GetString("parent")
+	query, _ := cmd.Flags().GetString("query")
+	cursor, _ := cmd.Flags().GetString("cursor")
+
+	// Since/Until ride the proto's Timestamp: unset means unbounded, so a
+	// resolved nil stays absent rather than being sent as a zero Timestamp.
+	return &rafikiv1.ListConversationsRequest{
+		Limit: int32(limit), Cursor: cursor, Sort: sort,
+		ParentConversationId: parent, Query: query, States: states, Kinds: kinds,
+		NameContains: name, CwdContains: cwd, Labels: labels,
+		Since: timeTS(since), Until: timeTS(until),
+	}, nil
+}
+
+func runConversationsList(cmd *cobra.Command, _ []string) error {
+	req, err := buildConversationListRequest(cmd)
+	if err != nil {
+		return err
+	}
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	client := ep.control()
+	ctx := cmdCtx(cmd)
+
+	all, _ := cmd.Flags().GetBool("all")
+	var rows []*rafikiv1.ConversationListing
+	next := ""
+	for {
+		resp, err := client.ListConversations(ctx, connect.NewRequest(req))
+		if err != nil {
+			return conversationConnectErr(err, ep.describe)
+		}
+		rows = append(rows, resp.Msg.GetRows()...)
+		next = resp.Msg.GetNextCursor()
+		if !all || next == "" {
+			break
+		}
+		// The cursor is valid only for a request whose sort and
+		// parent_conversation_id match the page that produced it; req carries
+		// both unchanged, so swapping the cursor is the only edit.
+		req.Cursor = next
+	}
+
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+	if err := renderConversationsList(os.Stdout, mode, rows, next); err != nil {
+		return err
+	}
+	if !all && next != "" {
+		// The hint rides stderr in every mode: stdout stays pure for a pipe,
+		// and -J's one-row-per-line records carry no cursor of their own.
+		_, err = fmt.Fprintf(os.Stderr, "more: --cursor %s\n", next)
+		return err
+	}
+	return nil
+}
+
+// renderConversationsList renders the aggregated listing in the requested
+// mode: the canonical protojson of the whole response message for -j (rows
+// plus the cursor that continues past them, so a piped consumer can page
+// without the stderr hint), one conversation row per compact line for -J,
+// and the listing table otherwise.
+func renderConversationsList(w io.Writer, mode outputMode, rows []*rafikiv1.ConversationListing, next string) error {
+	switch mode {
+	case outputJSON:
+		return emitProto(w, &rafikiv1.ListConversationsResponse{Rows: rows, NextCursor: next}, outputJSON)
+	case outputJSONL:
+		return emitProtoRows(w, rows, outputJSONL)
+	default:
+		return renderConversationListTable(w, rows)
+	}
+}
+
+// renderConversationListTable renders the listing table: identity columns,
+// the linked agent (its name, else its id, else "-"), that agent's kind and
+// lifecycle state, the row's visible member count, and the aggregates.
+func renderConversationListTable(w io.Writer, rows []*rafikiv1.ConversationListing) error {
+	if len(rows) == 0 {
+		_, err := fmt.Fprintln(w, "no conversations found")
+		return err
+	}
+	cur := clientstate.LoadScoped(clientstate.Scope{}).Currency
+	tb := table.New(w, table.Options{})
+	tb.Header("ID", "NAME", "AGENT", "KIND", "STATE", "KIDS", "TURNS", "COST", "LAST ACTIVITY")
+	for _, r := range rows {
+		agent := r.GetChildName()
+		if agent == "" {
+			agent = r.GetChildId()
+		}
+		if agent == "" {
+			agent = "-"
+		}
+		kind := r.GetKind()
+		if kind == "" {
+			kind = "-"
+		}
+		tb.Row(r.GetId(), r.GetName(), agent, kind, listingStateCell(r.GetState()),
+			strconv.Itoa(int(r.GetChildCount())), strconv.Itoa(int(r.GetTurns())),
+			costfmt.Format(r.GetCostUsd(), cur),
+			r.GetLastActivity().AsTime().Local().Format("2006-01-02 15:04"))
+	}
+	return tb.Render()
+}
+
+// listingStateCell spells one ConversationState for the table, in the same
+// vocabulary the --state flag accepts. UNSPECIFIED never reaches the wire
+// from this daemon, but an unknown value renders "-" rather than a lie.
+func listingStateCell(s rafikiv1.ConversationState) string {
+	switch s {
+	case rafikiv1.ConversationState_CONVERSATION_STATE_OPEN:
+		return "open"
+	case rafikiv1.ConversationState_CONVERSATION_STATE_EXITED:
+		return "exited"
+	case rafikiv1.ConversationState_CONVERSATION_STATE_CLOSED:
+		return "closed"
+	case rafikiv1.ConversationState_CONVERSATION_STATE_NO_AGENT:
+		return "no-agent"
+	default:
+		return "-"
+	}
 }
 
 // ─── export ─────────────────────────────────────────────────────────────────
