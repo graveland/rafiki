@@ -216,20 +216,47 @@ func historyError(err error, conversationID string) error {
 // nodes it returns. History is the transcript along the conversation head's
 // history: a row the head no longer reaches — a retracted prompt, a superseded
 // sibling reply — is not part of it.
+//
+// A request may name the conversation DIRECTLY by conversation_id instead of
+// by a child: exactly one of the two must be set. The conversation-keyed read
+// skips every child relationship check — there is no child to authorize — and
+// answers through the same server-derived scope every conversation verb uses,
+// so a conversation outside it is indistinguishable from an unknown one and
+// carries no child identity on its events.
 func (s *Server) GetHistory(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.GetHistoryRequest],
 ) (*connect.Response[rafikiv1.GetHistoryResponse], error) {
 	childID := req.Msg.GetChildId()
-	if childID == "" {
+	conversationID := req.Msg.GetConversationId()
+	if (childID == "") == (conversationID == "") {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("child_id is required"))
+			errors.New("exactly one of child_id and conversation_id is required"))
 	}
 	// Checked before the conversation resolves: a malformed limit is refused
 	// regardless of the child named, and never costs a storage read.
 	if req.Msg.Limit != nil && req.Msg.GetLimit() <= 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("limit must be positive"))
+	}
+
+	if conversationID != "" {
+		p := s.conversations.Load()
+		if p == nil {
+			return nil, connect.NewError(connect.CodeUnavailable,
+				errors.New("conversation insights not yet wired"))
+		}
+		visible, err := (*p).Visible(ctx, conversationID)
+		if err != nil {
+			return nil, err
+		}
+		if !visible {
+			// One refusal for a foreign scope and an unknown id alike: a
+			// scope miss must not be distinguishable from absence.
+			return nil, connect.NewError(connect.CodeNotFound,
+				errors.New("conversation not found"))
+		}
+		return s.historyPage(ctx, "", conversationID, req.Msg)
 	}
 	// childScoped: the READ boundary runs BEFORE the conversation resolves, so
 	// a caller learns nothing about an agent it may not read — not even whether
@@ -252,22 +279,33 @@ func (s *Server) GetHistory(
 		}
 	}
 
-	conversationID, err := s.resolveConversation(childID)
+	resolved, err := s.resolveConversation(childID)
 	if err != nil {
 		return nil, err
 	}
+	return s.historyPage(ctx, childID, resolved, req.Msg)
+}
 
+// historyPage is GetHistory's shared tail: page the conversation tree and
+// convert the nodes to durable events. childID names the events' child on the
+// child-keyed path and is empty on the conversation-keyed one, where the
+// caller addressed the conversation itself and no child relationship exists.
+func (s *Server) historyPage(
+	ctx context.Context,
+	childID, conversationID string,
+	msg *rafikiv1.GetHistoryRequest,
+) (*connect.Response[rafikiv1.GetHistoryResponse], error) {
 	var page conv.PageQuery
-	if req.Msg.AfterOrdinal != nil {
-		after := int(req.Msg.GetAfterOrdinal())
+	if msg.AfterOrdinal != nil {
+		after := int(msg.GetAfterOrdinal())
 		page.AfterOrdinal = &after
 	}
-	if before := req.Msg.GetBefore(); before != nil {
+	if before := msg.GetBefore(); before != nil {
 		cutoff := before.AsTime()
 		page.Before = &cutoff
 	}
-	if req.Msg.Limit != nil {
-		limit := int(req.Msg.GetLimit())
+	if msg.Limit != nil {
+		limit := int(msg.GetLimit())
 		page.Limit = &limit
 	}
 	nodes, err := s.history.Page(ctx, conversationID, page)

@@ -20,6 +20,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/quota"
+	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -990,6 +991,66 @@ func (a connectConversations) Search(ctx context.Context, f connectapi.Conversat
 		})
 	}
 	return out, nil
+}
+
+// List adapts Controller.ConversationList onto connectapi's listing mirror
+// types. The scope rule is Search's (childConversationScope, fail-closed), and
+// the daemon's own LLM conversations are excluded UNCONDITIONALLY: the filter
+// the wire carries has no excluded field, so no caller choice can re-admit a
+// conversation recall-summary or analyze wrote.
+func (a connectConversations) List(ctx context.Context, f connectapi.ConversationListFilter) ([]connectapi.ConversationListingRow, string, error) {
+	scope, err := childConversationScope(ctx, a.c)
+	if err != nil {
+		return nil, "", err
+	}
+	states := make([]insights.ListState, 0, len(f.States))
+	for _, s := range f.States {
+		states = append(states, insights.ListState(s))
+	}
+	rows, next, err := a.c.ConversationList(ctx, scope, insights.ListFilter{
+		Limit: f.Limit, Cursor: f.Cursor, Sort: insights.ListSort(f.Sort),
+		ParentConversationID: f.ParentConversationID, Query: f.Query,
+		States: states, Kinds: f.Kinds,
+		NameContains: f.NameContains, CwdContains: f.CwdContains,
+		Labels: f.Labels, Since: f.Since, Until: f.Until,
+		Excluded: recall.ExcludedEntrypoints,
+	})
+	if err != nil {
+		// The three listing sentinels name a caller or environment mistake,
+		// not a daemon fault: they are coded here, before the redacting
+		// ConnectErr, and are not logged as failures.
+		switch {
+		case errors.Is(err, insights.ErrBadCursor), errors.Is(err, insights.ErrRelevanceNeedsQuery):
+			return nil, "", connect.NewError(connect.CodeInvalidArgument, err)
+		case errors.Is(err, insights.ErrContentSearchUnavailable):
+			return nil, "", connect.NewError(connect.CodeFailedPrecondition, err)
+		}
+		logIfUncoded("connect: conversation list failed", err)
+		return nil, "", connectapi.ConnectErr(err)
+	}
+	out := make([]connectapi.ConversationListingRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, connectapi.ConversationListingRow{
+			ID: r.ID, Name: r.Name, Model: r.Model, Owner: r.Owner,
+			CreatedAt: r.CreatedAt, LastActivity: r.LastActivity, ClosedAt: r.ClosedAt,
+			Turns: r.Turns, CostUSD: r.CostUSD,
+			ParentConversationID: r.ParentConversationID, ChildCount: r.ChildCount,
+			ChildID: r.ChildID, ChildName: r.ChildName, Kind: r.Kind,
+			State: connectapi.ConversationListState(r.State),
+		})
+	}
+	return out, next, nil
+}
+
+// Visible adapts Controller.ConversationVisible behind the same scope rule as
+// every other conversation read, so a child's answer covers exactly the
+// corpus its listing covers.
+func (a connectConversations) Visible(ctx context.Context, conversationID string) (bool, error) {
+	scope, err := childConversationScope(ctx, a.c)
+	if err != nil {
+		return false, err
+	}
+	return a.c.ConversationVisible(ctx, scope, conversationID)
 }
 
 func (a connectConversations) Export(ctx context.Context, conversationID string) (connectapi.TranscriptRow, bool, error) {

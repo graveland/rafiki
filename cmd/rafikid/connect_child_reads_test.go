@@ -16,6 +16,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/server"
 
 	"github.com/multigres/testkit/assert"
@@ -283,4 +284,95 @@ func TestChildConversationsOwnerOfAdminIsNotDaemonWide(t *testing.T) {
 	_, ok, err := a.Export(ctx, thirdConv)
 	ck.NoError(err, "export of a third user's conversation is a scope miss, not an error")
 	ck.False(ok, "a child of an admin must not export a third user's conversation")
+}
+
+// fakeListReads records what the Controller's listing seam was called with,
+// and answers from fields a test sets.
+type fakeListReads struct {
+	gotScope     insights.Scope
+	gotFilter    insights.ListFilter
+	gotVisibleID string
+
+	rows    []insights.ConversationListing
+	next    string
+	err     error
+	visible bool
+}
+
+func (f *fakeListReads) ListConversations(_ context.Context, scope insights.Scope, flt insights.ListFilter) ([]insights.ConversationListing, string, error) {
+	f.gotScope = scope
+	f.gotFilter = flt
+	return f.rows, f.next, f.err
+}
+
+func (f *fakeListReads) Visible(_ context.Context, scope insights.Scope, conversationID string) (bool, error) {
+	f.gotScope = scope
+	f.gotVisibleID = conversationID
+	return f.visible, f.err
+}
+
+// TestListConversationsAdapterMatchesTheConversationReadBoundary pins the
+// fourth conversation read onto the same boundary the other three use: a
+// child credential's List and Visible resolve childConversationScope (the
+// OWNER's corpus for an ownerful lineage, the subtree for an ownerless one),
+// and the daemon's own LLM conversations are excluded with no way for a
+// caller to change that.
+func TestListConversationsAdapterMatchesTheConversationReadBoundary(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := limitsFixture(t, 3, 3) // c_d0 -> c_d1, neither with an owner
+	_ = c.st.Update("c_d1", func(s *childstore.Session) { s.SessionID = "01a0-worker" })
+	fb := &fakeListReads{}
+	c.listInsights = fb
+	a := connectConversations{c: c}
+	wantSel, err := c.subtreeSelector(context.Background(), "c_d0")
+	ck.Require().NoError(err, "subtree selector")
+	want := insights.ScopeSubtree(wantSel)
+
+	_, _, err = a.List(childTokenCtx("c_d0"), connectapi.ConversationListFilter{})
+	ck.Require().NoError(err, "List")
+	ck.True(reflect.DeepEqual(want, fb.gotScope), "List scope = %+v", fb.gotScope)
+	ck.EqDeep(recall.ExcludedEntrypoints, fb.gotFilter.Excluded,
+		"List must exclude the daemon's own LLM conversations")
+
+	fb.gotScope = insights.Scope{}
+	_, err = a.Visible(childTokenCtx("c_d0"), "01a0-worker")
+	ck.Require().NoError(err, "Visible")
+	ck.True(reflect.DeepEqual(want, fb.gotScope), "Visible scope = %+v", fb.gotScope)
+	ck.Eq("01a0-worker", fb.gotVisibleID, "Visible id")
+
+	// A user credential keeps scopeFor's answer, and the exclusion stays.
+	user := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", Via: server.ProvenanceUser})
+	fb.gotScope = insights.Scope{}
+	fb.gotFilter = insights.ListFilter{}
+	_, _, err = a.List(user, connectapi.ConversationListFilter{})
+	ck.Require().NoError(err, "List as a user")
+	ck.True(reflect.DeepEqual(insights.ScopeOwner("u1"), fb.gotScope), "user scope = %+v", fb.gotScope)
+	ck.EqDeep(recall.ExcludedEntrypoints, fb.gotFilter.Excluded,
+		"the exclusion must hold for a user credential too")
+}
+
+// TestListConversationsAdapterMapsTheListingSentinels pins which Connect code
+// each listing sentinel answers with: a cursor that cannot serve the request
+// and a relevance sort without a query are the caller's mistake
+// (invalid_argument), content search on a database without the index is the
+// environment's (failed_precondition).
+func TestListConversationsAdapterMapsTheListingSentinels(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want connect.Code
+	}{
+		{"bad cursor", insights.ErrBadCursor, connect.CodeInvalidArgument},
+		{"relevance needs query", insights.ErrRelevanceNeedsQuery, connect.CodeInvalidArgument},
+		{"content search unavailable", insights.ErrContentSearchUnavailable, connect.CodeFailedPrecondition},
+	} {
+		c := limitsFixture(t, 3, 3)
+		fb := &fakeListReads{err: tc.err}
+		c.listInsights = fb
+		a := connectConversations{c: c}
+		_, _, err := a.List(childTokenCtx("c_d0"), connectapi.ConversationListFilter{})
+		ck.Eq(tc.want, connect.CodeOf(err), "%s: err = %v, want code", tc.name, err)
+	}
 }

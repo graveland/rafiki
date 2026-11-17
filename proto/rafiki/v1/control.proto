@@ -28,6 +28,14 @@ message GetHistoryRequest {
   optional int32 limit = 3;
   // before keeps only events whose ts is strictly earlier. Unset = no bound.
   google.protobuf.Timestamp before = 4;
+  // conversation_id names the conversation DIRECTLY, by its own UUID, for a
+  // caller that holds the id rather than a child id (a conversation browser
+  // listing). Exactly one of child_id and conversation_id must be set. A
+  // conversation-keyed read is authorized by the same server-derived scope
+  // every conversation verb uses, never by a child relationship, so a
+  // conversation the caller cannot see is indistinguishable from an unknown
+  // one.
+  string conversation_id = 5;
 }
 
 message GetHistoryResponse {
@@ -893,6 +901,111 @@ message ConversationSearchResponse {
   repeated ConversationSummary rows = 1;
 }
 
+// ListConversationsRequest mirrors insights.ListFilter. It carries a
+// caller-chosen OWNER FILTER exactly like ConversationSearchRequest -- the
+// daemon ANDs its own server-derived scope on top and scope is never on the
+// wire. Every filter field is optional: a zero value means "not narrowed",
+// so an empty request lists the top level of the caller's visible set, most
+// recently active first.
+message ListConversationsRequest {
+  // 0 = the server default (50); negative is refused; the server clamps to a
+  // maximum.
+  int32 limit = 1;
+  // cursor continues after the previous page's last row (the opaque
+  // next_cursor a response returned). It is valid only for a request whose
+  // sort and parent_conversation_id match the one that produced it; anything
+  // else is refused.
+  string cursor = 2;
+  ConversationSort sort = 3;  // UNSPECIFIED = RECENT
+  // parent_conversation_id lists one tree level's members: the rows whose
+  // parent is this conversation. Empty means the TOP LEVEL (parent IS NULL),
+  // so there is no "everything" answer -- a client walks the tree level by
+  // level.
+  string parent_conversation_id = 4;
+  // query narrows to conversations whose extracted content matches (BM25 over
+  // conversation_window). With sort = RELEVANCE the rows are ordered best
+  // match first; relevance without a query is refused, and a database without
+  // the content index answers failed_precondition.
+  string query = 5;
+  // states narrows to conversations whose linked agent is in one of these
+  // lifecycle states. UNSPECIFIED inside the list is refused (it is not a
+  // state, and silently dropping it would widen the answer). Empty = all.
+  repeated ConversationState states = 6;
+  // kinds narrows to conversations whose linked agent has one of these child
+  // kinds. Empty = all; a non-empty list excludes conversations with no
+  // linked agent.
+  repeated string kinds = 7;
+  // name_contains is a case-insensitive substring match on the conversation's
+  // name or its linked agent's name.
+  string name_contains = 8;
+  // cwd_contains is a case-insensitive substring match on the conversation's
+  // working directory or its linked agent's.
+  string cwd_contains = 9;
+  // labels narrows to conversations whose linked agent carries ALL of these
+  // child labels.
+  map<string, string> labels = 10;
+  // since/until bound the conversation's last activity. Unset means
+  // unbounded.
+  google.protobuf.Timestamp since = 11;
+  google.protobuf.Timestamp until = 12;
+}
+
+// ConversationSort selects ListConversations' row order. UNSPECIFIED means
+// RECENT.
+enum ConversationSort {
+  CONVERSATION_SORT_UNSPECIFIED = 0;
+  CONVERSATION_SORT_RECENT = 1;      // last activity, newest first
+  CONVERSATION_SORT_CREATED = 2;     // creation time, newest first
+  CONVERSATION_SORT_RELEVANCE = 3;   // best match for query first; needs query
+}
+
+// ConversationState is the lifecycle state of the agent linked to a
+// conversation. A conversation with no linked agent is NO_AGENT, and every
+// filter/listing treats it as a first-class state rather than an absence.
+enum ConversationState {
+  CONVERSATION_STATE_UNSPECIFIED = 0;
+  CONVERSATION_STATE_OPEN = 1;      // linked agent is running or waiting
+  CONVERSATION_STATE_EXITED = 2;    // linked agent exited, not closed
+  CONVERSATION_STATE_CLOSED = 3;    // linked agent closed
+  CONVERSATION_STATE_NO_AGENT = 4;  // no agent links to the conversation
+}
+
+// ConversationListing is one row of ListConversations: the conversation, the
+// agent linked to it (when one exists) and the aggregates the page needs.
+message ConversationListing {
+  string id = 1;
+  string name = 2;
+  string model = 3;
+  // owner is the owning user's name; empty when unowned.
+  string owner = 4;
+  google.protobuf.Timestamp created_at = 5;
+  // last_activity is the conversation's last write.
+  google.protobuf.Timestamp last_activity = 6;
+  // closed_at is unset while the conversation is open.
+  google.protobuf.Timestamp closed_at = 7;
+  int32 turns = 8;
+  double cost_usd = 9;
+  // parent_conversation_id is empty for a top-level row.
+  string parent_conversation_id = 10;
+  // child_count is the number of visible members whose parent is this row,
+  // so it always equals what listing with parent_conversation_id = this row's
+  // id and the same filter returns.
+  int32 child_count = 11;
+  // child_id/child_name/kind describe the linked agent; all empty when no
+  // agent links to the conversation.
+  string child_id = 12;
+  string child_name = 13;
+  string kind = 14;
+  ConversationState state = 15;
+}
+
+message ListConversationsResponse {
+  repeated ConversationListing rows = 1;
+  // next_cursor continues after this page's last row; empty when the page is
+  // the last one.
+  string next_cursor = 2;
+}
+
 message ConversationExportRequest {
   string conversation_id = 1;
 }
@@ -1439,6 +1552,7 @@ service Control {
   rpc RecallBackfill(RecallBackfillRequest) returns (RecallBackfillResponse);
   rpc RecallStatus(RecallStatusRequest) returns (RecallStatusResponse);
   rpc ConversationSearch(ConversationSearchRequest) returns (ConversationSearchResponse);
+  rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
   rpc ConversationExport(ConversationExportRequest) returns (ConversationExportResponse);
   rpc ConversationQuery(ConversationQueryRequest) returns (ConversationQueryResponse);
   rpc ConversationReview(ConversationReviewRequest) returns (ConversationReviewResponse);

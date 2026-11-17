@@ -51,7 +51,8 @@ const (
 	// SetBudget, SetRouting, GetHistory, StreamEvents, ListChildren, GetChild,
 	// ListTasks;
 	// the three script-child verbs Report, Receive, SetResult; the
-	// conversation reads ConversationSearch/Export/Query, answered through the
+	// conversation reads ConversationSearch/Export/Query/ListConversations,
+	// answered through the
 	// caller's subtree (childConversationScope); the pymodule verbs, read
 	// from and written to the owner's corpus exactly as the MCP face's
 	// pymodule tools do; and PutPreset/DeletePreset, which the handler admits
@@ -147,6 +148,7 @@ var controlPolicyTable = map[string]controlPolicy{
 	"ConversationSearch": policyChildScoped,
 	"ConversationExport": policyChildScoped,
 	"ConversationQuery":  policyChildScoped,
+	"ListConversations":  policyChildScoped,
 	// The owner's pymodule corpus: a child reads what its executor can run
 	// and authors into it, as the MCP face's pymodule tools let it.
 	"ListPymodules":  policyChildScoped,

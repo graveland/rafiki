@@ -128,7 +128,6 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"Kill":         ownerGuarded,
 	"Close":        ownerGuarded,
 	"GetChild":     ownerGuarded,
-	"GetHistory":   ownerGuarded,
 	"SetBudget":    ownerGuarded,
 	"SetRouting":   ownerGuarded,
 	"Rename":       ownerGuarded,
@@ -138,6 +137,11 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"GetStreams":   ownerGuarded,
 	"ListTasks":    ownerGuarded,
 	"StreamEvents": ownerGuarded, // child/subtree subject; the All subject is filtered below
+	// GetHistory is guarded on its child_id. Its conversation_id form carries
+	// no child to authorize: that read skips the guard and is owner-scoped by
+	// scopeFor to insights.ScopeOwner for a non-admin user, the conversation
+	// verbs' boundary, with a scope miss reading exactly like an unknown id.
+	"GetHistory": ownerGuarded,
 	// Spawn is guarded on parent_child_id only: the owner stamp itself comes
 	// from the credential, so a top-level spawn needs no target check, while a
 	// spawn under a foreign parent would put the new child in another user's
@@ -156,6 +160,7 @@ var ownerIsolationTable = map[string]ownerIsolation{
 	"ConversationSearch":   ownerExempt,
 	"ConversationExport":   ownerExempt,
 	"ConversationQuery":    ownerExempt,
+	"ListConversations":    ownerExempt,
 	"ConversationStats":    ownerExempt,
 	"ConversationReview":   ownerExempt,
 	"ConversationFindings": ownerExempt,
@@ -273,6 +278,7 @@ var ownerExemptReasons = map[string]string{
 	"ConversationSearch":   "conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user",
 	"ConversationExport":   "conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user",
 	"ConversationQuery":    "conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user",
+	"ListConversations":    "conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user",
 	"ConversationStats":    "conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user",
 	"ConversationReview":   "conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user",
 	"ConversationFindings": "conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user",

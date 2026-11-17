@@ -304,6 +304,13 @@ type Controller struct {
 	// them. Nil exactly when pool is nil, same condition as reviewQ.
 	reviewInsights reviewReads
 
+	// listInsights answers the conversation-listing reads (ListConversations,
+	// Visible) exactly the way reviewInsights answers the review verbs': the
+	// methods live on *insights.Insights, not on the agentcli.Backend seam
+	// c.insights carries, so this field is the one place the Controller
+	// reaches them. Nil exactly when pool is nil.
+	listInsights conversationListReads
+
 	// baseCtx is the daemon's own context, threaded into inproc.Options.Parent
 	// so cancelling it stops every in-process agent child at once. Distinct
 	// from the per-request ctx passed to Spawn/Resume/RespawnChild, which only
@@ -980,6 +987,10 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		// does not re-price anything, so the catalog's pricer is irrelevant
 		// here and this needs no SetCatalog rebuild.
 		c.reviewInsights = insights.New(pool)
+		// The conversation-listing reads' surface, wired for the same reason
+		// as reviewInsights: ListConversations and Visible live on
+		// *insights.Insights alone.
+		c.listInsights = insights.New(pool)
 	}
 	return c
 }
@@ -1749,6 +1760,33 @@ func (c *Controller) ConversationSearch(ctx context.Context, scope insights.Scop
 		return nil, translateInsightsErr(err)
 	}
 	return rows, nil
+}
+
+// conversationListReads is the listing reads' seam, mirroring reviewReads:
+// the two methods live on *insights.Insights, and holding them behind an
+// interface keeps every test that builds a Controller without a database
+// compiling.
+type conversationListReads interface {
+	ListConversations(ctx context.Context, scope insights.Scope, f insights.ListFilter) ([]insights.ConversationListing, string, error)
+	Visible(ctx context.Context, scope insights.Scope, conversationID string) (bool, error)
+}
+
+func (c *Controller) ConversationList(ctx context.Context, scope insights.Scope, f insights.ListFilter) ([]insights.ConversationListing, string, error) {
+	if c.listInsights == nil {
+		return nil, "", local.ErrNoPool
+	}
+	rows, next, err := c.listInsights.ListConversations(ctx, scope, f)
+	if err != nil {
+		return nil, "", translateInsightsErr(err)
+	}
+	return rows, next, nil
+}
+
+func (c *Controller) ConversationVisible(ctx context.Context, scope insights.Scope, conversationID string) (bool, error) {
+	if c.listInsights == nil {
+		return false, local.ErrNoPool
+	}
+	return c.listInsights.Visible(ctx, scope, conversationID)
 }
 
 // agentRunnerError classifies a runner-construction failure: a hosting

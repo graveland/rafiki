@@ -612,6 +612,15 @@ pub struct GetHistoryRequest {
     /// before keeps only events whose ts is strictly earlier. Unset = no bound.
     #[prost(message, optional, tag = "4")]
     pub before: ::core::option::Option<::prost_types::Timestamp>,
+    /// conversation_id names the conversation DIRECTLY, by its own UUID, for a
+    /// caller that holds the id rather than a child id (a conversation browser
+    /// listing). Exactly one of child_id and conversation_id must be set. A
+    /// conversation-keyed read is authorized by the same server-derived scope
+    /// every conversation verb uses, never by a child relationship, so a
+    /// conversation the caller cannot see is indistinguishable from an unknown
+    /// one.
+    #[prost(string, tag = "5")]
+    pub conversation_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetHistoryResponse {
@@ -1657,6 +1666,124 @@ pub struct ConversationSummary {
 pub struct ConversationSearchResponse {
     #[prost(message, repeated, tag = "1")]
     pub rows: ::prost::alloc::vec::Vec<ConversationSummary>,
+}
+/// ListConversationsRequest mirrors insights.ListFilter. It carries a
+/// caller-chosen OWNER FILTER exactly like ConversationSearchRequest -- the
+/// daemon ANDs its own server-derived scope on top and scope is never on the
+/// wire. Every filter field is optional: a zero value means "not narrowed",
+/// so an empty request lists the top level of the caller's visible set, most
+/// recently active first.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListConversationsRequest {
+    /// 0 = the server default (50); negative is refused; the server clamps to a
+    /// maximum.
+    #[prost(int32, tag = "1")]
+    pub limit: i32,
+    /// cursor continues after the previous page's last row (the opaque
+    /// next_cursor a response returned). It is valid only for a request whose
+    /// sort and parent_conversation_id match the one that produced it; anything
+    /// else is refused.
+    #[prost(string, tag = "2")]
+    pub cursor: ::prost::alloc::string::String,
+    /// UNSPECIFIED = RECENT
+    #[prost(enumeration = "ConversationSort", tag = "3")]
+    pub sort: i32,
+    /// parent_conversation_id lists one tree level's members: the rows whose
+    /// parent is this conversation. Empty means the TOP LEVEL (parent IS NULL),
+    /// so there is no "everything" answer -- a client walks the tree level by
+    /// level.
+    #[prost(string, tag = "4")]
+    pub parent_conversation_id: ::prost::alloc::string::String,
+    /// query narrows to conversations whose extracted content matches (BM25 over
+    /// conversation_window). With sort = RELEVANCE the rows are ordered best
+    /// match first; relevance without a query is refused, and a database without
+    /// the content index answers failed_precondition.
+    #[prost(string, tag = "5")]
+    pub query: ::prost::alloc::string::String,
+    /// states narrows to conversations whose linked agent is in one of these
+    /// lifecycle states. UNSPECIFIED inside the list is refused (it is not a
+    /// state, and silently dropping it would widen the answer). Empty = all.
+    #[prost(enumeration = "ConversationState", repeated, tag = "6")]
+    pub states: ::prost::alloc::vec::Vec<i32>,
+    /// kinds narrows to conversations whose linked agent has one of these child
+    /// kinds. Empty = all; a non-empty list excludes conversations with no
+    /// linked agent.
+    #[prost(string, repeated, tag = "7")]
+    pub kinds: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// name_contains is a case-insensitive substring match on the conversation's
+    /// name or its linked agent's name.
+    #[prost(string, tag = "8")]
+    pub name_contains: ::prost::alloc::string::String,
+    /// cwd_contains is a case-insensitive substring match on the conversation's
+    /// working directory or its linked agent's.
+    #[prost(string, tag = "9")]
+    pub cwd_contains: ::prost::alloc::string::String,
+    /// labels narrows to conversations whose linked agent carries ALL of these
+    /// child labels.
+    #[prost(map = "string, string", tag = "10")]
+    pub labels: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+    /// since/until bound the conversation's last activity. Unset means
+    /// unbounded.
+    #[prost(message, optional, tag = "11")]
+    pub since: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "12")]
+    pub until: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// ConversationListing is one row of ListConversations: the conversation, the
+/// agent linked to it (when one exists) and the aggregates the page needs.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConversationListing {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub model: ::prost::alloc::string::String,
+    /// owner is the owning user's name; empty when unowned.
+    #[prost(string, tag = "4")]
+    pub owner: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// last_activity is the conversation's last write.
+    #[prost(message, optional, tag = "6")]
+    pub last_activity: ::core::option::Option<::prost_types::Timestamp>,
+    /// closed_at is unset while the conversation is open.
+    #[prost(message, optional, tag = "7")]
+    pub closed_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(int32, tag = "8")]
+    pub turns: i32,
+    #[prost(double, tag = "9")]
+    pub cost_usd: f64,
+    /// parent_conversation_id is empty for a top-level row.
+    #[prost(string, tag = "10")]
+    pub parent_conversation_id: ::prost::alloc::string::String,
+    /// child_count is the number of visible members whose parent is this row,
+    /// so it always equals what listing with parent_conversation_id = this row's
+    /// id and the same filter returns.
+    #[prost(int32, tag = "11")]
+    pub child_count: i32,
+    /// child_id/child_name/kind describe the linked agent; all empty when no
+    /// agent links to the conversation.
+    #[prost(string, tag = "12")]
+    pub child_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "13")]
+    pub child_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "14")]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(enumeration = "ConversationState", tag = "15")]
+    pub state: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListConversationsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub rows: ::prost::alloc::vec::Vec<ConversationListing>,
+    /// next_cursor continues after this page's last row; empty when the page is
+    /// the last one.
+    #[prost(string, tag = "2")]
+    pub next_cursor: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConversationExportRequest {
@@ -4186,6 +4313,85 @@ impl ListScope {
             "LIST_SCOPE_UNSPECIFIED" => Some(Self::Unspecified),
             "LIST_SCOPE_SUBTREE" => Some(Self::Subtree),
             "LIST_SCOPE_OWNER" => Some(Self::Owner),
+            _ => None,
+        }
+    }
+}
+/// ConversationSort selects ListConversations' row order. UNSPECIFIED means
+/// RECENT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ConversationSort {
+    Unspecified = 0,
+    /// last activity, newest first
+    Recent = 1,
+    /// creation time, newest first
+    Created = 2,
+    /// best match for query first; needs query
+    Relevance = 3,
+}
+impl ConversationSort {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONVERSATION_SORT_UNSPECIFIED",
+            Self::Recent => "CONVERSATION_SORT_RECENT",
+            Self::Created => "CONVERSATION_SORT_CREATED",
+            Self::Relevance => "CONVERSATION_SORT_RELEVANCE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONVERSATION_SORT_UNSPECIFIED" => Some(Self::Unspecified),
+            "CONVERSATION_SORT_RECENT" => Some(Self::Recent),
+            "CONVERSATION_SORT_CREATED" => Some(Self::Created),
+            "CONVERSATION_SORT_RELEVANCE" => Some(Self::Relevance),
+            _ => None,
+        }
+    }
+}
+/// ConversationState is the lifecycle state of the agent linked to a
+/// conversation. A conversation with no linked agent is NO_AGENT, and every
+/// filter/listing treats it as a first-class state rather than an absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ConversationState {
+    Unspecified = 0,
+    /// linked agent is running or waiting
+    Open = 1,
+    /// linked agent exited, not closed
+    Exited = 2,
+    /// linked agent closed
+    Closed = 3,
+    /// no agent links to the conversation
+    NoAgent = 4,
+}
+impl ConversationState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CONVERSATION_STATE_UNSPECIFIED",
+            Self::Open => "CONVERSATION_STATE_OPEN",
+            Self::Exited => "CONVERSATION_STATE_EXITED",
+            Self::Closed => "CONVERSATION_STATE_CLOSED",
+            Self::NoAgent => "CONVERSATION_STATE_NO_AGENT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CONVERSATION_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "CONVERSATION_STATE_OPEN" => Some(Self::Open),
+            "CONVERSATION_STATE_EXITED" => Some(Self::Exited),
+            "CONVERSATION_STATE_CLOSED" => Some(Self::Closed),
+            "CONVERSATION_STATE_NO_AGENT" => Some(Self::NoAgent),
             _ => None,
         }
     }

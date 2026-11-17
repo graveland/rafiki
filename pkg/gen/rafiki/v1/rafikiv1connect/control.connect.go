@@ -126,6 +126,9 @@ const (
 	// ControlConversationSearchProcedure is the fully-qualified name of the Control's
 	// ConversationSearch RPC.
 	ControlConversationSearchProcedure = "/rafiki.v1.Control/ConversationSearch"
+	// ControlListConversationsProcedure is the fully-qualified name of the Control's ListConversations
+	// RPC.
+	ControlListConversationsProcedure = "/rafiki.v1.Control/ListConversations"
 	// ControlConversationExportProcedure is the fully-qualified name of the Control's
 	// ConversationExport RPC.
 	ControlConversationExportProcedure = "/rafiki.v1.Control/ConversationExport"
@@ -313,6 +316,7 @@ type ControlClient interface {
 	RecallBackfill(context.Context, *connect.Request[v1.RecallBackfillRequest]) (*connect.Response[v1.RecallBackfillResponse], error)
 	RecallStatus(context.Context, *connect.Request[v1.RecallStatusRequest]) (*connect.Response[v1.RecallStatusResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
+	ListConversations(context.Context, *connect.Request[v1.ListConversationsRequest]) (*connect.Response[v1.ListConversationsResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
 	ConversationReview(context.Context, *connect.Request[v1.ConversationReviewRequest]) (*connect.Response[v1.ConversationReviewResponse], error)
@@ -673,6 +677,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			httpClient,
 			baseURL+ControlConversationSearchProcedure,
 			connect.WithSchema(controlMethods.ByName("ConversationSearch")),
+			connect.WithClientOptions(opts...),
+		),
+		listConversations: connect.NewClient[v1.ListConversationsRequest, v1.ListConversationsResponse](
+			httpClient,
+			baseURL+ControlListConversationsProcedure,
+			connect.WithSchema(controlMethods.ByName("ListConversations")),
 			connect.WithClientOptions(opts...),
 		),
 		conversationExport: connect.NewClient[v1.ConversationExportRequest, v1.ConversationExportResponse](
@@ -1082,6 +1092,7 @@ type controlClient struct {
 	recallBackfill           *connect.Client[v1.RecallBackfillRequest, v1.RecallBackfillResponse]
 	recallStatus             *connect.Client[v1.RecallStatusRequest, v1.RecallStatusResponse]
 	conversationSearch       *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
+	listConversations        *connect.Client[v1.ListConversationsRequest, v1.ListConversationsResponse]
 	conversationExport       *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
 	conversationQuery        *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
 	conversationReview       *connect.Client[v1.ConversationReviewRequest, v1.ConversationReviewResponse]
@@ -1352,6 +1363,11 @@ func (c *controlClient) RecallStatus(ctx context.Context, req *connect.Request[v
 // ConversationSearch calls rafiki.v1.Control.ConversationSearch.
 func (c *controlClient) ConversationSearch(ctx context.Context, req *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
 	return c.conversationSearch.CallUnary(ctx, req)
+}
+
+// ListConversations calls rafiki.v1.Control.ListConversations.
+func (c *controlClient) ListConversations(ctx context.Context, req *connect.Request[v1.ListConversationsRequest]) (*connect.Response[v1.ListConversationsResponse], error) {
+	return c.listConversations.CallUnary(ctx, req)
 }
 
 // ConversationExport calls rafiki.v1.Control.ConversationExport.
@@ -1701,6 +1717,7 @@ type ControlHandler interface {
 	RecallBackfill(context.Context, *connect.Request[v1.RecallBackfillRequest]) (*connect.Response[v1.RecallBackfillResponse], error)
 	RecallStatus(context.Context, *connect.Request[v1.RecallStatusRequest]) (*connect.Response[v1.RecallStatusResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
+	ListConversations(context.Context, *connect.Request[v1.ListConversationsRequest]) (*connect.Response[v1.ListConversationsResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
 	ConversationReview(context.Context, *connect.Request[v1.ConversationReviewRequest]) (*connect.Response[v1.ConversationReviewResponse], error)
@@ -2057,6 +2074,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		ControlConversationSearchProcedure,
 		svc.ConversationSearch,
 		connect.WithSchema(controlMethods.ByName("ConversationSearch")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlListConversationsHandler := connect.NewUnaryHandler(
+		ControlListConversationsProcedure,
+		svc.ListConversations,
+		connect.WithSchema(controlMethods.ByName("ListConversations")),
 		connect.WithHandlerOptions(opts...),
 	)
 	controlConversationExportHandler := connect.NewUnaryHandler(
@@ -2505,6 +2528,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlRecallStatusHandler.ServeHTTP(w, r)
 		case ControlConversationSearchProcedure:
 			controlConversationSearchHandler.ServeHTTP(w, r)
+		case ControlListConversationsProcedure:
+			controlListConversationsHandler.ServeHTTP(w, r)
 		case ControlConversationExportProcedure:
 			controlConversationExportHandler.ServeHTTP(w, r)
 		case ControlConversationQueryProcedure:
@@ -2800,6 +2825,10 @@ func (UnimplementedControlHandler) RecallStatus(context.Context, *connect.Reques
 
 func (UnimplementedControlHandler) ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationSearch is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListConversations(context.Context, *connect.Request[v1.ListConversationsRequest]) (*connect.Response[v1.ListConversationsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListConversations is not implemented"))
 }
 
 func (UnimplementedControlHandler) ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error) {

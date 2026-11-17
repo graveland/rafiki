@@ -48,6 +48,19 @@ class ListScope:
     LIST_SCOPE_SUBTREE = "LIST_SCOPE_SUBTREE"
     LIST_SCOPE_OWNER = "LIST_SCOPE_OWNER"
 
+class ConversationSort:
+    CONVERSATION_SORT_UNSPECIFIED = "CONVERSATION_SORT_UNSPECIFIED"
+    CONVERSATION_SORT_RECENT = "CONVERSATION_SORT_RECENT"
+    CONVERSATION_SORT_CREATED = "CONVERSATION_SORT_CREATED"
+    CONVERSATION_SORT_RELEVANCE = "CONVERSATION_SORT_RELEVANCE"
+
+class ConversationState:
+    CONVERSATION_STATE_UNSPECIFIED = "CONVERSATION_STATE_UNSPECIFIED"
+    CONVERSATION_STATE_OPEN = "CONVERSATION_STATE_OPEN"
+    CONVERSATION_STATE_EXITED = "CONVERSATION_STATE_EXITED"
+    CONVERSATION_STATE_CLOSED = "CONVERSATION_STATE_CLOSED"
+    CONVERSATION_STATE_NO_AGENT = "CONVERSATION_STATE_NO_AGENT"
+
 class ReviewStage:
     REVIEW_STAGE_UNSPECIFIED = "REVIEW_STAGE_UNSPECIFIED"
     REVIEW_STAGE_DETECT = "REVIEW_STAGE_DETECT"
@@ -71,6 +84,7 @@ class GetHistoryRequest:
     after_ordinal: Optional[int] = None
     limit: Optional[int] = None
     before: Optional[datetime.datetime] = None
+    conversation_id: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -82,6 +96,8 @@ class GetHistoryRequest:
             out["limit"] = self.limit
         if self.before is not None:
             out["before"] = _ts_out(self.before)
+        if self.conversation_id != "":
+            out["conversationId"] = self.conversation_id
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "GetHistoryRequest":
@@ -98,6 +114,9 @@ class GetHistoryRequest:
         _v = _d.get("before")
         if _v is not None:
             obj.before = _ts_in(_v, "before")
+        _v = _d.get("conversationId")
+        if _v is not None:
+            obj.conversation_id = _v
         return obj
 
 @dataclasses.dataclass
@@ -2081,6 +2100,213 @@ class ConversationSearchResponse:
         _v = _d.get("rows")
         if _v is not None:
             obj.rows = [ConversationSummary.from_dict(x) for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class ListConversationsRequest:
+    limit: int = 0
+    cursor: str = ""
+    sort: str = "CONVERSATION_SORT_UNSPECIFIED"
+    parent_conversation_id: str = ""
+    query: str = ""
+    states: list[str] = dataclasses.field(default_factory=list)
+    kinds: list[str] = dataclasses.field(default_factory=list)
+    name_contains: str = ""
+    cwd_contains: str = ""
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    since: Optional[datetime.datetime] = None
+    until: Optional[datetime.datetime] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.limit != 0:
+            out["limit"] = self.limit
+        if self.cursor != "":
+            out["cursor"] = self.cursor
+        if self.sort != "CONVERSATION_SORT_UNSPECIFIED":
+            out["sort"] = self.sort
+        if self.parent_conversation_id != "":
+            out["parentConversationId"] = self.parent_conversation_id
+        if self.query != "":
+            out["query"] = self.query
+        if self.states:
+            out["states"] = [x for x in self.states]
+        if self.kinds:
+            out["kinds"] = [x for x in self.kinds]
+        if self.name_contains != "":
+            out["nameContains"] = self.name_contains
+        if self.cwd_contains != "":
+            out["cwdContains"] = self.cwd_contains
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        if self.since is not None:
+            out["since"] = _ts_out(self.since)
+        if self.until is not None:
+            out["until"] = _ts_out(self.until)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListConversationsRequest":
+        obj = cls()
+        _v = _d.get("limit")
+        if _v is not None:
+            obj.limit = _int_in(_v)
+        _v = _d.get("cursor")
+        if _v is not None:
+            obj.cursor = _v
+        _v = _d.get("sort")
+        if _v is not None:
+            obj.sort = _v
+        _v = _d.get("parentConversationId")
+        if _v is not None:
+            obj.parent_conversation_id = _v
+        _v = _d.get("query")
+        if _v is not None:
+            obj.query = _v
+        _v = _d.get("states")
+        if _v is not None:
+            obj.states = [x for x in _v]
+        _v = _d.get("kinds")
+        if _v is not None:
+            obj.kinds = [x for x in _v]
+        _v = _d.get("nameContains")
+        if _v is not None:
+            obj.name_contains = _v
+        _v = _d.get("cwdContains")
+        if _v is not None:
+            obj.cwd_contains = _v
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        _v = _d.get("since")
+        if _v is not None:
+            obj.since = _ts_in(_v, "since")
+        _v = _d.get("until")
+        if _v is not None:
+            obj.until = _ts_in(_v, "until")
+        return obj
+
+@dataclasses.dataclass
+class ConversationListing:
+    id: str = ""
+    name: str = ""
+    model: str = ""
+    owner: str = ""
+    created_at: Optional[datetime.datetime] = None
+    last_activity: Optional[datetime.datetime] = None
+    closed_at: Optional[datetime.datetime] = None
+    turns: int = 0
+    cost_usd: float = 0.0
+    parent_conversation_id: str = ""
+    child_count: int = 0
+    child_id: str = ""
+    child_name: str = ""
+    kind: str = ""
+    state: str = "CONVERSATION_STATE_UNSPECIFIED"
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.id != "":
+            out["id"] = self.id
+        if self.name != "":
+            out["name"] = self.name
+        if self.model != "":
+            out["model"] = self.model
+        if self.owner != "":
+            out["owner"] = self.owner
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
+        if self.last_activity is not None:
+            out["lastActivity"] = _ts_out(self.last_activity)
+        if self.closed_at is not None:
+            out["closedAt"] = _ts_out(self.closed_at)
+        if self.turns != 0:
+            out["turns"] = self.turns
+        if self.cost_usd != 0.0:
+            out["costUsd"] = _float_out(self.cost_usd)
+        if self.parent_conversation_id != "":
+            out["parentConversationId"] = self.parent_conversation_id
+        if self.child_count != 0:
+            out["childCount"] = self.child_count
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.child_name != "":
+            out["childName"] = self.child_name
+        if self.kind != "":
+            out["kind"] = self.kind
+        if self.state != "CONVERSATION_STATE_UNSPECIFIED":
+            out["state"] = self.state
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ConversationListing":
+        obj = cls()
+        _v = _d.get("id")
+        if _v is not None:
+            obj.id = _v
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("model")
+        if _v is not None:
+            obj.model = _v
+        _v = _d.get("owner")
+        if _v is not None:
+            obj.owner = _v
+        _v = _d.get("createdAt")
+        if _v is not None:
+            obj.created_at = _ts_in(_v, "createdAt")
+        _v = _d.get("lastActivity")
+        if _v is not None:
+            obj.last_activity = _ts_in(_v, "lastActivity")
+        _v = _d.get("closedAt")
+        if _v is not None:
+            obj.closed_at = _ts_in(_v, "closedAt")
+        _v = _d.get("turns")
+        if _v is not None:
+            obj.turns = _int_in(_v)
+        _v = _d.get("costUsd")
+        if _v is not None:
+            obj.cost_usd = _float_in(_v)
+        _v = _d.get("parentConversationId")
+        if _v is not None:
+            obj.parent_conversation_id = _v
+        _v = _d.get("childCount")
+        if _v is not None:
+            obj.child_count = _int_in(_v)
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("childName")
+        if _v is not None:
+            obj.child_name = _v
+        _v = _d.get("kind")
+        if _v is not None:
+            obj.kind = _v
+        _v = _d.get("state")
+        if _v is not None:
+            obj.state = _v
+        return obj
+
+@dataclasses.dataclass
+class ListConversationsResponse:
+    rows: list[ConversationListing] = dataclasses.field(default_factory=list)
+    next_cursor: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.rows:
+            out["rows"] = [x.to_dict() for x in self.rows]
+        if self.next_cursor != "":
+            out["nextCursor"] = self.next_cursor
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListConversationsResponse":
+        obj = cls()
+        _v = _d.get("rows")
+        if _v is not None:
+            obj.rows = [ConversationListing.from_dict(x) for x in _v]
+        _v = _d.get("nextCursor")
+        if _v is not None:
+            obj.next_cursor = _v
         return obj
 
 @dataclasses.dataclass

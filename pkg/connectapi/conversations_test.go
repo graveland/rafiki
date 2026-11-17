@@ -31,12 +31,32 @@ type fakeConversationInsights struct {
 	err          error
 
 	result connectapi.CatalogueResult
+
+	listCalled  bool
+	gotList     connectapi.ConversationListFilter
+	listRows    []connectapi.ConversationListingRow
+	listNext    string
+	gotVisible  string
+	visible     bool
+	visibleSeen bool
 }
 
 func (f *fakeConversationInsights) Search(_ context.Context, flt connectapi.ConversationSearchFilter) ([]connectapi.ConversationSummaryRow, error) {
 	f.searchCalled = true
 	f.gotFilter = flt
 	return f.rows, f.err
+}
+
+func (f *fakeConversationInsights) List(_ context.Context, flt connectapi.ConversationListFilter) ([]connectapi.ConversationListingRow, string, error) {
+	f.listCalled = true
+	f.gotList = flt
+	return f.listRows, f.listNext, f.err
+}
+
+func (f *fakeConversationInsights) Visible(_ context.Context, conversationID string) (bool, error) {
+	f.gotVisible = conversationID
+	f.visibleSeen = true
+	return f.visible, f.err
 }
 
 func (f *fakeConversationInsights) Export(_ context.Context, conversationID string) (connectapi.TranscriptRow, bool, error) {

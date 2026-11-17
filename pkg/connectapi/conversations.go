@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -34,6 +35,57 @@ type ConversationSummaryRow struct {
 	InputTokens, OutputTokens, CacheReadTokens                int64
 	CacheHitRatio, TotalCostUSD                               float64
 	FirstMessage                                              string
+}
+
+// ConversationListSort mirrors insights.ListSort: the row order of a
+// conversation listing. The zero value is the recent order, matching both
+// that type's and the proto enum's "unspecified = recent" convention.
+type ConversationListSort int
+
+const (
+	ConversationListSortRecent    ConversationListSort = iota // last activity first
+	ConversationListSortCreated                               // creation time first
+	ConversationListSortRelevance                             // best match for the query first
+)
+
+// ConversationListState mirrors insights.ListState: the lifecycle state of
+// the agent linked to a conversation.
+type ConversationListState string
+
+const (
+	ConversationListStateOpen    ConversationListState = "open"
+	ConversationListStateExited  ConversationListState = "exited"
+	ConversationListStateClosed  ConversationListState = "closed"
+	ConversationListStateNoAgent ConversationListState = "no_agent"
+)
+
+// ConversationListFilter mirrors insights.ListFilter field for field. A nil
+// Since/Until is unbounded, and every other zero value means "not narrowed",
+// matching that type's conventions.
+type ConversationListFilter struct {
+	Limit                     int
+	Cursor                    string
+	Sort                      ConversationListSort
+	ParentConversationID      string
+	Query                     string
+	States                    []ConversationListState
+	Kinds                     []string
+	NameContains, CwdContains string
+	Labels                    map[string]string
+	Since, Until              *time.Time
+}
+
+// ConversationListingRow mirrors insights.ConversationListing.
+type ConversationListingRow struct {
+	ID, Name, Model, Owner   string
+	CreatedAt, LastActivity  time.Time
+	ClosedAt                 *time.Time // nil = still open
+	Turns                    int
+	CostUSD                  float64
+	ParentConversationID     string // "" = top level
+	ChildCount               int
+	ChildID, ChildName, Kind string
+	State                    ConversationListState
 }
 
 // TranscriptTurnRow mirrors insights.TranscriptTurn.
@@ -92,6 +144,16 @@ type CatalogueResult struct {
 // takes one, matching QuotaReader's "no caller-supplied id" shape.
 type ConversationInsights interface {
 	Search(ctx context.Context, f ConversationSearchFilter) ([]ConversationSummaryRow, error)
+	// List answers ListConversations: one level of the conversation tree under
+	// the caller's server-derived scope, with the opaque cursor to continue
+	// after. The adapter owns the scope AND the excluded-entrypoint list, so no
+	// caller choice can re-admit a conversation the daemon's own jobs wrote.
+	List(ctx context.Context, f ConversationListFilter) ([]ConversationListingRow, string, error)
+	// Visible reports whether conversationID is inside the caller's scope.
+	// Unknown and malformed ids answer (false, nil) -- the handler turns both
+	// into the one not-found answer, so a scope miss reads exactly like
+	// absence.
+	Visible(ctx context.Context, conversationID string) (bool, error)
 	// Export returns ok=false when the conversation does not exist OR is
 	// outside the caller's scope -- the two must be indistinguishable (a
 	// scope miss reads exactly like not-found, never a permission error).
@@ -152,6 +214,134 @@ func (s *Server) ConversationSearch(
 		out = append(out, row)
 	}
 	return connect.NewResponse(&rafikiv1.ConversationSearchResponse{Rows: out}), nil
+}
+
+// listSortFromProto maps the wire sort enum onto the filter's sort. The
+// enum's UNSPECIFIED and the filter's zero value both mean the recent order,
+// so the two zero conventions collapse here once, at the boundary.
+func listSortFromProto(v rafikiv1.ConversationSort) ConversationListSort {
+	switch v {
+	case rafikiv1.ConversationSort_CONVERSATION_SORT_CREATED:
+		return ConversationListSortCreated
+	case rafikiv1.ConversationSort_CONVERSATION_SORT_RELEVANCE:
+		return ConversationListSortRelevance
+	default:
+		return ConversationListSortRecent
+	}
+}
+
+// listStatesFromProto maps the wire state enums onto the filter's states. An
+// UNSPECIFIED entry inside the list is refused: it is not a state, and
+// silently dropping it would widen the answer past what the caller asked to
+// see.
+func listStatesFromProto(vals []rafikiv1.ConversationState) ([]ConversationListState, error) {
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	out := make([]ConversationListState, 0, len(vals))
+	for _, v := range vals {
+		switch v {
+		case rafikiv1.ConversationState_CONVERSATION_STATE_OPEN:
+			out = append(out, ConversationListStateOpen)
+		case rafikiv1.ConversationState_CONVERSATION_STATE_EXITED:
+			out = append(out, ConversationListStateExited)
+		case rafikiv1.ConversationState_CONVERSATION_STATE_CLOSED:
+			out = append(out, ConversationListStateClosed)
+		case rafikiv1.ConversationState_CONVERSATION_STATE_NO_AGENT:
+			out = append(out, ConversationListStateNoAgent)
+		default:
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("states contains an unspecified value"))
+		}
+	}
+	return out, nil
+}
+
+// ListConversations serves one level of the conversation tree under the
+// caller's server-derived scope. The wire carries a filter, never a scope or
+// an exclusion list: the adapter derives the scope from the caller's own
+// identity and always excludes the conversations the daemon's own LLM jobs
+// wrote, so no request can widen either.
+func (s *Server) ListConversations(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.ListConversationsRequest],
+) (*connect.Response[rafikiv1.ListConversationsResponse], error) {
+	p := s.conversations.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("conversation insights not yet wired"))
+	}
+	limit := int(req.Msg.GetLimit())
+	if limit < 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("limit must not be negative"))
+	}
+	if limit > maxConversationSearchLimit {
+		limit = maxConversationSearchLimit
+	}
+	since, err := protoTimePtr(req.Msg.GetSince())
+	if err != nil {
+		return nil, err
+	}
+	until, err := protoTimePtr(req.Msg.GetUntil())
+	if err != nil {
+		return nil, err
+	}
+	states, err := listStatesFromProto(req.Msg.GetStates())
+	if err != nil {
+		return nil, err
+	}
+	f := ConversationListFilter{
+		Limit: limit, Cursor: req.Msg.GetCursor(),
+		Sort:                 listSortFromProto(req.Msg.GetSort()),
+		ParentConversationID: req.Msg.GetParentConversationId(),
+		Query:                req.Msg.GetQuery(), States: states, Kinds: req.Msg.GetKinds(),
+		NameContains: req.Msg.GetNameContains(), CwdContains: req.Msg.GetCwdContains(),
+		Labels: req.Msg.GetLabels(), Since: since, Until: until,
+	}
+	// The adapter codes every error it can mean for the caller (a bad cursor,
+	// a relevance sort without a query, content search this database cannot
+	// serve, a credential refusal); the handler adds no mapping of its own.
+	rows, next, err := (*p).List(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*rafikiv1.ConversationListing, 0, len(rows))
+	for _, r := range rows {
+		row := &rafikiv1.ConversationListing{
+			Id: r.ID, Name: r.Name, Model: r.Model, Owner: r.Owner,
+			CreatedAt: timestamppb.New(r.CreatedAt), LastActivity: timestamppb.New(r.LastActivity),
+			Turns: int32(r.Turns), CostUsd: r.CostUSD,
+			ParentConversationId: r.ParentConversationID, ChildCount: int32(r.ChildCount),
+			ChildId: r.ChildID, ChildName: r.ChildName, Kind: r.Kind,
+			State: listingStateToProto(r.State),
+		}
+		// ClosedAt stays unset (never a zero Timestamp) for an open
+		// conversation, so "closed at the epoch" and "still open" cannot
+		// collapse.
+		if r.ClosedAt != nil {
+			row.ClosedAt = timestamppb.New(*r.ClosedAt)
+		}
+		out = append(out, row)
+	}
+	return connect.NewResponse(&rafikiv1.ListConversationsResponse{Rows: out, NextCursor: next}), nil
+}
+
+// listingStateToProto maps the filter-side state back onto the wire enum. The
+// filter type's values are exactly the four named states, so every value the
+// adapter can return has an arm here.
+func listingStateToProto(v ConversationListState) rafikiv1.ConversationState {
+	switch v {
+	case ConversationListStateOpen:
+		return rafikiv1.ConversationState_CONVERSATION_STATE_OPEN
+	case ConversationListStateExited:
+		return rafikiv1.ConversationState_CONVERSATION_STATE_EXITED
+	case ConversationListStateClosed:
+		return rafikiv1.ConversationState_CONVERSATION_STATE_CLOSED
+	case ConversationListStateNoAgent:
+		return rafikiv1.ConversationState_CONVERSATION_STATE_NO_AGENT
+	default:
+		return rafikiv1.ConversationState_CONVERSATION_STATE_UNSPECIFIED
+	}
 }
 
 func (s *Server) ConversationExport(
