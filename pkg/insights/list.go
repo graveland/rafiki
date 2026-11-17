@@ -106,13 +106,16 @@ func normalizeListSort(s ListSort) ListSort {
 	}
 }
 
-// strictUUID accepts only the canonical lowercase hyphenated form. uuid.Parse
-// also takes urn-prefixed, braced and hyphenless spellings that Postgres'
-// ::uuid cast refuses, so a value admitted by the parser alone would reach SQL
-// and fail with SQLSTATE 22P02 instead of the malformed answer.
+// strictUUID accepts the canonical hyphenated form in any case: the input is
+// lowercased before comparing against the parsed rendering, so an
+// upper-case-spelled uuid a human pastes is accepted, not silently treated as
+// malformed. uuid.Parse also takes urn-prefixed, braced and hyphenless
+// spellings that Postgres' ::uuid cast refuses, so a value admitted by the
+// parser alone would reach SQL and fail with SQLSTATE 22P02 instead of the
+// malformed answer; the comparison refuses those.
 func strictUUID(s string) bool {
 	id, err := uuid.Parse(s)
-	return err == nil && id.String() == s
+	return err == nil && id.String() == strings.ToLower(s)
 }
 
 // ilikePattern renders v as an ILIKE pattern matching v literally: the three

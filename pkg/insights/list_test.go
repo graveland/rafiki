@@ -564,13 +564,18 @@ func TestVisible(t *testing.T) {
 		"urn:uuid:" + conv,
 		"{" + conv + "}",
 		strings.ReplaceAll(conv, "-", ""),
-		strings.ToUpper(conv),
 		"urn:uuid:0b1e2f3a-1111-4222-8333-444455556666",
 	} {
 		ok, err = ins.Visible(ctx, ScopeOwner(owner), spelling)
 		c.NoError(err, "visible non-canonical spelling %q", spelling)
 		c.False(ok, "non-canonical spelling %q must not be visible", spelling)
 	}
+
+	// A canonical uuid spelled in upper case is the same uuid: the case is
+	// normalised, so the id stays visible instead of silently vanishing.
+	ok, err = ins.Visible(ctx, ScopeOwner(owner), strings.ToUpper(conv))
+	c.Require().NoError(err, "visible upper-case spelling")
+	c.True(ok, "an upper-case spelling of a visible id must stay visible")
 }
 
 // TestListConversationsSharedConversationChildPickedOnce pins the fan-out
@@ -627,15 +632,18 @@ func TestListConversationsIlikeEscapesWildcards(t *testing.T) {
 	c.NotContains(listIDs(got), pctDecoy, "the percent acted as a wildcard")
 }
 
-// TestListConversationsOuterOrderBreaksTiesByUUID pins the outer ORDER BY's
-// tie-break: rows tied on the sort key finish in uuid order, the same ordering
-// the page and the keyset use, so the row the cursor is minted from is the
-// page's true last row. The two ids tie on updated_at and differ only in their
-// uuids. On this cluster's builtin C.UTF-8 provider a canonical lowercase uuid
-// renders as text in the same order as its bytes, so the pre-fix unqualified
-// id (resolving to the p.id::text output column) is outcome-equivalent here;
-// the test still fails if the outer sort loses or flips the uuid tie-break.
-func TestListConversationsOuterOrderBreaksTiesByUUID(t *testing.T) {
+// TestListConversationsOuterTiesBreakInUUIDOrder pins what the outer ORDER BY
+// establishes for tied sort keys: the ids are compared as uuid values, in the
+// sort's own direction (descending here), not as their text rendering, so the
+// row the cursor is minted from is the page's true last row. The two ids tie
+// on updated_at and differ only in their uuids. Note the limit of the pin: a
+// canonical lowercase uuid renders as text in the same order as its bytes, so
+// on this cluster the pre-qualification unqualified id (resolving to the
+// p.id::text output column) was outcome-equivalent, and this test pins the
+// contract rather than discriminating the cast; it fails if the outer sort
+// loses or flips the uuid tie-break. The p.id qualification stays as
+// hardening.
+func TestListConversationsOuterTiesBreakInUUIDOrder(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
@@ -867,15 +875,17 @@ SELECT $1::uuid, 'row-' || g, 1, 'test', 'client' FROM generate_series(1, 501) g
 	c.NotEq("", next, "one row must remain for the next page")
 }
 
-// TestListConversationsParentFilterBadIDIsEmptyPage pins the parent filter's
-// refusal shape: a malformed spelling, a non-canonical spelling and an unknown
-// uuid all return an empty page with no error.
-func TestListConversationsParentFilterBadIDIsEmptyPage(t *testing.T) {
+// TestListConversationsParentFilterIDSpellings pins the parent filter's id
+// handling: a malformed spelling, a non-canonical spelling and an unknown uuid
+// return an empty page with no error, while a canonical uuid spelled in upper
+// case selects its children like the lower-case spelling does.
+func TestListConversationsParentFilterIDSpellings(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	owner := listOwnerUser(t, pool, "badparent")
-	listConversation(t, pool, listConvSeed{ownerID: owner, name: "top"})
+	root := listConversation(t, pool, listConvSeed{ownerID: owner, name: "top"})
+	kid := listConversation(t, pool, listConvSeed{ownerID: owner, name: "kid", parentID: root})
 	ins := New(pool)
 
 	for _, bad := range []string{
@@ -890,6 +900,15 @@ func TestListConversationsParentFilterBadIDIsEmptyPage(t *testing.T) {
 		c.Empty(rows, "parent %q must return no rows", bad)
 		c.Eq("", next, "parent %q must return no cursor", bad)
 	}
+
+	// A canonical uuid in upper case is the same parent: the case is
+	// normalised, so a human-pasted id expands instead of listing nothing.
+	rows, next, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{
+		ParentConversationID: strings.ToUpper(root), Excluded: listExcluded,
+	})
+	c.Require().NoError(err, "upper-case parent spelling")
+	c.EqDeep([]string{kid}, listIDs(rows), "the upper-case parent spelling expands like the lower-case one")
+	c.Eq("", next, "next on the expanded page")
 }
 
 // TestListConversationsCursorMismatchesRefused pins ErrBadCursor through the

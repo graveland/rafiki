@@ -78,12 +78,20 @@ func TestListCursorRejectsTampering(t *testing.T) {
 		"urn:uuid:0b1e2f3a-1111-4222-8333-444455556666",
 		"{0b1e2f3a-1111-4222-8333-444455556666}",
 		"0b1e2f3a111142228333444455556666",
-		strings.ToUpper("0b1e2f3a-1111-4222-8333-444455556666"),
 	} {
 		cs := encodeListCursor(ListSortRecent, "p-X", spelling, &at, nil)
 		_, err = decodeListCursor(cs, ListSortRecent, "p-X")
 		c.ErrorIs(err, ErrBadCursor, "cursor row id %q is not canonical", spelling)
 	}
+
+	// A canonical uuid spelled in upper case is the same uuid: the case is
+	// normalised and the cursor decodes, carrying the id through to the
+	// keyset, which Postgres casts in any case.
+	upperID := strings.ToUpper("0b1e2f3a-1111-4222-8333-444455556666")
+	upper := encodeListCursor(ListSortRecent, "p-X", upperID, &at, nil)
+	cs, err := decodeListCursor(upper, ListSortRecent, "p-X")
+	c.Require().NoError(err, "decode an upper-case cursor id")
+	c.Eq(upperID, cs.ID, "the upper-case id rides through")
 
 	// A recent cursor without its timestamp cannot keyset the request.
 	noTime := encodeListCursor(ListSortRecent, "p-X", "0b1e2f3a-1111-4222-8333-444455556666", nil, nil)
