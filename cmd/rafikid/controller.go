@@ -5783,6 +5783,20 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 			// from it, while the best-effort writers log and carry on.
 			return fmt.Errorf("write child row %s: %w", childID, err)
 		}
+		// The row write succeeded, so this is the first moment the child's
+		// conversation can learn its parent conversation. A spawned child's
+		// conversation row exists before the daemon knows which child it
+		// belongs to, so the link is stamped here, from the row, and retried
+		// on every later row write until it lands (a parent whose own
+		// conversation does not exist yet). Best-effort: the row write already
+		// succeeded and must not read as failed because an enrichment did.
+		if _, hasParent := childstore.ParentLabel(snap.Labels); hasParent {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := c.stampConversationParent(ctx, childID); err != nil {
+				slog.Warn("stamp conversation parent", "childId", childID, "error", err)
+			}
+			cancel()
+		}
 	}
 	return nil
 }
