@@ -457,6 +457,16 @@ func (s *installState) setOutcome(executorID, outcome string) {
 	s.mu.Unlock()
 }
 
+// forgetOutcome drops an executor's recorded launch outcome. Called when the
+// executor's row goes away: the map is keyed by executor id, which is never
+// reused, so without this a daemon that uninstalls and reinstalls all day keeps
+// one dead entry per install.
+func (s *installState) forgetOutcome(executorID string) {
+	s.mu.Lock()
+	delete(s.outcomes, executorID)
+	s.mu.Unlock()
+}
+
 // outcomeOf returns the recorded last launch outcome for executorID, or "".
 func (s *installState) outcomeOf(executorID string) string {
 	s.mu.Lock()
@@ -1580,6 +1590,9 @@ func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller
 	if derr := c.execStore.Delete(ctx, e.ID); derr != nil && !errors.Is(derr, executors.ErrNotFound) {
 		return translateExecutorErr(derr)
 	}
+	// The row is gone, so nothing can be listed for this id again; drop its
+	// in-memory launch outcome rather than holding an entry nobody can read.
+	c.install.forgetOutcome(e.ID)
 	return nil
 }
 
