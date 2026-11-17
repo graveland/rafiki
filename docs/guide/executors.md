@@ -251,10 +251,12 @@ install's. The target's login shell must be **POSIX sh** — a csh or fish login
 shell fails opaquely. Wire detail: `docs/reference/executor-protocol.md` →
 "Installing over ssh".
 
-**OpenBSD is an executor HOST target only**: the release archive carries just
-`rafiki` there (not `rafikid`, not `rafiki-hooks`), so `rafiki upgrade` and
-`scripts/install.sh` do not support OpenBSD — put an executor on one over ssh,
-but do not run a daemon there.
+**OpenBSD** archives carry `rafiki` and `rafikid` (not `rafiki-hooks`).
+`pkg/embedpg` has no OpenBSD build, so `rafikid` there needs an external
+PostgreSQL DSN, never `RAFIKI_DB=embedded`. `rafiki service`, `rafiki upgrade`
+and `scripts/install.sh` do not support OpenBSD: unpack the archive by hand and
+run the daemon under your own supervisor. An executor can still be put on an
+OpenBSD host over ssh.
 
 No certificate is involved for a local socket. **Socket permissions are the
 only access control**: the socket is `0600` from creation (`0177` umask), and
