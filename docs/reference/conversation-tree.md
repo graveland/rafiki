@@ -64,6 +64,41 @@ The active path is a different read (`conv.Handle.Working`), and the two must no
 be confused: full history is every row in ordinal order, the working set is the
 head's path.
 
+## Conversation-level parentage: `parent_conversation_id`
+
+The node tree above says what a message followed. `conversation.parent_conversation_id`
+says who STARTED a conversation, and it is a property of the conversation row,
+not of any node:
+
+- A thread conversation (`external_ref = '<session>:<thread>'`) points at the
+  root conversation of the same session (`external_ref = '<session>'`, same
+  `driven_by`).
+- A spawned child's root conversation points at its parent child's root
+  conversation.
+- NULL is a top-level conversation.
+
+It is immutable once set, like `fork_from`, and has exactly **two writers**:
+
+1. `capture.ResolveThreadConversation` sets a thread's parent at creation, from
+   the root it resolves before rewriting the `external_ref`.
+2. `stampConversationParent` (`cmd/rafikid/conversation_parent.go`) sets a
+   child's root conversation from the child row, on each child row write after
+   the row upsert, only when a parent label is present and only into a NULL. A
+   conversation row is created before the daemon learns which child it belongs
+   to, so this cannot happen at insert; a parent whose conversation does not
+   exist yet is retried on the child's next write, and a successful stamp is
+   memoized per child so later writes cost nothing.
+
+Nothing else writes it, and nothing reads child labels for nesting: the
+`0073_conversation_parent` migration backfilled both forms once, and
+`ListConversations` walks `parent_conversation_id` from then on.
+
+`conversation.updated_at` is the conversation's **last activity**: every
+`ConvBackend.Commit` that stores at least one message bumps it (a commit that
+inserts nothing, including a head retract, leaves it alone), and the migration
+backfilled it to each conversation's newest stored message. It is what
+`ListConversations` sorts by.
+
 ## Identity: `Canon` and the path hash
 
 `Canon(role, content)` is **generic JSON**, not the API's typed blocks:

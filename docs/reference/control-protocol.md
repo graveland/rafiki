@@ -669,8 +669,70 @@ happens, and a refetch through `GetHistory` drops it. Ordinals stay strictly
 increasing along the returned page, so a client can still page and resume by
 ordinal. `agent_view` renders the same transcript (`conv.Store.Transcript`), so
 a dead branch is absent from it too, and `rafiki logs`/`tail` backfill through
-`GetHistory`. A conversation the daemon does not hold answers `not_found`,
-never an empty page and never `internal`.
+`GetHistory`. `GetHistory` also reads a conversation the caller never spawned a child for: the request names either `child_id` or `conversation_id`, and exactly one of them must be set (both or neither is `CodeInvalidArgument`, checked before anything resolves). The `conversation_id` form skips the child scope, the owner guard and the child-to-conversation resolution; it asks `Visible` instead, under the same scope every conversation read derives (a non-admin user's own rows, a child credential's OWNER's whole corpus, everything for an admin or the unix socket). A conversation outside that scope and one that does not exist both answer `CodeNotFound` with the message `conversation not found`, and a malformed id answers the same way. The events are the same shape the child path returns with an empty child id.
+
+### Browsing conversations (`ListConversations`)
+
+`ListConversations` is what a browser reads, and it is deliberately not
+`ConversationSearch`: no content, no turn aggregates as filters, and it lists
+open, exited and closed conversations alike, kind-agnostically. Rows nest by
+`conversation.parent_conversation_id` (see `docs/reference/conversation-tree.md`).
+
+| Request field | Meaning |
+|---|---|
+| `limit` | Page size. 0 means 50; anything above 500 is clamped to 500, negative is `InvalidArgument`. |
+| `cursor` | Opaque keyset cursor from a previous page of the SAME sort and parent. |
+| `sort` | `RECENT` (`updated_at`, the default), `CREATED`, or `RELEVANCE` (needs `query`). |
+| `parent_conversation_id` | List this conversation's children instead of the top level. Empty means top level (`parent IS NULL`). |
+| `query` | Content filter: the conversation has a window matching the BM25 query. |
+| `states` | `OPEN`, `EXITED`, `CLOSED`, `NO_AGENT`. Empty means all; `UNSPECIFIED` inside the list is `InvalidArgument`. |
+| `kinds` | Child kinds. Empty means all; a non-empty list drops rows with no linked child. |
+| `name_contains`, `cwd_contains` | Case-insensitive substring over the conversation's name or cwd, and the linked child's name or cwd. `%`, `_` and `\` are literal. |
+| `labels` | Child labels the row's child must carry (containment). |
+| `since`, `until` | Bounds on `updated_at`; unset or the epoch means unbounded. |
+
+What a page contains, in order of the rules that decide it:
+
+1. **Eligible conversations.** The caller's scope (never a request field, exactly
+   as `ConversationSearch` derives it), minus `recall.ExcludedEntrypoints`
+   unconditionally (a filter cannot re-admit them), and minus conversations with
+   no messages and no `fork_from` (a ledger row is not a browsable
+   conversation).
+2. **The linked child**, resolved by two equality arms: `child.conversation_id`
+   first, else `child.child_id` matched against the first `:`-segment of
+   `external_ref` (which is how a claude root thread and its `<child>:<thread>`
+   conversations link). Two children sharing one conversation cannot duplicate a
+   row: the first arm takes one child, deterministically.
+3. **State**, derived from that child: `NO_AGENT` when there is none, `CLOSED`
+   when `closed_at` is set, `EXITED` when only `exited_at` is set, else `OPEN`.
+4. **The matched set** is what satisfies every filter. **The visible set** is the
+   matched set plus every ancestor of a match (each ancestor must itself be
+   eligible), so a match three levels down keeps its path to the top level. With
+   no filters the visible set is the eligible set.
+5. **The page** is the visible set's members whose parent equals the requested
+   parent, after the cursor, `limit + 1` rows read so that a non-empty
+   `next_cursor` is known without a second query. Only the page's own rows carry
+   `turns` and `cost_usd` (the same turn aggregate and pricing join `Search`
+   uses).
+6. **`child_count`** is how many visible rows have this row as their parent, so
+   it always equals what expanding the row with the same filters returns.
+
+**Cursors are opaque and bound.** The cursor carries the sort, the parent id and
+the last row's keyset values (`updated_at` or `created_at`, plus the id; the BM25
+score for relevance). It is base64url JSON, its decoded values reach SQL only as
+bind parameters, and a cursor minted for a different sort or a different parent
+is `InvalidArgument` rather than a wrong page. Relevance pages are best effort:
+the score is the best (lowest) match over the row's windows, and an ancestor that
+only appears because a descendant matched sorts by that descendant's score.
+
+`RELEVANCE` without a `query` is `InvalidArgument`. A database without the
+`conversation_window_bm25` index (an embedded build, or one whose migrations
+predate the extension) answers `FailedPrecondition` for a `query` rather than an
+empty page that looks like "no matches". Unwired insights answers `Unavailable`.
+
+The row's `owner` is the conversation's `owner_user_id`, and `model` is the model
+the conversation ran on. A child credential reading this RPC sees exactly what
+`ConversationSearch` shows it: its OWNER's whole corpus, never an admin's.
 
 #### `EventSubject`
 
@@ -810,6 +872,7 @@ call at all — and is described under "Owner isolation between users" below.
 | `RecallBackfill` | unary · userOnly | exempt — recall owner binding | Arm summarization of conversations whose last activity predates `summaries_enabled_at`: `since` (a `Timestamp`) sets the cut-over (**unset = from the beginning**, unlike `Recall`'s unset = unbounded), `max_cost_usd` is the spend ceiling after which backfill auto-disarms. An out-of-range `since` is `CodeInvalidArgument`. A non-admin caller is refused with `CodePermissionDenied`; a non-positive `max_cost_usd` is refused with `CodeInvalidArgument` (`connectapi.ErrNoBackfillBudget` — a zero-value request can never arm an all-history, budgetless backfill). A database without `pg_textsearch` has no indexer to consume an armed backfill, so it answers `CodeUnavailable` (`recall.ErrSearchUnavailable`) rather than reporting success for an arming nothing will run — AFTER the authority and budget checks, so a non-admin still reads `CodePermissionDenied` and a zero budget `CodeInvalidArgument` on every database |
 | `RecallStatus` | unary · userOnly | exempt — recall owner binding | The recall index's state: conversation/window/summary/memory counts, unembedded windows and pending summaries, cumulative summary cost, `backfill_since` (a `Timestamp`; unset when backfill is off), its budget and spend, and the configured embedding and summary models |
 | `ConversationSearch` | unary · childScoped | exempt — conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user | Query the conversation corpus. The request carries caller-chosen FILTERS (since/until `Timestamp`s bounding turn activity — unset or the epoch means unbounded, owner, persona, source, model, status, path, min_tokens, text, limit) — never a scope: the daemon derives scope server-side from the authenticated credential (`IsUserCredential` → the user's own rows, `IsAdmin` → all, a per-child credential → its OWNER's whole conversation corpus when its lineage has an owner — its own conversations, its subtree's and other agents' alike, and a child of an admin reads that admin's own conversations, never the daemon's — else its own subtree, anything else `CodePermissionDenied`) and ANDs it on top, so an `owner` filter can only ever narrow, never widen. An out-of-range `since`/`until` is `CodeInvalidArgument`. `limit` 0 means the default (50) and is clamped to 500. Each row carries id/name/owner/persona/source/model/status/driven_by, `created_at`, turn and token aggregates, cache-hit ratio, total USD and the first user message snippet, plus `closed_at` (a `Timestamp`; unset = the conversation is not closed, never a zero Timestamp). A child credential's conversation reads cover that whole corpus; its SPEND still covers ALL its descendants including closed ones |
+| `ListConversations` | unary · childScoped | exempt: conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user | Browse conversations by tree level: metadata only, never content, and open, exited and closed alike (§"Browsing conversations" below). Rows are the members of the visible set whose `parent_conversation_id` equals the request's `parent_conversation_id` (empty means top level), ordered by the sort and paged by an opaque keyset cursor |
 | `ConversationExport` | unary · childScoped | exempt — conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user | One conversation's decomposed transcript: header identity plus ordered turns (role, verbatim content-block JSON, skills invoked, per-turn tokens/`latency` (a `Duration`, unset when not reported)/model/prefix hash) and the recovered available-skills catalog. Scope is derived exactly as `ConversationSearch`. `conversation_id` may also be a child id (`c_…`): the daemon resolves it to the child's main-thread conversation by `external_ref` (the proxy keys a child's captured turns on its id — claude children have no `conversation_id` link and their session id is claude's own, never a conversation uuid). A child id with no captured conversation yet, or outside the caller's scope, returns `CodeNotFound` with a message saying to retry once the child's first model request is captured. A conversation that does not exist OR is outside the caller's scope returns `CodeNotFound` — the two are deliberately indistinguishable, because "you may not read X" would confirm X exists |
 | `ConversationQuery` | unary · childScoped | exempt — conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`, `spend`) over the conversation corpus. The request carries caller-chosen FILTERS (since/until `Timestamp`s — unset or the epoch means unbounded, owner, persona, source, model, path) — never a scope: the daemon derives scope server-side from the authenticated credential exactly as `ConversationSearch`, so an `owner` filter can only ever narrow, never widen. Time filters are per query: tools and skills filter message time, models filters turn time, classes and sizes filter turn activity, coverage filters conversation creation week, spend filters turn time. The `tools` rows group tool names CASE-INSENSITIVELY — each row is displayed under the spelling that carried the most calls (ties: the sort-first spelling) — sort by calls descending, and count `conversations` as DISTINCT conversations over the whole merged group, never a sum of per-spelling counts. The response carries the query's declared schema — typed `QueryColumn`s (name/kind/format, where `format` is a display-only hint) and rows of oneof-typed `QueryValue` cells (`str_value`/`int_value`/`float_value`), so ints and floats decode as numbers, never strings. An unknown query name OR a query whose admission class refuses the caller's derived scope returns `CodeNotFound` — the same fold as `ConversationExport` |
 | `ConversationReview` | unary · userOnly | exempt — conversation verbs are owner-scoped by scopeFor to insights.ScopeOwner for a non-admin user | Enqueue a detector/rank pass over one or more conversations. Every config field (stage, model, profile, budget_usd, min_turns, force) is OPTIONAL and resolves request field > `RAFIKI_REVIEW_*` daemon env > the named analyzer profile's own defaults — the request and env tiers are resolved at accept time, the profile tier (detector model, population filters, compact policy) lazily inside the worker. The response carries one status per in-scope requested conversation_id — `ENQUEUED`, `ALREADY_RUNNING`, or `QUEUE_FULL` — never an analysis id or run state; read the outcome back through `ConversationFindings`' `analyses` rows, which are inserted at completion only, so an in-flight review reads as absent. Never blocks on an LLM call: accepted jobs enter a bounded in-memory queue (capacity 8) drained by a single worker goroutine, and a full queue answers `QUEUE_FULL` without leaving the id marked in-flight. Scope is derived exactly as `ConversationSearch`. A requested id may be spelled as a conversation UUID or as a child id (`c_…` — the client's own `Resolve` produces child ids, so that is what `rafiki` sends); a child id is matched through the authoritative `conversations.child` mapping and canonicalized to its conversation UUID — the value the job and the single-flight guard key on, so two spellings of one conversation collide rather than run twice — and an id matching neither spelling is dropped from the response silently with no error, the same fold as `ConversationExport`. A batch is N independent per-conversation calls — no shared budget, no shared queue slot — and exactly one job per conversation runs at a time, enforced by an in-memory, per-daemon guard taken at accept and released when the job completes: a duplicate request for a conversation already queued or running gets `ALREADY_RUNNING` rather than a second job. `min_turns` gates at DEQUEUE, not at accept, so a below-threshold job is skipped silently |
@@ -3437,6 +3500,7 @@ transport error, and never a successful result carrying the text.
 | `task_list` | Read the ledger; filter by status, metadata or assignee; dropped rows hidden unless `include_dropped` |
 | `quota_status` | The caller's own captured Anthropic subscription rate-limit snapshot; omitted when the daemon has no quota capture (a Materializer decline) |
 | `conversation_search` | Search the CALLER's own past conversations by time, model, source, status or first-message substring; summaries with turn/token/cost figures. An admin caller reads the whole daemon's; a child caller reads its OWNER's whole conversation corpus when its lineage has an owner (its own, its subtree's and other agents' alike, and a child of an admin reads that admin's own conversations, never the daemon's) and its own subtree's only when it has none; otherwise scoped to the caller's owner. Errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
+| `conversation_list` | List conversations by tree level: metadata only, never content, open, exited and closed alike, newest activity first. Rows nest by `parent_conversation_id`: an unfiltered call returns top-level conversations, each with a `child_count`, and passing `parent_conversation_id` returns that row's children (the count always equals what the expansion returns). Filters: `states`, `kinds`, `name_contains`, `cwd_contains`, `labels`, `since`/`until`, and a content `query` ranked by relevance. `sort` is `recent` (default), `created` or `relevance`; `next_cursor` pages, and it is bound to the sort and the parent it was minted for. Scoped exactly like `conversation_search`, and it never lists a daemon-internal conversation (`recall-summary`, `analyze`) or a message-less ledger row. Content is `conversation_export`'s job |
 | `conversation_export` | Read one conversation's full transcript (per-turn metrics, skills invoked), found by `conversation_search`; a conversation outside the caller's scope answers not-found, never a permission error. This is how a CLOSED agent's conversation is read: the conversation corpus outlives the child row, so `agent_view` cannot see a closed agent but `conversation_export` can |
 | `conversation_query` | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`, `spend`) over the caller's conversation history: typed columns rendered as tab-separated text. `tools` groups tool names case-insensitively and sorts by calls descending. Scoped like `conversation_search`; errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
 | `pymodule_put` | Save a reusable Python module (name, source, one-line description) to the caller's own pymodule store — the required `repo` argument must be `"local"` (the blob store's sentinel; repos are read-only through this tool, `CodeInvalidArgument` otherwise); saving again under an existing name is a new version, never an overwrite. A module that does not parse as Python is refused outright; advisory findings — `ruff` lint output, failed dependency-venv installs on the owner's executors — ride the result text as a notice and never block the save. A child caller writes its owner's bucket, like a fundi child's `pymodule_put` |
