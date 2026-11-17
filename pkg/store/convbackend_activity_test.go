@@ -41,3 +41,40 @@ func TestCommitBumpsUpdatedAt(t *testing.T) {
 	c.True(at.After(time.Now().Add(-time.Minute)),
 		"updated_at = %s, want moved forward to the commit's now()", at)
 }
+
+// TestCommitKeepsUpdatedAt pins the other half of the activity write: a commit
+// that stores no message must not move last activity. RetractHead is the
+// ordinary zero-row commit: it moves the head onto the retracted row's parent
+// and writes no row, and a conversation whose newest message is a day old must
+// read as a day inactive afterwards.
+func TestCommitKeepsUpdatedAt(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	convID := cleanConversation(t, pool)
+
+	handle := conv.NewStore(NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner())
+	res, err := handle.Append(ctx, conv.Append{
+		FromHead: true,
+		Nodes:    []conv.NewNode{convNode(t, "user", "head to retract")},
+	})
+	c.Require().NoError(err, "append")
+	c.Require().Len(res.Nodes, 1, "one node appended")
+
+	_, err = pool.Exec(ctx,
+		`UPDATE conversations.conversation SET updated_at = now() - interval '1 day' WHERE id = $1::uuid`,
+		convID)
+	c.Require().NoError(err, "age the conversation's updated_at")
+	var before time.Time
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT updated_at FROM conversations.conversation WHERE id = $1::uuid`, convID).Scan(&before),
+		"read updated_at before the retract")
+
+	c.Require().NoError(handle.RetractHead(ctx, res.Nodes[0].ID), "retract the head")
+
+	var after time.Time
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT updated_at FROM conversations.conversation WHERE id = $1::uuid`, convID).Scan(&after),
+		"read updated_at after the retract")
+	c.Eq(before, after, "a retract writes no message, so last activity stays where it was")
+}

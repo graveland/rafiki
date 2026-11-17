@@ -357,9 +357,11 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 		newHead = c.NewHead
 	}
 	// updated_at doubles as the conversation's last activity; ListConversations sorts by it.
+	// It moves only when this commit stored a message ($2 is the stored count): a head retract
+	// or any zero-row commit moves the head without adding activity.
 	if _, err := tx.Exec(ctx, `
 		UPDATE conversations.conversation SET
-			updated_at     = now(),
+			updated_at     = CASE WHEN $2 > 0 THEN now() ELSE updated_at END,
 			next_ordinal   = next_ordinal + $2,
 			head_id        = $3::uuid,
 			node_count     = node_count + $2,
