@@ -10,7 +10,13 @@ import (
 // stampConversationParentSQL fills a child's root conversation with the root
 // conversation of the child that spawned it. A conversation row is created
 // before the daemon learns which child it belongs to, so the link is written
-// here, from the child row, rather than at insert. It only fills a NULL.
+// here, from the child row, rather than at insert. It only fills a NULL, and
+// only with a BROWSABLE parent conversation (node_count > 0 OR fork_from is
+// set, the same predicate ListConversations uses for eligibility): parenting
+// to a row the listing excludes would hide the child, because a browser walks
+// down from an eligible row and never reaches a child whose parent it cannot
+// list. A script child's task-ledger row is exactly that shape -- no messages,
+// no fork_from -- so a script coordinator's workers stay at top level.
 const stampConversationParentSQL = `
 WITH me AS (
     SELECT ch.child_id,
@@ -29,10 +35,11 @@ WITH me AS (
 )
 UPDATE conversations.conversation c
    SET parent_conversation_id = parent.conv_id
-  FROM me, parent
+  FROM me, parent, conversations.conversation pc
  WHERE c.id = me.conv_id
+   AND pc.id = parent.conv_id
+   AND (pc.node_count > 0 OR pc.fork_from IS NOT NULL)
    AND c.parent_conversation_id IS NULL
-   AND parent.conv_id IS NOT NULL
    AND parent.conv_id <> c.id`
 
 // The outcomes stampConversationParentStateSQL reports after a stamp that
@@ -44,7 +51,9 @@ const (
 	// parent conversation to find, now or later.
 	stampStateParentless = "parentless"
 	// stampStatePending: the child names a parent whose conversation does not
-	// exist yet, so a later row write must look again.
+	// exist yet, or exists but is not browsable, so a later row write must look
+	// again. Neither is terminal: a conversation row is created before its
+	// first message lands, so the parent may become browsable later.
 	stampStatePending = "pending"
 )
 
@@ -72,9 +81,10 @@ SELECT COALESCE((
 ), '` + stampStatePending + `')`
 
 // stampConversationParent records, on a child's root conversation, the root
-// conversation of the child that spawned it. It only fills a NULL, and a
-// parent whose conversation does not exist yet is retried on the child's next
-// row write.
+// conversation of the child that spawned it. It only fills a NULL, only with a
+// browsable parent conversation, and a parent whose conversation does not
+// exist yet (or is not browsable yet) is retried on the child's next row
+// write.
 //
 // A claude child leaves conversations.child.conversation_id NULL and links by
 // external_ref, so both sides resolve their conversation the same two-arm way:
@@ -87,9 +97,10 @@ SELECT COALESCE((
 // the Controller and later row writes for that child skip the lookups
 // entirely. That covers both terminal outcomes: a conversation that already
 // carries a parent (this daemon stamped it, or an earlier one did) and a child
-// with no parent label at all. The parent-conversation-missing case stays
-// unmemoized and keeps retrying, which is what carries a child whose parent's
-// own conversation is written after its first row write.
+// with no parent label at all. The parent-conversation-missing and
+// parent-not-browsable cases stay unmemoized and keep retrying, which is what
+// carries a child whose parent's own conversation is written after its first
+// row write, or whose parent's conversation gains its first message later.
 func (c *Controller) stampConversationParent(ctx context.Context, childID string) error {
 	if c.pool == nil {
 		return nil

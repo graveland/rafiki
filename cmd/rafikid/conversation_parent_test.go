@@ -64,21 +64,76 @@ func relabelStampChild(t *testing.T, pool *pgxpool.Pool, childID, parentID strin
 }
 
 // insertStampConversation writes one conversation row linked to a child by
-// external_ref and returns its id.
+// external_ref and returns its id. node_count is 1, the shape a conversation
+// that has stored a message has, which is what makes it a browsable parent.
 func insertStampConversation(t *testing.T, pool *pgxpool.Pool, extRef string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var id string
 	err := pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by, external_ref)
-		 VALUES ('test', 'server', $1) RETURNING id::text`, extRef).Scan(&id)
+		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by, external_ref, node_count)
+		 VALUES ('test', 'server', $1, 1) RETURNING id::text`, extRef).Scan(&id)
 	assert.NewAborting(t).NoError(err, "insert conversation for %s", extRef)
 	return id
 }
 
-// cleanupStampRows removes this run's child and conversation rows. The test
-// database is shared and never reset, so a test must not leave rows behind.
+// insertStampLedgerConversation writes the message-less task-ledger row
+// ensureLedgerConversation creates for a non-fundi child: node_count 0 and no
+// fork_from, so ListConversations excludes it and the stamp must not parent
+// anything to it.
+func insertStampLedgerConversation(t *testing.T, pool *pgxpool.Pool, extRef string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var id string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by, external_ref)
+		 VALUES ('script', 'server', $1) RETURNING id::text`, extRef).Scan(&id)
+	assert.NewAborting(t).NoError(err, "insert ledger conversation for %s", extRef)
+	return id
+}
+
+// insertStampMessage stores one message in convID and returns its id, the
+// value a conversation's fork_from points at.
+func insertStampMessage(t *testing.T, pool *pgxpool.Pool, convID string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var id string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content)
+		 VALUES ($1::uuid, 0, 'user', '[{"type":"text","text":"hi"}]'::jsonb) RETURNING id::text`,
+		convID).Scan(&id)
+	assert.NewAborting(t).NoError(err, "insert message in %s", convID)
+	return id
+}
+
+// setStampNodeCount writes a conversation's node_count, so a test can make a
+// message-less conversation browsable or take that away.
+func setStampNodeCount(t *testing.T, pool *pgxpool.Pool, convID string, n int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET node_count = $2 WHERE id = $1::uuid`, convID, n)
+	assert.NewAborting(t).NoError(err, "set node_count of %s", convID)
+}
+
+// setStampForkFrom points a conversation's fork_from at an existing message.
+func setStampForkFrom(t *testing.T, pool *pgxpool.Pool, convID, msgID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET fork_from = $2::uuid WHERE id = $1::uuid`, convID, msgID)
+	assert.NewAborting(t).NoError(err, "set fork_from of %s", convID)
+}
+
+// cleanupStampRows removes this run's child and conversation rows, and any
+// message a fixture stored in them (a message blocks the conversation delete).
+// The test database is shared and never reset, so a test must not leave rows
+// behind.
 func cleanupStampRows(t *testing.T, pool *pgxpool.Pool, childIDs, convIDs []string) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -88,6 +143,19 @@ func cleanupStampRows(t *testing.T, pool *pgxpool.Pool, childIDs, convIDs []stri
 			t.Logf("cleanup children: %v", err)
 		}
 		if len(convIDs) > 0 {
+			// A fixture may point fork_from at a message of another of its own
+			// conversations, and a message blocks its conversation's delete, so
+			// clear the references before deleting either side.
+			if _, err := pool.Exec(ctx,
+				`UPDATE conversations.conversation SET fork_from = NULL
+				  WHERE id = ANY($1::uuid[])`, convIDs); err != nil {
+				t.Logf("cleanup fork refs: %v", err)
+			}
+			if _, err := pool.Exec(ctx,
+				`DELETE FROM conversations.conversation_message WHERE conversation_id = ANY($1::uuid[])`,
+				convIDs); err != nil {
+				t.Logf("cleanup messages: %v", err)
+			}
 			if _, err := pool.Exec(ctx,
 				`DELETE FROM conversations.conversation WHERE id = ANY($1::uuid[])`, convIDs); err != nil {
 				t.Logf("cleanup conversations: %v", err)
@@ -183,6 +251,63 @@ func TestStampConversationParentRetriesUntilTheParentsConversationExists(t *test
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "retry stamp")
 	got, _ = stampParentOf(t, pool, childConv)
 	c.Eq(parentConv, got, "the retry must stamp once the parent's conversation exists")
+}
+
+// A script coordinator's only conversation is the message-less task-ledger row
+// ensureLedgerConversation creates, which ListConversations excludes. The stamp
+// must leave its worker top level rather than parent it to a row no listing can
+// show, and must not memoize that: the parent's conversation becomes browsable
+// as soon as it stores a message, and a later write stamps then.
+func TestStampConversationParentSkipsAMessageLessLedgerParent(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := openTestPool(t)
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	parentID := "c_" + uniq + "_ledger_parent"
+	childID := "c_" + uniq + "_ledger_worker"
+
+	ledgerConv := insertStampLedgerConversation(t, pool, parentID)
+	childConv := insertStampConversation(t, pool, childID)
+	cleanupStampRows(t, pool, []string{childID, parentID}, []string{childConv, ledgerConv})
+	insertStampChild(t, pool, parentID, "", nil, false)
+	insertStampChild(t, pool, childID, parentID, &childConv, false)
+
+	ctrl := &Controller{pool: pool}
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "stamp")
+	got, _ := stampParentOf(t, pool, childConv)
+	c.Eq("", got, "a worker must stay top level under a message-less ledger row")
+
+	setStampNodeCount(t, pool, ledgerConv, 1)
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "retry stamp")
+	got, _ = stampParentOf(t, pool, childConv)
+	c.Eq(ledgerConv, got, "the retry must stamp once the parent's conversation is browsable")
+}
+
+// fork_from alone makes a parent's conversation browsable, so a conversation
+// that stores no message of its own but forks another's history is a valid
+// parent.
+func TestStampConversationParentTreatsAForkAsBrowsable(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := openTestPool(t)
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	sourceID := "c_" + uniq + "_fork_source"
+	parentID := "c_" + uniq + "_fork_parent"
+	childID := "c_" + uniq + "_fork_child"
+
+	sourceConv := insertStampConversation(t, pool, sourceID)
+	sourceMsg := insertStampMessage(t, pool, sourceConv)
+	parentConv := insertStampConversation(t, pool, parentID)
+	setStampNodeCount(t, pool, parentConv, 0)
+	setStampForkFrom(t, pool, parentConv, sourceMsg)
+	childConv := insertStampConversation(t, pool, childID)
+	cleanupStampRows(t, pool, []string{childID, parentID, sourceID},
+		[]string{childConv, parentConv, sourceConv})
+	insertStampChild(t, pool, parentID, "", &parentConv, false)
+	insertStampChild(t, pool, childID, parentID, &childConv, false)
+
+	ctrl := &Controller{pool: pool}
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "stamp")
+	got, _ := stampParentOf(t, pool, childConv)
+	c.Eq(parentConv, got, "a forked parent conversation is browsable and must be stamped")
 }
 
 // The stamp only fills a NULL: a conversation that already names a parent is
