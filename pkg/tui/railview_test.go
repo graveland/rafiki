@@ -201,3 +201,34 @@ func TestRailWidthCountsTheKindTag(t *testing.T) {
 	// inequality alone cannot tell a len regression from a correct width.
 	assert.NewAborting(t).Eq(ansi.StringWidth(kindTag("claude")), tw-pw, "tag width")
 }
+
+// The kid count rides the PLAIN row between the kind tag and the badge, so a
+// parent with children reads "name (N)" and a leaf carries no count at all.
+func TestRenderRailShowsKidCount(t *testing.T) {
+	c := assert.NewCollecting(t)
+	nodes := []rail.Node{
+		{ChildID: "c_1", Name: "coordinator", Kids: 2},
+		{ChildID: "c_2", Name: "leaf"},
+	}
+	out := renderRail(nodes, "", "", 80, false, nil, 0)
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	c.Require().Eq(2, len(lines), "rows")
+	c.StrContains(lines[0], "coordinator (2)", "the kid count is missing from the parent row: %q", lines[0])
+	c.NotStrContains(lines[1], "(", "a leaf must not render a count: %q", lines[1])
+}
+
+// The kid count is part of the row railWidthFor budgets for, or a long name
+// clips the count off before the badge.
+func TestRailWidthCountsKids(t *testing.T) {
+	plain := []rail.Node{{ChildID: "c_a", Name: "coordinator"}}
+	counted := []rail.Node{{ChildID: "c_a", Name: "coordinator", Kids: 2}}
+	// The floor would mask the difference, so use a name long enough to clear it.
+	for i := range plain {
+		plain[i].Name = strings.Repeat("n", railMin)
+		counted[i].Name = plain[i].Name
+	}
+	kw, pw := railWidthFor(counted, 200, nil), railWidthFor(plain, 200, nil)
+	// Exact: len(" (2)") == its display width, so an inequality could not tell
+	// a wrong-width regression from a correct one.
+	assert.NewAborting(t).Eq(len(" (2)"), kw-pw, "kid count width")
+}

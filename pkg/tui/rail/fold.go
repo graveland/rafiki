@@ -13,16 +13,22 @@ package rail
 // collapsed row with no descendants is an ordinary leaf. The input is not
 // modified; collapse state is the caller's and a nested row keeps its own
 // entry while an ancestor hides it.
+//
+// Every returned row also carries Kids, the number of rows in its descendant
+// run exactly one depth below it, set whether or not the row is collapsed, so
+// the count is visible in both states.
 func Fold(nodes []Node, collapsed map[string]bool) []Node {
-	if len(collapsed) == 0 {
-		return nodes
-	}
 	out := make([]Node, 0, len(nodes))
 	for i := 0; i < len(nodes); i++ {
 		n := nodes[i]
 		end := i + 1
 		for end < len(nodes) && nodes[end].Depth > n.Depth {
 			end++
+		}
+		for _, d := range nodes[i+1 : end] {
+			if d.Depth == n.Depth+1 {
+				n.Kids++
+			}
 		}
 		if collapsed[n.ChildID] && end > i+1 {
 			n.Folded = true

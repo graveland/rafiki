@@ -55,6 +55,15 @@ func nativeTag(n rail.Node) string {
 	return ""
 }
 
+// kidsTag renders a row's direct-child count as " (N)". Empty for a leaf: the
+// absence of children is not a number worth a column.
+func kidsTag(n rail.Node) string {
+	if n.Kids == 0 {
+		return ""
+	}
+	return " (" + strconv.Itoa(n.Kids) + ")"
+}
+
 // renderRail draws the tree.
 //
 // It renders whatever rows it is given. The "stay hidden below two rows" look
@@ -82,9 +91,9 @@ func nativeTag(n rail.Node) string {
 //
 // The clamp matters in both directions: railMin keeps a two-agent cockpit from
 // a sliver, and railMaxFrac stops one absurdly-named agent eating the
-// transcript. The budget counts everything renderRail puts in the plain row —
-// cursor, indent, glyph, name, native tag, kind tag, badge and cost, because those are what get
-// clipped.
+// transcript. The budget counts everything renderRail puts in the plain row --
+// cursor, indent, glyph, name, native tag, kind tag, kid count, badge and cost,
+// because those are what get clipped.
 func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 	want := railMin
 	for _, n := range nodes {
@@ -92,7 +101,8 @@ func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 		if name == "" {
 			name = n.ChildID
 		}
-		w := 2 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name) + ansi.StringWidth(nativeTag(n)) + ansi.StringWidth(kindTag(n.Kind))
+		kids := kidsTag(n)
+		w := 2 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name) + ansi.StringWidth(nativeTag(n)) + ansi.StringWidth(kindTag(n.Kind)) + ansi.StringWidth(kids)
 		if n.Attention > 0 {
 			w += 2 + len(strconv.Itoa(n.Attention))
 		}
@@ -146,7 +156,7 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 		if n.Folded {
 			fold = "+"
 		}
-		left := cursor + strings.Repeat("  ", n.Depth) + fold + rail.AnimatedGlyph(n, tick) + " " + nativeTag(n) + name + kindTag(n.Kind) + badge
+		left := cursor + strings.Repeat("  ", n.Depth) + fold + rail.AnimatedGlyph(n, tick) + " " + nativeTag(n) + name + kindTag(n.Kind) + kidsTag(n) + badge
 		cost := fmtCost(n.TotalCost(), cur)
 		row := clip(left, width)
 		if cost != "" {

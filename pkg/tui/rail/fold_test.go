@@ -54,6 +54,32 @@ func TestFoldNestedCollapseCountsOnceAndKeepsInnerState(t *testing.T) {
 	ck.True(reopened[1].Folded, "kid keeps its own fold while root is open")
 }
 
+// TestKidsCountedWhenExpandedAndCollapsed: Kids is the row's DIRECT-child
+// count, set whether or not the row is collapsed, so "(N)" survives a fold.
+func TestKidsCountedWhenExpandedAndCollapsed(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	tree := []rail.Node{
+		{ChildID: "parent", Depth: 0},
+		{ChildID: "kid1", Depth: 1},
+		{ChildID: "grand", Depth: 2},
+		{ChildID: "kid2", Depth: 1},
+	}
+
+	open := rail.Fold(tree, nil)
+	ck.Eq(2, open[0].Kids, "parent: kid1 and kid2")
+	ck.Eq(1, open[1].Kids, "kid1: grand")
+	ck.Eq(0, open[2].Kids, "grand is a leaf")
+	ck.Eq(0, open[3].Kids, "kid2 is a leaf")
+
+	folded := rail.Fold(tree, map[string]bool{"parent": true})
+	ck.EqDeep([]string{"parent"}, ids(folded), "collapsed parent hides its run")
+	ck.True(folded[0].Folded, "parent should be Folded")
+	ck.Eq(2, folded[0].Kids, "the collapsed row keeps its count")
+
+	ck.Eq(0, tree[0].Kids, "Fold must not mutate its input")
+	ck.False(tree[0].Folded, "Fold must not mutate its input")
+}
+
 func TestFoldLeafAndEmptyAreUnchanged(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	got := rail.Fold(foldTree(), map[string]bool{"grand": true, "other": true})

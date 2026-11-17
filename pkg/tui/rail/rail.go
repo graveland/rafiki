@@ -187,6 +187,11 @@ type Node struct {
 	// Folded is set only by Fold: the row is collapsed over hidden descendants,
 	// and Attention then carries the whole subtree's count.
 	Folded bool
+
+	// Kids is the number of direct children this row has in the rail, set by
+	// Fold whether or not the row is collapsed, so the count is visible in
+	// both states.
+	Kids int
 }
 
 // TotalCost is what should be DISPLAYED: settled cost from completed turns
