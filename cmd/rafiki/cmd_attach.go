@@ -45,7 +45,8 @@ inserts a newline, esc (or ^X) aborts the turn.
 ^O expands full tool arguments and thinking, ^L repaints the screen.
 ⇥ cycles the three panes — input, agents, transcript — and each one owns its
 keys while it has focus. ⌥N hops to the next agent that needs you, ^↑/^↓ move,
-^B collapses the rail, ^G toggles help. Children keep running after you quit —
+^B collapses the rail, ^S turns it into a conversation search (⏎ switches to
+the conversation under the cursor), ^G toggles help. Children keep running after you quit —
 reattach any time.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runAttach,

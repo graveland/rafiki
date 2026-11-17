@@ -492,6 +492,12 @@ type Cockpit struct {
 	// searchFrom is the focus pane search mode was entered from, restored on
 	// the way out.
 	searchFrom focusPane
+	// searchReading is search's second stop: ⏎ on a row with no agent to
+	// switch to hands the keys to that conversation's transcript, so the scroll
+	// keys move through it as they do from the input pane. Focus stays
+	// focusRail -- the rail column is still what is drawn -- and esc gives the
+	// keys back to the search list.
+	searchReading bool
 	// searchConv is the conversation the search cursor rests on and searchSeq
 	// counts its changes: the debounced transcript fetch is armed under a seq
 	// and a stale one is ignored, exactly like the agent rail's preview.
@@ -1854,7 +1860,11 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// so a stray letter reaches neither the agent rail's verbs nor the
 	// textarea behind the rail.
 	if c.searchOpen && c.focus == focusRail {
-		if m, cmd, claimed := c.handleSearchKey(msg); claimed {
+		handle := c.handleSearchKey
+		if c.searchReading {
+			handle = c.handleSearchReadKey
+		}
+		if m, cmd, claimed := handle(msg); claimed {
 			return m, cmd
 		}
 		if m, cmd, claimed := c.handleGlobalKey(msg, armed); claimed {
@@ -2151,12 +2161,13 @@ func (c *Cockpit) confirmQuit(armed bool) tea.Cmd {
 
 // handleSearchKey is the search rail's keymap, consulted only while search is
 // open and the rail holds focus. It reports whether it claimed the key;
-// whatever it did not claim falls to the globals. The keys it owns: printable
-// text and backspace edit the query, up/down move the cursor, left/right
-// toggle a row's expansion, tab cycles the sort, PgUp/PgDn/home/end scroll the
-// browsed transcript, and esc or ^R or ^S leave search mode (restoring the
-// agent rail exactly as it was). ⏎ expands a row with children, commits to one
-// without, and a second ⏎ on an expanded row commits.
+// whatever it did not claim falls to the globals. It moves the way the agent
+// rail does: up/down step the cursor, PgUp/PgDn page it, home/end jump to the
+// first and last loaded row, → opens a row's child conversations and ← folds
+// it or climbs to its parent. ⏎ switches to the conversation (see
+// searchEnter). Printable text and backspace edit the query, tab cycles the
+// sort, and esc or ^R or ^S leave search mode (restoring the agent rail
+// exactly as it was).
 //
 // The agent rail's own cursor motion (the attention hops) is SWALLOWED here
 // rather than performed: it would rewrite the agent rail's selection and move
@@ -2171,18 +2182,20 @@ func (c *Cockpit) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool
 		return c, c.searchMove(-1), true
 	case key.Matches(msg, k.SelectDown):
 		return c, c.searchMove(+1), true
-	case key.Matches(msg, k.FoldLeft), key.Matches(msg, k.FoldRight):
-		return c, c.searchExpandToggle(), true
+	case key.Matches(msg, k.ScrollPageUp):
+		return c, c.searchMove(-c.railPage()), true
+	case key.Matches(msg, k.ScrollPageDown):
+		return c, c.searchMove(+c.railPage()), true
+	case key.Matches(msg, k.ScrollTop):
+		return c, c.searchMove(-c.search.cursor), true
+	case key.Matches(msg, k.ScrollBottom):
+		return c, c.searchMove(len(c.search.rows) - 1 - c.search.cursor), true
+	case key.Matches(msg, k.FoldLeft):
+		return c, c.searchFold(), true
+	case key.Matches(msg, k.FoldRight):
+		return c, c.searchExpand(), true
 	case key.Matches(msg, k.Commit):
 		return c, c.searchEnter(), true
-	case key.Matches(msg, k.ScrollPageUp), key.Matches(msg, k.ScrollPageDown):
-		// The browsed transcript pages, exactly as the input pane's transcript
-		// does. The rail moves with arrows only; paging it would make a screen of
-		// rows do two different things under one key press.
-		return c, c.scrollSearch(msg), true
-	case key.Matches(msg, k.ScrollTop), key.Matches(msg, k.ScrollBottom):
-		c.jumpSearchScroll(key.Matches(msg, k.ScrollTop))
-		return c, nil, true
 	case key.Matches(msg, k.NextAttention), key.Matches(msg, k.PrevAttention),
 		key.Matches(msg, k.HopPrev), key.Matches(msg, k.HopNext):
 		return c, nil, true
@@ -2196,6 +2209,33 @@ func (c *Cockpit) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool
 	}
 	if msg.Text != "" {
 		return c, c.searchType(msg.Text), true
+	}
+	return c, nil, false
+}
+
+// handleSearchReadKey is the keymap while the keys are in a browsed
+// transcript (searchReading): the same keys that scroll the transcript from
+// the input pane scroll this one, esc or ⏎ hand the keys back to the search
+// list, and ^S, ^R or ^B leave search altogether. Everything else falls to the
+// globals and is then swallowed, so a stray letter edits no query the reader
+// cannot see the cursor of.
+func (c *Cockpit) handleSearchReadKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	k := c.keys
+	switch {
+	case key.Matches(msg, k.SearchToggle), key.Matches(msg, k.ToggleRail):
+		return c, c.closeSearchTo(c.searchFrom), true
+	case key.Matches(msg, k.Escape), key.Matches(msg, k.Commit):
+		c.searchReading = false
+		return c, nil, true
+	case key.Matches(msg, k.ScrollPageUp), key.Matches(msg, k.ScrollPageDown),
+		key.Matches(msg, k.ScrollLineUp), key.Matches(msg, k.ScrollLineDown):
+		return c, c.scrollSearch(msg), true
+	case key.Matches(msg, k.ScrollTop), key.Matches(msg, k.ScrollBottom):
+		c.jumpSearchScroll(key.Matches(msg, k.ScrollTop))
+		return c, nil, true
+	case key.Matches(msg, k.NextAttention), key.Matches(msg, k.PrevAttention),
+		key.Matches(msg, k.HopPrev), key.Matches(msg, k.HopNext):
+		return c, nil, true
 	}
 	return c, nil, false
 }
@@ -2248,6 +2288,7 @@ func (c *Cockpit) openSearch() tea.Cmd {
 	}
 	c.searchFrom = c.focus
 	c.searchOpen = true
+	c.searchReading = false
 	cmds := []tea.Cmd{c.setFocus(focusRail), c.syncSearchPreview(true)}
 	if req := c.search.resumeTop(); req != nil {
 		cmds = append(cmds, c.searchPageCmd(*req))
@@ -2265,6 +2306,7 @@ func (c *Cockpit) closeSearchTo(p focusPane) tea.Cmd {
 		return nil
 	}
 	c.searchOpen = false
+	c.searchReading = false
 	c.searchSeq++
 	return c.setFocus(p)
 }
@@ -2317,51 +2359,50 @@ func (c *Cockpit) searchMove(delta int) tea.Cmd {
 	return cmd
 }
 
-// searchExpandToggle expands or collapses the row under the cursor.
-func (c *Cockpit) searchExpandToggle() tea.Cmd {
-	row := c.search.cursorRow()
-	if row == nil {
-		return nil
+// searchExpand opens the row under the cursor, the agent rail's →. Its
+// children are fetched the first time; the cursor does not move, so the
+// browsed transcript stays where it is.
+func (c *Cockpit) searchExpand() tea.Cmd {
+	if req := c.search.expandCursor(); req != nil {
+		return c.searchPageCmd(*req)
 	}
-	req := c.search.toggle(row.l.GetId())
-	cmd := c.syncSearchPreview(true)
-	if req != nil {
-		cmd = tea.Batch(c.searchPageCmd(*req), cmd)
-	}
-	return cmd
+	return nil
 }
 
-// searchEnter acts on the row under the cursor.
-//
-// A row with children EXPANDS on the first ⏎ and never commits from it: a
-// coordinator's finished conversation with subagent conversations under it is
-// the most natural row to look inside, and resuming a process (and its spend)
-// because someone meant to expand it is not a thing a browser may do. The
-// second ⏎ on an expanded row has nothing left to open, so it commits. A row
-// with no children commits straight away: a live agent is focused through the
-// same hop the agent rail's ⏎ uses, an exited one is resumed and then focused,
-// and either way search ends with the keys in the input. A row with nothing
-// actionable falls back to expanding, as does a second ⏎ on a childless row.
+// searchFold is the agent rail's ←: fold the open row under the cursor, or
+// climb to its parent, in which case the browsed transcript follows.
+func (c *Cockpit) searchFold() tea.Cmd {
+	if c.search.foldCursor() {
+		return c.syncSearchPreview(true)
+	}
+	return nil
+}
+
+// searchEnter switches to the conversation under the cursor, the way the agent
+// rail's ⏎ switches to an agent: a live agent is focused through the same hop,
+// an exited one is resumed and then focused, and either way search ends with
+// the keys in the input, where PgUp/PgDn/home/end and the arrows move through
+// its transcript. A conversation with no agent to switch to (closed, or none
+// linked) has nothing to hop to, so ⏎ hands the keys to its read-only
+// transcript instead, with the same scroll keys; esc gives them back to the
+// list. Opening a row's child conversations is → alone, so ⏎ never has two
+// meanings.
 func (c *Cockpit) searchEnter() tea.Cmd {
 	row := c.search.cursorRow()
 	if row == nil {
 		return nil
 	}
 	l := row.l
-	if l.GetChildCount() > 0 && !c.search.expanded[l.GetId()] {
-		return c.searchExpandToggle()
+	if l.GetChildId() != "" {
+		switch l.GetState() {
+		case rafikiv1.ConversationState_CONVERSATION_STATE_OPEN:
+			return c.searchCommit(l, false)
+		case rafikiv1.ConversationState_CONVERSATION_STATE_EXITED:
+			return c.searchCommit(l, true)
+		}
 	}
-	child := l.GetChildId()
-	if child == "" {
-		return c.searchExpandToggle()
-	}
-	switch l.GetState() {
-	case rafikiv1.ConversationState_CONVERSATION_STATE_OPEN:
-		return c.searchCommit(l, false)
-	case rafikiv1.ConversationState_CONVERSATION_STATE_EXITED:
-		return c.searchCommit(l, true)
-	}
-	return c.searchExpandToggle()
+	c.searchReading = true
+	return nil
 }
 
 // searchCommit focuses (or resumes and focuses) the conversation's linked
@@ -2488,7 +2529,8 @@ func (c *Cockpit) searchRailView(width int) string {
 	top, vis := railWindow(len(rows), c.search.cursor, c.searchTop, c.bodyHeight()-1)
 	c.searchTop = top
 	text := renderSearchRail(rows[top:top+vis], c.search.query,
-		searchSortName(c.search.sort), c.search.selectedID(), width, c.focus == focusRail)
+		searchSortName(c.search.sort), c.search.selectedID(), width,
+		c.focus == focusRail && !c.searchReading)
 	if vis < len(rows) {
 		// The query line is the pane's first line, not a row; the markers
 		// bracket the row list below it. No style spans a newline here, so the
@@ -3759,8 +3801,12 @@ func (c *Cockpit) scrollPosition() string {
 func (c *Cockpit) footerHints() string {
 	k := c.keys
 	var bs []key.Binding
-	switch c.focus {
-	case focusRail:
+	switch {
+	case c.searchOpen && c.focus == focusRail && c.searchReading:
+		bs = []key.Binding{k.ScrollLineUp, k.ScrollPageUp, k.ScrollTop, k.ScrollBottom, k.Escape}
+	case c.searchOpen && c.focus == focusRail:
+		bs = []key.Binding{k.SelectUp, k.SelectDown, k.ScrollPageUp, k.FoldLeft, k.FoldRight, k.Commit, k.NextPane, k.Escape}
+	case c.focus == focusRail:
 		bs = []key.Binding{k.SelectUp, k.SelectDown, k.FoldLeft, k.FoldRight, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.Rename, k.Escape}
 	default:
 		bs = []key.Binding{k.Send, k.Queue, k.Newline, k.ClearInput, k.ClearAll, k.Abort}
@@ -3829,7 +3875,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.HopPrev, "Switch to the agent above in the rail, without leaving the input."},
 		entry{k.HopNext, "Switch to the agent below."},
 		entry{k.ToggleRail, "Show or hide the rail (^B does the same). Hiding it leaves your agents running."},
-		entry{k.SearchToggle, "Switch the rail between the agent list and the conversation search. Type to search, arrows to browse, ⏎ to expand a row (again for its agent), tab to cycle the sort; esc or ^S again goes back."},
+		entry{k.SearchToggle, "Switch the rail between the agent list and the conversation search. Type to search, move as in the agent rail, ⏎ to switch to the conversation (a closed one opens read-only), tab to cycle the sort; esc or ^S again goes back."},
 		entry{k.Help, "Show or hide this page."},
 		entry{k.ExpandArgs, "Expand or collapse tool-call details: full arguments and results."},
 		entry{k.ToggleInjected, "Expand or collapse injected messages: the notices the daemon and the agent's harness add. Drawn short by default."},

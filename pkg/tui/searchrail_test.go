@@ -689,9 +689,10 @@ func TestSearchRailEnterResumesAnExitedChild(t *testing.T) {
 	ck.Eq("c_exit", fake.resumeCalls()[0].GetChildId(), "resume named the linked agent")
 }
 
-// ⏎ on a row with no actionable agent expands or collapses it, like right
-// and left do; the expansion asks for the row's children.
-func TestSearchRailEnterExpandsAChildlessRow(t *testing.T) {
+// → opens a row's child conversations and ← folds it, the agent rail's own
+// fold keys. The first open asks for the children; a reopen is served from
+// what was already loaded.
+func TestSearchRailRightOpensAndLeftFoldsARow(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
 		"|": {
@@ -701,7 +702,7 @@ func TestSearchRailEnterExpandsAChildlessRow(t *testing.T) {
 	}}
 	c := searchCockpit(t, fake)
 
-	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	searchRun(t, c, cmd)
 	ck.True(c.searchOpen, "search stays open")
 	calls := fake.listCalls()
@@ -709,27 +710,75 @@ func TestSearchRailEnterExpandsAChildlessRow(t *testing.T) {
 	ck.Eq("p", calls[1].GetParentConversationId(), "of the expanded row")
 	ck.EqDeep([]string{"p", "k"}, rowIDs(c.search.rows), "children inline")
 
-	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	ck.EqDeep([]string{"p"}, rowIDs(c.search.rows), "the second enter collapsed the row")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	ck.EqDeep([]string{"p"}, rowIDs(c.search.rows), "← did not fold the open row")
+
+	_, cmd = c.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	searchRun(t, c, cmd)
+	ck.EqDeep([]string{"p", "k"}, rowIDs(c.search.rows), "→ did not reopen the row")
+	ck.Eq(2, len(fake.listCalls()), "the reopen asked again for children already loaded")
 }
 
-// ⏎ on a row whose linked agent is closed does not commit: the row expands.
-func TestSearchRailEnterExpandsAClosedAgentsRow(t *testing.T) {
+// ← on a row that is not open climbs to its parent, as it does in the agent
+// rail, and the browsed transcript follows the cursor there.
+func TestSearchRailLeftClimbsToTheParent(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|":  {Rows: []*rafikiv1.ConversationListing{searchListing("p", "parent", 1)}},
+		"p|": searchPageResp(searchListing("k", "kid", 0)),
+	}}
+	c := searchCockpit(t, fake)
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	searchRun(t, c, cmd)
+	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	ck.Require().Eq("k", c.search.selectedID(), "setup: the cursor rests on the child")
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	ck.Eq("p", c.search.selectedID(), "← on a child row did not climb to its parent")
+	ck.EqDeep([]string{"p", "k"}, rowIDs(c.search.rows), "climbing folded the parent")
+	ck.Eq("p", c.searchConv, "the browsed transcript did not follow the climb")
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	ck.EqDeep([]string{"p"}, rowIDs(c.search.rows), "the next ← did not fold the parent")
+}
+
+// → on a row with no child conversations has nothing to open: it asks the
+// daemon for nothing and marks nothing open.
+func TestSearchRailRightOnAChildlessRowAsksForNothing(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(searchListing("solo", "solo", 0)),
+	}}
+	c := searchCockpit(t, fake)
+
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	searchRun(t, c, cmd)
+	ck.Eq(1, len(fake.listCalls()), "→ on a childless row asked the daemon for its children")
+	ck.False(c.search.expanded["solo"], "→ marked a childless row open")
+}
+
+// ⏎ on a conversation with no agent to switch to (here a closed one) cannot
+// hop anywhere, so it hands the keys to the read-only transcript: search stays
+// open, nothing is fetched or resumed, and esc gives the keys back.
+func TestSearchRailEnterReadsAClosedConversation(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	closed := searchListing("conv-closed", "old work", 0)
 	closed.ChildId = "c_gone"
-	closed.State = rafikiv1.ConversationState_CONVERSATION_STATE_CLOSED
 	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
-		"|":            searchPageResp(closed),
-		"conv-closed|": searchPageResp(),
+		"|": searchPageResp(closed),
 	}}
 	c := searchCockpit(t, fake)
 
 	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	searchRun(t, c, cmd)
-	ck.True(c.searchOpen, "search stays open: there is nothing to commit to")
-	ck.Eq(2, len(fake.listCalls()), "the row expanded instead")
-	ck.Eq(0, len(fake.resumeCalls()), "nothing was resumed")
+	ck.True(c.searchOpen, "search closed: there is no agent to switch to")
+	ck.True(c.searchReading, "⏎ did not hand the keys to the transcript")
+	ck.Eq(1, len(fake.listCalls()), "⏎ fetched rows")
+	ck.Eq(0, len(fake.resumeCalls()), "something was resumed")
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	ck.False(c.searchReading, "esc did not give the keys back to the list")
+	ck.True(c.searchOpen, "esc from the transcript left search instead of returning to the list")
 }
 
 // A page that fails releases the level's in-flight mark, so a later move can
@@ -870,8 +919,8 @@ func TestSearchRailQueryChangeDropsTheBrowsedTranscript(t *testing.T) {
 }
 
 // A failed CHILD page must collapse the row again: left expanded it claims to
-// have children it never got, and the next enter collapses what was never
-// opened instead of retrying.
+// have children it never got, and the next → finds it already open and
+// retries nothing.
 func TestSearchRailFailedChildPageCollapsesTheRow(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
@@ -882,17 +931,17 @@ func TestSearchRailFailedChildPageCollapsesTheRow(t *testing.T) {
 
 	// The expansion's request is never run, so its failure is the only thing
 	// that answers it.
-	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	ck.Require().True(c.search.expanded["p"], "setup: enter expanded the row")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	ck.Require().True(c.search.expanded["p"], "setup: → expanded the row")
 	ck.Require().Eq(1, len(fake.listCalls()), "setup: the expansion asked for its children")
 
 	c.Update(searchPageMsg{gen: c.search.gen, parent: "p", err: errors.New("the daemon is down")})
 	ck.False(c.search.expanded["p"], "a failed child page left the row claiming to be expanded")
 	ck.False(c.search.loading["p"], "the failed level stayed in flight, so nothing can retry")
 
-	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	searchRun(t, c, cmd)
-	ck.Eq(2, len(fake.listCalls()), "the next enter collapsed the row instead of retrying")
+	ck.Eq(2, len(fake.listCalls()), "the next → did not retry")
 	ck.EqDeep([]string{"p", "k"}, rowIDs(c.search.rows), "the retry's children landed under the row")
 }
 
@@ -948,12 +997,10 @@ func TestSearchRailHistoryFailureNamesTheDaemonsSentence(t *testing.T) {
 		"the notice is the daemon's sentence, not connect's transport code")
 }
 
-// ⏎ EXPANDS a row with children and never commits from it: a coordinator's
-// finished conversation with subagent conversations under it is the most
-// natural row to look inside, and resuming a process (and its spend) because
-// someone meant to expand it is not something a browser may do. The second ⏎
-// on the expanded row has nothing left to open, so it commits.
-func TestSearchRailEnterExpandsBeforeItResumes(t *testing.T) {
+// ⏎ switches to a row's agent even when the row has child conversations:
+// opening them is →'s job alone, so ⏎ has one meaning. An exited agent is
+// resumed on the way, and its child conversations are not fetched.
+func TestSearchRailEnterSwitchesToARowWithChildren(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	exited := searchListing("conv-exited", "done work", 2)
 	exited.ChildId = "c_exit"
@@ -968,20 +1015,15 @@ func TestSearchRailEnterExpandsBeforeItResumes(t *testing.T) {
 
 	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	searchRun(t, c, cmd)
-	ck.True(c.searchOpen, "the first ⏎ left search: a row with children must expand")
-	ck.Eq(0, len(fake.resumeCalls()), "the first ⏎ resumed a finished coordinator to expand it")
-	ck.EqDeep([]string{"conv-exited", "kid"}, rowIDs(c.search.rows), "the first ⏎ expanded the row")
-
-	_, cmd = c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	searchRun(t, c, cmd)
-	ck.False(c.searchOpen, "the second ⏎ on the expanded row commits")
-	ck.Require().Eq(1, len(fake.resumeCalls()), "the commit resumed the exited agent")
-	ck.Eq("c_exit", c.selected, "the rail cursor followed the commit")
+	ck.False(c.searchOpen, "⏎ on a row with children did not switch to its agent")
+	ck.Require().Eq(1, len(fake.resumeCalls()), "the switch did not resume the exited agent")
+	ck.Eq("c_exit", c.selected, "the rail cursor did not follow the switch")
+	ck.Eq(1, len(fake.listCalls()), "⏎ fetched the row's child conversations")
 }
 
-// The same rule for an OPEN agent with children: the first ⏎ opens the row
-// instead of hopping away from the browser.
-func TestSearchRailEnterExpandsAnOpenRowsChildren(t *testing.T) {
+// → on a live row with children opens them without leaving search: browsing a
+// coordinator's subagents must not hop away from the browser.
+func TestSearchRailRightOpensALiveRowsChildren(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	live := searchListing("conv-live", "live work", 1)
 	live.ChildId = "c_live"
@@ -992,11 +1034,11 @@ func TestSearchRailEnterExpandsAnOpenRowsChildren(t *testing.T) {
 	}}
 	c := searchCockpit(t, fake)
 
-	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	searchRun(t, c, cmd)
-	ck.True(c.searchOpen, "the first ⏎ on a live row with children left search")
-	ck.Eq(focusRail, c.focus, "the first ⏎ moved focus")
-	ck.EqDeep([]string{"conv-live", "kid"}, rowIDs(c.search.rows), "the first ⏎ expanded the row")
+	ck.True(c.searchOpen, "→ on a live row with children left search")
+	ck.Eq(focusRail, c.focus, "→ moved focus")
+	ck.EqDeep([]string{"conv-live", "kid"}, rowIDs(c.search.rows), "→ did not open the row")
 }
 
 // A commit lands where the agent rail's own ⏎ lands, whatever pane search was
@@ -1111,10 +1153,37 @@ func TestSearchRailDoesNotReadTheAgentRailCursorsChild(t *testing.T) {
 	ck.Eq("", c.focusChild, "a fetch for an undisplayed agent opened its focus stream")
 }
 
-// A browsed transcript is read-only, so a reader who cannot page it sees one
-// screenful: PgUp/PgDn scroll it and home/end jump, exactly as they do from the
-// input pane. The rail moves with arrows only.
-func TestSearchRailScrollKeysScrollTheBrowsedTranscript(t *testing.T) {
+// In the list, PgUp/PgDn and home/end move the cursor exactly as they do in
+// the agent rail, and the browsed transcript follows it.
+func TestSearchRailPageKeysMoveTheCursor(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	rows := make([]*rafikiv1.ConversationListing, 0, 100)
+	for i := 0; i < 100; i++ {
+		rows = append(rows, searchListing("conv-"+strconv.Itoa(i), "row", 0))
+	}
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(rows...),
+	}}
+	c := searchCockpit(t, fake)
+	page := c.railPage()
+	ck.Require().Less(100, page, "setup: a page is shorter than the list")
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	ck.Eq(page, c.search.cursor, "PgDn did not move the cursor a page down")
+	ck.Eq("conv-"+strconv.Itoa(page), c.searchConv, "the transcript did not follow PgDn")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	ck.Eq(0, c.search.cursor, "PgUp did not move the cursor a page up")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	ck.Eq(99, c.search.cursor, "end did not move to the last row")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	ck.Eq(0, c.search.cursor, "home did not move to the first row")
+	ck.False(c.searchReading, "a page key handed the keys to the transcript")
+}
+
+// Once ⏎ has handed the keys to a read-only transcript, the scroll keys move
+// through it, as they do from the input pane, and leave the list's cursor
+// alone; esc hands them back and the arrows move the list again.
+func TestSearchRailReadingScrollsTheTranscript(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
 		"|": searchPageResp(searchListing("conv-1", "first", 0), searchListing("conv-2", "second", 0)),
@@ -1136,19 +1205,26 @@ func TestSearchRailScrollKeysScrollTheBrowsedTranscript(t *testing.T) {
 	bottom := p.vp.YOffset()
 	ck.Require().Greater(0, bottom, "setup: the transcript is taller than the pane")
 
-	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
-	ck.Less(bottom, p.vp.YOffset(), "PgUp did not scroll the browsed transcript")
-	ck.Eq("conv-2", c.search.selectedID(), "PgUp moved the search rail's cursor")
-	ck.True(c.searchOpen, "PgUp left search")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	ck.Require().True(c.searchReading, "setup: ⏎ handed the keys to the transcript")
 
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	ck.Less(bottom, p.vp.YOffset(), "PgUp did not scroll the transcript")
 	c.Update(tea.KeyPressMsg{Code: tea.KeyHome})
 	ck.Eq(0, p.vp.YOffset(), "home did not jump to the top")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	ck.Eq(1, p.vp.YOffset(), "↓ did not scroll the transcript a line")
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
 	ck.Eq(bottom, p.vp.YOffset(), "end did not jump to the bottom")
-
-	// Arrows still move the rail, and the pane follows the new row.
 	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	ck.Eq("conv-1", c.search.selectedID(), "the arrow key did not move the rail")
+	ck.Eq(bottom-1, p.vp.YOffset(), "↑ did not scroll the transcript a line")
+	ck.Eq("conv-2", c.search.selectedID(), "a scroll key moved the list's cursor")
+	ck.True(c.searchOpen, "a scroll key left search")
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	ck.False(c.searchReading, "esc did not hand the keys back to the list")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	ck.Eq("conv-1", c.search.selectedID(), "↑ did not move the list after esc")
 }
 
 // Browsed transcripts are ordinary sessions: touched on every rest and on every

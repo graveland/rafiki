@@ -279,6 +279,39 @@ func (s *searchRail) toggle(id string) *searchPage {
 	return &searchPage{parent: id}
 }
 
+// expandCursor opens the row under the cursor, the agent rail's →. Only a row
+// with child conversations has anything to open: a childless row, or one
+// already open, changes nothing and asks for nothing.
+func (s *searchRail) expandCursor() *searchPage {
+	r := s.cursorRow()
+	if r == nil || r.l.GetChildCount() == 0 || s.expanded[r.l.GetId()] {
+		return nil
+	}
+	return s.toggle(r.l.GetId())
+}
+
+// foldCursor is the agent rail's ←: it folds the row under the cursor when
+// that row is open, and otherwise moves the cursor to the row's parent, so
+// repeated presses climb the tree. It reports whether the cursor moved, which
+// is when the browsed transcript has to follow.
+func (s *searchRail) foldCursor() bool {
+	r := s.cursorRow()
+	if r == nil {
+		return false
+	}
+	if s.expanded[r.l.GetId()] {
+		s.toggle(r.l.GetId())
+		return false
+	}
+	for i := s.cursor - 1; i >= 0; i-- {
+		if s.rows[i].depth < r.depth {
+			s.cursor = i
+			return true
+		}
+	}
+	return false
+}
+
 // move shifts the cursor, clamped, and asks for the cursor level's next page
 // once the cursor comes within searchPrefetch rows of what that level has
 // loaded. The request goes out once: a level already loading, or one whose
