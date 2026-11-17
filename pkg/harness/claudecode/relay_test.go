@@ -133,38 +133,21 @@ func TestSplitRelaysTakesTheLastOccurrence(t *testing.T) {
 	c.EqDeep([]claudecode.Relayed{{Index: 0, Text: relayedText}}, relays, "trailing newline: the relay is found")
 }
 
-// TestSplitRelaysNearMissesUntouched pins that only the exact shape is a relay:
-// every near-miss is left for the ordinary reminder handling, and is neither
-// guessed at nor truncated.
+// TestSplitRelaysNearMissesUntouched pins what is still not a relay: no words of
+// the user's, no reminder around the phrase, or not a user message. Framing is
+// tolerated (TestSplitRelaysToleratesVariantFraming); a missing message is not.
 func TestSplitRelaysNearMissesUntouched(t *testing.T) {
 	c := assert.NewAborting(t)
 
 	cases := map[string]func() msg.Message{
-		"missing trailer": func() msg.Message {
-			return relayToolResult("<system-reminder>\nThe user sent a new message while you were working:\nalso\n</system-reminder>")
-		},
-		"missing close tag": func() msg.Message {
-			return relayToolResult("<system-reminder>\nThe user sent a new message while you were working:\nalso\n\nThis is how Claude Code surfaces messages the user sends mid-turn, and then some trailing prose with no closing reminder tag at all")
-		},
 		"ordinary reminder": func() msg.Message {
 			return msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: reminder}}}
-		},
-		"nested tag in the body": func() msg.Message {
-			return relayToolResult("<system-reminder>\nThe user sent a new message while you were working:\nalso\n<system-reminder>nested</system-reminder>\n\nThis is how Claude Code surfaces messages the user sends mid-turn\n</system-reminder>")
 		},
 		"empty user text": func() msg.Message {
 			return relayToolResult("<system-reminder>\nThe user sent a new message while you were working:\n  \n\nThis is how Claude Code surfaces messages the user sends mid-turn\n</system-reminder>")
 		},
-		"relay not at the end": func() msg.Message {
-			return relayToolResult(relayAlone + "\n\nprose after the relay")
-		},
-		"relay then two newlines": func() msg.Message {
-			return relayToolResult(relayAlone + "\n\n")
-		},
-		"prose before a top-level relay": func() msg.Message {
-			return msg.Message{Role: msg.User, Content: []msg.Block{
-				msg.Text{Text: "the user's earlier line\n\n" + relayAlone},
-			}}
+		"phrase outside a reminder": func() msg.Message {
+			return relayToolResult("The user sent a new message while you were working:\nalso")
 		},
 		"relay not in the tool result's last block": func() msg.Message {
 			return msg.Message{Role: msg.User, Content: []msg.Block{
@@ -185,4 +168,45 @@ func TestSplitRelaysNearMissesUntouched(t *testing.T) {
 		c.EqDeep(want, got, "%s: the message is left untouched", name)
 		c.Len(relays, 0, "%s: nothing is relayed", name)
 	}
+}
+
+// TestSplitRelaysToleratesVariantFraming pins that the relay is found by its
+// phrase, so a reworded trailer, a missing one, attributes on the tag or prose
+// around it still surface the user's words.
+func TestSplitRelaysToleratesVariantFraming(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	cases := map[string]struct{ in, left string }{
+		"missing trailer": {
+			"<system-reminder>\nThe user sent a new message while you were working:\nalso\n</system-reminder>", ""},
+		"missing close tag": {
+			"<system-reminder>\nThe user sent a new message while you were working:\nalso\n\nThis is how Claude Code surfaces messages the user sends mid-turn, and more", ""},
+		"tag attributes": {
+			"<system-reminder kind=\"x\">\nThe user sent a new message while you were working:\nalso\n</system-reminder>", ""},
+		"prose after": {
+			"out\n\n" + relayIn("also") + "\n\nprose after the relay", "out\n\nprose after the relay"},
+	}
+	for name, tc := range cases {
+		got, relays := claudecode.Harness{}.SplitRelays(relayToolResult(tc.in))
+		c.EqDeep([]claudecode.Relayed{{Index: 0, Text: "also"}}, relays, "%s: the user's words come out", name)
+		tr := got.Content[0].(msg.ToolResult)
+		if tc.left == "" {
+			c.Len(tr.Content, 0, "%s: nothing is left", name)
+			continue
+		}
+		c.Require().Len(tr.Content, 1, "%s: the rest stays", name)
+		c.Eq(tc.left, tr.Content[0].(msg.Text).Text, "%s: what is left", name)
+	}
+
+	// A trailer this code does not recognise is indistinguishable from the
+	// user's own words, so it stays in the message rather than being guessed at.
+	_, rw := claudecode.Harness{}.SplitRelays(relayToolResult("<system-reminder>\nThe user sent a new message while you were working:\nalso\n\nPlease address it.\n</system-reminder>"))
+	c.EqDeep([]claudecode.Relayed{{Index: 0, Text: "also\n\nPlease address it."}}, rw, "reworded trailer: kept with the message")
+
+	got, relays := claudecode.Harness{}.SplitRelays(msg.Message{Role: msg.User, Content: []msg.Block{
+		msg.Text{Text: "earlier line\n\n" + relayAlone},
+	}})
+	c.Require().Len(got.Content, 1, "top-level prose before the relay stays")
+	c.Eq("earlier line", got.Content[0].(msg.Text).Text, "top-level: the prose is left")
+	c.EqDeep([]claudecode.Relayed{{Index: 0, Text: relayedText}}, relays, "top-level: the relay comes out beside it")
 }

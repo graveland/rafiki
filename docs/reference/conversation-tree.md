@@ -285,8 +285,13 @@ does every request path: `pkg/llm` replays the
 relayed message exactly as stored, which is why
 `TestDeliveryCorpusKeepsTheMidTurnWrapperAndBothIdenticalSends` (`pkg/capture`)
 still sees the wrapper. `eventconv.UserMessageFrom` is `SplitRelays`' only
-caller; a near miss is left untouched rather than guessed at. Pinned by
-`TestSplitRelaysRecordedToolResult`, `TestSplitRelaysTakesTheLastOccurrence`
+caller. Recognition is deliberately LOOSE, since it only decides how the
+cockpit draws the message: the relay is found by its fixed phrase inside a
+`<system-reminder>`, and the trailer, the close tag, tag attributes and prose
+around it are all optional (text before or after stays where it was). Only a
+relay with no words of the user's in it, or a phrase outside any reminder, is
+left untouched. Pinned by `TestSplitRelaysRecordedToolResult`,
+`TestSplitRelaysTakesTheLastOccurrence`, `TestSplitRelaysToleratesVariantFraming`
 and `TestSplitRelaysNearMissesUntouched` (`pkg/harness/claudecode`) and
 `TestUserMessageFromSplitsARelayedMidTurnMessage` (`pkg/eventconv`).
 

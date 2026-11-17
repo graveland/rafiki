@@ -9,38 +9,57 @@ import (
 	"go.graveland.dev/rafiki/pkg/msg"
 )
 
-// Claude Code relays a message the user sends mid-turn by appending a reminder
-// to the next tool result's text, or as a top-level block of its own. It is the
-// ordinary reminder wrapper around a fixed opening and a fixed trailer, with
-// the user's own words in between.
+// Claude Code relays a message the user sends mid-turn inside a reminder, either
+// appended to the next tool result's text or as a top-level block of its own.
+// This only decides how the cockpit draws it, so recognition is by the fixed
+// phrase alone: the reminder's exact framing, the trailer's wording and what
+// surrounds the relay are all tolerated, and only a relay with no words of the
+// user's in it is refused.
 const (
-	relayOpen    = "<system-reminder>\nThe user sent a new message while you were working:\n"
-	relayTrailer = "\n\nThis is how Claude Code surfaces messages the user sends mid-turn"
+	relayPhrase  = "The user sent a new message while you were working:"
+	relayTrailer = "This is how Claude Code surfaces messages the user sends mid-turn"
+	reminderOpen = "<system-reminder"
+	reminderEnd  = "</system-reminder>"
 )
 
-// relayText splits s into the text before the relay and the user's own message,
-// reporting whether s carries a relay at all. The relay must be the last thing
-// in s; anything that does not match exactly is a near-miss, never a guess.
+// relayText splits s into everything around the relay and the user's own
+// message, reporting whether s carries a relay at all. The last occurrence of
+// the phrase inside a reminder is the relay; its body runs to the last trailer
+// line, or to the reminder's end when there is none.
 func relayText(s string) (before, user string, ok bool) {
-	if strings.HasSuffix(s, "\n") && strings.HasSuffix(strings.TrimSuffix(s, "\n"), closeTag) {
-		s = strings.TrimSuffix(s, "\n")
-	}
-	if !strings.HasSuffix(s, closeTag) {
+	p := strings.LastIndex(s, relayPhrase)
+	if p < 0 {
 		return "", "", false
 	}
-	i := strings.LastIndex(s, relayOpen)
-	if i < 0 || i+len(relayOpen) > len(s)-len(closeTag) {
+	open := strings.LastIndex(s[:p], reminderOpen)
+	if open < 0 {
 		return "", "", false
 	}
-	b := s[i+len(relayOpen) : len(s)-len(closeTag)]
-	if strings.Contains(b, "<system-reminder>") || strings.Contains(b, "</system-reminder>") {
+	gt := strings.IndexByte(s[open:p], '>')
+	if gt < 0 || strings.TrimSpace(s[open+gt+1:p]) != "" {
 		return "", "", false
 	}
-	j := strings.LastIndex(b, relayTrailer)
-	if j < 0 || strings.TrimSpace(b[:j]) == "" {
+	body := s[p+len(relayPhrase):]
+	after := ""
+	if e := strings.Index(body, reminderEnd); e >= 0 {
+		after = body[e+len(reminderEnd):]
+		body = body[:e]
+	}
+	if j := strings.LastIndex(body, relayTrailer); j >= 0 {
+		body = body[:j]
+	}
+	user = strings.TrimSpace(body)
+	if user == "" {
 		return "", "", false
 	}
-	return strings.TrimRight(s[:i], "\n"), b[:j], true
+	before = strings.TrimRight(s[:open], "\n")
+	if rest := strings.TrimSpace(after); rest != "" {
+		if before != "" {
+			before += "\n\n"
+		}
+		before += rest
+	}
+	return before, user, true
 }
 
 // Relayed is a message the user sent mid-turn that Claude Code appended to the
@@ -64,10 +83,15 @@ func (Harness) SplitRelays(m msg.Message) (msg.Message, []Relayed) {
 		switch t := b.(type) {
 		case msg.Text:
 			before, user, ok := relayText(t.Text)
-			if !ok || before != "" {
+			if !ok {
 				continue
 			}
-			blocks[i] = msg.Text{Text: user}
+			if before == "" {
+				blocks[i] = msg.Text{Text: user}
+				continue
+			}
+			blocks[i] = msg.Text{Text: before}
+			relays = append(relays, Relayed{Index: i, Text: user})
 		case msg.ToolResult:
 			if len(t.Content) == 0 {
 				continue
