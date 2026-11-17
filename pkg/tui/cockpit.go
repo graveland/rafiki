@@ -268,8 +268,8 @@ type searchTickMsg struct {
 }
 
 // searchPreviewTickMsg fires previewDebounce after the search cursor landed
-// on a row whose transcript is not already in hand, so a held arrow key over
-// the search rail costs one conversation-keyed GetHistory, not one per row.
+// on a row, so a held arrow key over the search rail costs one
+// conversation-keyed GetHistory, not one per row.
 type searchPreviewTickMsg struct {
 	seq int
 }
@@ -794,7 +794,8 @@ func (c *Cockpit) ImageCleanup() string { return c.images.cleanup() }
 func (c *Cockpit) OSCCleanup() string { return c.osc7501.cleanup() }
 
 // viewing is the child whose transcript the conversation pane renders: the
-// rail cursor while the rail holds focus, the committed agent otherwise.
+// rail cursor while the rail holds focus, the committed agent otherwise, and
+// NO child while the search rail is up.
 //
 // The subscription FOLLOWS this child: browsing moves it (rest-gated, see
 // previewSettle), ⏎ and esc move it back, and applyEvent feeds exactly the
@@ -802,7 +803,15 @@ func (c *Cockpit) OSCCleanup() string { return c.osc7501.cleanup() }
 // tracks it live -- while the typed-to agent stays a separate thing (the rail's
 // focus), which is the whole point of browsing without committing: reading one
 // agent and talking to another never collide.
+//
+// Search mode answers "none" because it draws a BROWSED CONVERSATION, not an
+// agent: the rail cursor is then just a leftover, and anything that reads
+// viewing() on the event side -- the badge a landed fetch clears, the stream it
+// opens, the ledger it fetches -- would act on an agent nobody is looking at.
 func (c *Cockpit) viewing() string {
+	if c.searchOpen {
+		return ""
+	}
 	if c.focus == focusRail && c.selected != "" {
 		return c.selected
 	}
@@ -1472,11 +1481,15 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case searchPageMsg:
 		// A failure only releases the level's in-flight mark; a later cursor
-		// move or re-expand can try again. A stale page (the gen moved on
-		// while the RPC ran) is dropped whole: it answers a question nobody
-		// is asking any more.
+		// move or re-expand can try again. A stale page or a stale failure (the
+		// gen moved on while the RPC ran) is dropped whole: it answers a
+		// question nobody is asking any more, and releasing its level would let
+		// the newer gen issue a second top page that applyPage then appends
+		// twice.
 		if msg.err != nil {
-			c.search.pageFailed(msg.parent)
+			if !c.search.pageFailed(msg.gen, msg.parent) {
+				return c, nil
+			}
 			if c.searchOpen {
 				c.setNotice("search failed: " + trimRPCError(msg.err))
 			}
@@ -1485,7 +1498,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !c.search.applyPage(msg.gen, msg.parent, msg.resp) {
 			return c, nil
 		}
-		return c, c.syncSearchPreview()
+		return c, c.syncSearchPreview(false)
 
 	case searchTickMsg:
 		// The query debounce firing. A stale gen means a newer change
@@ -1507,21 +1520,22 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(c.searchHistInFlight, msg.convID)
 		if msg.err != nil {
 			if c.searchOpen && msg.convID == c.searchConv {
-				c.setNotice("history unavailable: " + connect.CodeOf(msg.err).String())
+				c.setNotice("history unavailable: " + trimRPCError(msg.err))
 			}
 			return c, nil
 		}
-		s := c.sessions[msg.convID]
-		if s == nil {
-			s = session.New(msg.convID)
-			c.sessions[msg.convID] = s
-		}
+		// A fresh session per response: GetHistory is the conversation as it
+		// stands now, and ApplyHistory appends rather than reconciling, so
+		// folding a second read into the first session would render every
+		// block twice. The session already on screen was the initial paint and
+		// is replaced whole.
+		s := session.New(msg.convID)
 		for _, ev := range msg.events {
 			s.ApplyHistory(ev)
 		}
-		// The session's existence IS the fetched mark: it is created only when
-		// a response lands, and searchPreviewSettle reads it as the cache. A
-		// search session has no stream to resume, so no cursor is set.
+		c.sessions[msg.convID] = s
+		c.touch(msg.convID)
+		// A search session has no stream to resume, so no cursor is set.
 		return c, nil
 
 	case quotaTickMsg:
@@ -2138,10 +2152,16 @@ func (c *Cockpit) confirmQuit(armed bool) tea.Cmd {
 // handleSearchKey is the search rail's keymap, consulted only while search is
 // open and the rail holds focus. It reports whether it claimed the key;
 // whatever it did not claim falls to the globals. The keys it owns: printable
-// text and backspace edit the query, arrows move the cursor, left/right
-// toggle a row's expansion, tab cycles the sort, and esc or ^R or ^S leave
-// search mode (restoring the agent rail exactly as it was). ⏎ commits when
-// the row's linked agent can be acted on, and expands otherwise.
+// text and backspace edit the query, up/down move the cursor, left/right
+// toggle a row's expansion, tab cycles the sort, PgUp/PgDn/home/end scroll the
+// browsed transcript, and esc or ^R or ^S leave search mode (restoring the
+// agent rail exactly as it was). ⏎ expands a row with children, commits to one
+// without, and a second ⏎ on an expanded row commits.
+//
+// The agent rail's own cursor motion (the attention hops) is SWALLOWED here
+// rather than performed: it would rewrite the agent rail's selection and move
+// the focus subscription while the pane draws a browsed conversation, and
+// nothing on screen would say so.
 func (c *Cockpit) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	k := c.keys
 	switch {
@@ -2155,6 +2175,17 @@ func (c *Cockpit) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool
 		return c, c.searchExpandToggle(), true
 	case key.Matches(msg, k.Commit):
 		return c, c.searchEnter(), true
+	case key.Matches(msg, k.ScrollPageUp), key.Matches(msg, k.ScrollPageDown):
+		// The browsed transcript pages, exactly as the input pane's transcript
+		// does. The rail moves with arrows only; paging it would make a screen of
+		// rows do two different things under one key press.
+		return c, c.scrollSearch(msg), true
+	case key.Matches(msg, k.ScrollTop), key.Matches(msg, k.ScrollBottom):
+		c.jumpSearchScroll(key.Matches(msg, k.ScrollTop))
+		return c, nil, true
+	case key.Matches(msg, k.NextAttention), key.Matches(msg, k.PrevAttention),
+		key.Matches(msg, k.HopPrev), key.Matches(msg, k.HopNext):
+		return c, nil, true
 	case key.Matches(msg, k.NextPane):
 		// Tab cycles the sort here instead of moving focus: the search rail's
 		// one compositional key is the sort, and shift+tab still leaves for the
@@ -2169,19 +2200,55 @@ func (c *Cockpit) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool
 	return c, nil, false
 }
 
+// scrollSearch forwards a scroll key to the browsed conversation's viewport,
+// the way scrollFocused forwards one to the input pane's child. A browsed
+// transcript is read-only, so a reader who cannot page it sees one screenful.
+func (c *Cockpit) scrollSearch(msg tea.KeyPressMsg) tea.Cmd {
+	id := c.searchConv
+	if id == "" {
+		return nil
+	}
+	p := c.pane(id)
+	var cmd tea.Cmd
+	p.vp, cmd = p.vp.Update(msg)
+	p.atBottom = p.vp.AtBottom()
+	return cmd
+}
+
+// jumpSearchScroll sends the browsed transcript to the top or the bottom. The
+// viewport binds neither home nor end itself.
+func (c *Cockpit) jumpSearchScroll(top bool) {
+	id := c.searchConv
+	if id == "" {
+		return
+	}
+	p := c.pane(id)
+	if top {
+		p.vp.GotoTop()
+	} else {
+		p.vp.GotoBottom()
+	}
+	p.atBottom = p.vp.AtBottom()
+}
+
 // openSearch switches the rail column to the conversation search. The agent
 // rail's own state is left untouched (cursor, folds, scroll), so closing
 // search restores it exactly; the focus pane search was entered from is
 // remembered for the way back. A rail reopened on its previous results shows
 // them again with no round trip; an empty one fetches its first top-level
 // page now, undebounced, because the open is the deliberate act.
+//
+// The open is also a REST on the row under the cursor, so its transcript is
+// fetched again: a preview armed before the rail closed died with the previous
+// seq, and reopening on the same row must not leave the pane reading "No
+// messages yet" until the cursor moves.
 func (c *Cockpit) openSearch() tea.Cmd {
 	if c.search == nil {
 		c.search = newSearchRail()
 	}
 	c.searchFrom = c.focus
 	c.searchOpen = true
-	cmds := []tea.Cmd{c.setFocus(focusRail)}
+	cmds := []tea.Cmd{c.setFocus(focusRail), c.syncSearchPreview(true)}
 	if req := c.search.resumeTop(); req != nil {
 		cmds = append(cmds, c.searchPageCmd(*req))
 	}
@@ -2189,10 +2256,10 @@ func (c *Cockpit) openSearch() tea.Cmd {
 }
 
 // closeSearchTo leaves search mode and puts focus on p: searchFrom when the
-// toggle or esc closes it, the input when a pane cycle does. Nothing the
-// agent rail owns was touched while search was open, so restoring it is a
-// flag flip. A preview tick armed for the search cursor is stale from this
-// moment on.
+// toggle or esc closes it, the input when a pane cycle or a commit does.
+// Nothing the agent rail owns was touched while search was open, so restoring
+// it is a flag flip. A preview tick armed for the search cursor is stale from
+// this moment on.
 func (c *Cockpit) closeSearchTo(p focusPane) tea.Cmd {
 	if !c.searchOpen {
 		return nil
@@ -2221,10 +2288,17 @@ func (c *Cockpit) searchBackspace() tea.Cmd {
 // carries the gen AND the request the change returned: at fire time a gen
 // that no longer matches means a newer change superseded this one and its
 // own tick owns the request, so the stale one is ignored whole.
+//
+// The browsed transcript goes with the old rows: it answered the old question,
+// and leaving it beside an empty rail would show one result set's conversation
+// under another's query for the whole debounce plus RPC. The seq bump orphans
+// any preview tick already armed.
 func (c *Cockpit) searchChanged(req *searchPage) tea.Cmd {
 	if req == nil {
 		return nil
 	}
+	c.searchConv = ""
+	c.searchSeq++
 	gen := c.search.gen
 	page := *req
 	return tea.Tick(searchDebounce, func(time.Time) tea.Msg {
@@ -2236,7 +2310,7 @@ func (c *Cockpit) searchChanged(req *searchPage) tea.Cmd {
 // loaded rows also fetches that level's next page.
 func (c *Cockpit) searchMove(delta int) tea.Cmd {
 	req := c.search.move(delta)
-	cmd := c.syncSearchPreview()
+	cmd := c.syncSearchPreview(true)
 	if req != nil {
 		cmd = tea.Batch(c.searchPageCmd(*req), cmd)
 	}
@@ -2250,24 +2324,33 @@ func (c *Cockpit) searchExpandToggle() tea.Cmd {
 		return nil
 	}
 	req := c.search.toggle(row.l.GetId())
-	cmd := c.syncSearchPreview()
+	cmd := c.syncSearchPreview(true)
 	if req != nil {
 		cmd = tea.Batch(c.searchPageCmd(*req), cmd)
 	}
 	return cmd
 }
 
-// searchEnter acts on the row under the cursor. When its linked agent can be
-// acted on, it commits: a live agent is focused through the same hop the
-// agent rail's ⏎ uses, an exited one is resumed and then focused; either way
-// search mode ends and the input gets the keys. Every other row expands or
-// collapses, which is what left and right do outright.
+// searchEnter acts on the row under the cursor.
+//
+// A row with children EXPANDS on the first ⏎ and never commits from it: a
+// coordinator's finished conversation with subagent conversations under it is
+// the most natural row to look inside, and resuming a process (and its spend)
+// because someone meant to expand it is not a thing a browser may do. The
+// second ⏎ on an expanded row has nothing left to open, so it commits. A row
+// with no children commits straight away: a live agent is focused through the
+// same hop the agent rail's ⏎ uses, an exited one is resumed and then focused,
+// and either way search ends with the keys in the input. A row with nothing
+// actionable falls back to expanding, as does a second ⏎ on a childless row.
 func (c *Cockpit) searchEnter() tea.Cmd {
 	row := c.search.cursorRow()
 	if row == nil {
 		return nil
 	}
 	l := row.l
+	if l.GetChildCount() > 0 && !c.search.expanded[l.GetId()] {
+		return c.searchExpandToggle()
+	}
 	child := l.GetChildId()
 	if child == "" {
 		return c.searchExpandToggle()
@@ -2282,8 +2365,11 @@ func (c *Cockpit) searchEnter() tea.Cmd {
 }
 
 // searchCommit focuses (or resumes and focuses) the conversation's linked
-// agent and closes search mode, landing in the same state the agent rail's
-// ⏎ lands in: that agent's transcript, keys in the input.
+// agent and ends search, landing in the state the agent rail's ⏎ lands in
+// whatever pane search was opened from: that agent's transcript, keys in the
+// input, no rail drawn beside them. It is the rail's own commit, so it uses
+// the rail's own exit -- closeSearchTo first, because leaveRail asks viewing()
+// which agent the pane is about to show and search mode answers "none".
 func (c *Cockpit) searchCommit(l *rafikiv1.ConversationListing, resume bool) tea.Cmd {
 	child := l.GetChildId()
 	name := child
@@ -2295,19 +2381,31 @@ func (c *Cockpit) searchCommit(l *rafikiv1.ConversationListing, resume bool) tea
 		c.setNotice("resuming " + name + "…")
 		cmds = append(cmds, c.resumeCmd(child, name))
 	}
-	cmds = append(cmds, c.closeSearchTo(c.searchFrom), c.hop(child))
+	cmds = append(cmds, c.closeSearchTo(focusInput), c.hop(child), c.leaveRail())
 	return tea.Batch(cmds...)
 }
 
 // syncSearchPreview readies the transcript pane for the row the search cursor
-// rests on: a change of row bumps the seq and arms the debounce, and a tick
-// that is still current fetches that row's conversation. Like the agent
-// rail's preview, the fetch is deferred so a held arrow key costs one
-// GetHistory, not one per row swept past.
-func (c *Cockpit) syncSearchPreview() tea.Cmd {
+// rests on. A rest bumps the seq and arms the debounce, so a held arrow key
+// costs one GetHistory at the final rest, not one per row swept past; a page
+// landing (rest false) only arms when it moved the pane onto a conversation it
+// was not already showing.
+//
+// A rest always re-arms, even for a conversation whose transcript is already in
+// hand: the cached text is the initial paint, not a reason to keep showing a
+// transcript that may have moved on since, and it is also what retries a fetch
+// that failed. The in-flight mark is what stops two reads of one conversation.
+func (c *Cockpit) syncSearchPreview(rest bool) tea.Cmd {
 	id := c.search.selectedID()
-	if id == c.searchConv {
+	if id == "" {
+		c.searchConv = ""
 		return nil
+	}
+	if !rest && id == c.searchConv {
+		return nil
+	}
+	if s := c.sessions[id]; s != nil {
+		c.touch(id)
 	}
 	c.searchConv = id
 	c.searchSeq++
@@ -2325,9 +2423,6 @@ func (c *Cockpit) searchPreviewSettle(seq int) tea.Cmd {
 	id := c.searchConv
 	if id == "" || c.searchHistInFlight[id] {
 		return nil
-	}
-	if s := c.sessions[id]; s != nil {
-		return nil // read once; the pane shows it from cache
 	}
 	c.searchHistInFlight[id] = true
 	return c.searchHistoryCmd(id)
@@ -2441,10 +2536,11 @@ func (c *Cockpit) searchTranscript(width, height int) string {
 	return conv
 }
 
-// pasted path — same stagedAttachment, same cap, same notice shape — and the
+// applyClipboardPaste stages what ^V read. An image stages exactly like a
+// pasted path (same stagedAttachment, same cap, same notice shape), and the
 // token is what the model reads naming the bytes beside it. Tokens NUMBER
 // across pastes ([Image #1], [Image #2]) so a model can be told "the second
-// image" — two identical [clipboard.png] tokens could not be told apart.
+// image": two identical [clipboard.png] tokens could not be told apart.
 // Text re-enters handlePaste so CRLF normalization and folding apply
 // unchanged. A failed read is a notice, never an error dialog: ^V must be
 // safe to press on spec.
@@ -2946,11 +3042,16 @@ func (c *Cockpit) touch(childID string) {
 	for len(c.lru) > maxSessions {
 		victim := c.lru[0]
 		c.lru = c.lru[1:]
-		if victim == c.focused() || victim == c.viewing() || victim == c.focusChild {
+		if victim == c.focused() || victim == c.viewing() || victim == c.focusChild ||
+			(c.searchOpen && victim == c.searchConv) {
 			// Never evict what the user is looking at -- the focused child, the
-			// row under the cursor while the rail holds focus, or the child the
-			// subscription is on (the same one a tick after a cursor move): an
-			// eviction under a live session would strand its stream.
+			// row under the cursor while the rail holds focus, the child the
+			// subscription is on (the same one a tick after a cursor move), or the
+			// conversation the search pane is showing: an eviction under a live
+			// session would strand its stream, and under a browsed one it would
+			// empty the pane until the cursor moved. A browsed conversation is
+			// otherwise evictable like any session, which is what keeps a long
+			// browsing session from holding every transcript it passed.
 			c.lru = append([]string{victim}, c.lru...)
 			break
 		}
@@ -3045,11 +3146,13 @@ func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	idx = (idx + delta + len(order)) % len(order)
 	if c.focus == focusRail && order[idx] == focusInput {
 		if c.searchOpen {
-			// Leaving the search rail for the input ends search mode. The agent
-			// rail's own state was never touched, and leaving it hidden-or-not
-			// exactly as it was is the point, so this is not leaveRail: it
-			// hides the agent rail unconditionally.
-			return c.closeSearchTo(focusInput)
+			// Leaving the search rail for the input ends search mode, and it leaves
+			// it the way every rail exit does: through leaveRail, which hides the
+			// agent rail. Restoring it as the flag it was would draw the agent rail
+			// beside a focused input, the ambiguous state the two-mode rule exists
+			// to prevent. closeSearchTo runs FIRST because leaveRail asks viewing()
+			// which agent the pane is about to show.
+			return tea.Batch(c.closeSearchTo(focusInput), c.leaveRail())
 		}
 		// Leaving the rail hands the keys back through leaveRail, which also
 		// returns the subscription to the committed agent -- the same round
@@ -3726,7 +3829,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.HopPrev, "Switch to the agent above in the rail, without leaving the input."},
 		entry{k.HopNext, "Switch to the agent below."},
 		entry{k.ToggleRail, "Show or hide the rail (^B does the same). Hiding it leaves your agents running."},
-		entry{k.SearchToggle, "Switch the rail between the agent list and the conversation search. Type to search, arrows to browse, ⏎ to open an agent or expand a row, tab to cycle the sort; esc or ^S again goes back."},
+		entry{k.SearchToggle, "Switch the rail between the agent list and the conversation search. Type to search, arrows to browse, ⏎ to expand a row (again for its agent), tab to cycle the sort; esc or ^S again goes back."},
 		entry{k.Help, "Show or hide this page."},
 		entry{k.ExpandArgs, "Expand or collapse tool-call details: full arguments and results."},
 		entry{k.ToggleInjected, "Expand or collapse injected messages: the notices the daemon and the agent's harness add. Drawn short by default."},

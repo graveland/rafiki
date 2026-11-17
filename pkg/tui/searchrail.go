@@ -200,9 +200,24 @@ func (s *searchRail) applyPage(gen int, parent string, resp *rafikiv1.ListConver
 }
 
 // pageFailed releases a level's in-flight mark after its RPC failed, so a
-// later cursor move or re-expand can try again.
-func (s *searchRail) pageFailed(parent string) {
+// later cursor move or re-expand can try again. It reports whether the failure
+// belonged to the current gen: one that did not answers a question nobody is
+// asking any more, and releasing its level would let a fresh page be issued
+// for a result set the failure knows nothing about.
+//
+// A failed CHILD level is also collapsed again, so the row stops claiming to
+// be expanded with nothing under it and the next enter retries instead of
+// collapsing what was never opened.
+func (s *searchRail) pageFailed(gen int, parent string) bool {
+	if gen != s.gen {
+		return false
+	}
 	delete(s.loading, parent)
+	if parent != "" {
+		delete(s.expanded, parent)
+		s.rebuild()
+	}
+	return true
 }
 
 // rebuild flattens the loaded levels into the visible rows, depth first: each

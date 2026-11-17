@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	rafikiv1connect "go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/tui/session"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -387,6 +389,7 @@ type searchFakeClient struct {
 	histReqs   []*rafikiv1.GetHistoryRequest
 	resumeReqs []*rafikiv1.ResumeRequest
 	listErr    error
+	histErr    error
 	// pages maps "parent|cursor" to the canned response; a miss is an empty
 	// page, which is also how a level reads as exhausted.
 	pages   map[string]*rafikiv1.ListConversationsResponse
@@ -408,6 +411,9 @@ func (f *searchFakeClient) GetHistory(_ context.Context, req *connect.Request[ra
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.histReqs = append(f.histReqs, req.Msg)
+	if f.histErr != nil {
+		return nil, f.histErr
+	}
 	return connect.NewResponse(&rafikiv1.GetHistoryResponse{Events: f.history[req.Msg.GetConversationId()]}), nil
 }
 
@@ -566,8 +572,9 @@ func TestSearchRailTabCyclesTheSort(t *testing.T) {
 }
 
 // Moving the cursor onto a row fetches that row's conversation by its own id
-// and renders it read-only in the transcript pane; the fetch is cached, so a
-// second rest on the same row costs nothing.
+// and renders it read-only in the transcript pane. A NEW rest re-fetches, so a
+// conversation whose agent is still working is not frozen at its first view;
+// what the debounce buys is one fetch per rest, not one per row swept past.
 func TestSearchRailPreviewFetchesTheBrowsedConversation(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	fake := &searchFakeClient{
@@ -602,20 +609,21 @@ func TestSearchRailPreviewFetchesTheBrowsedConversation(t *testing.T) {
 	ck.Require().True(s != nil, "the transcript landed in a conversation-keyed session")
 	ck.Eq(1, len(s.Blocks), "the event applied")
 
-	// Resting on conv-1 fetches it; returning to conv-2 is served from cache.
+	// Resting on conv-1 fetches it. Coming back to conv-2 is a new rest, so it
+	// fetches again: the transcript already in hand was the initial paint.
 	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	searchPreviewNow(t, c)
 	ck.Eq(2, len(fake.histCalls()), "conv-1 warmed once")
 	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	searchPreviewNow(t, c)
-	ck.Eq(2, len(fake.histCalls()), "conv-2 served from cache")
+	ck.Eq(3, len(fake.histCalls()), "the new rest on conv-2 refreshed it")
 
-	// A sweep that ends on a cached row fetches nothing: the ticks the cursor
-	// outran are stale by design, so the sweep costs one rest, not one row.
+	// A sweep arms one tick per row and only the final rest's is current, so it
+	// costs one fetch, not one per row it passes.
 	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	searchPreviewNow(t, c)
-	ck.Eq(2, len(fake.histCalls()), "a sweep past cached rows costs nothing")
+	ck.Eq(4, len(fake.histCalls()), "a sweep past rows costs one rest, not one row")
 }
 
 // A stale preview tick (the cursor moved on between arm and fire) fetches
@@ -736,6 +744,481 @@ func TestSearchRailFailedPageReleasesTheLevel(t *testing.T) {
 	c.Update(searchPageMsg{gen: c.search.gen, parent: "some-parent",
 		err: errors.New("the daemon is down")})
 	ck.NotStrContains(c.notice, "some-parent", "the notice is a sentence, not a dump")
+}
+
+// searchFromRail is a cockpit in BROWSE (two live children, the first under
+// the agent rail's cursor) with the search rail opened on top of it, which is
+// the origin every mode invariant has to hold from.
+func searchFromRail(t *testing.T, fake *searchFakeClient) *Cockpit {
+	t.Helper()
+	c := newTestCockpit("")
+	c.client = fake
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_live", "live work", 0), summaryFor("c_other", "other work", 0),
+	})
+	c.focus = focusRail
+	c.selected = "c_live"
+	if c.railCols() == 0 {
+		t.Fatalf("setup: the agent rail does not draw, so BROWSE is not the origin")
+	}
+	_, cmd := c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	searchRun(t, c, cmd)
+	assert.NewAborting(t).Eq(focusRail, c.searchFrom, "search opened from the agent rail")
+	return c
+}
+
+// searchLiveRow is the listing a commit needs: a conversation whose linked
+// agent can be acted on, with no child conversations under it.
+func searchLiveRow(convID, childID, name string) *rafikiv1.ConversationListing {
+	l := searchListing(convID, name, 0)
+	l.ChildId = childID
+	l.State = rafikiv1.ConversationState_CONVERSATION_STATE_OPEN
+	return l
+}
+
+// A failure that belongs to an OLDER gen must not release its level: the level
+// is not stuck, it has a newer request in flight, and releasing the mark lets a
+// reopen issue an undebounced top page that the pending tick then issues again,
+// so every row renders twice. It must not flash a notice for a query nobody is
+// asking either.
+func TestSearchRailStaleFailureReleasesNothing(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(searchListing("conv-1", "first", 0)),
+	}}
+	c := searchCockpit(t, fake)
+
+	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	stale := c.search.gen - 1
+	ck.Require().True(c.search.loading[""], "setup: the change put a top page in flight")
+
+	c.Update(searchPageMsg{gen: stale, parent: "", err: errors.New("the daemon is down")})
+	ck.True(c.search.loading[""],
+		"a stale failure released the level, so a reopen can issue a second top page")
+	ck.Eq("", c.notice, "a stale failure flashed a notice for a query nobody is asking")
+
+	// Close and reopen inside the debounce: the reopen must issue nothing, and
+	// the pending tick must issue the level's page exactly once.
+	c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	_, cmd := c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	searchRun(t, c, cmd)
+	ck.Eq(1, len(fake.listCalls()), "the reopen issued a top page that was already in flight")
+	searchTickNow(t, c)
+	ck.Eq(2, len(fake.listCalls()), "the pending tick issued the level's page once")
+
+	// A failure of the CURRENT gen is the real thing: it releases the level and
+	// names itself so a later move can retry.
+	c.Update(searchPageMsg{gen: c.search.gen, parent: "", err: errors.New("still down")})
+	ck.False(c.search.loading[""], "a current failure must release the level")
+	ck.NotEq("", c.notice, "a current failure names itself in the notice")
+}
+
+// Closing search inside the preview debounce orphans the tick, so REOPENING on
+// the same row must re-arm it: otherwise searchConv still matches the row, no
+// fetch is ever issued, and the pane reads "No messages yet." until the cursor
+// moves. The same re-arm is what retries a fetch that failed.
+func TestSearchRailReopenRefetchesThePreview(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{
+		pages: map[string]*rafikiv1.ListConversationsResponse{
+			"|": searchPageResp(searchListing("conv-1", "first", 0), searchListing("conv-2", "second", 0)),
+		},
+		history: map[string][]*rafikiv1.Event{
+			"conv-2": {historyEventForConv("conv-2", "hello from conv-2")},
+		},
+	}
+	c := searchCockpit(t, fake)
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // arms the preview for conv-2
+	ck.Require().Eq("conv-2", c.searchConv, "setup: the cursor rests on conv-2")
+
+	c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}) // close inside the debounce
+	ck.Require().False(c.searchOpen, "search closed")
+	afterClose := c.searchSeq
+
+	c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	ck.NotEq(afterClose, c.searchSeq,
+		"the reopen armed no preview for the row under the cursor")
+	searchPreviewNow(t, c)
+	ck.Require().Eq(1, len(fake.histCalls()), "the reopened pane fetched nothing")
+	ck.Eq("conv-2", fake.histCalls()[0].GetConversationId(), "the reopen fetched the row it opened on")
+	ck.StrContains(c.View().Content, "hello from conv-2", "the reopened pane shows the transcript")
+}
+
+// A query change clears the browsed transcript with the rows it described: the
+// pane showed one result set's conversation beside the next query's empty rail
+// for the whole debounce plus RPC.
+func TestSearchRailQueryChangeDropsTheBrowsedTranscript(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{
+		pages: map[string]*rafikiv1.ListConversationsResponse{
+			"|": searchPageResp(searchListing("conv-1", "first", 0)),
+		},
+		history: map[string][]*rafikiv1.Event{
+			"conv-1": {historyEventForConv("conv-1", "hello from conv-1")},
+		},
+	}
+	c := searchCockpit(t, fake)
+	searchPreviewNow(t, c)
+	ck.Require().StrContains(c.View().Content, "hello from conv-1", "setup: the transcript is on screen")
+
+	c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	ck.Eq("", c.searchConv, "the reset kept the previous result's conversation under the cursor")
+	ck.NotStrContains(c.View().Content, "hello from conv-1",
+		"the pane still showed the previous result's transcript")
+}
+
+// A failed CHILD page must collapse the row again: left expanded it claims to
+// have children it never got, and the next enter collapses what was never
+// opened instead of retrying.
+func TestSearchRailFailedChildPageCollapsesTheRow(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|":  {Rows: []*rafikiv1.ConversationListing{searchListing("p", "parent", 2)}},
+		"p|": searchPageResp(searchListing("k", "kid", 0)),
+	}}
+	c := searchCockpit(t, fake)
+
+	// The expansion's request is never run, so its failure is the only thing
+	// that answers it.
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	ck.Require().True(c.search.expanded["p"], "setup: enter expanded the row")
+	ck.Require().Eq(1, len(fake.listCalls()), "setup: the expansion asked for its children")
+
+	c.Update(searchPageMsg{gen: c.search.gen, parent: "p", err: errors.New("the daemon is down")})
+	ck.False(c.search.expanded["p"], "a failed child page left the row claiming to be expanded")
+	ck.False(c.search.loading["p"], "the failed level stayed in flight, so nothing can retry")
+
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	searchRun(t, c, cmd)
+	ck.Eq(2, len(fake.listCalls()), "the next enter collapsed the row instead of retrying")
+	ck.EqDeep([]string{"p", "k"}, rowIDs(c.search.rows), "the retry's children landed under the row")
+}
+
+// A preview fetch that failed is retried on the next rest of the same row: the
+// failure leaves no session behind, and the only thing between the reader and a
+// second try used to be the "already fetched" early-out on the same row.
+func TestSearchRailFailedPreviewIsRetriedOnTheNextRest(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{
+		pages: map[string]*rafikiv1.ListConversationsResponse{
+			"|": searchPageResp(searchListing("conv-1", "first", 0)),
+		},
+		histErr: errors.New("the daemon is down"),
+	}
+	c := searchCockpit(t, fake)
+	searchPreviewNow(t, c)
+	ck.Require().Eq(1, len(fake.histCalls()), "setup: the first rest fetched")
+	ck.False(c.searchHistInFlight["conv-1"], "the failure did not release the in-flight mark")
+	ck.Nil(c.sessions["conv-1"], "setup: the failed read left no transcript")
+
+	// Resting on the same row again (the cursor is already on it, so the move is
+	// clamped) must try again rather than serve the absence from memory. The
+	// armed seq is the assertion: without it no tick exists to fire.
+	fake.mu.Lock()
+	fake.histErr = nil
+	fake.history = map[string][]*rafikiv1.Event{
+		"conv-1": {historyEventForConv("conv-1", "second time lucky")},
+	}
+	fake.mu.Unlock()
+	armed := c.searchSeq
+	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	ck.NotEq(armed, c.searchSeq, "the next rest armed no preview for the row it is already on")
+	searchPreviewNow(t, c)
+	ck.Require().Eq(2, len(fake.histCalls()), "the next rest did not retry the failed fetch")
+	ck.Require().True(c.sessions["conv-1"] != nil, "the retry left no transcript")
+	ck.Eq(1, len(c.sessions["conv-1"].Blocks), "the retry's transcript landed")
+}
+
+// A failed transcript fetch says what the daemon said, through the same trim
+// every page error uses, rather than connect's transport code.
+func TestSearchRailHistoryFailureNamesTheDaemonsSentence(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(searchListing("conv-1", "first", 0)),
+	}}
+	c := searchCockpit(t, fake)
+	searchPreviewNow(t, c)
+
+	c.Update(searchHistoryMsg{convID: "conv-1",
+		err: connect.NewError(connect.CodeInternal, errors.New("conversation is gone"))})
+	ck.False(c.searchHistInFlight["conv-1"], "the failure did not release the in-flight mark")
+	ck.Eq("history unavailable: conversation is gone", c.notice,
+		"the notice is the daemon's sentence, not connect's transport code")
+}
+
+// ⏎ EXPANDS a row with children and never commits from it: a coordinator's
+// finished conversation with subagent conversations under it is the most
+// natural row to look inside, and resuming a process (and its spend) because
+// someone meant to expand it is not something a browser may do. The second ⏎
+// on the expanded row has nothing left to open, so it commits.
+func TestSearchRailEnterExpandsBeforeItResumes(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	exited := searchListing("conv-exited", "done work", 2)
+	exited.ChildId = "c_exit"
+	exited.State = rafikiv1.ConversationState_CONVERSATION_STATE_EXITED
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|":            searchPageResp(exited),
+		"conv-exited|": searchPageResp(searchListing("kid", "subagent conversation", 0)),
+	}}
+	c := searchCockpit(t, fake)
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_exit", "done work", 0)})
+	exitChild(c, "c_exit")
+
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	searchRun(t, c, cmd)
+	ck.True(c.searchOpen, "the first ⏎ left search: a row with children must expand")
+	ck.Eq(0, len(fake.resumeCalls()), "the first ⏎ resumed a finished coordinator to expand it")
+	ck.EqDeep([]string{"conv-exited", "kid"}, rowIDs(c.search.rows), "the first ⏎ expanded the row")
+
+	_, cmd = c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	searchRun(t, c, cmd)
+	ck.False(c.searchOpen, "the second ⏎ on the expanded row commits")
+	ck.Require().Eq(1, len(fake.resumeCalls()), "the commit resumed the exited agent")
+	ck.Eq("c_exit", c.selected, "the rail cursor followed the commit")
+}
+
+// The same rule for an OPEN agent with children: the first ⏎ opens the row
+// instead of hopping away from the browser.
+func TestSearchRailEnterExpandsAnOpenRowsChildren(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	live := searchListing("conv-live", "live work", 1)
+	live.ChildId = "c_live"
+	live.State = rafikiv1.ConversationState_CONVERSATION_STATE_OPEN
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|":          searchPageResp(live),
+		"conv-live|": searchPageResp(searchListing("kid", "subagent conversation", 0)),
+	}}
+	c := searchCockpit(t, fake)
+
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	searchRun(t, c, cmd)
+	ck.True(c.searchOpen, "the first ⏎ on a live row with children left search")
+	ck.Eq(focusRail, c.focus, "the first ⏎ moved focus")
+	ck.EqDeep([]string{"conv-live", "kid"}, rowIDs(c.search.rows), "the first ⏎ expanded the row")
+}
+
+// A commit lands where the agent rail's own ⏎ lands, whatever pane search was
+// opened from: that agent's transcript, keys in the input, no rail drawn beside
+// them.
+func TestSearchRailCommitFromTheAgentRailLandsInTheInput(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(searchLiveRow("conv-live", "c_live", "live work")),
+	}}
+	c := searchFromRail(t, fake)
+
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	searchRun(t, c, cmd)
+	ck.False(c.searchOpen, "search closed on the commit")
+	ck.Eq(focusInput, c.focus, "commit from a rail origin left focus")
+	ck.Eq(0, c.railCols(), "the agent rail stayed drawn beside a focused input")
+	ck.True(c.ta.Focused(), "the textarea was left blurred")
+	ck.Eq("c_live", c.selected, "the rail cursor followed the commit")
+}
+
+// The cockpit holds two modes and nothing between them: BROWSE (rail drawn AND
+// focused) and TALK (full width, keys in the input). Every exit from the search
+// rail has to land in one of them.
+func TestSearchRailEveryExitLeavesTheTwoModes(t *testing.T) {
+	exits := []struct {
+		name  string
+		press func(c *Cockpit)
+	}{
+		{"esc", func(c *Cockpit) { c.Update(keyMsg("esc")) }},
+		{"^S", func(c *Cockpit) { c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}) }},
+		{"^R", func(c *Cockpit) { c.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl}) }},
+		{"shift+tab", func(c *Cockpit) { c.Update(keyMsg("shift+tab")) }},
+		{"enter", func(c *Cockpit) { c.Update(keyMsg("enter")) }},
+	}
+	for _, tc := range exits {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
+			fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+				"|": searchPageResp(searchLiveRow("conv-live", "c_live", "live work")),
+			}}
+			c := searchFromRail(t, fake)
+			ck.Require().True(c.searchOpen, "setup: search is open")
+
+			tc.press(c)
+
+			ck.False(c.searchOpen, "%s left search open", tc.name)
+			if c.focus == focusInput {
+				ck.Eq(0, c.railCols(),
+					"%s left the agent rail drawn beside a focused input", tc.name)
+				ck.True(c.ta.Focused(), "%s left the input unfocused", tc.name)
+				return
+			}
+			ck.Eq(focusRail, c.focus, "%s left focus on %v", tc.name, c.focus)
+			ck.NotEq(0, c.railCols(), "%s landed in BROWSE with no rail drawn", tc.name)
+		})
+	}
+}
+
+// The attention hops are the agent rail's own cursor motion. Running one under
+// an open search would rewrite `selected` and move the focus subscription while
+// the pane draws a browsed conversation, and nothing on screen would say so.
+func TestSearchRailHopKeysDoNotMoveTheAgentRail(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(searchLiveRow("conv-live", "c_live", "live work")),
+	}}
+	c := searchFromRail(t, fake)
+
+	for _, msg := range []tea.KeyPressMsg{
+		{Code: 'n', Mod: tea.ModAlt},
+		{Code: 'p', Mod: tea.ModAlt},
+		{Code: tea.KeyUp, Mod: tea.ModCtrl},
+		{Code: tea.KeyDown, Mod: tea.ModCtrl},
+	} {
+		c.Update(msg)
+		ck.Eq("c_live", c.selected, "%s moved the agent rail's cursor while search was open", msg.String())
+		ck.Eq("", c.focusChild, "%s opened a focus stream for an agent nobody is looking at", msg.String())
+		ck.True(c.searchOpen, "%s closed search", msg.String())
+	}
+	ck.Eq("", c.search.query, "a hop key was typed into the query")
+}
+
+// Displayed is read, and under an open search NOTHING agent-side is displayed:
+// the rail cursor is a leftover, and a history fetch for its child must not
+// clear that agent's badge or open its stream.
+func TestSearchRailDoesNotReadTheAgentRailCursorsChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(searchListing("conv-1", "first", 0)),
+	}}
+	c := searchCockpit(t, fake)
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_live", "live work", 0), summaryFor("c_other", "other work", 0),
+	})
+	c.rail.SetFocus("c_other")
+	c.Update(railEventMsg{evs: []*rafikiv1.Event{turnEndFor("c_live", 8)}})
+	n, ok := c.rail.Get("c_live")
+	ck.Require().True(ok, "setup: the agent has a row")
+	ck.Require().Eq(1, n.Attention, "setup: the agent carries a badge")
+
+	// The user browsed the rail onto that agent and then opened search.
+	c.focus = focusRail
+	c.selected = "c_live"
+	c.sessions["c_live"] = session.New("c_live")
+
+	c.Update(historyMsg{childID: "c_live", after: 8, events: []*rafikiv1.Event{
+		historyEvent("c_live", "nobody is looking at this", 0, false),
+	}})
+	n, _ = c.rail.Get("c_live")
+	ck.Eq(1, n.Attention, "a fetch for an undisplayed agent cleared its badge")
+	ck.Eq("", c.focusChild, "a fetch for an undisplayed agent opened its focus stream")
+}
+
+// A browsed transcript is read-only, so a reader who cannot page it sees one
+// screenful: PgUp/PgDn scroll it and home/end jump, exactly as they do from the
+// input pane. The rail moves with arrows only.
+func TestSearchRailScrollKeysScrollTheBrowsedTranscript(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(searchListing("conv-1", "first", 0), searchListing("conv-2", "second", 0)),
+	}}
+	c := searchCockpit(t, fake)
+	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	searchPreviewNow(t, c)
+
+	s := c.sessions["conv-2"]
+	ck.Require().True(s != nil, "setup: the browsed transcript loaded")
+	for i := 0; i < 200; i++ {
+		s.Blocks = append(s.Blocks, session.Block{Kind: session.KindSystem,
+			Text: "line " + strconv.Itoa(i), Final: true})
+	}
+	s.Finalized = len(s.Blocks)
+	p := c.pane("conv-2")
+	c.View()
+	p.vp.GotoBottom()
+	bottom := p.vp.YOffset()
+	ck.Require().Greater(0, bottom, "setup: the transcript is taller than the pane")
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	ck.Less(bottom, p.vp.YOffset(), "PgUp did not scroll the browsed transcript")
+	ck.Eq("conv-2", c.search.selectedID(), "PgUp moved the search rail's cursor")
+	ck.True(c.searchOpen, "PgUp left search")
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	ck.Eq(0, p.vp.YOffset(), "home did not jump to the top")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	ck.Eq(bottom, p.vp.YOffset(), "end did not jump to the bottom")
+
+	// Arrows still move the rail, and the pane follows the new row.
+	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	ck.Eq("conv-1", c.search.selectedID(), "the arrow key did not move the rail")
+}
+
+// Browsed transcripts are ordinary sessions: touched on every rest and on every
+// fetch, so the LRU bounds them too. A long browsing session must not hold a
+// pane and a renderer for every conversation it passed.
+func TestSearchRailBrowsedSessionsAreEvicted(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	rows := make([]*rafikiv1.ConversationListing, 0, maxSessions+2)
+	for i := 0; i < maxSessions+2; i++ {
+		rows = append(rows, searchListing("conv-"+strconv.Itoa(i), "browsed", 0))
+	}
+	fake := &searchFakeClient{pages: map[string]*rafikiv1.ListConversationsResponse{
+		"|": searchPageResp(rows...),
+	}}
+	c := searchCockpit(t, fake)
+	for i := 0; i < maxSessions+2; i++ {
+		if i > 0 {
+			c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		}
+		searchPreviewNow(t, c)
+	}
+	ck.Require().Eq(maxSessions+2, len(fake.histCalls()), "setup: every row was fetched once")
+	ck.LessOrEqual(maxSessions, len(c.sessions), "browsed transcripts are never evicted")
+	ck.Nil(c.sessions["conv-0"], "the oldest browsed conversation survived the LRU")
+}
+
+// A second read of a conversation whose agent is still working must REPLACE the
+// transcript, not append to it: ApplyHistory has no dedup, so folding a refetch
+// into the session already on screen would draw every block twice.
+func TestSearchRailRefetchReplacesTheTranscript(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	fake := &searchFakeClient{
+		pages: map[string]*rafikiv1.ListConversationsResponse{
+			"|": searchPageResp(searchListing("conv-1", "first", 0), searchListing("conv-2", "second", 0)),
+		},
+		history: map[string][]*rafikiv1.Event{
+			"conv-2": {historyEventForConv("conv-2", "first line")},
+		},
+	}
+	c := searchCockpit(t, fake)
+	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	searchPreviewNow(t, c)
+	ck.Require().Eq(1, len(c.sessions["conv-2"].Blocks), "setup: the first read landed")
+
+	// The conversation grew while the cursor was away.
+	fake.mu.Lock()
+	fake.history["conv-2"] = []*rafikiv1.Event{
+		historyEventForConv("conv-2", "first line"),
+		historyEventForConv("conv-2", "second line"),
+	}
+	fake.mu.Unlock()
+	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	searchPreviewNow(t, c)
+	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	searchPreviewNow(t, c)
+
+	s := c.sessions["conv-2"]
+	ck.Require().True(s != nil, "the refetch left no session")
+	ck.Eq(2, len(s.Blocks), "the refetch appended to the transcript instead of replacing it")
+}
+
+// historyEventForConv is one conversation-keyed user message: a GetHistory
+// response for a browsed conversation carries no child identity on its events.
+func historyEventForConv(convID, text string) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: convID,
+		Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
+			Content: []*rafikiv1.ContentBlock{{Block: &rafikiv1.ContentBlock_Text{
+				Text: &rafikiv1.TextBlock{Text: text},
+			}}},
+		}}}
 }
 
 // The search rail's width and the transcript pane render through View.

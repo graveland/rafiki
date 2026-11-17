@@ -224,9 +224,9 @@ func searchFold(r searchRow) string {
 
 // searchStateTag marks the one state that changes what a row can do: a
 // conversation whose linked agent is open carries a live marker, because
-// ⏎ will jump to it rather than expand. Every other state renders nothing:
-// closed rows are dimmed instead, and an exited agent's affordance is the
-// resume on commit, not a glyph.
+// committing to it lands in that agent's transcript, live. Every other state
+// renders nothing: closed rows are dimmed instead, and an exited agent's
+// affordance is the resume on commit, not a glyph.
 func searchStateTag(l *rafikiv1.ConversationListing) string {
 	if l.GetState() == rafikiv1.ConversationState_CONVERSATION_STATE_OPEN {
 		return " ●"
