@@ -60,8 +60,19 @@ func TestSlashModelRestartsClaudeOnTheNewModel(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	snap, _ := c.st.Get(id)
-	ck.Eq("claude-sonnet-5", snap.Model, "the stored model carries the bare id")
+	// The store snapshot is written asynchronously, so it can lag the pid change
+	// above under load; poll it rather than reading it once.
+	var model string
+	for modelDeadline := time.Now().Add(8 * time.Second); time.Now().Before(modelDeadline); time.Sleep(20 * time.Millisecond) {
+		snap, ok := c.st.Get(id)
+		if !ok {
+			continue
+		}
+		if model = snap.Model; model == "claude-sonnet-5" {
+			break
+		}
+	}
+	ck.Eq("claude-sonnet-5", model, "the stored model carries the bare id")
 
 	// The fake logs its argv as its first act, which can trail the pid change
 	// the loop above waits on.
