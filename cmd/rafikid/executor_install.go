@@ -721,7 +721,7 @@ func (c *Controller) InstallExecutor(
 	//    A credential is the one exception a REINSTALL makes, and only when the
 	//    marker beside it is this very row's: an executor.cred that this install
 	//    wrote is not a collision with somebody else's executor.
-	if probe.GetCredentialPresent() && !(reinstall && probe.GetMarker() == installRow.ID) {
+	if probe.GetCredentialPresent() && (!reinstall || probe.GetMarker() != installRow.ID) {
 		return nil, installErr(protocol.ErrAlreadyExists,
 			"%s already has a durable executor (%s); use it, or remove that file first",
 			name, remoteCredentialPath(instance))

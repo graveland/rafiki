@@ -67,7 +67,7 @@ func (s *directInstallStore) Authenticate(ctx context.Context, credential string
 	// The ROW is the authority, never the credential: a real store re-reads the
 	// row on every connection, which is why a deleted row stops authenticating
 	// the credential it was issued.
-	return s.fakeStore.Get(ctx, s.rowID)
+	return s.Get(ctx, s.rowID)
 }
 
 func (s *directInstallStore) RotateCredential(ctx context.Context, id string) (string, error) {
@@ -79,7 +79,7 @@ func (s *directInstallStore) RotateCredential(ctx context.Context, id string) (s
 		return "", err
 	}
 	s.mu.Unlock()
-	if _, err := s.fakeStore.Get(ctx, id); err != nil {
+	if _, err := s.Get(ctx, id); err != nil {
 		return "", err
 	}
 	s.mu.Lock()

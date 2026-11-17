@@ -212,8 +212,8 @@ func (s *Server) RemoteLaunch(
 		// The scrub runs on the RAW output, before %q quotes it: quoting first
 		// would render a quote or a backslash inside the ticket escaped, so the
 		// scrub would no longer match and the ticket would ride out in pieces.
-		return nil, connect.NewError(connect.CodeInternal, errors.New(
-			fmt.Sprintf("remote launch: %v; raw output: %q", perr, scrubTicket(string(stdout), ticket))))
+		return nil, connect.NewError(connect.CodeInternal,
+			fmt.Errorf("remote launch: %v; raw output: %q", perr, scrubTicket(string(stdout), ticket)))
 	}
 	slog.Debug("executor: remote launch", "destination", target.GetDestination(),
 		"installId", msg.GetInstallId(), "state", resp.GetState(), "pid", resp.GetPid())

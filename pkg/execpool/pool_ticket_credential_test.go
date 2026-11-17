@@ -53,7 +53,7 @@ func (s *ticketCredStore) RotateCredential(ctx context.Context, id string) (stri
 	if s.rotateErr != nil {
 		return "", s.rotateErr
 	}
-	if _, err := s.fakeStore.Get(ctx, id); err != nil {
+	if _, err := s.Get(ctx, id); err != nil {
 		return "", err
 	}
 	s.rotations++
@@ -109,7 +109,8 @@ func TestRedeemInstallTicketRotatesCredential(t *testing.T) {
 	// covers.
 	c.NoError(conn.Close(), "close the ticket connection")
 
-	requireRefused(t, exchangeErr(t, p, bearerHeader("the-old-credential")), http.StatusUnauthorized)
+	oldErr := exchangeErr(t, p, bearerHeader("the-old-credential"))
+	_ = requireRefused(t, oldErr, http.StatusUnauthorized)
 
 	conn2, _, err := upgradeExchange(t, p, bearerHeader(minted))
 	c.NoError(err, "the minted credential must authenticate the same row")
