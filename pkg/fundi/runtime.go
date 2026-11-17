@@ -354,11 +354,11 @@ type RuntimeOptions struct {
 	// (a DB-less daemon) or for the standalone `rafikid fundi` process.
 	Quota tools.QuotaReader
 
-	// Conversations, when non-nil, gives this child the conversation_search and
-	// conversation_export tools -- reads over its OWN conversation history.
-	// Supplied by the daemon as a per-owner adapter; nil when no
-	// conversation-insights source is configured (a DB-less daemon) or for the
-	// standalone `rafikid fundi` process.
+	// Conversations, when non-nil, gives this child the conversation_search,
+	// conversation_list and conversation_export tools -- reads over its OWN
+	// conversation history. Supplied by the daemon as a per-owner adapter; nil
+	// when no conversation-insights source is configured (a DB-less daemon) or
+	// for the standalone `rafikid fundi` process.
 	Conversations tools.ConversationReader
 
 	// PyModules, when non-nil, gives this child the pymodule_put and

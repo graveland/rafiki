@@ -5,10 +5,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -21,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/tags"
@@ -349,9 +352,10 @@ func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 		"agent_view",
 		// Deliberate on a DB-less face, unlike quota_status: Conversations is
 		// set unconditionally in getServer (newMCPConversationReader degrades
-		// to a deny-all Scope internally), so these three materialize and
+		// to a deny-all Scope internally), so these four materialize and
 		// answer an ErrNoPool error at call time instead of declining.
 		"conversation_export",
+		"conversation_list",
 		"conversation_query",
 		"conversation_search",
 		"task_add",
@@ -399,6 +403,7 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		"agent_untag",
 		"agent_view",
 		"conversation_export",
+		"conversation_list",
 		"conversation_query",
 		"conversation_search",
 		"memory_delete",
@@ -732,6 +737,16 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 	c.False(!strings.Contains(queryDesc, "agent-kind conversations only") ||
 		!strings.Contains(queryDesc, "coverage filters conversation creation week"), "conversation_query: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
 
+	// conversation_list is composed like conversation_export: the scope note
+	// plus the verbatim blueprint text. Its blueprint text carries no
+	// ownership claim (pinned from the blueprint side by
+	// TestConversationListDescriptionNeedsNoScopeExcision), so the plain
+	// containment check the pairs loop below runs is the right one -- there is
+	// nothing to excise.
+	listDesc, overridden := mcpToolDescriptions["conversation_list"]
+	c.Require().True(overridden, "conversation_list: no override; the blueprint text ships without the scope note")
+	c.StrContains(listDesc, mcpConversationScopeNote, "conversation_list: the scope-aware note is gone")
+
 	for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete"} {
 		c.StrContains(mcpToolDescriptions[name], "A claude-kind child you spawn", "%s: missing the pymodule_run delegation pointer", name)
 	}
@@ -748,6 +763,7 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 		"agent_send":          &tools.AgentSendBlueprint{},
 		"agent_kill":          &tools.AgentKillBlueprint{},
 		"conversation_export": &tools.ConversationExportBlueprint{},
+		"conversation_list":   &tools.ConversationListBlueprint{},
 		"pymodule_put":        &tools.PyModulePutBlueprint{},
 		"pymodule_get":        &tools.PyModuleGetBlueprint{},
 		"pymodule_delete":     &tools.PyModuleDeleteBlueprint{},
@@ -795,7 +811,7 @@ func TestMCPFaceConversationScopeNoteNamesOwner(t *testing.T) {
 	c.StrContains(mcpConversationScopeNote, "other agents' alike", "the note does not say other agents' conversations are in scope")
 	c.NotStrContains(mcpConversationScopeNote, "your own subtree's when you call as a spawned agent", "the note claims a spawned agent reads only its subtree; it reads its owner's corpus")
 	c.NotStrContains(mcpConversationScopeNote, "credential you are calling with", "the note is back to describing the credential instead of the scope")
-	for _, name := range []string{"conversation_search", "conversation_export", "conversation_query"} {
+	for _, name := range []string{"conversation_search", "conversation_list", "conversation_export", "conversation_query"} {
 		desc, ok := mcpToolDescriptions[name]
 		c.True(ok, "%s: no override; the blueprint text ships without the scope note", name)
 		c.StrContains(desc, mcpConversationScopeNote, "%s: the scope note is gone", name)
@@ -917,6 +933,7 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 		"agent_untag",
 		"agent_view",
 		"conversation_export",
+		"conversation_list",
 		"conversation_query",
 		"conversation_search",
 		"memory_delete",
@@ -1105,4 +1122,103 @@ func TestMCPNotificationNoteScopesItselfToTopLevelAgents(t *testing.T) {
 	for _, want := range []string{"TOP-LEVEL", "worker's own children", "not in a loop"} {
 		c.StrContains(mcpNotificationNote, want, "mcpNotificationNote")
 	}
+}
+
+// TestMCPFaceConversationListServesTheChildsOwnerCorpus drives
+// conversation_list through the SDK session a per-child caller gets, pinning
+// the capability beside conversation_search on this face: the same reader
+// binding (the OWNER's corpus, never the identity's), the same answer. The
+// caller's own and its descendant's conversations surface; the sibling
+// owner's never; and the states filter binds end to end -- the seeded rows
+// carry no linked child, so they are no_agent and a closed-only page is
+// empty.
+func TestMCPFaceConversationListServesTheChildsOwnerCorpus(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := openTestPool(t)
+	ctx := context.Background()
+	uniq := fmt.Sprintf("c_%d", time.Now().UnixNano())
+
+	own := insertConvForCost(t, pool, "")             // fundi caller: session-id route
+	desc := insertConvForCost(t, pool, uniq+"kid")    // claude descendant: ref route
+	sibling := insertConvForCost(t, pool, uniq+"sib") // another owner's conversation
+	ownerName := "mcp-child-list-owner-" + uniq
+	otherName := "mcp-child-list-other-" + uniq
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.conversation WHERE id = ANY($1::uuid[])`,
+			[]string{own, desc, sibling})
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.users WHERE username = ANY($1::text[])`,
+			[]string{ownerName, otherName})
+	})
+	// The caller's lineage owns own+desc; the sibling belongs to a different
+	// user, so it must stay invisible however the owner is resolved. The
+	// listing only walks conversations with nodes, so each is seeded with one.
+	ownerID := insertOwnerUser(t, pool, ownerName, false)
+	otherID := insertOwnerUser(t, pool, otherName, false)
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET owner_user_id = $1::uuid, node_count = 1
+		  WHERE id = ANY($2::uuid[])`, ownerID, []string{own, desc}); err != nil {
+		t.Fatalf("own conversations: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET owner_user_id = $1::uuid, node_count = 1
+		  WHERE id = ANY($2::uuid[])`, otherID, []string{sibling}); err != nil {
+		t.Fatalf("own the sibling conversation: %v", err)
+	}
+	st := childstore.New()
+	dir := t.TempDir()
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"),
+		filepath.Join(dir, "c.sock"), nil, pool, nil, false, ctx, nil, nil, nil, nil)
+	caller := uniq + "caller"
+	st.Insert(&childstore.Session{
+		ChildID: caller, SessionID: own, Status: protocol.StatusIdle,
+		Kind: protocol.KindFundi, StartedAt: time.Now(), OwnerUserID: ownerID,
+	})
+	st.Insert(&childstore.Session{
+		ChildID: uniq + "kid", Status: protocol.StatusIdle,
+		Kind: protocol.KindClaude, StartedAt: time.Now(),
+		Labels: map[string]string{childstore.LabelParent: caller, childstore.LabelRoot: caller},
+	})
+	st.Insert(&childstore.Session{
+		ChildID: uniq + "sib", Status: protocol.StatusIdle,
+		Kind: protocol.KindClaude, StartedAt: time.Now(),
+		Labels: map[string]string{childstore.LabelParent: uniq + "root", childstore.LabelRoot: uniq + "root"},
+	})
+
+	face := newMCPFace(discardLogger(), nil, nil, "test")
+	face.SetController(ctrl)
+	// The identity deliberately carries the OTHER owner's user id: the reader
+	// must resolve the owner from the CHILD's stored lineage, never from the
+	// identity, or the sibling leaks.
+	child := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	child = child.WithContext(server.WithIdentity(child.Context(), &server.Identity{
+		UserID: otherID, ChildID: caller, Via: server.ProvenanceChildToken,
+	}))
+	cs := mcpConnect(t, face.getServer(child))
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "conversation_list"})
+	c.NoError(err, "conversation_list")
+	c.False(res.IsError, "conversation_list answered an error: %s", mcpToolResultText(t, res))
+	// The tool returns the page as JSON, so the conversation ids are the
+	// oracle: the caller's own and its descendant's rows surface, the other
+	// owner's never, and the page always carries the cursor the next call
+	// continues from.
+	text := mcpToolResultText(t, res)
+	c.StrContains(text, own, "conversation_list did not surface the caller's own conversation")
+	c.StrContains(text, desc, "conversation_list did not surface the in-subtree descendant")
+	c.NotStrContains(text, sibling, "conversation_list leaked another owner's conversation")
+	c.StrContains(text, `"next_cursor": ""`, "the page does not carry next_cursor")
+
+	// The states filter binds end to end: state no_agent rows are dropped by a
+	// closed-only filter, and the empty page keeps the rows array.
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "conversation_list",
+		Arguments: map[string]any{"states": []any{"closed"}},
+	})
+	c.NoError(err, "conversation_list with a states filter")
+	c.False(res.IsError, "conversation_list answered an error: %s", mcpToolResultText(t, res))
+	filtered := mcpToolResultText(t, res)
+	c.StrContains(filtered, `"rows": []`, "the closed-only page is not empty")
+	c.NotStrContains(filtered, own, "the closed-only page leaked an unlinked conversation")
 }

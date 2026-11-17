@@ -93,11 +93,70 @@ type ConversationTranscript struct {
 	AvailableSkills                                  []string
 }
 
+// ConversationListQuery is the filter the conversation_list tool hands its
+// reader. It mirrors insights.ListFilter for this package's boundary: Sort and
+// States stay the strings the tool validated against their vocabularies
+// (recent|created|relevance; open|exited|closed|no_agent), and the reader's
+// implementation maps them onto the insights enums. Since/Until are parsed
+// times -- the RFC3339 strings live only in the tool's JSON input
+// (conversationListArgs). There is deliberately no excluded field: the
+// daemon's own LLM conversations are never listed, and no tool argument can
+// re-admit them (the reader's implementation sets that list itself).
+type ConversationListQuery struct {
+	Limit                int
+	Cursor               string
+	Sort                 string
+	ParentConversationID string
+	Query                string
+	States               []string
+	Kinds                []string
+	NameContains         string
+	CwdContains          string
+	Labels               map[string]string
+	Since, Until         *time.Time
+}
+
+// ConversationListRow is one conversation, as the listing reports it:
+// package-local mirror of insights.ConversationListing. It carries snake_case
+// json tags because the conversation_list tool marshals the page straight
+// into its output, and the tool's own description names these fields in
+// snake_case (child_count, next_cursor) -- the same spelling protojson gives
+// the same rows on the Connect wire.
+type ConversationListRow struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Model string `json:"model"`
+	Owner string `json:"owner"`
+
+	CreatedAt    time.Time  `json:"created_at"`
+	LastActivity time.Time  `json:"last_activity"`
+	ClosedAt     *time.Time `json:"closed_at"` // nil = still open
+
+	Turns   int     `json:"turns"`
+	CostUSD float64 `json:"cost_usd"`
+
+	ParentConversationID string `json:"parent_conversation_id"` // "" = top level
+	ChildCount           int    `json:"child_count"`
+
+	ChildID   string `json:"child_id"` // "" when no child links to the conversation
+	ChildName string `json:"child_name"`
+	Kind      string `json:"kind"`
+	State     string `json:"state"` // open, exited, closed or no_agent
+}
+
+// ConversationListPage is one page of the listing: the rows and the opaque
+// cursor that continues after them ("" when the page is the last one).
+type ConversationListPage struct {
+	Rows       []ConversationListRow `json:"rows"`
+	NextCursor string                `json:"next_cursor"`
+}
+
 // ConversationReader answers scoped conversation reads, bound to one caller
 // at construction -- the same reasoning as QuotaReader and AgentSpawner: no
 // method takes a caller-supplied id, so the constructor is the only binding.
 type ConversationReader interface {
 	ConversationSearch(ctx context.Context, q ConversationQuery) ([]ConversationSummaryRow, error)
+	ConversationList(ctx context.Context, q ConversationListQuery) (ConversationListPage, error)
 	ConversationExport(ctx context.Context, conversationID string) (*ConversationTranscript, error)
 	RunQuery(ctx context.Context, name string, f CatalogueFilter) (CatalogueResult, error)
 }

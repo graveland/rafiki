@@ -417,10 +417,11 @@ type ToolOpts struct {
 	// subtree has no use for.
 	Quota QuotaReader
 
-	// Conversations, when non-nil, gives this agent the conversation_search and
-	// conversation_export tools -- reads over its OWN conversation history.
-	// nil means no conversation-insights source is configured (a DB-less
-	// daemon), matching Quota's degrade rule.
+	// Conversations, when non-nil, gives this agent the conversation_search,
+	// conversation_list, conversation_export and conversation_query tools --
+	// reads over its OWN conversation history. nil means no
+	// conversation-insights source is configured (a DB-less daemon), matching
+	// Quota's degrade rule.
 	Conversations ConversationReader
 
 	// PyModules, when non-nil, gives this agent the pymodule_put and

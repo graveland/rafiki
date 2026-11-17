@@ -134,6 +134,7 @@ var tierByTool = map[string]Tier{
 	"agent_result":        TierDaemon,
 	"quota_status":        TierDaemon,
 	"conversation_search": TierDaemon,
+	"conversation_list":   TierDaemon,
 	"conversation_export": TierDaemon,
 	"conversation_query":  TierDaemon,
 

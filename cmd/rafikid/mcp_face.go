@@ -565,6 +565,7 @@ var mcpBlueprints = []tools.Tool{
 	&tools.TaskListBlueprint{},
 	&tools.QuotaStatusBlueprint{},
 	&tools.ConversationSearchBlueprint{},
+	&tools.ConversationListBlueprint{},
 	&tools.ConversationExportBlueprint{},
 	&tools.ConversationQueryBlueprint{},
 	&tools.PyModulePutBlueprint{},
@@ -770,6 +771,7 @@ var mcpToolDescriptions = func() map[string]string {
 	send := &tools.AgentSendBlueprint{}
 	kill := &tools.AgentKillBlueprint{}
 	search := &tools.ConversationSearchBlueprint{}
+	list := &tools.ConversationListBlueprint{}
 	export := &tools.ConversationExportBlueprint{}
 	query := &tools.ConversationQueryBlueprint{}
 	put := &tools.PyModulePutBlueprint{}
@@ -832,6 +834,13 @@ var mcpToolDescriptions = func() map[string]string {
 		// owner's whole corpus for a spawned agent, the whole daemon for an admin.
 		// See mcpConversationScopeNote.
 		"conversation_search": mcpConversationScopeNote + "\n\n" + searchText,
+		// conversation_list's blueprint text carries no ownership claim -- the
+		// listing's boundary IS the owner's corpus, which the scope note alone
+		// states -- so its override is the plain composition, note plus the
+		// verbatim blueprint text (pinned as such by
+		// TestMCPFaceDescriptionsCarryTheBlueprintText and the blueprint-side
+		// TestConversationListDescriptionNeedsNoScopeExcision).
+		"conversation_list":   mcpConversationScopeNote + "\n\n" + list.Description(),
 		"conversation_export": mcpConversationScopeNote + "\n\n" + export.Description(),
 		"conversation_query":  mcpConversationScopeNote + "\n\n" + queryText,
 		// agent_set_budget, agent_models and quota_status have no native-client

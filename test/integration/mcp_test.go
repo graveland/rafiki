@@ -69,6 +69,7 @@ var mcpToolNames = []string{
 	"task_list",
 	"quota_status",
 	"conversation_search",
+	"conversation_list",
 	"conversation_export",
 	"conversation_query",
 	"preset_list",
@@ -493,6 +494,9 @@ func mcpReadSSEData(t *testing.T, resp *http.Response, wantID float64) json.RawM
 	start := time.Now()
 	var found json.RawMessage
 	scanner := bufio.NewScanner(resp.Body)
+	// The tools/list frame is one SSE line carrying every tool's full
+	// description, past bufio.Scanner's default 64KB line cap.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		data, ok := strings.CutPrefix(scanner.Text(), "data:")
 		if !ok || found != nil {

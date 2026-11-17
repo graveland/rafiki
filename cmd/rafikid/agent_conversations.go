@@ -9,6 +9,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -101,6 +102,65 @@ func (r *conversationReader) ConversationSearch(ctx context.Context, q tools.Con
 		})
 	}
 	return out, nil
+}
+
+func (r *conversationReader) ConversationList(ctx context.Context, q tools.ConversationListQuery) (tools.ConversationListPage, error) {
+	f, err := listFilterFromTool(q)
+	if err != nil {
+		return tools.ConversationListPage{}, err
+	}
+	rows, next, err := r.ctrl.ConversationList(ctx, r.scope, f)
+	if err != nil {
+		return tools.ConversationListPage{}, err
+	}
+	out := make([]tools.ConversationListRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, tools.ConversationListRow{
+			ID: row.ID, Name: row.Name, Model: row.Model, Owner: row.Owner,
+			CreatedAt: row.CreatedAt, LastActivity: row.LastActivity, ClosedAt: row.ClosedAt,
+			Turns: row.Turns, CostUSD: row.CostUSD,
+			ParentConversationID: row.ParentConversationID, ChildCount: row.ChildCount,
+			ChildID: row.ChildID, ChildName: row.ChildName, Kind: row.Kind, State: string(row.State),
+		})
+	}
+	return tools.ConversationListPage{Rows: out, NextCursor: next}, nil
+}
+
+// listFilterFromTool maps the tool layer's stringly list query onto
+// insights.ListFilter. The conversation_list tool validates sort and states
+// against their vocabularies before the reader sees them, so the default arms
+// here are unreachable from a shipped tool; they fail loudly rather than
+// silently re-ordering rows or widening the state filter.
+func listFilterFromTool(q tools.ConversationListQuery) (insights.ListFilter, error) {
+	var sort insights.ListSort
+	switch q.Sort {
+	case "", "recent":
+		sort = insights.ListSortRecent
+	case "created":
+		sort = insights.ListSortCreated
+	case "relevance":
+		sort = insights.ListSortRelevance
+	default:
+		return insights.ListFilter{}, fmt.Errorf("conversation_list: unknown sort %q", q.Sort)
+	}
+	states := make([]insights.ListState, 0, len(q.States))
+	for _, s := range q.States {
+		switch insights.ListState(s) {
+		case insights.ListStateOpen, insights.ListStateExited,
+			insights.ListStateClosed, insights.ListStateNoAgent:
+			states = append(states, insights.ListState(s))
+		default:
+			return insights.ListFilter{}, fmt.Errorf("conversation_list: unknown state %q", s)
+		}
+	}
+	return insights.ListFilter{
+		Limit: q.Limit, Cursor: q.Cursor, Sort: sort,
+		ParentConversationID: q.ParentConversationID, Query: q.Query,
+		States: states, Kinds: q.Kinds,
+		NameContains: q.NameContains, CwdContains: q.CwdContains,
+		Labels: q.Labels, Since: q.Since, Until: q.Until,
+		Excluded: recall.ExcludedEntrypoints,
+	}, nil
 }
 
 func (r *conversationReader) ConversationExport(ctx context.Context, conversationID string) (*tools.ConversationTranscript, error) {
