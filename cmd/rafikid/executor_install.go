@@ -129,6 +129,38 @@ type launcherRemote struct {
 	cl executorpbconnect.ExecutorServiceClient
 }
 
+// streamSendErr turns a failed Send into the error that actually says why.
+//
+// connect's client stream answers a Send with an error wrapping io.EOF once the
+// server has ended the stream, and the real status arrives only from
+// CloseAndReceive. Returning the Send error as-is would turn a launcher's
+// CodeUnimplemented refusal into CodeUnknown, and that code is what decides
+// between falling back to the relay and refusing the install as too old — so the
+// status is read off the stream the failed send came from.
+func streamSendErr[Req, Res any](
+	stream *connect.ClientStreamForClient[Req, Res], err error,
+) error {
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
+	if _, cerr := stream.CloseAndReceive(); cerr != nil {
+		return cerr
+	}
+	return err
+}
+
+// bidiSendErr is streamSendErr for a bidi stream, whose status arrives from the
+// next Receive rather than from a CloseAndReceive.
+func bidiSendErr[Req, Res any](stream *connect.BidiStreamForClient[Req, Res], err error) error {
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
+	if _, rerr := stream.Receive(); rerr != nil {
+		return rerr
+	}
+	return err
+}
+
 func (l launcherRemote) Probe(
 	ctx context.Context, target *executorpb.RemoteTarget, binaryPath string,
 ) (*executorpb.RemoteProbeResponse, error) {
@@ -153,7 +185,7 @@ func (l launcherRemote) Push(
 			Target: target, BinaryPath: binaryPath, Sha256: sha256,
 		}},
 	}); err != nil {
-		return err
+		return streamSendErr(stream, err)
 	}
 	buf := make([]byte, 64<<10)
 	for {
@@ -163,7 +195,7 @@ func (l launcherRemote) Push(
 			if err := stream.Send(&executorpb.RemoteInstallRequest{
 				Msg: &executorpb.RemoteInstallRequest_Chunk{Chunk: chunk},
 			}); err != nil {
-				return err
+				return streamSendErr(stream, err)
 			}
 		}
 		if errors.Is(rerr, io.EOF) {
@@ -184,7 +216,7 @@ func (l launcherRemote) Serve(ctx context.Context, start *executorpb.RemoteServe
 	if err := stream.Send(&executorpb.RemoteServeRequest{
 		Msg: &executorpb.RemoteServeRequest_Start{Start: start},
 	}); err != nil {
-		return nil, err
+		return nil, bidiSendErr(stream, err)
 	}
 	return stream, nil
 }
@@ -199,12 +231,12 @@ func (l launcherRemote) Launch(
 	if err := stream.Send(&executorpb.RemoteLaunchRequest{
 		Msg: &executorpb.RemoteLaunchRequest_Start{Start: start},
 	}); err != nil {
-		return nil, err
+		return nil, streamSendErr(stream, err)
 	}
 	if err := stream.Send(&executorpb.RemoteLaunchRequest{
 		Msg: &executorpb.RemoteLaunchRequest_Stdin{Stdin: []byte(ticket + "\n")},
 	}); err != nil {
-		return nil, err
+		return nil, streamSendErr(stream, err)
 	}
 	resp, err := stream.CloseAndReceive()
 	if err != nil {
@@ -572,10 +604,16 @@ func launcherTooOldErr(le execpool.LiveExecutor) error {
 
 // probeFailure renders a probe that never ran. CodeUnimplemented from a probe
 // under a REQUIRED direct install is the same old-launcher answer the launch
-// path gives, so it names the machine to upgrade; under auto there is nothing to
-// fall back TO — a probe that never answered carries no uname and no binary
-// answer, so there is no install to run over the relay either — and it stays the
-// launcher's own failure.
+// path gives, so it names the machine to upgrade.
+//
+// RULING: under auto the same CodeUnimplemented stays a LAUNCHER FAILURE rather
+// than silently choosing the relay. The probe is what reports the target's uname
+// and platform, and nothing can be installed onto a target without them: there
+// is no platform to record and no transport that installs anything by itself, so
+// "choose tunnel" would only move the same failure later with less said about it.
+// The cost is bounded and visible: an old launcher is refused under auto with the
+// probe's own message, and the operator either upgrades it or passes mode=tunnel
+// — which still needs this probe, so the refusal is honest rather than cautious.
 func probeFailure(launcher execpool.LiveExecutor, requested, dest string, err error) error {
 	slog.Warn("executor install: probe", "target", dest, "error", sshText(err))
 	if isUnimplemented(err) && requested == executorinstall.ModeDirect {
@@ -766,6 +804,15 @@ func (c *Controller) InstallExecutor(
 		// The recipe records the transport that is about to be used, so the NEXT
 		// relaunch — possibly after a daemon restart, with no memory of this
 		// call — drives the same one.
+		//
+		// RULING: the mode is persisted BEFORE the launch runs, so a launch that
+		// then fails leaves the recipe on the NEW mode. That is the deliberate
+		// choice: the recipe records what the operator asked for, the next lazy
+		// relaunch retries it, and a target still holding the old process is
+		// recovered by the next install, whose re-provisioned credential row
+		// invalidates the process's stale one. Reverting the mode on a launch
+		// failure would leave the recipe disagreeing with the attempt just made,
+		// and a transient ssh error would flip a working tunnel install to direct.
 		if installRow.EffectiveMode() != mode {
 			if serr := c.install.store.SetMode(ctx, installRow.ID, mode); serr != nil {
 				return nil, executorinstallErr(serr)
@@ -798,11 +845,18 @@ func (c *Controller) InstallExecutor(
 		}
 		mode = executorinstall.ModeTunnel
 		if serr := c.install.store.SetMode(ctx, installRowID, mode); serr != nil {
-			return nil, executorinstallErr(serr)
+			// The launch is what the caller asked for; recording it is what a LATER
+			// relaunch reads. Failing the install here would deny the operator the
+			// relay it just proved works, so say what the recipe now wrongly claims
+			// and carry on: it still says direct, and every relaunch until the next
+			// install retries the attempt that just failed.
+			slog.Warn("executor install: could not record the relay transport; "+
+				"the recipe still says direct and each relaunch will retry the direct launch",
+				"target", dest, "install", installRowID, "error", serr)
 		}
 		slog.Info("executor install: mode chosen", "target", dest, "mode", mode,
 			"requested", requested, "why", "launcher is too old to start a self-dialling executor")
-		if lerr = c.launchInstalled(ctx, executorID); lerr != nil {
+		if lerr = c.launchInstalledMode(ctx, executorID, mode); lerr != nil {
 			return nil, lerr
 		}
 	}
@@ -1148,6 +1202,14 @@ func (c *Controller) executorRowByMachine(
 // to connect. Coalesced per executor id: eight concurrent callers cost one ssh
 // session and share its outcome.
 func (c *Controller) launchInstalled(ctx context.Context, executorID string) error {
+	return c.launchInstalledMode(ctx, executorID, "")
+}
+
+// launchInstalledMode is launchInstalled with the transport FORCED: a non-empty
+// mode overrides the recipe for this attempt alone. That is how an install which
+// could not record the relay it fell back to still launches the relay now —
+// reading the recipe again would find the transport that just failed.
+func (c *Controller) launchInstalledMode(ctx context.Context, executorID, mode string) error {
 	if err := c.requireInstaller(); err != nil {
 		return err
 	}
@@ -1165,7 +1227,7 @@ func (c *Controller) launchInstalled(ctx context.Context, executorID string) err
 			return ctx.Err()
 		}
 	}
-	err := c.runLaunch(ctx, executorID)
+	err := c.runLaunch(ctx, executorID, mode)
 	c.install.finishLaunch(executorID, flight, err)
 	return err
 }
@@ -1176,7 +1238,7 @@ func (c *Controller) launchInstalled(ctx context.Context, executorID string) err
 // reached the launcher: a listing that showed the previous launch's `ok` after
 // this one failed for want of a connected launcher would be a lie about the last
 // thing the daemon tried.
-func (c *Controller) runLaunch(ctx context.Context, executorID string) (err error) {
+func (c *Controller) runLaunch(ctx context.Context, executorID, modeOverride string) (err error) {
 	row, ok, err := c.install.store.ByExecutor(ctx, executorID)
 	if err != nil {
 		return executorinstallErr(err)
@@ -1186,6 +1248,9 @@ func (c *Controller) runLaunch(ctx context.Context, executorID string) (err erro
 			"executor %s was not installed over ssh", shortID(executorID))
 	}
 	mode := row.EffectiveMode()
+	if modeOverride != "" {
+		mode = modeOverride
+	}
 	started := time.Now()
 	state := ""
 	defer func() {

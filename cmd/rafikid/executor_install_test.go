@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -51,6 +52,9 @@ type fakeInstallStore struct {
 	inserts int
 	sets    int
 	modes   int
+	// modeErr, when set, fails every SetMode: a store that cannot record the
+	// transport an install fell back to.
+	modeErr error
 }
 
 func newFakeInstallStore() *fakeInstallStore {
@@ -122,6 +126,9 @@ func (s *fakeInstallStore) SetLauncher(_ context.Context, id, launcherExecutorID
 func (s *fakeInstallStore) SetMode(_ context.Context, id, mode string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.modeErr != nil {
+		return s.modeErr
+	}
 	r, ok := s.rows[id]
 	if !ok || r.RemovedAt != nil {
 		return nil
@@ -268,6 +275,10 @@ type fakeLauncher struct {
 	// test can announce the connection a direct launch is waiting for.
 	tailText string
 	onLaunch func(*executorpb.RemoteLaunchStart)
+	// launchCtxErr is the context error Launch was HANDED, recorded on every
+	// call: a launch bound to the caller's lifetime shows up here as a cancelled
+	// context, which is what the daemon must never pass.
+	launchCtxErr error
 }
 
 func (f *fakeLauncher) Probe(
@@ -317,10 +328,11 @@ func (f *fakeLauncher) Serve(
 }
 
 func (f *fakeLauncher) Launch(
-	_ context.Context, start *executorpb.RemoteLaunchStart, ticket string,
+	ctx context.Context, start *executorpb.RemoteLaunchStart, ticket string,
 ) (*executorpb.RemoteLaunchResponse, error) {
 	f.mu.Lock()
 	f.launches = append(f.launches, fakeLaunch{start: start, ticket: ticket})
+	f.launchCtxErr = ctx.Err()
 	resp, launchErr, hook := f.launchResp, f.launchErr, f.onLaunch
 	f.mu.Unlock()
 	if launchErr != nil {
@@ -404,6 +416,13 @@ func (f *fakeLauncher) launchAt(i int) (fakeLaunch, bool) {
 		return fakeLaunch{}, false
 	}
 	return f.launches[i], true
+}
+
+// launchContextErr returns the context error the last Launch was handed.
+func (f *fakeLauncher) launchContextErr() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.launchCtxErr
 }
 
 // tailCalls returns how many log tails were read.
@@ -1700,7 +1719,33 @@ func TestInstallForcedDirectOnAnUnimplementedLauncherNamesTheLauncher(t *testing
 		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(),
 			installReqMode("", executorinstall.ModeDirect))
 		expectControllerError(t, err, protocol.ErrFailedPrecondition, refused)
+		c := assert.NewAborting(t)
+		c.Eq(0, f.launcher.serveCalls(), "a probe that never answered relays nothing")
+		c.Eq(0, f.launcher.launchCalls(), "and launches nothing")
+		c.Eq(0, len(f.execs.creates), "no row is written without a platform to record")
 	})
+}
+
+// RULING: under AUTO an unimplemented probe stays the launcher's own failure
+// rather than quietly choosing the relay. The probe is what reports the target's
+// uname and platform, and nothing can be installed onto a target without them —
+// there is no platform to record and no transport that installs anything on its
+// own — so "choose tunnel" would only move the same failure later with less said
+// about it. The cost is that an old launcher is refused under auto with the
+// probe's own words; the operator upgrades it or passes mode=tunnel, which still
+// needs this probe, so the refusal is honest rather than cautious.
+func TestInstallAutoOnAnUnimplementedProbeIsTheLaunchersFailure(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.launcher.probeErr = connect.NewError(connect.CodeUnimplemented,
+		errors.New("unknown service rafiki.executor.v1.ExecutorService"))
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	expectControllerError(t, err, protocol.ErrUnavailable,
+		"probe brent@ublk-s2 failed: unknown service rafiki.executor.v1.ExecutorService")
+	c.Eq(0, f.launcher.serveCalls(), "a probe that never answered relays nothing")
+	c.Eq(0, f.launcher.launchCalls(), "and launches nothing")
+	c.Eq(0, len(f.execs.creates), "no row is written without a platform to record")
 }
 
 // The ticket of a direct launch is the stream's stdin frame and NOTHING else: it
@@ -1760,6 +1805,80 @@ func TestDirectLaunchRunningSpendsNoTicket(t *testing.T) {
 	}
 }
 
+// Every direct-launch exit that is not a connection revokes the ticket: one
+// minted for a session nobody is awaiting is a credential an ssh that finally
+// starts could still redeem. Only the `running` arm was pinned before, so any one
+// of these three discards could be deleted with every test still green.
+func TestDirectLaunchRevokesTheTicketOnEveryFailedExit(t *testing.T) {
+	// revoked asserts the launch's ticket can no longer be spent.
+	revoked := func(t *testing.T, f *installFixture) {
+		t.Helper()
+		c := assert.NewAborting(t)
+		launch, ok := f.launcher.launchAt(0)
+		c.Require().True(ok, "the direct launch ran")
+		if _, ok := f.pool.Tickets().Redeem(launch.ticket); ok {
+			t.Fatal("a failed launch left its ticket redeemable; a late dial could still spend it")
+		}
+	}
+
+	t.Run("the launch RPC failed", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newInstallFixture(t)
+		f.reachableTarget()
+		f.launcher.launchErr = connect.NewError(connect.CodeUnavailable,
+			errors.New("ssh: connect to host brent@ublk-s2 port 22: Connection refused"))
+
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+		c.Require().Error(err, "the launch failed")
+		c.Eq(1, f.launcher.launchCalls(), "the launch was attempted")
+		revoked(t, f)
+	})
+
+	t.Run("the target never connected", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newInstallFixture(t)
+		f.reachableTarget()
+		f.state.connectTimeout = 25 * time.Millisecond
+
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+		c.Require().Error(err, "the target never dialled back")
+		revoked(t, f)
+	})
+
+	t.Run("the caller gave up", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newInstallFixture(t)
+		f.reachableTarget()
+		caller, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		// Cancelled from INSIDE the launch, so the ticket is minted and spent on the
+		// wire before the caller gives up.
+		f.launcher.onLaunch = func(*executorpb.RemoteLaunchStart) { cancel() }
+
+		_, err := f.ctrl.InstallExecutor(caller, installUserCaller(), installReqMode("", "auto"))
+		c.ErrorIs(err, context.Canceled, "the caller's own give-up is what it reads")
+		revoked(t, f)
+	})
+}
+
+// The launch RPC rides the DAEMON's lifetime, never the caller's: a caller that
+// gave up did not start this process, and cancelling the ssh mid-flight would
+// leave a target whose executor may or may not exist.
+func TestDirectLaunchRunsOnTheDaemonsContext(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.reachableTarget()
+
+	caller, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := f.ctrl.InstallExecutor(caller, installUserCaller(), installReqMode("", "auto"))
+	c.ErrorIs(err, context.Canceled, "the caller's own give-up is what it reads, so the launch itself succeeded")
+	c.Eq(1, f.launcher.launchCalls(), "the launch still ran")
+	c.Nil(f.launcher.launchContextErr(),
+		"the launch RPC must be bound to the daemon's context, not the cancelled caller's")
+}
+
 // A target that never dials back is diagnosed by its OWN log, and the error names
 // the executor and the target — not the launcher alone, which is the machine that
 // was working.
@@ -1801,6 +1920,53 @@ func TestDirectLaunchTimeoutErrorNamesTargetAndCarriesLogTail(t *testing.T) {
 		c.Require().True(errors.As(err, &ce), "a launch failure is a ControllerError, got %v", err)
 		c.StrContains(ce.Message, "(log unavailable:", "an unreadable tail is said out loud")
 	})
+}
+
+// The stored outcome of a failed launch is its FIRST line. A launch error carries
+// the remote log tail, and a listing is one row per executor, so the rest must not
+// reach it.
+func TestLastLaunchRecordsFailureFirstLine(t *testing.T) {
+	t.Run("a remote log tail", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newInstallFixture(t)
+		f.reachableTarget()
+		f.state.connectTimeout = 25 * time.Millisecond
+		f.launcher.tailText = "executor: dial tcp 10.0.0.5:8035: connect: connection refused\n" +
+			"executor: retrying in 1s\nexecutor: giving up"
+
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+		c.Require().Error(err, "the target never connected")
+
+		outcome := f.state.outcomeOf("exec-1")
+		c.Eq("failed: executor ublk-s2 on brent@ublk-s2 (via greyshift) did not connect within 25ms; "+
+			"remote log:", outcome, "the outcome is the error's first line, whole")
+		c.NotStrContains(outcome, "\n", "a listing row holds one line")
+		c.NotStrContains(outcome, "giving up", "the log tail is not in the row")
+	})
+
+	t.Run("a launcher's own multi-line refusal", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		f := newInstallFixture(t)
+		f.reachableTarget()
+		f.launcher.launchErr = connect.NewError(connect.CodePermissionDenied,
+			errors.New("Permission denied (publickey).\nHost key verification failed."))
+
+		_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+		c.Require().Error(err, "the launcher refused")
+
+		outcome := f.state.outcomeOf("exec-1")
+		c.Eq("failed: launch brent@ublk-s2 failed: Permission denied (publickey).",
+			outcome, "the outcome is the first line of the launcher's own words")
+		c.NotStrContains(outcome, "\n", "a listing row holds one line")
+		c.NotStrContains(outcome, "Host key", "the rest of the message stays out of the row")
+	})
+}
+
+// TestRelaunchRecordsFailureFirstLine runs the pinned first-line table under a
+// name the relaunch tests' verify pattern reaches; the table itself is
+// TestLastLaunchRecordsFailureFirstLine.
+func TestRelaunchRecordsFailureFirstLine(t *testing.T) {
+	t.Run("TestLastLaunchRecordsFailureFirstLine", TestLastLaunchRecordsFailureFirstLine)
 }
 
 // The relay's timeout names the executor being launched FIRST and the launcher
@@ -1886,6 +2052,35 @@ func TestReinstallChangingModeUpdatesTheRecipe(t *testing.T) {
 	c.Eq(1, f.launcher.serveCalls(), "and the relay is what ran")
 }
 
+// A reinstall whose fallback cannot be RECORDED still falls back. The launch is
+// what the caller asked for; recording it is what the next relaunch reads, so an
+// unwritable mode is a warning naming the consequence, never a refusal of the
+// relay that just worked.
+func TestReinstallFallbackSurvivesAnUnrecordableMode(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	f.reachableTarget()
+	f.launcher.launchErr = connect.NewError(connect.CodeUnimplemented,
+		errors.New("unknown service rafiki.executor.v1.ExecutorService"))
+	f.installs.modeErr = errors.New("conversations.executor_install: i/o timeout")
+	f.connectAs = "exec-1"
+
+	prev := slog.Default()
+	logs := &capturingHandler{}
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReqMode("", "auto"))
+	c.Require().NoError(err, "an unrecordable fallback must not deny the launch the caller asked for")
+	c.Eq(1, f.launcher.launchCalls(), "the direct launch was tried")
+	c.Eq(1, f.launcher.serveCalls(), "and the relay ran anyway")
+	c.Eq(executorinstall.ModeDirect, f.installs.liveRows()[0].Mode,
+		"the recipe still says direct, which is exactly what the warning is about")
+	c.StrContains(logs.String(), "could not record the relay transport",
+		"the consequence must be said out loud")
+}
+
 // A recipe written before the mode column existed carries no mode, and that reads
 // as tunnel — which is exactly how it behaved.
 func TestRecipeWithoutModeReadsAsTunnel(t *testing.T) {
@@ -1934,14 +2129,23 @@ func TestRelaunchDirectUsesLaunchNotServe(t *testing.T) {
 // Two concurrent relaunches of a direct executor cost ONE launch, exactly as they
 // cost one ssh session in the relay: the flight is keyed by executor id, not by
 // transport.
+//
+// The followers have LIVE contexts and must come back with the LEADER's outcome.
+// That is what makes the coalescing observable: a caller that gave up on its own
+// context would return before the leader finished and could never see it started a
+// second launch. Every wait here is bounded, so dropping the flight fails the test
+// rather than hanging it.
 func TestRelaunchCoalescesDirectLaunches(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
 	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	// The leader FAILS rather than connecting, so it HAS an outcome to share.
+	f.state.connectTimeout = 25 * time.Millisecond
 
 	// The leader is held INSIDE the launch until the followers have all arrived,
 	// so "they joined" is a fact rather than a scheduling hope.
 	launched := make(chan struct{})
+	entered := make(chan struct{}, 4)
 	release := make(chan struct{})
 	var once sync.Once
 	f.launcher.onLaunch = func(*executorpb.RemoteLaunchStart) {
@@ -1957,33 +2161,52 @@ func TestRelaunchCoalescesDirectLaunches(t *testing.T) {
 		t.Fatal("the leader never ran its launch")
 	}
 
-	// Followers whose contexts are already cancelled: each JOINS the in-flight
-	// launch and returns its own context's error instead of opening a launch of
-	// its own.
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
+	followerErrs := make(chan error, 4)
 	var wg sync.WaitGroup
-	errs := make(chan error, 4)
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- f.ctrl.launchInstalled(cancelled, "exec-1")
+			entered <- struct{}{}
+			followerErrs <- f.ctrl.launchInstalled(context.Background(), "exec-1")
 		}()
 	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		c.ErrorIs(err, context.Canceled, "a coalesced caller returns its own context's error")
+	for i := 0; i < 4; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a follower never started")
+		}
 	}
 
+	// Released only once every follower is running, and collected through a
+	// bounded wait: a follower that ignored the flight would block inside the fake
+	// launch and be reported here instead of hanging the test.
 	close(release)
-	f.ctrl.installConnected("exec-1")
+	followersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(followersDone)
+	}()
 	select {
-	case err := <-leaderDone:
-		c.NoError(err, "the leader completes when the executor connects")
+	case <-followersDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the leader never returned after the executor connected")
+		t.Fatal("the followers never returned: the launch flight published no outcome")
 	}
+	close(followerErrs)
+
+	var leaderErr error
+	select {
+	case leaderErr = <-leaderDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leader never returned")
+	}
+	c.Require().Error(leaderErr, "the leader's launch never connected, so it failed")
+
 	c.Eq(1, f.launcher.launchCalls(), "five callers must cost ONE direct launch")
+	for err := range followerErrs {
+		// The outcome INSTANCE, not its text: a follower that led a launch of its
+		// own would carry an identical-looking error of its own making.
+		c.True(err == leaderErr, "a coalesced caller returns the leader's own outcome, got %v", err)
+	}
 }
