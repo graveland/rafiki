@@ -329,3 +329,99 @@ func TestStampConversationParentRunsFromWriteRecord(t *testing.T) {
 	got, _ = stampParentOf(t, pool, topConv)
 	c.Eq("", got, "a top-level child's write must not stamp anything")
 }
+
+// unsetStampParent clears a conversation's parent link, so a test can watch
+// whether a later stamp LOOKS again: the stamp only fills NULLs, so a skip
+// and a refusal look identical unless the link is cleared first.
+func unsetStampParent(t *testing.T, pool *pgxpool.Pool, convID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET parent_conversation_id = NULL WHERE id = $1::uuid`, convID)
+	assert.NewAborting(t).NoError(err, "unset parent of %s", convID)
+}
+
+// TestStampConversationParentSecondWriteSkipsTheLookups pins the memo: once a
+// stamp has landed for a child, a later row write for that child must not
+// query again. The probe clears the conversation's parent link and re-points
+// the child's labels at a second parent whose conversation exists, so a stamp
+// that still looked would fill the second parent's conversation; a memoized
+// skip leaves it NULL.
+func TestStampConversationParentSecondWriteSkipsTheLookups(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := openTestPool(t)
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	firstParent := "c_" + uniq + "_memo_first"
+	secondParent := "c_" + uniq + "_memo_second"
+	childID := "c_" + uniq + "_memo_child"
+
+	firstConv := insertStampConversation(t, pool, firstParent)
+	secondConv := insertStampConversation(t, pool, secondParent)
+	childConv := insertStampConversation(t, pool, childID)
+	cleanupStampRows(t, pool, []string{childID, firstParent, secondParent},
+		[]string{firstConv, secondConv, childConv})
+	insertStampChild(t, pool, firstParent, "", &firstConv, false)
+	insertStampChild(t, pool, secondParent, "", &secondConv, false)
+	insertStampChild(t, pool, childID, firstParent, &childConv, false)
+
+	ctrl := &Controller{pool: pool}
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "first stamp")
+	got, _ := stampParentOf(t, pool, childConv)
+	c.Eq(firstConv, got, "the first stamp must land")
+
+	unsetStampParent(t, pool, childConv)
+	relabelStampChild(t, pool, childID, secondParent)
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "second stamp")
+	got, _ = stampParentOf(t, pool, childConv)
+	c.Eq("", got, "a memoized child must not be looked at again; got %s", got)
+}
+
+// TestStampConversationParentAdoptedConversationIsMemoizedToo pins the
+// zero-row leg of the memo: a conversation this daemon did NOT stamp (it
+// already carried a parent when the daemon first wrote the row) is
+// discovered stamped on that first write and memoized, so it costs nothing
+// afterwards either. The probe is the same clear-and-relabel trick as above.
+func TestStampConversationParentAdoptedConversationIsMemoizedToo(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := openTestPool(t)
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	firstParent := "c_" + uniq + "_adopt_first"
+	secondParent := "c_" + uniq + "_adopt_second"
+	childID := "c_" + uniq + "_adopt_child"
+
+	firstConv := insertStampConversation(t, pool, firstParent)
+	secondConv := insertStampConversation(t, pool, secondParent)
+	childConv := insertStampConversationWithParent(t, pool, childID, firstConv)
+	cleanupStampRows(t, pool, []string{childID, firstParent, secondParent},
+		[]string{firstConv, secondConv, childConv})
+	insertStampChild(t, pool, firstParent, "", &firstConv, false)
+	insertStampChild(t, pool, secondParent, "", &secondConv, false)
+	insertStampChild(t, pool, childID, firstParent, &childConv, false)
+
+	ctrl := &Controller{pool: pool}
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "first stamp on an adopted conversation")
+	got, _ := stampParentOf(t, pool, childConv)
+	c.Eq(firstConv, got, "the adopted link must be untouched")
+
+	unsetStampParent(t, pool, childConv)
+	relabelStampChild(t, pool, childID, secondParent)
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "second stamp")
+	got, _ = stampParentOf(t, pool, childConv)
+	c.Eq("", got, "a conversation discovered already stamped must be memoized too; got %s", got)
+}
+
+// insertStampConversationWithParent writes one conversation row already
+// carrying its parent link, the shape a row stamped by an earlier daemon
+// has when this daemon first sees it.
+func insertStampConversationWithParent(t *testing.T, pool *pgxpool.Pool, extRef, parentConvID string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var id string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by, external_ref, parent_conversation_id)
+		 VALUES ('test', 'server', $1, $2::uuid) RETURNING id::text`, extRef, parentConvID).Scan(&id)
+	assert.NewAborting(t).NoError(err, "insert stamped conversation for %s", extRef)
+	return id
+}
