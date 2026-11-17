@@ -35,9 +35,11 @@ to when RAFIKI_DB is set. Unlike "rafiki search" (live, in-memory,
 currently-running children only), these query history in Postgres regardless
 of whether anything is still running.
 
-Output matches "rafikid agent stats|search|export|query" exactly — same queries,
-same renderers, only the transport differs. --output controls the format: tables
-at a terminal, JSON when piped.`,
+Output matches "rafikid agent stats|search|export|query" exactly: same queries,
+same renderers, only the transport differs. --output controls the format: a
+table is the default at a terminal AND in a pipe alike (there is no pipe to
+JSON switch), -o json/-j prints pretty JSON, and -o jsonl/-J prints one compact
+record per line.`,
 	}
 	cmd.AddCommand(
 		newConversationsStatsCmd(),

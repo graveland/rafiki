@@ -196,6 +196,70 @@ while open — and the JSON arm carries `closed_at` only for a finished row
 (never a zero time). `rafikid agent search` has no such column, but its
 `-j` JSON rows carry `closed_at` when set.
 
+**`rafiki conversations ls` and `list` no longer mean search.** Both used to be
+aliases of `rafiki conversations search`; they now run the listing below, with
+different rows, different columns and different JSON. The move is deliberate
+(the listing owns the tree-shaped name and `search` keeps none), but a script
+that spelled `ls` to get search rows changes meaning silently. Spell
+`rafiki conversations search` when you mean search.
+
+## `rafiki conversations list` (alias `ls`)
+
+```
+rafiki conversations list
+rafiki conversations list --parent <conv-id> --sort created
+rafiki conversations list --state open --kind fundi --label team=infra --all
+rafiki conversations list --query "flaky test" --sort relevance -J
+```
+
+One level of the conversation tree over the Connect plane (`ListConversations`
+in `docs/reference/control-protocol.md`), metadata only and never content: the
+rows whose `parent_conversation_id` is `--parent` (empty means the TOP LEVEL),
+open, exited and closed conversations alike, ordered by `--sort`. There is no
+"everything" answer: walk the tree level by level through each row's `KIDS`
+column (how many visible rows hang under it) and its id, passing the id back as
+`--parent`. `rafikid agent` has no counterpart: `stats`/`search`/`export`/
+`query` are the DSN-backed reads.
+
+Flags:
+
+- `--limit N`: rows per page. Default 50; `0` asks for the daemon's default
+  (also 50); the daemon clamps anything above 500; a negative value is refused
+  before the call.
+- `--cursor C`: continue after the previous page's last row. Take `C` from
+  the `next_cursor` the previous page reported (the plain table arm prints it
+  to stderr as `more: --cursor …`, so stdout stays clean for a pipe). A cursor
+  is valid only for a request whose `--sort` and `--parent` match the page that
+  produced it.
+- `--all`: follow `next_cursor` until the level is exhausted and print every
+  row, so no stderr hint is printed.
+- `--sort recent|created|relevance`: last activity (the default), creation
+  time, or best match for `--query`; `relevance` without `--query` is refused.
+- `--parent <conv-id>`: list that conversation's members instead of the top
+  level. A canonical uuid is accepted in either case.
+- `--query S` (`-q`): narrow to conversations whose extracted content matches
+  `S` (BM25 over the conversation windows); requires a database that carries
+  the index, else the daemon answers `failed_precondition`.
+- `--state open|exited|closed|no-agent`: the linked agent's lifecycle state.
+  Repeatable, or comma-separated in one flag.
+- `--kind K`: the linked agent's child kind (e.g. `fundi`, `claude`).
+  Repeatable.
+- `--name S`, `--cwd S`: case-insensitive substring match against the
+  conversation's name or working directory AND its linked agent's.
+- `--label k=v`: a child label the row's agent must carry; repeatable, and a
+  row must carry ALL of them.
+- `--since T`, `--until T`: bounds on last activity, RFC3339 or a duration
+  like `24h`; `--since` is inclusive and `--until` exclusive.
+
+Output modes are the client's usual three-way contract, identical to the other
+`rafiki conversations` verbs and with no pipe switch: the table on a TTY and in
+a pipe alike, `-o json`/`-j` for the pretty protojson of the whole
+`ListConversationsResponse` (the rows AND the `next_cursor`, so a piped consumer
+can page without the stderr hint), and `-o jsonl`/`-J` for one compact row per
+line. The table's columns are `ID`, `NAME`, `AGENT` (the linked agent's name,
+else its id, else `-`), `KIND`, `STATE`, `KIDS`, `TURNS`, `COST` and `LAST
+ACTIVITY`.
+
 ## `export`
 
 ```
