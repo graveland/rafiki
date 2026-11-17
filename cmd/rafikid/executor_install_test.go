@@ -1260,6 +1260,22 @@ func TestUninstallDirectAsksTheLauncherToStopTheProcess(t *testing.T) {
 	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the row is still deleted")
 }
 
+// The last-launch outcome is keyed by executor id, and ids are never reused, so
+// an uninstall drops the entry: otherwise a daemon that installs and uninstalls
+// all day holds one dead entry per install, and a listing's decoration map grows
+// with a history nothing can render.
+func TestUninstallForgetsTheLaunchOutcome(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	f.ctrl.install.setOutcome("exec-1", "ok: direct launch started in 40ms")
+
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"), "uninstall")
+
+	c.Eq("", f.ctrl.install.outcomeOf("exec-1"),
+		"the deleted executor's outcome must be dropped, not left for a row that no longer exists")
+}
+
 // A TUNNEL install has nothing to stop: its remote process is the launcher's own
 // ssh child, ended with the session, so the uninstall asks for the marker only.
 func TestUninstallTunnelDoesNotAskToStop(t *testing.T) {
