@@ -5,14 +5,18 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -409,6 +413,82 @@ func TestStampConversationParentAdoptedConversationIsMemoizedToo(t *testing.T) {
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "second stamp")
 	got, _ = stampParentOf(t, pool, childConv)
 	c.Eq("", got, "a conversation discovered already stamped must be memoized too; got %s", got)
+}
+
+// insertTopLevelStampChild writes the child row a top-level spawn makes: a
+// conversation and no parent label at all.
+func insertTopLevelStampChild(t *testing.T, pool *pgxpool.Pool, childID string, conversationID *string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := pool.Exec(ctx,
+		`INSERT INTO conversations.child (child_id, kind, status, spawned_at, labels, conversation_id)
+		 VALUES ($1, 'fundi', 'idle', now(), '{}'::jsonb, $2::uuid)`, childID, conversationID)
+	assert.NewAborting(t).NoError(err, "insert top-level child %s", childID)
+}
+
+// queryCounter counts the SQL statements a pool issues, so a test can assert
+// that a call costs no lookup rather than inferring it from a probe.
+type queryCounter struct{ n atomic.Int64 }
+
+func (q *queryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	q.n.Add(1)
+	return ctx
+}
+
+func (q *queryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (q *queryCounter) reset()     { q.n.Store(0) }
+func (q *queryCounter) count() int { return int(q.n.Load()) }
+
+// openCountingTestPool opens the test pool with a query counter installed,
+// skipping without RAFIKI_TEST_DSN like openTestPool does.
+func openCountingTestPool(t *testing.T) (*pgxpool.Pool, *queryCounter) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	c.NoError(err, "parse dsn")
+	counter := &queryCounter{}
+	cfg.ConnConfig.Tracer = counter
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	c.NoError(err, "open pool")
+	t.Cleanup(pool.Close)
+	c.NoError(store.Migrate(ctx, pool), "migrate")
+	return pool, counter
+}
+
+// TestStampConversationParentParentlessChildIsMemoizedToo pins the second
+// terminal leg of the memo: a child with no parent label has nothing to find,
+// so its first row write pays the two lookups and later ones pay none. Without
+// the memoization every such write repeats both queries for the child's whole
+// lifetime.
+func TestStampConversationParentParentlessChildIsMemoizedToo(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool, counter := openCountingTestPool(t)
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	childID := "c_" + uniq + "_memo_top"
+
+	childConv := insertStampConversation(t, pool, childID)
+	cleanupStampRows(t, pool, []string{childID}, []string{childConv})
+	insertTopLevelStampChild(t, pool, childID, &childConv)
+
+	ctrl := &Controller{pool: pool}
+	counter.reset()
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "first stamp")
+	c.True(counter.count() > 0, "the first stamp on a parentless child must look at the child row")
+
+	before := counter.count()
+	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "second stamp")
+	c.Eq(before, counter.count(), "a memoized parentless child must issue no lookups on the next write")
+
+	got, _ := stampParentOf(t, pool, childConv)
+	c.Eq("", got, "a parentless child's conversation must stay top level")
 }
 
 // insertStampConversationWithParent writes one conversation row already

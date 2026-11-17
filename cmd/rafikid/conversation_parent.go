@@ -35,23 +35,41 @@ UPDATE conversations.conversation c
    AND parent.conv_id IS NOT NULL
    AND parent.conv_id <> c.id`
 
-// stampConversationParentDoneSQL answers whether the child's conversation
-// already carries a parent, resolving the conversation the same two ways the
-// stamp does: the stored conversation_id, else the oldest conversation whose
-// external_ref is the child id. It separates the two zero-row outcomes of the
-// stamp -- already stamped, worth memoizing, and parent conversation missing,
-// worth retrying.
-const stampConversationParentDoneSQL = `
-SELECT EXISTS (
-    SELECT 1
+// The outcomes stampConversationParentStateSQL reports after a stamp that
+// changed no row.
+const (
+	// stampStateStamped: the conversation already names a parent.
+	stampStateStamped = "stamped"
+	// stampStateParentless: the child carries no parent label, so there is no
+	// parent conversation to find, now or later.
+	stampStateParentless = "parentless"
+	// stampStatePending: the child names a parent whose conversation does not
+	// exist yet, so a later row write must look again.
+	stampStatePending = "pending"
+)
+
+// stampConversationParentStateSQL classifies a zero-row stamp, resolving the
+// child's conversation the same two ways the stamp does: the stored
+// conversation_id, else the oldest conversation whose external_ref is the
+// child id. It answers one row for every child that exists, and pending for a
+// child that does not, so a vanished row is retried rather than memoized. Both
+// terminal outcomes are memoizable; only pending keeps retrying.
+const stampConversationParentStateSQL = `
+SELECT COALESCE((
+    SELECT CASE
+               WHEN c.parent_conversation_id IS NOT NULL THEN '` + stampStateStamped + `'
+               WHEN COALESCE(ch.labels->>'rafiki/parent', ch.labels->>'fundi/parent', '') = ''
+                   THEN '` + stampStateParentless + `'
+               ELSE '` + stampStatePending + `'
+           END
       FROM conversations.child ch
-      JOIN conversations.conversation c
+      LEFT JOIN conversations.conversation c
         ON c.id = COALESCE(ch.conversation_id,
                (SELECT v.id FROM conversations.conversation v
                  WHERE v.external_ref = ch.child_id
                  ORDER BY v.created_at LIMIT 1))
      WHERE ch.child_id = $1
-       AND c.parent_conversation_id IS NOT NULL)`
+), '` + stampStatePending + `')`
 
 // stampConversationParent records, on a child's root conversation, the root
 // conversation of the child that spawned it. It only fills a NULL, and a
@@ -65,11 +83,13 @@ SELECT EXISTS (
 // resolved to itself) and never touches updated_at -- the stamp is
 // bookkeeping about the tree's shape, not activity on it.
 //
-// Once the conversation carries a parent there is nothing left to do, so the
-// outcome is memoized per child id on the Controller and later row writes for
-// that child skip the lookups entirely. A zero-row stamp is memoized only
-// when the conversation is already stamped; the parent-conversation-missing
-// case stays unmemoized and keeps retrying.
+// Once there is nothing left to do the outcome is memoized per child id on
+// the Controller and later row writes for that child skip the lookups
+// entirely. That covers both terminal outcomes: a conversation that already
+// carries a parent (this daemon stamped it, or an earlier one did) and a child
+// with no parent label at all. The parent-conversation-missing case stays
+// unmemoized and keeps retrying, which is what carries a child whose parent's
+// own conversation is written after its first row write.
 func (c *Controller) stampConversationParent(ctx context.Context, childID string) error {
 	if c.pool == nil {
 		return nil
@@ -86,11 +106,11 @@ func (c *Controller) stampConversationParent(ctx context.Context, childID string
 		slog.Debug("stamped conversation parent", "childId", childID)
 		return nil
 	}
-	var done bool
-	if err := c.pool.QueryRow(ctx, stampConversationParentDoneSQL, childID).Scan(&done); err != nil {
+	var state string
+	if err := c.pool.QueryRow(ctx, stampConversationParentStateSQL, childID).Scan(&state); err != nil {
 		return err
 	}
-	if done {
+	if state == stampStateStamped || state == stampStateParentless {
 		c.stampedParents.Store(childID, struct{}{})
 	}
 	return nil

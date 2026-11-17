@@ -311,10 +311,13 @@ type Controller struct {
 	// reaches them. Nil exactly when pool is nil.
 	listInsights conversationListReads
 
-	// stampedParents holds the children whose conversation this daemon has
-	// already stamped with its parent conversation, so writeRecordLastStatus's
-	// stamp costs no lookups on later row writes. It only grows with children
-	// this daemon stamped; a zero value is ready to use.
+	// stampedParents holds the children whose conversation parent link this
+	// daemon has settled, so writeRecordLastStatus's stamp costs no lookups on
+	// later row writes: either the conversation carries a parent (stamped here
+	// or before this daemon saw it) or the child has no parent label, so there
+	// is nothing to find. A child whose parent conversation does not exist yet
+	// is absent and keeps retrying. It only grows; a zero value is ready to
+	// use.
 	stampedParents sync.Map
 
 	// baseCtx is the daemon's own context, threaded into inproc.Options.Parent
