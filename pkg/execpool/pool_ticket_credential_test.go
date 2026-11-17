@@ -31,10 +31,47 @@ type ticketCredStore struct {
 	// rotateErr, when non-nil, is what RotateCredential returns — a store
 	// outage, which must reach the peer as retryable.
 	rotateErr error
+	// getErr, when non-nil, is what the NEXT Get returns — a read outage on the
+	// row, which must reach the peer as retryable AND leave the ticket
+	// redeemable, so the retry that follows finds the store whole again.
+	getErr error
+	// onRotate, when set, runs inside RotateCredential — the hook a test uses to
+	// change the world while the connection is mid-flight (revoking the ticket
+	// admission is about to consume).
+	onRotate func()
 }
 
 func newTicketCredStore(id, cred string) *ticketCredStore {
 	return &ticketCredStore{fakeStore: newFakeStore(id), cred: cred}
+}
+
+// Get answers from fakeStore unless a read outage is armed for this call.
+// RotateCredential reads through fakeStore instead, so a rotation's own row read
+// never eats the outage armed for admission.
+func (s *ticketCredStore) Get(ctx context.Context, id string) (executors.Executor, error) {
+	s.mu.Lock()
+	err := s.getErr
+	s.getErr = nil
+	s.mu.Unlock()
+	if err != nil {
+		return executors.Executor{}, err
+	}
+	return s.fakeStore.Get(ctx, id)
+}
+
+// failNextGet arms one row-read outage, consumed by the next Get.
+func (s *ticketCredStore) failNextGet(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.getErr = err
+}
+
+// revokeOnRotate arms the mid-flight hook: the rotation itself kills the ticket
+// admission is holding, which is the revoke racing the consume.
+func (s *ticketCredStore) revokeOnRotate(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onRotate = fn
 }
 
 func (s *ticketCredStore) Authenticate(ctx context.Context, credential string) (executors.Executor, error) {
@@ -49,13 +86,21 @@ func (s *ticketCredStore) Authenticate(ctx context.Context, credential string) (
 
 func (s *ticketCredStore) RotateCredential(ctx context.Context, id string) (string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.rotateErr != nil {
-		return "", s.rotateErr
+	rotateErr, hook := s.rotateErr, s.onRotate
+	s.mu.Unlock()
+	// The hook runs OUTSIDE the lock: it reaches into the pool, and a fake store
+	// held across unknown code deadlocks the test rather than failing it.
+	if hook != nil {
+		hook()
 	}
-	if _, err := s.Get(ctx, id); err != nil {
+	if rotateErr != nil {
+		return "", rotateErr
+	}
+	if _, err := s.fakeStore.Get(ctx, id); err != nil {
 		return "", err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.rotations++
 	s.cred = fmt.Sprintf("minted-%d", s.rotations)
 	return s.cred, nil
@@ -184,9 +229,53 @@ func TestRotateCredentialStoreOutageIsRetryable(t *testing.T) {
 		"a failed rotation must leave the stored credential alone, got")
 }
 
+// A store READ outage while resolving a row-bound ticket is the same class of
+// answer: retryable, and therefore it must cost nothing. The ticket is consumed
+// only after admission and the rotation, so a Get that fails leaves it
+// redeemable and the SAME ticket works once the store is back — the guard that
+// dies if consumption moves back above the row read.
+func TestRedeemInstallTicketStoreOutageLeavesTheTicketRedeemable(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newTicketCredStore("exec-1", "the-old-credential")
+	p := New(store)
+
+	ticket, err := p.Tickets().Mint(TicketGrant{
+		Owner: "brent", RowID: "exec-1", MintCredential: true,
+	})
+	c.NoError(err, "mint install ticket")
+
+	store.failNextGet(errors.New("failed to connect to `host=db.internal user=rafiki`: connection refused"))
+
+	err = exchangeErr(t, p, ticketHeader(ticket))
+	ref := requireRefused(t, err, http.StatusServiceUnavailable)
+	c.Eq("rafikid could not verify the credential right now; retry", ref.Reason,
+		"a row-read outage must answer the fixed retryable text, got")
+	c.False(errors.Is(classifyRefusal(err), ErrEnrollmentRejected),
+		"a row-read outage classified as terminal; the executor would exit permanently: %v", err)
+	c.Eq(0, store.rotateCount(), "a row the daemon could not read must rotate nothing, rotations =")
+
+	conn, hdr, err := upgradeExchange(t, p, ticketHeader(ticket))
+	c.NoError(err, "the SAME ticket must redeem once the store is back; a ticket spent by the "+
+		"outage would make this a terminal 401 and strand the executor")
+	c.Eq(1, store.rotateCount(), "the retry must complete the one rotation, rotations =")
+	minted := hdr.Get(upgradeconn.HeaderCredential)
+	c.NotEq("", minted, "the retried redemption must still hand over %s", upgradeconn.HeaderCredential)
+	c.Eq(minted, store.currentCredential(), "the header's plaintext must be the one the store holds, got")
+	c.NoError(conn.Close(), "close")
+
+	// ...and the retry that succeeded is what spent it.
+	c.ErrorIs(classifyRefusal(exchangeErr(t, p, ticketHeader(ticket))), ErrEnrollmentRejected,
+		"the ticket must be spent by the redemption that succeeded; replaying it is terminal")
+	c.Eq(1, store.rotateCount(), "a replay after the successful retry rotated again, rotations =")
+}
+
 // A ticket redeems once. A second redemption is terminal and must not rotate
 // again — otherwise whoever replays a captured ticket keeps invalidating the
 // credential of the executor that legitimately holds it.
+//
+// The consumption is the LAST step of a successful redemption (after admission
+// and the rotation), which is what leaves every retryable refusal ahead of it
+// holding an unspent ticket. The replay below therefore finds it gone.
 func TestRedeemInstallTicketIsOneShot(t *testing.T) {
 	c := assert.NewAborting(t)
 	store := newTicketCredStore("exec-1", "the-old-credential")
@@ -244,6 +333,79 @@ func TestRedeemInstallTicketWithLiveIncumbentRotatesNothing(t *testing.T) {
 	c.NoError(err, "the incumbent's credential must still authenticate after the refusal")
 	c.Len(p.Live(), 1, "the incumbent must still be the live connection")
 	c.NoError(incumbent.Close(), "close the incumbent")
+}
+
+// A 409 says "retry shortly", so the retry has to be possible. The ticket is
+// consumed only after p.admit has succeeded, which means a 409 against a healthy
+// incumbent costs nothing: the SAME ticket redeems once the incumbent is gone —
+// the guard that dies if consumption moves back above admit.
+func TestRedeemInstallTicketAdmitRefusalLeavesTheTicketRedeemable(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newTicketCredStore("exec-1", "the-incumbent-credential")
+	p := New(store)
+	p.healthInterval = time.Hour // the incumbent answers; nothing should evict it
+
+	incumbent := joinAsCredential(t, p, &stubHandler{executorID: "exec-1"}, "the-incumbent-credential")
+	waitFor(t, 5*time.Second, "the incumbent to join", func() bool { return len(p.Live()) == 1 })
+
+	ticket, err := p.Tickets().Mint(TicketGrant{
+		Owner: "brent", RowID: "exec-1", MintCredential: true,
+	})
+	c.NoError(err, "mint install ticket")
+
+	ref := requireRefused(t, exchangeErr(t, p, ticketHeader(ticket)), http.StatusConflict)
+	c.StrContains(ref.Reason, "retry shortly", "a 409 must invite a retry, got")
+	c.Eq(0, store.rotateCount(), "a 409-refused ticket rotated the credential, rotations =")
+	c.Eq("the-incumbent-credential", store.currentCredential(),
+		"the refused ticket spent the credential the live executor holds, got")
+
+	c.NoError(incumbent.Close(), "close the incumbent")
+	waitFor(t, 5*time.Second, "the incumbent to leave", func() bool { return len(p.Live()) == 0 })
+
+	conn, hdr, err := upgradeExchange(t, p, ticketHeader(ticket))
+	c.NoError(err, "the SAME ticket must redeem once the incumbent is gone; a ticket spent by "+
+		"the 409 would make the retry it invited a terminal 401")
+	c.Eq(1, store.rotateCount(), "the admitted retry must rotate once, rotations =")
+	minted := hdr.Get(upgradeconn.HeaderCredential)
+	c.NotEq("", minted, "the retried redemption must still hand over %s", upgradeconn.HeaderCredential)
+	c.Eq(minted, store.currentCredential(), "the header's plaintext must be the one the store holds, got")
+	c.NoError(conn.Close(), "close")
+}
+
+// A ticket revoked while its connection is mid-flight is not one this daemon
+// authenticated: the consume is the last word, so the answer is the same
+// terminal 401 a spent ticket earns and NO credential rides it — handing a
+// credential to a launch the daemon has given up on would leave that launch's
+// credential live with nobody holding it.
+//
+// Asserted at authorize rather than over the wire because upgradeconn.Dial
+// discards a refusal's headers, and "carries no Rafiki-Credential" is the whole
+// subject; the rotation itself is expected to have happened by then (that cost
+// is what authorize's consume comment records).
+func TestRedeemInstallTicketRevokedBeforeConsumeIsTerminal(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := newTicketCredStore("exec-1", "the-old-credential")
+	p := New(store)
+
+	ticket, err := p.Tickets().Mint(TicketGrant{
+		Owner: "brent", RowID: "exec-1", MintCredential: true,
+	})
+	c.NoError(err, "mint install ticket")
+	store.revokeOnRotate(func() { p.Tickets().Revoke(ticket) })
+
+	a, hdr, err := p.authorize(ticketRequest(t, ticket))
+	var ref *upgradeconn.Refusal
+	c.True(errors.As(err, &ref), "a revoked ticket must be refused, got %v", err)
+	c.Eq(http.StatusUnauthorized, ref.Status, "a revoked ticket is terminal, got status")
+	c.StrContains(ref.Reason, "session ticket is unknown, already used, or revoked",
+		"a revoked ticket must say so, got")
+	c.Eq("", hdr.Get(upgradeconn.HeaderCredential),
+		"a refused redemption must carry no %s header, got", upgradeconn.HeaderCredential)
+	c.Empty(a.credential, "a refused redemption must admit nothing, got %+v", a)
+	c.Eq(1, store.rotateCount(),
+		"the rotation runs BEFORE the consume, so it has already happened here, rotations =")
+	_, still := p.Tickets().Peek(ticket)
+	c.False(still, "a revoked ticket must stay revoked; the consume must not put it back")
 }
 
 // joinAsCredential performs the full executor link against p with a Bearer

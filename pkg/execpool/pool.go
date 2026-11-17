@@ -334,9 +334,11 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 	var e executors.Executor
 	var credential string
 	var transient bool
-	// mint, when set, rotates a row-bound ticket's credential. It stays a
-	// closure until admission has SUCCEEDED; see the SchemeTicket branch.
+	// mint, when set, rotates a row-bound ticket's credential, and consume,
+	// when set, spends the ticket that admitted this connection. BOTH run after
+	// admission has SUCCEEDED, mint first; see the SchemeTicket branch.
 	var mint func(context.Context) (string, error)
+	var consume func() error
 
 	switch scheme {
 	case upgradeconn.SchemeTicket:
@@ -344,7 +346,17 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 		// redeeming it is what that connection's authentication buys. What it
 		// buys depends on the grant: a row-less grant stands for a transient
 		// executor, a row-bound one authenticates an existing durable row.
-		grant, ok := p.tickets.Redeem(secret)
+		//
+		// PEEKED here, not redeemed: one-shot-ness is still decided by the
+		// atomic Redeem below, and that Redeem closes LAST — after this
+		// connection is admissible AND its credential has been minted.
+		// Everything in between can still refuse, and every one of those
+		// refusals is retryable PRECISELY because nothing has been consumed: a
+		// store outage, a 409 against a healthy incumbent and a failed rotation
+		// all answer with a retry, and a retry presenting a ticket spent by the
+		// refused attempt would be a terminal 401 — the whole fleet stranded by
+		// a database blip.
+		grant, ok := p.tickets.Peek(secret)
 		if !ok {
 			// Terminal. A ticket is one-shot and tied to a control
 			// connection; retrying cannot make a spent one valid, and a
@@ -398,27 +410,44 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 				// RULING: the rotation is not serialised ACROSS tickets. Two
 				// DIFFERENT live tickets for the SAME row, redeemed at once, both
 				// rotate; the last write wins and the other peer's 101 credential
-				// is already dead. Same-ticket replay is safe
-				// (TicketRegistry.Redeem deletes under a mutex). The scope boundary
-				// is that the daemon never mints two minting tickets for one row
-				// concurrently: the launcher coalesces relaunches per executor id,
-				// and install mints one ticket per launch. Crossing that boundary
-				// costs one failed launch — the loser's credential is dead, and its
-				// next relaunch mints a fresh one, so it self-heals.
+				// is already dead. Same-ticket replay is safe: the atomic
+				// TicketRegistry.Redeem is what decides one-shot-ness and it closes
+				// after the rotation, so a concurrent replay loses the Redeem. The
+				// scope boundary is that the daemon never mints two minting
+				// tickets for one row concurrently: the launcher coalesces
+				// relaunches per executor id, and install mints one ticket per
+				// launch. Crossing that boundary costs one failed launch — the
+				// loser's credential is dead, and its next relaunch mints a fresh
+				// one, so it self-heals.
 				id := e.ID
-				spent, held := secret, grant
 				mint = func(ctx context.Context) (string, error) {
-					cred, err := p.store.RotateCredential(ctx, id)
-					if err != nil {
-						// The redemption bought nothing, so the ticket goes
-						// back: its refusal is the retryable 503, and a retry
-						// presenting a ticket spent by a rotation that never
-						// happened would be a terminal 401.
-						p.tickets.Restore(spent, held)
-					}
-					return cred, err
+					return p.store.RotateCredential(ctx, id)
 				}
 			}
+		}
+		// The consume step, and the last word on this ticket. It runs only
+		// after admit and the mint above, so a failure anywhere earlier leaves
+		// the ticket redeemable and the retry works.
+		//
+		// REMAINING COST of this order: a ticket REVOKED between the peek and
+		// here has already rotated the row's credential when this 401 is
+		// answered, so the old credential dies and the new one reaches nobody.
+		// The row is durable and launcher-independent, so the next relaunch
+		// mints another — the same self-healing path a VM reset takes, and the
+		// reason this is a rotation with no reader rather than a lost identity.
+		peeked := grant
+		consume = func() error {
+			redeemed, ok := p.tickets.Redeem(secret)
+			if !ok || !sameGrant(peeked, redeemed) {
+				// Refused here after admission, so the connection is dropped
+				// before the 101: revoked under us, or spent by a concurrent
+				// attempt that got here first.
+				return &upgradeconn.Refusal{
+					Status: http.StatusUnauthorized,
+					Reason: "session ticket is unknown, already used, or revoked",
+				}
+			}
+			return nil
 		}
 	case upgradeconn.SchemeEnroll:
 		// First enrollment.
@@ -469,10 +498,16 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 		if rerr != nil {
 			// The same mapping every other credential check uses: an outage
 			// stays 503-class (retried), never a terminal 401 that would take
-			// the executor out of service.
+			// the executor out of service. The ticket is untouched, so the
+			// retry presents a ticket that still redeems.
 			return admission{}, nil, authRefusal(rerr)
 		}
 		credential = cred
+	}
+	if consume != nil {
+		if cerr := consume(); cerr != nil {
+			return admission{}, nil, cerr
+		}
 	}
 
 	hdr := http.Header{upgradeconn.HeaderExecutorID: {e.ID}}

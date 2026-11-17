@@ -1633,14 +1633,15 @@ it refuses and names the machine that has to be upgraded.
 with.** `Pool.authorize`'s `Ticket` branch, for a row-bound grant flagged
 `MintCredential` (set only by the install path), rotates the row's credential and
 returns the new one on the 101's `Rafiki-Credential`, exactly as enrollment does.
-The rotation is deferred until admission has SUCCEEDED — a ticket refused for a
-disabled row (checked before it) or a 409 against a healthy incumbent therefore
-costs nothing — and a store failure puts the ticket back
-(`TicketRegistry.Restore`) and answers the retryable 503-class refusal. Two
-consequences to keep: every relaunch mints a new credential and invalidates the
-previous one, so a credential found on the target belongs to the current launch
-and is never a durable identity (the ROW is that), and a spent ticket is a
-terminal 401, never a retry.
+The ticket is PEEKED, never consumed up front: it is spent only once the
+connection is admissible AND the credential is minted, so a refusal anywhere
+before that — a disabled row, a store outage resolving the row, a failed
+rotation, a 409 against a healthy incumbent — answers with a retryable status
+and leaves the ticket redeemable, and no retryable failure can strand an
+executor. Two consequences to keep: every relaunch mints a new credential and
+invalidates the previous one, so a credential found on the target belongs to the
+current launch and is never a durable identity (the ROW is that), and a spent
+ticket is a terminal 401, never a retry.
 
 ### Who may launch
 

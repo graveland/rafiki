@@ -109,6 +109,11 @@ func (r *TicketRegistry) Mint(g TicketGrant) (string, error) {
 // Redeem consumes a ticket. A ticket redeems exactly once: replaying one must
 // not authenticate a second executor onto the same identity, which is the same
 // rule Pool.admit enforces for durable credentials.
+//
+// This is the ONE-SHOT GATE, and it closes last: Pool.authorize calls it only
+// once the connection is admissible and the credential has been minted, so
+// every retryable refusal on the way there leaves the ticket redeemable.
+// Peek is how it reads the grant before that point.
 func (r *TicketRegistry) Redeem(ticket string) (TicketGrant, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -119,24 +124,34 @@ func (r *TicketRegistry) Redeem(ticket string) (TicketGrant, bool) {
 	return g, ok
 }
 
-// Restore puts a grant back under a ticket a redemption consumed and then could
-// not carry out. It exists for one case: a minting install ticket whose rotation
-// failed, where the ticket bought nothing and the peer was answered with the
-// retryable refusal. Consuming it anyway would make the retry a terminal 401 and
-// take an executor out of service over a database blip.
+// Peek reads a ticket's grant WITHOUT consuming it.
 //
-// Only the minting install path calls this, never a transient one, and it is a
-// plain re-insert — so it CAN put a grant back under a ticket a launcher Revoked
-// while that rotation was running. The cost is bounded to a late join: the
-// revoked ticket belonged to an install launch whose launcher had given up
-// waiting, the executor it readmits is the machine that install already owns, and
-// its row is durable and launcher-independent, so the executor coming up late is
-// the outcome the operator asked for. A session (transient) ticket is never
-// restored, so nothing here can outlive the control connection that minted it.
-func (r *TicketRegistry) Restore(ticket string, g TicketGrant) {
+// It exists so admission can do everything that can fail — resolve the row,
+// check it is enabled, admit the connection, mint the credential — before the
+// one-shot gate closes. Every one of those refusals is retryable, and each is
+// only retryable because nothing has been consumed: a ticket spent by a
+// connection that was then refused makes the retry a terminal 401 and takes the
+// executor out of service over a database blip.
+//
+// It is NOT an alternative to Redeem for deciding one-shot-ness. Two concurrent
+// attempts can both peek the same ticket; exactly one of them Redeems it, and
+// the other is refused there — see Pool.authorize's SchemeTicket branch.
+func (r *TicketRegistry) Peek(ticket string) (TicketGrant, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.m[ticket] = g
+	g, ok := r.m[ticket]
+	return g, ok
+}
+
+// sameGrant reports whether the grant a redemption returned is the one
+// admission was decided against: the same row, the same executor, the same
+// minting flag. Redeem is what makes a ticket one-shot, so a value that differs
+// here is not the ticket this connection was authenticated on — admitting it
+// would authorise against facts nobody checked.
+func sameGrant(peeked, redeemed TicketGrant) bool {
+	return peeked.RowID == redeemed.RowID &&
+		peeked.ExecutorID == redeemed.ExecutorID &&
+		peeked.MintCredential == redeemed.MintCredential
 }
 
 // Revoke discards an unredeemed ticket. This is how a closed control

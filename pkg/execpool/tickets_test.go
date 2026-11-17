@@ -27,6 +27,41 @@ func TestTicketRedeemsOnceThenIsSpent(t *testing.T) {
 	}
 }
 
+// Peek is the read that lets admission finish before the one-shot gate closes:
+// it must not consume, or a retryable refusal would spend the ticket it is
+// answering "retry" to, and it must be the same grant Redeem would return.
+func TestTicketPeekDoesNotConsume(t *testing.T) {
+	c := assert.NewAborting(t)
+	r := NewTicketRegistry()
+	g := TicketGrant{ExecutorID: "e1", Owner: "brent", RowID: "row-1", MintCredential: true}
+	tk, err := r.Mint(g)
+	c.NoError(err)
+
+	peeked, ok := r.Peek(tk)
+	c.True(ok, "a freshly minted ticket must be peekable")
+	c.True(sameGrant(g, peeked), "Peek must return the grant that was minted, got %+v", peeked)
+
+	// Repeated peeks leave the ticket redeemable: that is what makes several
+	// attempts on one ticket possible, with the atomic Redeem deciding which
+	// of them wins.
+	if _, again := r.Peek(tk); !again {
+		t.Fatal("Peek consumed the ticket; a retryable refusal would then answer " +
+			"a retry with a terminal 401")
+	}
+	redeemed, ok := r.Redeem(tk)
+	c.True(ok, "a peeked ticket must still redeem")
+	c.True(sameGrant(peeked, redeemed), "Redeem must return the peeked grant, got %+v", redeemed)
+
+	_, gone := r.Peek(tk)
+	c.False(gone, "a redeemed ticket must not be peekable")
+	revokedTicket, err := r.Mint(TicketGrant{ExecutorID: "e2"})
+	c.NoError(err)
+	r.Revoke(revokedTicket)
+	_, peekable := r.Peek(revokedTicket)
+	c.False(peekable, "revocation must make a ticket unpeekable too, or admission would "+
+		"do all its work for a launch the daemon has given up on")
+}
+
 func TestTicketRevokeBeforeRedeem(t *testing.T) {
 	r := NewTicketRegistry()
 	tk, err := r.Mint(TicketGrant{ExecutorID: "e1", Owner: "brent"})
