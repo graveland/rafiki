@@ -1453,8 +1453,8 @@ func (c *Controller) remoteLogTail(
 }
 
 // UninstallExecutor removes an executor this lineage installed: the ssh session
-// ends, the target's install marker goes, the recipe is tombstoned and the
-// executor row is deleted.
+// ends, the target's install process and marker go, the recipe is tombstoned and
+// the executor row is deleted.
 func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller, ref string) error {
 	if err := c.requireInstaller(); err != nil {
 		return err
@@ -1499,11 +1499,14 @@ func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller
 	// removed, or a still-running executor rewrites it.
 	c.install.cancelServe(e.ID)
 
-	// The marker is cleaned through the launcher when it is live. A failure here
-	// does not fail the uninstall: the leftover marker is named by the next
-	// install's clobber guard, with the command that clears it.
+	// The target is cleaned through the launcher when it is live: the marker
+	// goes, and a DIRECT install's detached process is stopped as well. A failure
+	// here does not fail the uninstall — the tombstone and the row deletion below
+	// are the guarantee, and the leftover marker is named by the next install's
+	// clobber guard — but for a direct row it is the difference between the
+	// process stopping now and stopping once its next connection is refused.
 	if row.LauncherExecutorID != "" {
-		c.cleanInstallMarker(ctx, row)
+		c.cleanInstall(ctx, row)
 	}
 
 	if terr := c.install.store.Tombstone(ctx, row.ID); terr != nil {
@@ -1515,42 +1518,78 @@ func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller
 	return nil
 }
 
-// cleanInstallMarker removes the target's install marker iff it holds this
-// install's id. The shared binary cache is left alone: it is content-addressed
+// directStillRunning is what an uninstall could not do, said out loud: a direct
+// install's process is DETACHED, so releasing this daemon's session ends
+// nothing. The deleted executor row is what ends it — the remote's next
+// connection is refused with a terminal 401, so it exits instead of retrying.
+const directStillRunning = "the remote executor is still running; it stops itself the next time it reconnects, " +
+	"because its executor row is deleted and the daemon answers 401"
+
+// cleanInstall removes the target's install marker iff it holds this install's
+// id, and — for a DIRECT install — asks the launcher to stop the detached
+// process first. The shared binary cache is left alone: it is content-addressed
 // and every install on that target uses it.
-func (c *Controller) cleanInstallMarker(ctx context.Context, row executorinstall.Row) {
+//
+// Nothing here can fail the uninstall. For a tunnel row that is just tidiness
+// (its remote process is the launcher's own ssh child, ended with the session
+// above); for a direct row it is a fact worth naming, because the row deletion
+// that follows is what ends that process, so a launcher this call could not
+// reach leaves work running on the target until the remote reconnects.
+func (c *Controller) cleanInstall(ctx context.Context, row executorinstall.Row) {
+	stop := row.EffectiveMode() == executorinstall.ModeDirect
 	launcherExec, live := c.liveExecutor(row.LauncherExecutorID)
 	if !live {
-		slog.Debug("uninstall: launcher is not connected; leaving the target's install marker",
+		cleanInstallMissed(stop, false,
+			"uninstall: launcher is not connected; leaving the target's install marker",
 			"launcher", shortID(row.LauncherExecutorID), "target", row.Target)
 		return
 	}
 	// The same gate the install and the relaunch apply: no path asks a machine
 	// that is not a launcher to run ssh on the daemon's behalf.
 	if err := installLauncherGate(launcherExec); err != nil {
-		slog.Debug("uninstall: launcher may not run ssh; leaving the target's install marker",
+		cleanInstallMissed(stop, false,
+			"uninstall: launcher may not run ssh; leaving the target's install marker",
 			"launcher", shortID(row.LauncherExecutorID), "target", row.Target, "error", err)
 		return
 	}
 	launcher, err := c.install.launcher(row.LauncherExecutorID)
 	if err != nil {
-		slog.Warn("uninstall: could not reach the launcher; leaving the target's install marker",
+		cleanInstallMissed(stop, true,
+			"uninstall: could not reach the launcher; leaving the target's install marker",
 			"launcher", shortID(row.LauncherExecutorID), "target", row.Target, "error", err)
 		return
 	}
-	// Marker-only (stop=false): a direct executor's process is not held by this
-	// daemon, so the row deletion below is what ends it — its next reconnect is
-	// refused. Nothing in THIS path signals a remote process.
-	removed, _, cerr := launcher.Clean(ctx, &executorpb.RemoteTarget{
+	removed, stopped, cerr := launcher.Clean(ctx, &executorpb.RemoteTarget{
 		Destination: row.Target, Instance: row.Instance,
-	}, row.ID, false)
+	}, row.ID, stop)
 	if cerr != nil {
-		slog.Warn("uninstall: could not remove the target's install marker; the next install will name it",
+		cleanInstallMissed(stop, true,
+			"uninstall: could not remove the target's install marker; the next install will name it",
 			"target", row.Target, "install", row.ID, "error", cerr)
 		return
 	}
-	slog.Debug("uninstall: cleaned the target's install marker",
-		"target", row.Target, "install", row.ID, "removed", removed)
+	slog.Info("uninstall: cleaned the target", "target", row.Target,
+		"install", row.ID, "mode", row.EffectiveMode(), "removed", removed, "stopped", stopped)
+}
+
+// cleanInstallMissed reports ONE reason an uninstall could not clean the target.
+// Each reason returns, so a direct row's consequence sentence is said once per
+// uninstall rather than once per line.
+//
+// stop is whether the target runs a DETACHED process (a direct install), whose
+// only ending is the deleted executor row: that always logs at Warn and always
+// carries the consequence, whatever the reason. warn is the level a tunnel row's
+// wording has always used for this reason; a tunnel row's remote process is the
+// launcher's ssh child and dies with the session, so there is nothing to name.
+func cleanInstallMissed(stop, warn bool, msg string, args ...any) {
+	switch {
+	case stop:
+		slog.Warn(msg+"; "+directStillRunning, args...)
+	case warn:
+		slog.Warn(msg, args...)
+	default:
+		slog.Debug(msg, args...)
+	}
 }
 
 // installedByLineage reports whether a caller may uninstall a row whose

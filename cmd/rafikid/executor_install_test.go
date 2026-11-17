@@ -1137,6 +1137,25 @@ func TestRelaunchRefusesADisabledLauncher(t *testing.T) {
 
 // ─── Uninstall ──────────────────────────────────────────────────────────────
 
+// directConsequence is the sentence a DIRECT install's uninstall must say when
+// it could not stop the remote process. Written out here rather than reusing the
+// code's own constant: a test that imported it would pass whatever that constant
+// happened to say, which is no guard on the promise made to an operator.
+const directConsequence = "the remote executor is still running; it stops itself the next time it reconnects, " +
+	"because its executor row is deleted and the daemon answers 401"
+
+// logLineContaining returns the first captured log line containing needle, or ""
+// when no line does. captureLogs installs the text handler, so a line carries
+// its own level as `level=WARN`.
+func logLineContaining(logs, needle string) string {
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
+}
+
 // Uninstall tombstones the recipe, deletes the executor row and ends the ssh
 // session. The recipe stays as the record; the executor row has no tombstone.
 func TestUninstallTombstonesAndDeletes(t *testing.T) {
@@ -1180,16 +1199,111 @@ func TestUninstallCleansMarkerWhenLauncherLive(t *testing.T) {
 // A launcher that is not connected must not make the uninstall fail: the
 // executor row is the thing the caller asked to be rid of, and the leftover
 // marker is named by the next install's clobber guard.
+//
+// This row is a TUNNEL one, whose remote process is the launcher's own ssh
+// child and died with the session above, so the line is still Debug and says
+// nothing about a process left running.
 func TestUninstallSucceedsWhenLauncherDown(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
 	f.seedInstalledExecutor()
 	f.pool.live = nil
+	logs := captureLogs(t)
 
 	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"), "uninstall")
 	c.Eq(0, f.launcher.cleanCalls(), "a down launcher cannot clean the marker")
 	c.Eq(0, len(f.installs.liveRows()), "the recipe is still tombstoned")
 	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the executor row is still deleted")
+
+	line := logLineContaining(logs.String(), "uninstall: launcher is not connected")
+	c.Require().NotEq("", line, "the skipped cleanup is still recorded; log:\n"+logs.String())
+	c.StrContains(line, "level=DEBUG", "a tunnel row's leftover marker stays a debug line: "+line)
+	c.NotStrContains(logs.String(), directConsequence,
+		"a tunnel row's process is the launcher's ssh child; nothing is left running to name")
+}
+
+// A DIRECT install's process is detached, so uninstall must ask the launcher to
+// stop it — and for THIS install's id, since the launcher stops a process only
+// when the target's lock records the install that owns it.
+func TestUninstallDirectAsksTheLauncherToStopTheProcess(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"), "uninstall")
+
+	c.Eq(1, f.launcher.cleanCalls(), "the target is cleaned once")
+	call := f.launcher.cleans[0]
+	c.True(call.GetStopProcess(), "a direct install must ask the launcher to stop the detached process")
+	c.Eq("recipe-1", call.GetInstallId(), "the stop is matched to THIS install's id")
+	c.Eq("brent@ublk-s2", call.GetTarget().GetDestination(), "the right target")
+	c.Eq("work", call.GetTarget().GetInstance(), "the right namespace")
+	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the row is still deleted")
+}
+
+// A TUNNEL install has nothing to stop: its remote process is the launcher's own
+// ssh child, ended with the session, so the uninstall asks for the marker only.
+func TestUninstallTunnelDoesNotAskToStop(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeTunnel)
+
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"), "uninstall")
+
+	c.Eq(1, f.launcher.cleanCalls(), "the marker is removed through the launcher")
+	c.False(f.launcher.cleans[0].GetStopProcess(),
+		"a tunnel install must not ask the launcher to stop a process it does not own")
+}
+
+// A launcher the daemon cannot reach does not block a direct uninstall — the
+// row is deleted and the recipe tombstoned regardless — but it must say what it
+// could not do: the remote process keeps running until its next connection is
+// refused.
+func TestUninstallDirectWithUnreachableLauncherStillRemovesTheRow(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	f.pool.live = nil
+	logs := captureLogs(t)
+
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"),
+		"an unreachable launcher must not fail the uninstall")
+	c.Eq(0, f.launcher.cleanCalls(), "a down launcher cannot stop the remote process")
+	tomb, ok := f.installs.rowByID("recipe-1")
+	c.Require().True(ok, "the recipe row is kept")
+	c.NotNil(tomb.RemovedAt, "the recipe is still tombstoned")
+	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the executor row is still deleted")
+
+	line := logLineContaining(logs.String(), "uninstall: launcher is not connected")
+	c.Require().NotEq("", line, "the uninstall must say what it could not do; log:\n"+logs.String())
+	c.StrContains(line, "level=WARN", "a direct row's leftover process is a warning, not debug: "+line)
+	c.StrContains(line, directConsequence, "the warning must name the consequence: "+line)
+	c.Eq(1, strings.Count(logs.String(), directConsequence),
+		"the consequence is said once per uninstall, not once per line; log:\n"+logs.String())
+}
+
+// A Clean that fails is the same shape: the launcher was reached but could not
+// do the work, so uninstall still removes the row and the warning still names
+// the process left running.
+func TestUninstallDirectCleanErrorStillRemovesTheRow(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	f.launcher.cleanErr = errors.New("ssh: connect to host ublk-s2 port 22: connection refused")
+	logs := captureLogs(t)
+
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"),
+		"a failed stop must not fail the uninstall")
+	c.Eq(1, f.launcher.cleanCalls(), "the launcher was asked")
+	tomb, ok := f.installs.rowByID("recipe-1")
+	c.Require().True(ok, "the recipe row is kept")
+	c.NotNil(tomb.RemovedAt, "the recipe is still tombstoned")
+	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the executor row is still deleted")
+
+	line := logLineContaining(logs.String(), "uninstall: could not remove the target's install marker")
+	c.Require().NotEq("", line, "the failed cleanup must be reported; log:\n"+logs.String())
+	c.StrContains(line, "level=WARN", "a direct row's failed stop is a warning: "+line)
+	c.StrContains(line, directConsequence, "the warning must name the consequence: "+line)
 }
 
 // An agent may uninstall what ITS OWN LINEAGE installed — the row it installed
