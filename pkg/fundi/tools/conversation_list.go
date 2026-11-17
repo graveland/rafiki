@@ -36,7 +36,7 @@ func (ConversationListBlueprint) InputSchema() Schema {
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "limit", Type: "integer",
-				Description: "Max rows per page (default 50, maximum 500)."},
+				Description: "Max rows per page (default 50, maximum 500); a negative value is refused."},
 			{Name: "cursor", Type: "string",
 				Description: "Opaque next_cursor from the previous page; pass it back unchanged to continue."},
 			{Name: "sort", Type: "string", Enum: listSorts,
@@ -108,6 +108,12 @@ func (t *conversationListTool) Execute(ctx context.Context, in ToolInput) (ToolR
 	var args conversationListArgs
 	if err := in.Unmarshal(&args); err != nil {
 		return ToolResult{}, fmt.Errorf("conversation_list: %w", err)
+	}
+	// 0 asks for the daemon's default; a negative page size is a mistake the
+	// Connect face already refuses (InvalidArgument), so the tool refuses it
+	// too rather than letting insights treat every <= 0 as the default.
+	if args.Limit < 0 {
+		return ToolResult{}, fmt.Errorf("conversation_list: limit must not be negative, got %d", args.Limit)
 	}
 	if args.Sort != "" && !slices.Contains(listSorts, args.Sort) {
 		return ToolResult{}, fmt.Errorf("conversation_list: unknown sort %q; valid values are %s",

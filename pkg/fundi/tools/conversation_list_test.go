@@ -182,6 +182,37 @@ func TestConversationListRefusesABadBound(t *testing.T) {
 	}
 }
 
+// TestConversationListRefusesANegativeLimit pins that a negative page size is
+// refused with an error naming the field, exactly as the Connect face refuses
+// it with InvalidArgument, while 0 still asks for the default. Without the
+// check, insights treats every limit <= 0 as the default and the two faces
+// silently disagree on the same input.
+func TestConversationListRefusesANegativeLimit(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		in   ToolInput
+	}{
+		{"minus one", ToolInput(`{"limit":-1}`)},
+		{"large negative", ToolInput(`{"limit":-500}`)},
+	} {
+		fake := &fakeConversationListReader{}
+		tool, _ := (ConversationListBlueprint{}).Materialize(ToolOpts{Conversations: fake})
+		_, err := tool.Execute(context.Background(), tc.in)
+		c.Require().Error(err, "%s: Execute returned no error", tc.name)
+		c.StrContains(err.Error(), "limit", "%s: the error does not name the field", tc.name)
+		c.StrContains(err.Error(), "conversation_list", "%s: the error does not name the tool", tc.name)
+		c.Eq(0, fake.query.Limit, "%s: the reader must not have been called", tc.name)
+	}
+
+	// 0 is the default page size, not a mistake: it reaches the reader as 0.
+	fake := &fakeConversationListReader{}
+	tool, _ := (ConversationListBlueprint{}).Materialize(ToolOpts{Conversations: fake})
+	_, err := tool.Execute(context.Background(), ToolInput(`{"limit":0}`))
+	c.Require().NoError(err, "Execute with limit 0")
+	c.Eq(0, fake.query.Limit, "limit 0 must reach the reader as 0 (the default page size)")
+}
+
 // TestConversationListEmptyPageStillCarriesRows pins the output contract: an
 // empty page marshals as an empty rows array with an empty next_cursor, not a
 // bare null, so the model's paging pattern never has a special case.
