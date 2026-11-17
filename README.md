@@ -33,8 +33,9 @@ for real](docs/guide/deployment.md).
   watchable or drivable from the cockpit, the web UI, the CLI, another agent or
   the Python SDK at once.
 - **An executor plane.** An agent's file, shell and LSP tools run on the
-  executor it is bound to (your laptop, a VM, a container), never on the
-  daemon. Isolation is whatever you compose around the executor.
+  executor it is bound to (your laptop, a VM, a container, or another machine
+  you `rafiki executor install` over ssh), never on the daemon. Isolation is
+  whatever you compose around the executor.
 - **A routing proxy** (Anthropic and OpenAI faces) with breaker-gated
   failover, declarative OpenRouter routing, a provider cache guard, model
   declarations and per-user model aliases, and per-model cost accounting.

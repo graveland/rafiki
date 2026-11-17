@@ -143,7 +143,9 @@
   watching and driving a tree of agents live, no separate build step. It draws
   image thumbnails inline on terminals with Kitty Unicode-placeholder support
   (iTerm2 ≥ 3.7.0, ghostty, kitty) and a one-line placeholder elsewhere;
-  `--images=auto|kitty|off` overrides detection, `^Y` toggles.
+  `--images=auto|kitty|off` overrides detection, `^Y` toggles. `^S` searches
+  and browses every past conversation, nested under the one that spawned it,
+  and `⏎` resumes one into the cockpit.
 - **Multi-daemon profiles** — one client resolves distinct daemons (local
   socket or remote TLS) by name, each with its own token and model defaults;
   agent presets (named seats: model, tools, prompt, budget) live in each

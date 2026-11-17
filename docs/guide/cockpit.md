@@ -79,6 +79,7 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | `^↑` / `^↓` | Hop up/down the rail without changing pane |
 | `esc` / `^X` | Abort the running turn |
 | `^R` / `^B` | Collapse/restore the agent rail; with one agent, peek it |
+| `^S` | Search conversations in place of the rail (see below); `^S` or `esc` returns |
 | `^G` | Toggle the help page: every key with a sentence on what it does. `PgUp`/`PgDn`, `home`/`end` scroll it when it does not fit |
 | `^O` | Expand tool arguments in full rather than folded |
 | `^Y` | Toggle image thumbnails (Kitty-graphics terminals only) |
@@ -133,6 +134,31 @@ that, and the rail answers it by re-listing rather than patching the one row —
 close cascades, and `ListChildren` is what membership means. A fifteen-second
 re-list runs as a backstop, so against a daemon older than that event a row can
 linger up to that long. A row that merely *exited* stays until you close it.
+
+## Searching conversations
+
+`^S` swaps the rail column for a conversation search over every conversation you
+may see — open, exited and closed alike, whatever kind of agent produced it. It
+is a separate list with its own cursor: `^S`, `esc` or `^R` closes it and the
+agent rail is back exactly as you left it.
+
+- **Type** to filter by content (a BM25 match over the conversation's text);
+  with no query it lists recent conversations. Typing is debounced, so one
+  request goes out per pause rather than per keystroke. `backspace` edits.
+- **`⇥`** cycles the sort (recent, created, relevance); `⇧⇥` leaves for the input.
+- **`↑`/`↓`, `PgUp`/`PgDn`, `home`/`end`** move the cursor; the transcript pane
+  shows the conversation under it, read-only.
+- **`→`/`←`** open or fold a row's child conversations (subagents nest under
+  the conversation that spawned them); a row with children shows `(n)` and
+  a `+`/`-` fold mark. Closed rows are dimmed and every row shows its age.
+- **`⏎`** on a row with children expands it first and never commits from that
+  press; on a childless row it switches to the conversation — an open agent is
+  hopped to, an exited one is resumed and then hopped to. A second `⏎` on an
+  expanded row commits it. Committing leaves search.
+
+The attention-hop keys do nothing while search is up, since the pane is showing
+a conversation rather than the agent under the agent rail's cursor. The wire
+side is `ListConversations` in the [control protocol](../reference/control-protocol.md#browsing-conversations-listconversations).
 
 ## Reading the transcript
 
