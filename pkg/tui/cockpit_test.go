@@ -1507,7 +1507,7 @@ func TestHelpPageNamesEveryInputAndRailKey(t *testing.T) {
 	k := c.keys
 	for _, b := range []key.Binding{k.Send, k.Queue, k.Newline, k.ClipboardPaste, k.ClearInput, k.ClearAll, k.Abort,
 		k.SelectUp, k.FoldLeft, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.EditBudget, k.Rename, k.Escape,
-		k.ToggleRail, k.ToggleInjected, k.ToggleImages, k.ExpandArgs, k.Redraw, k.Quit} {
+		k.ToggleRail, k.SearchToggle, k.ToggleInjected, k.ToggleImages, k.ExpandArgs, k.Redraw, k.Quit} {
 		ck.StrContains(help, b.Help().Key, "the help page is missing a key")
 	}
 }
@@ -3400,4 +3400,70 @@ func TestFooterNamesTheInjectedToggle(t *testing.T) {
 	h := c.keys.ToggleInjected.Help()
 	ck.StrContains(footer, h.Key+" "+h.Desc,
 		"the footer does not name the injected toggle:\n")
+}
+
+// ── the search rail ──────────────────────────────────────────────────────────
+
+// Toggling search on and back leaves the agent rail exactly as it was: the
+// selection, the collapse map, and the hidden-or-not decision. The search
+// rail keeps its own cursor and folds, so the agent rail has nothing to
+// restore from a mode that never touched it.
+func TestSearchRailToggleRestoresTheAgentRail(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_a", "c_b", "c_c")
+	c.collapsed = map[string]bool{"c_b": true}
+	c.selected = "c_c"
+	c.railTop = 1
+
+	c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	ck.Require().True(c.searchOpen, "search opened")
+
+	c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	ck.False(c.searchOpen, "search closed again")
+	ck.Eq("c_c", c.selected, "the agent rail's selection")
+	ck.EqDeep(map[string]bool{"c_b": true}, c.collapsed, "the agent rail's collapse map")
+	ck.Eq(1, c.railTop, "the agent rail's scroll")
+}
+
+// Search mode restores the focus pane it was entered from: opened while
+// typing, it returns to the input; opened while browsing the agent rail, it
+// returns to the rail.
+func TestSearchRailToggleRestoresTheFocusPane(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := railWith(t, "c_a", "c_b")
+	c.setFocus(focusInput)
+
+	c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	ck.Require().True(c.searchOpen, "search opened")
+	ck.Require().Eq(focusRail, c.focus, "the search rail holds focus")
+
+	c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	ck.Eq(focusInput, c.focus, "the input got the keys back")
+
+	// Esc leaves search the same way.
+	c.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	ck.Require().True(c.searchOpen, "search opened again")
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	ck.False(c.searchOpen, "esc left search")
+	ck.Eq(focusInput, c.focus, "the input got the keys back again")
+}
+
+// ^G names every binding, the search toggle included: a key the help page
+// does not record is a key that reads as dead.
+func TestSearchRailToggleIsInTheHelpPage(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 120, Height: 200})
+	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	help := ansi.Strip(c.View().Content)
+	ck.StrContains(help, c.keys.SearchToggle.Help().Key, "the help page is missing the search toggle")
+	ck.StrContains(help, "conversation search", "the help page does not say what the toggle does")
+}
+
+// The footer names the toggle beside the other global keys.
+func TestSearchRailToggleIsInTheFooter(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	footer := ansi.Strip(c.footerHints())
+	ck.StrContains(footer, c.keys.SearchToggle.Help().Key, "the footer is missing the search toggle")
 }

@@ -11,6 +11,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 )
 
@@ -174,6 +175,151 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 		default:
 			sb.WriteString(row)
 		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// searchName is a row's display name: the conversation's name, then the
+// linked agent's, then the id's first eight characters. An anonymous
+// conversation still has an id, so the last fallback always lands.
+func searchName(l *rafikiv1.ConversationListing) string {
+	if l.GetName() != "" {
+		return l.GetName()
+	}
+	if l.GetChildName() != "" {
+		return l.GetChildName()
+	}
+	id := l.GetId()
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	return id
+}
+
+// searchKidsTag renders a row's child count as " (N)" from the listing, the
+// same shape the agent rail's kidsTag renders from the tree. Empty for a
+// leaf: the absence of children is not a number worth a column.
+func searchKidsTag(l *rafikiv1.ConversationListing) string {
+	if l.GetChildCount() == 0 {
+		return ""
+	}
+	return " (" + strconv.Itoa(int(l.GetChildCount())) + ")"
+}
+
+// searchFold is a row's fold mark: + when it has children and is collapsed,
+// - when it is expanded, nothing for a leaf. It sits where the agent rail's
+// fold mark does, one column before the name. The expanded state lives on the
+// model, which bakes it into the row (searchRow.folded, set by rebuild), so
+// the render never reaches into the model's maps.
+func searchFold(r searchRow) string {
+	if r.l.GetChildCount() == 0 {
+		return ""
+	}
+	if r.folded {
+		return "+"
+	}
+	return "-"
+}
+
+// searchStateTag marks the one state that changes what a row can do: a
+// conversation whose linked agent is open carries a live marker, because
+// ⏎ will jump to it rather than expand. Every other state renders nothing:
+// closed rows are dimmed instead, and an exited agent's affordance is the
+// resume on commit, not a glyph.
+func searchStateTag(l *rafikiv1.ConversationListing) string {
+	if l.GetState() == rafikiv1.ConversationState_CONVERSATION_STATE_OPEN {
+		return " ●"
+	}
+	return ""
+}
+
+// searchSortName is the right-aligned label on the query line: the sort the
+// rail is currently ordered by, in the short lowercase form. UNSPECIFIED
+// means RECENT on the wire, so the label says recent rather than showing a
+// spelling nobody chose.
+func searchSortName(sort rafikiv1.ConversationSort) string {
+	switch sort {
+	case rafikiv1.ConversationSort_CONVERSATION_SORT_CREATED:
+		return "created"
+	case rafikiv1.ConversationSort_CONVERSATION_SORT_RELEVANCE:
+		return "best match"
+	default:
+		return "recent"
+	}
+}
+
+// searchQueryLine is the pane's first line: "/ " and the query as typed, the
+// sort name right-aligned. The query clips to leave the sort its column; the
+// sort wins because the query is the thing growing under the user's fingers
+// and the sort is the thing that tells them what order the result is in.
+func searchQueryLine(query, sortName string, width int) string {
+	right := ""
+	if sortName != "" {
+		right = " " + sortName
+	}
+	left := clip("/ "+query, max(width-ansi.StringWidth(right), 1))
+	return padTo(left, max(width-ansi.StringWidth(right), 1)) + right
+}
+
+// searchRowStyle picks a row's style. Closed conversations read as history
+// rather than as live fleet members, which is the same dim the agent rail
+// uses for exited rows.
+func searchRowStyle(l *rafikiv1.ConversationListing) lipgloss.Style {
+	if l.GetState() == rafikiv1.ConversationState_CONVERSATION_STATE_CLOSED {
+		return styleRailDim
+	}
+	return lipgloss.Style{}
+}
+
+// searchRailWidth sizes the search pane to its content, exactly as
+// railWidthFor sizes the agent rail: the query line and the widest row set
+// the want, railMin keeps a sliver from happening, and the same railMaxPct
+// clamp stops one long name eating the transcript. The budget counts
+// everything the render puts in the plain row (cursor, indent, fold, name,
+// kid count, state tag), because those are what get clipped.
+func searchRailWidth(rows []searchRow, query, sortName string, total int) int {
+	want := railMin
+	if q := 2 + ansi.StringWidth(query) + ansi.StringWidth(" "+sortName); q > want {
+		want = q
+	}
+	for _, r := range rows {
+		w := 2 + 2*r.depth + ansi.StringWidth(searchFold(r)) + 1 +
+			ansi.StringWidth(searchName(r.l)) +
+			ansi.StringWidth(searchKidsTag(r.l)) +
+			ansi.StringWidth(searchStateTag(r.l))
+		if w > want {
+			want = w
+		}
+	}
+	if cap := total * railMaxPct / 100; cap > railMin && want > cap {
+		want = cap
+	}
+	return want
+}
+
+// renderSearchRail draws the search pane: the query line first, then one row
+// per conversation, expanded children inline at their depth. Rows are
+// clipped BEFORE styling, so the width budget is measured on plain text and
+// lipgloss escape sequences never count against it.
+func renderSearchRail(rows []searchRow, query, sortName, selected string, width int, paneFocused bool) string {
+	var sb strings.Builder
+	sb.WriteString(searchQueryLine(query, sortName, width))
+	sb.WriteString("\n")
+	for _, r := range rows {
+		id := r.l.GetId()
+		cursor := "  "
+		if id == selected {
+			cursor = "▸ "
+			if paneFocused {
+				cursor = "▶ "
+			}
+		}
+		fold := searchFold(r)
+		left := cursor + strings.Repeat("  ", r.depth) + fold + " " + searchName(r.l) +
+			searchKidsTag(r.l) + searchStateTag(r.l)
+		row := clip(left, width)
+		sb.WriteString(searchRowStyle(r.l).Render(row))
 		sb.WriteString("\n")
 	}
 	return sb.String()

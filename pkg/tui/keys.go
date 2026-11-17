@@ -56,6 +56,13 @@ type keyMap struct {
 	ToggleInjected key.Binding
 	Abort          key.Binding
 
+	// SearchToggle switches the rail column between the agent list and the
+	// conversation search. ^S is free: not in textareaKeys (the textarea has
+	// no save binding), bound by no global, and the modals that use ^S for
+	// their own filter panels own every key while they are up, so the two
+	// never meet, the same coexistence ^R already has with the form.
+	SearchToggle key.Binding
+
 	// Input pane.
 	Send           key.Binding
 	Queue          key.Binding
@@ -135,6 +142,13 @@ func defaultKeyMap() keyMap {
 		// turn, and it is free in the input pane (the textarea ignores it,
 		// and the other two panes match their own Escape before this).
 		Abort: key.NewBinding(key.WithKeys("esc", "ctrl+x"), key.WithHelp("esc", "abort turn")),
+
+		// ^S opens the conversation search over ListConversations; pressed
+		// again (or esc) returns the agent rail exactly as it was. ^F would be
+		// the mnemonic and is a textarea key (forward-char): a global there
+		// would be one more character you can no longer type, which is the
+		// trade the grandfathered keys already made and not one to repeat.
+		SearchToggle: key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("^S", "search")),
 
 		// ⏎ is a STEER, always: the daemon injects it into a turn that is
 		// running and enqueues it as the next turn when none is
@@ -310,6 +324,7 @@ func (k keyMap) globalConflicts() []string {
 		"ToggleRail": k.ToggleRail, "Help": k.Help,
 		"ExpandArgs": k.ExpandArgs, "ToggleImages": k.ToggleImages,
 		"ToggleInjected": k.ToggleInjected,
+		"SearchToggle":   k.SearchToggle,
 		"Redraw":         k.Redraw, "Abort": k.Abort,
 	}
 	var out []string

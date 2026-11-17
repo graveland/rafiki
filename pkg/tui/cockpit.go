@@ -258,6 +258,40 @@ type previewTickMsg struct {
 	seq int
 }
 
+// searchTickMsg fires searchDebounce after a query, sort or state change. It
+// carries the gen AND the request the change returned: a gen that no longer
+// matches means a newer change superseded this one, and its own tick owns the
+// request, so the stale one is ignored whole.
+type searchTickMsg struct {
+	gen int
+	req searchPage
+}
+
+// searchPreviewTickMsg fires previewDebounce after the search cursor landed
+// on a row whose transcript is not already in hand, so a held arrow key over
+// the search rail costs one conversation-keyed GetHistory, not one per row.
+type searchPreviewTickMsg struct {
+	seq int
+}
+
+// searchPageMsg is one ListConversations response or failure, carrying the
+// gen it was issued under so applyPage can drop a stale page whole.
+type searchPageMsg struct {
+	gen    int
+	parent string
+	resp   *rafikiv1.ListConversationsResponse
+	err    error
+}
+
+// searchHistoryMsg is one conversation-keyed GetHistory for the row the
+// search cursor rests on. Its events carry no child identity, which is what
+// lets them apply into a session keyed by the conversation.
+type searchHistoryMsg struct {
+	convID string
+	events []*rafikiv1.Event
+	err    error
+}
+
 type tasksLoadedMsg struct {
 	childID string
 	rows    []*rafikiv1.TaskRow
@@ -449,6 +483,26 @@ type Cockpit struct {
 	// drawn when the tree is taller than the pane (see railWindow).
 	collapsed map[string]bool
 	railTop   int
+	// search is the conversation-search model (searchrail.go), and searchOpen
+	// says the rail column is showing it instead of the agent list. The agent
+	// rail's own state (cursor, folds, scroll) is never touched while search
+	// is open, which is what makes leaving search restore it exactly.
+	search     *searchRail
+	searchOpen bool
+	// searchFrom is the focus pane search mode was entered from, restored on
+	// the way out.
+	searchFrom focusPane
+	// searchConv is the conversation the search cursor rests on and searchSeq
+	// counts its changes: the debounced transcript fetch is armed under a seq
+	// and a stale one is ignored, exactly like the agent rail's preview.
+	// searchTop is the first search row drawn when the list is taller than the
+	// pane. searchHistInFlight marks a conversation-keyed GetHistory already
+	// running: ApplyHistory bypasses the ordinal cursor, so two responses for
+	// one conversation would render every block twice.
+	searchConv         string
+	searchSeq          int
+	searchTop          int
+	searchHistInFlight map[string]bool
 	// historyInFlight marks a GetHistory already running, per child. History is
 	// not deduplicated -- ApplyHistory deliberately bypasses the ordinal cursor
 	// because the two ordinal spaces are unrelated -- so two responses for one
@@ -626,6 +680,7 @@ func NewCockpit(opts Options) *Cockpit {
 		profileName:              opts.ProfileName,
 		showProfileBadge:         opts.ShowProfileBadge,
 		historyInFlight:          make(map[string]bool),
+		searchHistInFlight:       make(map[string]bool),
 		optimistic:               newOptimisticLedger(time.Now),
 		caps:                     newTermCaps(opts.Images, os.Getenv),
 		images:                   newImageStore(nil),
@@ -1415,6 +1470,60 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case previewTickMsg:
 		return c, c.previewSettle(msg.seq)
 
+	case searchPageMsg:
+		// A failure only releases the level's in-flight mark; a later cursor
+		// move or re-expand can try again. A stale page (the gen moved on
+		// while the RPC ran) is dropped whole: it answers a question nobody
+		// is asking any more.
+		if msg.err != nil {
+			c.search.pageFailed(msg.parent)
+			if c.searchOpen {
+				c.setNotice("search failed: " + trimRPCError(msg.err))
+			}
+			return c, nil
+		}
+		if !c.search.applyPage(msg.gen, msg.parent, msg.resp) {
+			return c, nil
+		}
+		return c, c.syncSearchPreview()
+
+	case searchTickMsg:
+		// The query debounce firing. A stale gen means a newer change
+		// superseded this one and its own tick owns the request; a top level
+		// that already has rows means the page for this gen already landed. In
+		// both cases the request must not be issued again: applyPage appends,
+		// so a second response for one level would render its rows twice.
+		// The request still goes out when search is closed, so the result set
+		// is warm the next time the rail opens.
+		if c.search == nil || msg.gen != c.search.gen || len(c.search.kids[""]) > 0 {
+			return c, nil
+		}
+		return c, c.searchPageCmd(msg.req)
+
+	case searchPreviewTickMsg:
+		return c, c.searchPreviewSettle(msg.seq)
+
+	case searchHistoryMsg:
+		delete(c.searchHistInFlight, msg.convID)
+		if msg.err != nil {
+			if c.searchOpen && msg.convID == c.searchConv {
+				c.setNotice("history unavailable: " + connect.CodeOf(msg.err).String())
+			}
+			return c, nil
+		}
+		s := c.sessions[msg.convID]
+		if s == nil {
+			s = session.New(msg.convID)
+			c.sessions[msg.convID] = s
+		}
+		for _, ev := range msg.events {
+			s.ApplyHistory(ev)
+		}
+		// The session's existence IS the fetched mark: it is created only when
+		// a response lands, and searchPreviewSettle reads it as the cache. A
+		// search session has no stream to resume, so no cursor is set.
+		return c, nil
+
 	case quotaTickMsg:
 		return c, tea.Batch(c.fetchQuotaCmd(), quotaTick())
 
@@ -1715,7 +1824,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		c.endArmedID = ""
 	}
 
-	// ── globals: live from every pane ────────────────────────────────────
+	// ── globals: live from every pane ───────────────────────────────────
 	// Any keystroke that is not the repeat disarms, so ^C followed by typing
 	// does not leave a live trigger behind for minutes.
 	armed := !c.quitArmed.IsZero() && time.Since(c.quitArmed) < quitConfirmWindow
@@ -1723,107 +1832,25 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		c.quitArmed = time.Time{}
 	}
 
-	switch {
-	case key.Matches(msg, k.Quit):
-		if !armed {
-			c.quitArmed = time.Now()
-			c.setNotice("press " + k.Quit.Help().Key + " again to quit — children keep running")
-			return c, nil
+	// ── the search rail ─────────────────────────────────────────────────
+	// While it is open and holds focus it owns the keys before the globals:
+	// tab is the sort cycle here, and esc leaves search rather than aborting
+	// a turn nobody is running. Everything it does not claim falls to the
+	// globals (quit, help, redraw, the attention hops) and is then swallowed,
+	// so a stray letter reaches neither the agent rail's verbs nor the
+	// textarea behind the rail.
+	if c.searchOpen && c.focus == focusRail {
+		if m, cmd, claimed := c.handleSearchKey(msg); claimed {
+			return m, cmd
 		}
-		c.quitting = true
-		c.shutdown()
-		return c, tea.Quit
-	case key.Matches(msg, k.NextPane):
-		return c, c.cyclePane(+1)
-	case key.Matches(msg, k.PrevPane):
-		return c, c.cyclePane(-1)
-	case key.Matches(msg, k.NextAttention):
-		return c, c.hop(c.rail.NextAttention())
-	case key.Matches(msg, k.PrevAttention):
-		return c, c.hop(c.rail.PrevAttention())
-	case key.Matches(msg, k.HopPrev):
-		return c, c.hop(c.neighbour(-1))
-	case key.Matches(msg, k.HopNext):
-		return c, c.hop(c.neighbour(+1))
-	case key.Matches(msg, k.ToggleRail):
-		// Below two rows the rail is hidden by DEFAULT (railCols), not by a
-		// decision, so a plain flip changes nothing on screen and ^R reads as a
-		// dead key — and the spawn form lives on the rail (`n` is rail-local),
-		// so with one agent it is unreachable too. An explicit press outranks
-		// the default look exactly the way a ⇥ peek does: reveal the one-row
-		// rail focused, and put it away again on the next press.
-		if c.rail.Len() < 2 {
-			switch {
-			case c.railPeek:
-				// Already peeked: this press hides it again.
-				c.railHidden = true
-				c.railPeek = false
-			case c.rail.Len() == 0:
-				// Nothing to peek at all — go straight to the thing an empty
-				// rail exists to lead to, same call landRailFirst makes on
-				// arrival.
-				return c, c.openSpawnForm()
-			default:
-				c.railHidden = false
-				c.railPeek = true
-				return c, c.setFocus(focusRail)
-			}
-			// Never leave focus on a pane that just became invisible.
-			return c, c.cyclePane(0)
-		}
-		c.railHidden = !c.railHidden
-		// The peek flag goes with it either way: the rail a toggle reveals sits
-		// unfocused (the watch mode), and every exit from the rail hides it
-		// (leaveRail), so a pin is "the rail while I keep typing", not a sticky
-		// decision -- it ends the next time the rail is entered and left.
-		c.railPeek = false
-		// Never leave focus on a pane that just became invisible.
-		return c, c.cyclePane(0)
-	case key.Matches(msg, k.Help):
-		c.showHelp = !c.showHelp
-		c.helpTop = 0
-		return c, nil
-	case key.Matches(msg, k.ExpandArgs):
-		c.expandArgs = !c.expandArgs
-		// paneSig alone is NOT enough. It makes linesFor call Lines again, but
-		// Lines reuses r.cached for every block below Finalized -- which is the
-		// whole visible transcript -- so the toggle reached only the live tail.
-		c.invalidatePanes()
-		return c, nil
-	case key.Matches(msg, k.ToggleInjected):
-		// Same trap as ^O above: an injected block renders a different number
-		// of rows in each mode, and Lines reuses r.cached for everything below
-		// Finalized, so without the invalidation the toggle would reach only the
-		// live tail.
-		c.expandInjected = !c.expandInjected
-		c.invalidatePanes()
-		if c.expandInjected {
-			c.setNotice("injected messages: expanded")
-		} else {
-			c.setNotice("injected messages: collapsed")
+		if m, cmd, claimed := c.handleGlobalKey(msg, armed); claimed {
+			return m, cmd
 		}
 		return c, nil
-	case key.Matches(msg, k.ToggleImages):
-		if c.caps.mode() != imageModeKitty {
-			c.setNotice("this terminal cannot draw images; start with --images=kitty to force it")
-			return c, nil
-		}
-		c.imagesHidden = !c.imagesHidden
-		c.invalidatePanes()
-		if c.imagesHidden {
-			c.setNotice("images: placeholders")
-		} else {
-			c.setNotice("images: thumbnails")
-		}
-		return c, nil
-	case key.Matches(msg, k.Redraw):
-		c.invalidatePanes()
-		// Re-transmit what the screen just lost: ^L is also the manual recovery
-		// for a terminal that discarded its images.
-		if rt := c.retransmitCmd(); rt != nil {
-			return c, tea.Sequence(tea.ClearScreen, rt)
-		}
-		return c, tea.ClearScreen
+	}
+
+	if m, cmd, claimed := c.handleGlobalKey(msg, armed); claimed {
+		return m, cmd
 	}
 
 	// ── pane-local ───────────────────────────────────────────────────────
@@ -1979,7 +2006,441 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
-// applyClipboardPaste stages what ^V read. An image stages exactly like a
+// handleGlobalKey runs the cockpit's global bindings, live from every pane.
+// It reports whether it claimed the key. The search rail asks it after its
+// own keys, because ^C must quit from there too while the search rail owns
+// tab and esc before the globals get a turn.
+func (c *Cockpit) handleGlobalKey(msg tea.KeyPressMsg, armed bool) (tea.Model, tea.Cmd, bool) {
+	k := c.keys
+	switch {
+	case key.Matches(msg, k.Quit):
+		return c, c.confirmQuit(armed), true
+	case key.Matches(msg, k.NextPane):
+		return c, c.cyclePane(+1), true
+	case key.Matches(msg, k.PrevPane):
+		return c, c.cyclePane(-1), true
+	case key.Matches(msg, k.NextAttention):
+		return c, c.hop(c.rail.NextAttention()), true
+	case key.Matches(msg, k.PrevAttention):
+		return c, c.hop(c.rail.PrevAttention()), true
+	case key.Matches(msg, k.HopPrev):
+		return c, c.hop(c.neighbour(-1)), true
+	case key.Matches(msg, k.HopNext):
+		return c, c.hop(c.neighbour(+1)), true
+	case key.Matches(msg, k.ToggleRail):
+		// Below two rows the rail is hidden by DEFAULT (railCols), not by a
+		// decision, so a plain flip changes nothing on screen and ^R reads as a
+		// dead key, and the spawn form lives on the rail (`n` is rail-local),
+		// so with one agent it is unreachable too. An explicit press outranks
+		// the default look exactly the way a ⇥ peek does: reveal the one-row
+		// rail focused, and put it away again on the next press.
+		if c.rail.Len() < 2 {
+			switch {
+			case c.railPeek:
+				// Already peeked: this press hides it again.
+				c.railHidden = true
+				c.railPeek = false
+			case c.rail.Len() == 0:
+				// Nothing to peek at all: go straight to the thing an empty
+				// rail exists to lead to, same call landRailFirst makes on
+				// arrival.
+				return c, c.openSpawnForm(), true
+			default:
+				c.railHidden = false
+				c.railPeek = true
+				return c, c.setFocus(focusRail), true
+			}
+			// Never leave focus on a pane that just became invisible.
+			return c, c.cyclePane(0), true
+		}
+		c.railHidden = !c.railHidden
+		// The peek flag goes with it either way: the rail a toggle reveals sits
+		// unfocused (the watch mode), and every exit from the rail hides it
+		// (leaveRail), so a pin is "the rail while I keep typing", not a sticky
+		// decision -- it ends the next time the rail is entered and left.
+		c.railPeek = false
+		// Never leave focus on a pane that just became invisible.
+		return c, c.cyclePane(0), true
+	case key.Matches(msg, k.SearchToggle):
+		// The rail column's second face. Pressed again (or esc, or ^R) while
+		// search is up, it hands the rail back to the agent list exactly as
+		// it was.
+		if c.searchOpen {
+			return c, c.closeSearchTo(c.searchFrom), true
+		}
+		return c, c.openSearch(), true
+	case key.Matches(msg, k.Help):
+		c.showHelp = !c.showHelp
+		c.helpTop = 0
+		return c, nil, true
+	case key.Matches(msg, k.ExpandArgs):
+		c.expandArgs = !c.expandArgs
+		// paneSig alone is NOT enough. It makes linesFor call Lines again, but
+		// Lines reuses r.cached for every block below Finalized -- which is the
+		// whole visible transcript -- so the toggle reached only the live tail.
+		c.invalidatePanes()
+		return c, nil, true
+	case key.Matches(msg, k.ToggleInjected):
+		// Same trap as ^O above: an injected block renders a different number
+		// of rows in each mode, and Lines reuses r.cached for everything below
+		// Finalized, so without the invalidation the toggle would reach only the
+		// live tail.
+		c.expandInjected = !c.expandInjected
+		c.invalidatePanes()
+		if c.expandInjected {
+			c.setNotice("injected messages: expanded")
+		} else {
+			c.setNotice("injected messages: collapsed")
+		}
+		return c, nil, true
+	case key.Matches(msg, k.ToggleImages):
+		if c.caps.mode() != imageModeKitty {
+			c.setNotice("this terminal cannot draw images; start with --images=kitty to force it")
+			return c, nil, true
+		}
+		c.imagesHidden = !c.imagesHidden
+		c.invalidatePanes()
+		if c.imagesHidden {
+			c.setNotice("images: placeholders")
+		} else {
+			c.setNotice("images: thumbnails")
+		}
+		return c, nil, true
+	case key.Matches(msg, k.Redraw):
+		c.invalidatePanes()
+		// Re-transmit what the screen just lost: ^L is also the manual recovery
+		// for a terminal that discarded its images.
+		if rt := c.retransmitCmd(); rt != nil {
+			return c, tea.Sequence(tea.ClearScreen, rt), true
+		}
+		return c, tea.ClearScreen, true
+	}
+	return c, nil, false
+}
+
+// confirmQuit is the quit binding's arm-and-confirm: a single stray ^C/^D
+// must not throw away an attached session, so the first press arms and the
+// repeat quits. armed says the repeat window is still open, which the caller
+// computed before the search rail got its turn at the key.
+func (c *Cockpit) confirmQuit(armed bool) tea.Cmd {
+	if !armed {
+		c.quitArmed = time.Now()
+		c.setNotice("press " + c.keys.Quit.Help().Key + " again to quit; children keep running")
+		return nil
+	}
+	c.quitting = true
+	c.shutdown()
+	return tea.Quit
+}
+
+// ── the search rail ─────────────────────────────────────────────────────
+
+// handleSearchKey is the search rail's keymap, consulted only while search is
+// open and the rail holds focus. It reports whether it claimed the key;
+// whatever it did not claim falls to the globals. The keys it owns: printable
+// text and backspace edit the query, arrows move the cursor, left/right
+// toggle a row's expansion, tab cycles the sort, and esc or ^R or ^S leave
+// search mode (restoring the agent rail exactly as it was). ⏎ commits when
+// the row's linked agent can be acted on, and expands otherwise.
+func (c *Cockpit) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	k := c.keys
+	switch {
+	case key.Matches(msg, k.SearchToggle), key.Matches(msg, k.ToggleRail), key.Matches(msg, k.Escape):
+		return c, c.closeSearchTo(c.searchFrom), true
+	case key.Matches(msg, k.SelectUp):
+		return c, c.searchMove(-1), true
+	case key.Matches(msg, k.SelectDown):
+		return c, c.searchMove(+1), true
+	case key.Matches(msg, k.FoldLeft), key.Matches(msg, k.FoldRight):
+		return c, c.searchExpandToggle(), true
+	case key.Matches(msg, k.Commit):
+		return c, c.searchEnter(), true
+	case key.Matches(msg, k.NextPane):
+		// Tab cycles the sort here instead of moving focus: the search rail's
+		// one compositional key is the sort, and shift+tab still leaves for the
+		// input through cyclePane.
+		return c, c.searchChanged(c.search.cycleSort()), true
+	case msg.String() == "backspace":
+		return c, c.searchBackspace(), true
+	}
+	if msg.Text != "" {
+		return c, c.searchType(msg.Text), true
+	}
+	return c, nil, false
+}
+
+// openSearch switches the rail column to the conversation search. The agent
+// rail's own state is left untouched (cursor, folds, scroll), so closing
+// search restores it exactly; the focus pane search was entered from is
+// remembered for the way back. A rail reopened on its previous results shows
+// them again with no round trip; an empty one fetches its first top-level
+// page now, undebounced, because the open is the deliberate act.
+func (c *Cockpit) openSearch() tea.Cmd {
+	if c.search == nil {
+		c.search = newSearchRail()
+	}
+	c.searchFrom = c.focus
+	c.searchOpen = true
+	cmds := []tea.Cmd{c.setFocus(focusRail)}
+	if req := c.search.resumeTop(); req != nil {
+		cmds = append(cmds, c.searchPageCmd(*req))
+	}
+	return tea.Batch(cmds...)
+}
+
+// closeSearchTo leaves search mode and puts focus on p: searchFrom when the
+// toggle or esc closes it, the input when a pane cycle does. Nothing the
+// agent rail owns was touched while search was open, so restoring it is a
+// flag flip. A preview tick armed for the search cursor is stale from this
+// moment on.
+func (c *Cockpit) closeSearchTo(p focusPane) tea.Cmd {
+	if !c.searchOpen {
+		return nil
+	}
+	c.searchOpen = false
+	c.searchSeq++
+	return c.setFocus(p)
+}
+
+// searchType appends typed text to the query and re-arms the debounce.
+func (c *Cockpit) searchType(text string) tea.Cmd {
+	return c.searchChanged(c.search.setQuery(c.search.query + text))
+}
+
+// searchBackspace drops the query's last rune. An empty query has nothing to
+// drop and changes nothing.
+func (c *Cockpit) searchBackspace() tea.Cmd {
+	r := []rune(c.search.query)
+	if len(r) == 0 {
+		return nil
+	}
+	return c.searchChanged(c.search.setQuery(string(r[:len(r)-1])))
+}
+
+// searchChanged arms the debounce for a query, sort or state change. The tick
+// carries the gen AND the request the change returned: at fire time a gen
+// that no longer matches means a newer change superseded this one and its
+// own tick owns the request, so the stale one is ignored whole.
+func (c *Cockpit) searchChanged(req *searchPage) tea.Cmd {
+	if req == nil {
+		return nil
+	}
+	gen := c.search.gen
+	page := *req
+	return tea.Tick(searchDebounce, func(time.Time) tea.Msg {
+		return searchTickMsg{gen: gen, req: page}
+	})
+}
+
+// searchMove shifts the search cursor; a move that runs the level out of
+// loaded rows also fetches that level's next page.
+func (c *Cockpit) searchMove(delta int) tea.Cmd {
+	req := c.search.move(delta)
+	cmd := c.syncSearchPreview()
+	if req != nil {
+		cmd = tea.Batch(c.searchPageCmd(*req), cmd)
+	}
+	return cmd
+}
+
+// searchExpandToggle expands or collapses the row under the cursor.
+func (c *Cockpit) searchExpandToggle() tea.Cmd {
+	row := c.search.cursorRow()
+	if row == nil {
+		return nil
+	}
+	req := c.search.toggle(row.l.GetId())
+	cmd := c.syncSearchPreview()
+	if req != nil {
+		cmd = tea.Batch(c.searchPageCmd(*req), cmd)
+	}
+	return cmd
+}
+
+// searchEnter acts on the row under the cursor. When its linked agent can be
+// acted on, it commits: a live agent is focused through the same hop the
+// agent rail's ⏎ uses, an exited one is resumed and then focused; either way
+// search mode ends and the input gets the keys. Every other row expands or
+// collapses, which is what left and right do outright.
+func (c *Cockpit) searchEnter() tea.Cmd {
+	row := c.search.cursorRow()
+	if row == nil {
+		return nil
+	}
+	l := row.l
+	child := l.GetChildId()
+	if child == "" {
+		return c.searchExpandToggle()
+	}
+	switch l.GetState() {
+	case rafikiv1.ConversationState_CONVERSATION_STATE_OPEN:
+		return c.searchCommit(l, false)
+	case rafikiv1.ConversationState_CONVERSATION_STATE_EXITED:
+		return c.searchCommit(l, true)
+	}
+	return c.searchExpandToggle()
+}
+
+// searchCommit focuses (or resumes and focuses) the conversation's linked
+// agent and closes search mode, landing in the same state the agent rail's
+// ⏎ lands in: that agent's transcript, keys in the input.
+func (c *Cockpit) searchCommit(l *rafikiv1.ConversationListing, resume bool) tea.Cmd {
+	child := l.GetChildId()
+	name := child
+	if l.GetChildName() != "" {
+		name = l.GetChildName()
+	}
+	var cmds []tea.Cmd
+	if resume {
+		c.setNotice("resuming " + name + "…")
+		cmds = append(cmds, c.resumeCmd(child, name))
+	}
+	cmds = append(cmds, c.closeSearchTo(c.searchFrom), c.hop(child))
+	return tea.Batch(cmds...)
+}
+
+// syncSearchPreview readies the transcript pane for the row the search cursor
+// rests on: a change of row bumps the seq and arms the debounce, and a tick
+// that is still current fetches that row's conversation. Like the agent
+// rail's preview, the fetch is deferred so a held arrow key costs one
+// GetHistory, not one per row swept past.
+func (c *Cockpit) syncSearchPreview() tea.Cmd {
+	id := c.search.selectedID()
+	if id == c.searchConv {
+		return nil
+	}
+	c.searchConv = id
+	c.searchSeq++
+	seq := c.searchSeq
+	return tea.Tick(previewDebounce, func(time.Time) tea.Msg {
+		return searchPreviewTickMsg{seq: seq}
+	})
+}
+
+// searchPreviewSettle is the search preview's debounce firing.
+func (c *Cockpit) searchPreviewSettle(seq int) tea.Cmd {
+	if seq != c.searchSeq || !c.searchOpen {
+		return nil // the cursor moved on, or search closed; a newer tick owns it
+	}
+	id := c.searchConv
+	if id == "" || c.searchHistInFlight[id] {
+		return nil
+	}
+	if s := c.sessions[id]; s != nil {
+		return nil // read once; the pane shows it from cache
+	}
+	c.searchHistInFlight[id] = true
+	return c.searchHistoryCmd(id)
+}
+
+// searchHistoryCmd loads a conversation's transcript by its own id, the way
+// the search rail reads: conversation-keyed, so a conversation whose linked
+// agent is closed, and which therefore names no child the cockpit knows,
+// still reads whole. The events carry no child identity on this path, which
+// is what lets them apply into a session keyed by the conversation.
+func (c *Cockpit) searchHistoryCmd(convID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		resp, err := c.client.GetHistory(ctx,
+			connect.NewRequest(&rafikiv1.GetHistoryRequest{ConversationId: convID}))
+		if err != nil {
+			return searchHistoryMsg{convID: convID, err: err}
+		}
+		return searchHistoryMsg{convID: convID, events: resp.Msg.GetEvents()}
+	}
+}
+
+// searchPageCmd issues one ListConversations the model asked for. gen, parent
+// and cursor are captured before the closure runs: a query typed while the
+// RPC is in flight bumps the gen, and applyPage drops the response whole.
+func (c *Cockpit) searchPageCmd(p searchPage) tea.Cmd {
+	gen := c.search.gen
+	req := &rafikiv1.ListConversationsRequest{
+		ParentConversationId: p.parent,
+		Cursor:               p.cursor,
+		Sort:                 c.search.sort,
+		Query:                c.search.query,
+		States:               c.search.states,
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		resp, err := c.client.ListConversations(ctx, connect.NewRequest(req))
+		if err != nil {
+			return searchPageMsg{gen: gen, parent: p.parent, err: err}
+		}
+		return searchPageMsg{gen: gen, parent: p.parent, resp: resp.Msg}
+	}
+}
+
+// searchRow is the listing under the search cursor, or nil.
+func (c *Cockpit) searchRow() *rafikiv1.ConversationListing {
+	if c.search == nil {
+		return nil
+	}
+	if r := c.search.cursorRow(); r != nil {
+		return r.l
+	}
+	return nil
+}
+
+// searchRailView draws the search pane: the query line, then the visible
+// rows windowed like the agent rail's, with the same two marker lines so a
+// list taller than the pane says what is cut off.
+func (c *Cockpit) searchRailView(width int) string {
+	rows := c.search.rows
+	top, vis := railWindow(len(rows), c.search.cursor, c.searchTop, c.bodyHeight()-1)
+	c.searchTop = top
+	text := renderSearchRail(rows[top:top+vis], c.search.query,
+		searchSortName(c.search.sort), c.search.selectedID(), width, c.focus == focusRail)
+	if vis < len(rows) {
+		// The query line is the pane's first line, not a row; the markers
+		// bracket the row list below it. No style spans a newline here, so the
+		// split is safe.
+		lines := strings.Split(text, "\n")
+		marked := make([]string, 0, len(lines)+2)
+		marked = append(marked, lines[0], railMarker("↑", top))
+		marked = append(marked, lines[1:]...)
+		marked = append(marked, railMarker("↓", len(rows)-top-vis))
+		text = strings.Join(marked, "\n")
+	}
+	return text
+}
+
+// searchTranscript renders the conversation under the search cursor, read
+// only: a search row's transcript has no stream, no input, and no optimistic
+// overlay. The cursor moves, the fetch lands, the pane shows what the daemon
+// returned; typing goes to the committed agent as ever.
+func (c *Cockpit) searchTranscript(width, height int) string {
+	id := c.searchConv
+	if id == "" {
+		return styleMeta.Render("No conversation under the cursor.")
+	}
+	s := c.sessions[id]
+	if s == nil {
+		if c.searchHistInFlight[id] {
+			return styleMeta.Render("loading…")
+		}
+		return styleMeta.Render("No messages yet.")
+	}
+	p := c.pane(id)
+	lines := p.linesFor(s, width, height, renderOpts{
+		expandArgs:     c.expandArgs,
+		drawImages:     c.drawImages(),
+		smallIDs:       c.caps.smallIDs(),
+		expandInjected: c.expandInjected,
+	}, c.overlayFor(""))
+	if lines != nil {
+		c.syncViewport(p, lines)
+	}
+	conv := p.vp.View()
+	if strings.TrimSpace(ansi.Strip(conv)) == "" {
+		conv = styleMeta.Render("No messages yet; this conversation has no recorded turns.")
+	}
+	return conv
+}
+
 // pasted path — same stagedAttachment, same cap, same notice shape — and the
 // token is what the model reads naming the bytes beside it. Tokens NUMBER
 // across pastes ([Image #1], [Image #2]) so a model can be told "the second
@@ -2525,6 +2986,12 @@ func (c *Cockpit) setFocus(p focusPane) tea.Cmd {
 // false for: focus resting on something invisible is a cockpit that looks
 // stuck, keys going somewhere nothing on screen explains.
 func (c *Cockpit) railVisible() bool {
+	// Search mode draws the rail column on its own say-so: it is a mode the
+	// user asked for, not a look the agent rail's rules decide, and an empty
+	// search rail still has a query line worth a column.
+	if c.searchOpen {
+		return true
+	}
 	// Len() >= 1 on both sides: a peek set while the rail had a row must not
 	// keep drawing an empty column after that row closed out of the rail.
 	return !c.railHidden && (c.rail.Len() >= 2 || (c.railPeek && c.rail.Len() >= 1))
@@ -2544,7 +3011,10 @@ func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	// lands focus ON the rail, never on a pane still invisible. An EMPTY rail
 	// has nothing to reveal, and a dead ⇥ there is a trap -- esc out of the
 	// create form would otherwise leave no key but ^R that leads anywhere.
-	if delta != 0 && c.rail.Len() == 0 {
+	if delta != 0 && c.rail.Len() == 0 && !c.searchOpen {
+		// Search mode is exempt: its rail column is a mode the user asked for,
+		// and ⇥ there means the input, not the thing an empty agent list leads
+		// to.
 		return c.openSpawnForm()
 	}
 	if delta != 0 && c.rail.Len() >= 1 && !c.railVisible() {
@@ -2574,6 +3044,13 @@ func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	}
 	idx = (idx + delta + len(order)) % len(order)
 	if c.focus == focusRail && order[idx] == focusInput {
+		if c.searchOpen {
+			// Leaving the search rail for the input ends search mode. The agent
+			// rail's own state was never touched, and leaving it hidden-or-not
+			// exactly as it was is the point, so this is not leaveRail: it
+			// hides the agent rail unconditionally.
+			return c.closeSearchTo(focusInput)
+		}
 		// Leaving the rail hands the keys back through leaveRail, which also
 		// returns the subscription to the committed agent -- the same round
 		// trip esc makes, so ⇥ out of a peeked rail closes the peek like its
@@ -2798,6 +3275,12 @@ func (c *Cockpit) shutdown() {
 // how tall it is -- a fixed subtraction overlaps the transcript by exactly the
 // rows the box gains, and stays invisible until someone hits the case.
 func (c *Cockpit) taskBoxLines() []string {
+	// The box follows the VIEWED agent, and the search transcript is not an
+	// agent: under it the committed agent's ledger would read as the browsed
+	// conversation's. Nothing beats a wrong ledger under the wrong pane.
+	if c.searchOpen {
+		return nil
+	}
 	f := c.viewing()
 	if f == "" {
 		return nil
@@ -2841,7 +3324,13 @@ func (c *Cockpit) bodyHeight() int {
 // empty column costing the transcript width for nothing.
 func (c *Cockpit) railCols() int {
 	if c.form != nil || c.picker != nil || c.execPicker != nil || c.budgetForm != nil || c.renameForm != nil ||
-		c.tagForm != nil || c.railHidden ||
+		c.tagForm != nil {
+		return 0
+	}
+	if c.searchOpen {
+		return searchRailWidth(c.search.rows, c.search.query, searchSortName(c.search.sort), c.width)
+	}
+	if c.railHidden ||
 		c.rail.Len() == 0 || (c.rail.Len() < 2 && !c.railPeek) {
 		return 0
 	}
@@ -2862,6 +3351,18 @@ func (c *Cockpit) railCols() int {
 func (c *Cockpit) agentIdentity() string {
 	if c.picker != nil || c.execPicker != nil || c.form != nil || c.showHelp {
 		return ""
+	}
+	if c.searchOpen {
+		// Search mode names the browsed conversation, not an agent: the pane
+		// shows the row the cursor rests on, and the input still talks to the
+		// committed agent.
+		l := c.searchRow()
+		if l == nil {
+			return ""
+		}
+		name := searchName(l)
+		id := styleAgentName.Render(name) + styleMeta.Render(" · search")
+		return id
 	}
 	v := c.viewing()
 	if v == "" {
@@ -2895,6 +3396,12 @@ func (c *Cockpit) agentIdentity() string {
 // status naming a different child would read as its own. c.status stays
 // untouched underneath and takes over again on esc or commit.
 func (c *Cockpit) displayStatus() string {
+	// Search mode: the rail rows carry their own state, and the cursor is a
+	// conversation rather than an agent, so the connection status is what
+	// the line honestly has to say.
+	if c.searchOpen {
+		return c.status
+	}
 	if c.focus == focusRail && c.selected != "" {
 		if n, ok := c.rail.Get(c.selected); ok && n.Status != "" {
 			return "agent: " + n.Status
@@ -2978,6 +3485,15 @@ func (c *Cockpit) syncViewport(p *paneState, lines []string) {
 // MaxCost, so an operator watching the footer can see how close it is to
 // being killed by budget_sweep without opening the spawn form again.
 func (c *Cockpit) costReadout() string {
+	// Search mode: the browsed conversation's own spend, from the listing.
+	// A conversation with no agent has none, and an agent's rail-side total
+	// would describe a pane that is not on screen.
+	if c.searchOpen {
+		if l := c.searchRow(); l != nil {
+			return fmtCost(l.GetCostUsd(), c.currency)
+		}
+		return ""
+	}
 	f := c.viewing()
 	if f == "" {
 		return ""
@@ -3003,6 +3519,14 @@ func (c *Cockpit) costReadout() string {
 // modelReadout is the footer's model id ("provider/model") for the viewed
 // agent, empty until the rail has seeded it.
 func (c *Cockpit) modelReadout() string {
+	// Search mode: the browsed conversation's model, kind-disambiguated like
+	// any agent row's.
+	if c.searchOpen {
+		if l := c.searchRow(); l != nil {
+			return modelReadoutFor(l.GetKind(), l.GetModel())
+		}
+		return ""
+	}
 	f := c.viewing()
 	if f == "" {
 		return ""
@@ -3050,6 +3574,12 @@ func modelReadoutFor(kind, model string) string {
 // model has none), the same show-nothing-rather-than-guess rule quotaReadout
 // follows.
 func (c *Cockpit) contextReadout() string {
+	// Search mode: a listing carries no token counts, and the viewed agent's
+	// context would describe a pane that is not on screen. Nothing beats a
+	// wrong number.
+	if c.searchOpen {
+		return ""
+	}
 	f := c.viewing()
 	if f == "" {
 		return ""
@@ -3088,7 +3618,12 @@ func fmtTok(n int64) string {
 // instead. It reappears the instant you scroll back, which is also the only
 // time the number can tell you anything you don't already know.
 func (c *Cockpit) scrollPosition() string {
-	f := c.viewing()
+	// The readout describes the pane on SCREEN, which in search mode is the
+	// browsed conversation's, not the viewed agent's.
+	f := c.searchConv
+	if !c.searchOpen {
+		f = c.viewing()
+	}
 	if f == "" {
 		return ""
 	}
@@ -3135,6 +3670,7 @@ func (c *Cockpit) footerHints() string {
 	parts = append(parts,
 		c.keys.NextPane.Help().Key+" pane",
 		c.keys.ToggleRail.Help().Key+" rail",
+		c.keys.SearchToggle.Help().Key+" search",
 		c.keys.Help.Help().Key+" help",
 		// The two expansion keys sit together: a collapsed injected message
 		// says "[+N lines]" and a folded tool call says "[omitted N lines]",
@@ -3190,6 +3726,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.HopPrev, "Switch to the agent above in the rail, without leaving the input."},
 		entry{k.HopNext, "Switch to the agent below."},
 		entry{k.ToggleRail, "Show or hide the rail (^B does the same). Hiding it leaves your agents running."},
+		entry{k.SearchToggle, "Switch the rail between the agent list and the conversation search. Type to search, arrows to browse, ⏎ to open an agent or expand a row, tab to cycle the sort; esc or ^S again goes back."},
 		entry{k.Help, "Show or hide this page."},
 		entry{k.ExpandArgs, "Expand or collapse tool-call details: full arguments and results."},
 		entry{k.ToggleInjected, "Expand or collapse injected messages: the notices the daemon and the agent's harness add. Drawn short by default."},
@@ -3284,24 +3821,28 @@ func (c *Cockpit) View() tea.View {
 	railCols := c.railCols()
 	railText := ""
 	if railCols > 0 {
-		rows := c.railNodes()
-		cursor := c.focused()
-		if c.focus == focusRail && c.selected != "" {
-			cursor = c.selected
-		}
-		idx := -1
-		for i, n := range rows {
-			if n.ChildID == cursor {
-				idx = i
-				break
+		if c.searchOpen {
+			railText = c.searchRailView(railCols)
+		} else {
+			rows := c.railNodes()
+			cursor := c.focused()
+			if c.focus == focusRail && c.selected != "" {
+				cursor = c.selected
 			}
-		}
-		top, vis := railWindow(len(rows), idx, c.railTop, c.bodyHeight())
-		c.railTop = top
-		railText = renderRail(rows[top:top+vis], c.focused(), c.selected, railCols,
-			c.focus == focusRail, c.currency, c.frame)
-		if vis < len(rows) {
-			railText = railMarker("↑", top) + railText + railMarker("↓", len(rows)-top-vis)
+			idx := -1
+			for i, n := range rows {
+				if n.ChildID == cursor {
+					idx = i
+					break
+				}
+			}
+			top, vis := railWindow(len(rows), idx, c.railTop, c.bodyHeight())
+			c.railTop = top
+			railText = renderRail(rows[top:top+vis], c.focused(), c.selected, railCols,
+				c.focus == focusRail, c.currency, c.frame)
+			if vis < len(rows) {
+				railText = railMarker("↑", top) + railText + railMarker("↓", len(rows)-top-vis)
+			}
 		}
 	}
 
@@ -3327,6 +3868,11 @@ func (c *Cockpit) View() tea.View {
 		conv = c.tagForm.view(convWidth)
 	case c.showHelp:
 		conv = c.helpView(convWidth, bodyHeight)
+	case c.searchOpen:
+		// The search rail's transcript pane: the browsed conversation, read
+		// only, ahead of the agent cases because viewing() still names the
+		// committed agent here.
+		conv = c.searchTranscript(convWidth, bodyHeight)
 	case f == "" && c.rail.Len() == 0:
 		conv = styleMeta.Render("No agents running. Start one with `rafiki create`.")
 	case f == "":
@@ -3371,7 +3917,7 @@ func (c *Cockpit) View() tea.View {
 		conv = styleMeta.Render("loading…")
 	}
 	switch f := c.viewing(); {
-	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && c.renameForm == nil && c.tagForm == nil && !c.showHelp && c.sessions[f] != nil:
+	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && c.renameForm == nil && c.tagForm == nil && !c.showHelp && !c.searchOpen && c.sessions[f] != nil:
 		if n, ok := c.rail.Get(f); ok && rail.Working(n.Status) {
 			conv += "\n" + styleWorking.Render(rail.SpinnerFrame(c.frame)+" "+workingLabel(n.Status))
 		}

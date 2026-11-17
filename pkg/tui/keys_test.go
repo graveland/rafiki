@@ -148,6 +148,7 @@ func TestLifecycleKeysStayRailLocal(t *testing.T) {
 		"ToggleRail": k.ToggleRail, "Help": k.Help,
 		"ExpandArgs": k.ExpandArgs, "ToggleImages": k.ToggleImages,
 		"ToggleInjected": k.ToggleInjected,
+		"SearchToggle":   k.SearchToggle,
 		"Redraw":         k.Redraw, "Abort": k.Abort,
 	}
 	rail := map[string]bool{}
