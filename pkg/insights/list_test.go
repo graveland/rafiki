@@ -911,6 +911,53 @@ func TestListConversationsParentFilterIDSpellings(t *testing.T) {
 	c.Eq("", next, "next on the expanded page")
 }
 
+// TestListConversationsParentCursorSpellingIsNormalised pins the cursor's
+// parent binding against the two spellings of one uuid. A page minted under
+// the upper-case spelling is continued with the lower-case one, the spelling
+// every row reports in parent_conversation_id, and must return the next page
+// instead of ErrBadCursor: the cursor is bound to the parent, not to the
+// spelling it was minted with.
+func TestListConversationsParentCursorSpellingIsNormalised(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "parentcursor")
+	root := listConversation(t, pool, listConvSeed{ownerID: owner, name: "root"})
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for i := 0; i < 3; i++ {
+		listConversation(t, pool, listConvSeed{
+			ownerID: owner, name: fmt.Sprintf("spell-kid-%d", i), parentID: root,
+			updatedAt: base.Add(time.Duration(i) * time.Minute),
+		})
+	}
+	ins := New(pool)
+
+	first, next, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{
+		ParentConversationID: strings.ToUpper(root), Limit: 1, Excluded: listExcluded,
+	})
+	c.Require().NoError(err, "first page under the upper-case parent")
+	c.Require().Len(first, 1, "first page rows")
+	c.Require().NotEq("", next, "the first page must leave a next cursor")
+	c.Eq(root, first[0].ParentConversationID, "a row reports its parent in lower case")
+
+	second, _, err := ins.ListConversations(ctx, ScopeOwner(owner), ListFilter{
+		ParentConversationID: root, Cursor: next, Limit: 1, Excluded: listExcluded,
+	})
+	c.Require().NoError(err, "a cursor minted under one spelling must continue under the other")
+	c.Require().Len(second, 1, "second page rows")
+	c.NotEq(first[0].ID, second[0].ID, "the second page must advance past the first")
+
+	// The whole walk, spelled two ways, is the same walk: the lower-case
+	// walk is the oracle for the mixed one.
+	want := listPagingWalk(c, ctx, ins, ScopeOwner(owner), ListFilter{
+		ParentConversationID: root, Excluded: listExcluded,
+	}, 2)
+	got := append([]string{first[0].ID}, listPagingWalk(c, ctx, ins, ScopeOwner(owner), ListFilter{
+		ParentConversationID: root, Cursor: next, Excluded: listExcluded,
+	}, 1)...)
+	c.EqDeep(want, got, "a walk whose pages switch parent spelling must match the uniformly-spelled walk")
+}
+
 // TestListConversationsCursorMismatchesRefused pins ErrBadCursor through the
 // listing call itself: a cursor minted for one sort or parent cannot page
 // another request's shape.

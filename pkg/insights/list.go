@@ -163,13 +163,17 @@ func (i *Insights) ListConversations(ctx context.Context, scope Scope, f ListFil
 	// well-formed parent gives, so callers cannot distinguish the two the
 	// same way Visible cannot. The check is strict: spellings uuid.Parse
 	// tolerates but Postgres' ::uuid cast refuses must land here too, not in
-	// a SQL error.
+	// a SQL error. A canonical uuid spelled in either case names one parent,
+	// so the id is lower-cased once, here: the cursor carries that spelling
+	// and the page clause binds it, and a continuation that passes the id
+	// this listing reports (Postgres renders uuids in lower case) must be
+	// accepted.
 	parent := ""
 	if f.ParentConversationID != "" {
 		if !strictUUID(f.ParentConversationID) {
 			return nil, "", nil
 		}
-		parent = f.ParentConversationID
+		parent = strings.ToLower(f.ParentConversationID)
 	}
 
 	var cursorID string
