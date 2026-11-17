@@ -265,6 +265,10 @@ type fakeLauncher struct {
 	launchErr error
 	tailErr   error
 	cleanErr  error
+	// cleanResult, when set, is what Clean answers: a target whose stop was not
+	// achieved removes nothing and prints neither word, and that outcome has to
+	// be reachable from a test.
+	cleanResult *executorpb.RemoteCleanResponse
 	// serveExit, when set, makes the remote exit immediately after the stream
 	// opens — the shape of a target whose ssh works and whose binary does not.
 	serveExit   bool
@@ -369,6 +373,9 @@ func (f *fakeLauncher) Clean(
 	})
 	if f.cleanErr != nil {
 		return false, false, f.cleanErr
+	}
+	if f.cleanResult != nil {
+		return f.cleanResult.GetRemoved(), f.cleanResult.GetStopped(), nil
 	}
 	return true, stop, nil
 }
@@ -1260,7 +1267,121 @@ func TestUninstallDirectAsksTheLauncherToStopTheProcess(t *testing.T) {
 	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the row is still deleted")
 }
 
-// The last-launch outcome is keyed by executor id, and ids are never reused, so
+// installEvictPool is the fixture's fake pool with the real pool's one rule this
+// test needs to observe — an evicted executor leaves the live list at once, so
+// "still live after an uninstall" is a fact rather than an inference — plus a
+// record of how many executor rows were already deleted when each cut happened,
+// which is what pins the ORDER.
+type installEvictPool struct {
+	*fakePool
+	store *installExecStore
+	mu    sync.Mutex
+	gone  []string
+	rows  []int
+}
+
+func (p *installEvictPool) Evict(id string) {
+	p.mu.Lock()
+	p.gone = append(p.gone, id)
+	p.rows = append(p.rows, len(p.store.deleted))
+	p.mu.Unlock()
+	p.fakePool.Evict(id)
+}
+
+// evictedIDs returns the ids Evict was called for, in order.
+func (p *installEvictPool) evictedIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.gone...)
+}
+
+// deletedBeforeCuts returns, per cut, how many rows the executor store had
+// already deleted: 1 means every cut happened after its row went.
+func (p *installEvictPool) deletedBeforeCuts() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.rows...)
+}
+
+// liveIDs is the pool's live list minus what was evicted.
+func (p *installEvictPool) liveIDs() []string {
+	gone := map[string]bool{}
+	for _, id := range p.evictedIDs() {
+		gone[id] = true
+	}
+	var out []string
+	for _, le := range p.Live() {
+		if !gone[le.Executor.ID] {
+			out = append(out, le.Executor.ID)
+		}
+	}
+	return out
+}
+
+// An uninstall cuts the executor's connection ITSELF. Waiting for the pool's next
+// row refresh (about 30s) leaves the daemon accepting work for a machine the
+// caller has just uninstalled, on a row that no longer exists.
+func TestUninstallEvictsTheExecutorImmediately(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	pool := &installEvictPool{fakePool: f.pool, store: f.execs}
+	f.ctrl.execPool = pool
+
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"), "uninstall")
+
+	c.EqDeep([]string{"exec-1"}, pool.evictedIDs(), "the deleted executor's connection is cut at once")
+	c.EqDeep([]string{installTestLauncher}, pool.liveIDs(),
+		"the uninstalled executor is gone from the pool and the launcher it went through stays")
+	c.EqDeep([]int{1}, pool.deletedBeforeCuts(),
+		"the row is deleted BEFORE the cut: a reconnect meets a 401, not an admission")
+}
+
+// A controller with no executor listener has no pool, and an uninstall must not
+// panic on it — there is nothing connected to cut.
+func TestUninstallWithoutAPoolStillRemovesTheRow(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	f.ctrl.execPool = nil
+	f.ctrl.execPoolConn = nil
+
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"), "uninstall")
+	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the row is deleted with no pool to cut")
+	c.Eq(0, len(f.installs.liveRows()), "the recipe is still tombstoned")
+}
+
+// A stop the target could not ACHIEVE removes nothing there, the marker
+// included (remoteStopScript), and the row is still deleted — that deletion is
+// what ends the process. The response carries no warning field, so the daemon's
+// Warn is the only place that says the process may still be running; see the
+// RULING above cleanInstall.
+func TestUninstallDirectUnachievedStopWarnsAndRemovesTheRow(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	f.seedInstalledExecutorMode(executorinstall.ModeDirect)
+	f.launcher.cleanResult = &executorpb.RemoteCleanResponse{}
+	logs := captureLogs(t)
+
+	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), installUserCaller(), "ublk-s2"),
+		"an unachieved stop must not fail the uninstall")
+	c.Eq(1, f.launcher.cleanCalls(), "the launcher was asked to stop the process")
+	tomb, ok := f.installs.rowByID("recipe-1")
+	c.Require().True(ok, "the recipe row is kept")
+	c.NotNil(tomb.RemovedAt, "the recipe is still tombstoned")
+	c.EqDeep([]string{"exec-1"}, f.execs.deleted, "the executor row is still deleted")
+
+	line := logLineContaining(logs.String(), "could not confirm the detached executor stopped")
+	c.Require().NotEq("", line, "the unachieved stop must be reported; log:\n"+logs.String())
+	c.StrContains(line, "level=WARN", "a direct row's unachieved stop is a warning: "+line)
+	c.StrContains(line, "brent@ublk-s2", "the warning names the target: "+line)
+	c.StrContains(line, directConsequence, "the warning must name the consequence: "+line)
+	c.Eq(1, strings.Count(logs.String(), directConsequence),
+		"the consequence is said once per uninstall, not once per line; log:\n"+logs.String())
+	c.NotStrContains(logs.String(), "uninstall: cleaned the target",
+		"a stop that was not achieved is not a clean uninstall; log:\n"+logs.String())
+}
+
 // an uninstall drops the entry: otherwise a daemon that installs and uninstalls
 // all day holds one dead entry per install, and a listing's decoration map grows
 // with a history nothing can render.

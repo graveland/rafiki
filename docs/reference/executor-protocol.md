@@ -1781,6 +1781,11 @@ With `stop_process` it stops that same install's detached executor FIRST, under
 the same marker match, and answers `stopped`. The rule, as implemented
 (`remoteStopScript`, `pkg/executor/remote_ssh.go`):
 
+- A pid is not an identity. Before anything is signalled, `ps -o command= -p
+  <pid>` must show THIS install's id, which the detached child carries in its
+  `--install-id` argv; a `ps` that cannot answer, prints nothing, or prints
+  somebody else's command line is no evidence at all. Nothing is signalled, no
+  file is touched and neither word is printed.
 - The pid comes from `<data dir>/executor.pid` and must be `2..9999999` — a
   `0`-leading or non-numeric value, `0` or `1` is no pid at all, because
   `kill -TERM -0` would signal the remote shell's OWN process group and
@@ -1790,18 +1795,24 @@ the same marker match, and answers `stopped`. The rule, as implemented
   pid IS its group's leader — which a detached executor, `setsid`'d, always is.
   Everything else is signalled as a plain pid, and a `ps` that cannot answer is
   no evidence of a group: nothing here guesses.
-- TERM, then up to 10 polls 0.5s apart, then KILL and the same again.
+- TERM, then up to 10 polls 0.5s apart, then KILL and the same again. A process
+  that is already gone — one `kill -0` cannot find, or one `ps -o stat=` calls a
+  zombie — needs neither: a defunct process holds a pid without doing work, and
+  waiting one out would leave the target unreinstallable.
 - `stopped` is printed, and `executor.pid`/`executor.cred`/`executor.lock`
-  removed, only once the process is confirmed gone. A process that survives KILL
-  keeps its credential and its lock and the target reports neither word: telling
-  the daemon an executor stopped while it is still running is worse than saying
-  nothing.
+  removed, only once the process is confirmed gone. A stop that is not achieved
+  removes NOTHING — not the credential, not the lock, and not the marker, whose
+  first line is the only file that names which install the leftovers belong to —
+  and the target reports neither word. Telling the daemon an executor stopped
+  while it is still running is worse than saying nothing, and an orphaned
+  credential beside a removed marker leaves the next install's clobber guard
+  with nothing to name.
 
-Residual, recorded rather than eliminated: the pid file may name a pid the
-kernel has since reused. A reused pid that is not a session leader is signalled
-single-file — one unrelated process, never a group — and a reused pid that
-leads some OTHER group cannot be told apart from the executor's at all, so the
-pid bound and the `ps` check bound the damage instead of removing it.
+Residual, recorded rather than eliminated: the identity is checked before the
+signal rather than atomically with it, so a pid that exits and is reused in the
+moment between those two `ps` calls can still be signalled. That window is what
+the identity check narrows the problem to; a stale pid file is no longer
+sufficient on its own.
 
 ### `executor serve --stdio`
 
@@ -1950,9 +1961,18 @@ its to remove. A row a human installed has no installer child, so no child may
 uninstall it. Uninstall ends the ssh session FIRST (a still-running remote
 rewrites its marker), then removes the target's marker through the launcher
 when it holds this install's id and the launcher is live, then tombstones the
-recipe and deletes the executor row. A failure to clean the marker does NOT
-fail the uninstall: the leftover is named by the next install's clobber guard,
-with the command that clears it.
+recipe, deletes the executor row and evicts the executor's connection — the
+pool's row refresh would otherwise keep serving it for about half a minute
+after the row went. A failure to clean the marker does NOT fail the uninstall:
+the leftover is named by the next install's clobber guard, with the command
+that clears it.
+
+A `direct` stop that is asked for and not achieved is reported the same way,
+because the response has no field for it: the daemon logs a warning naming the
+target, the install id and the consequence, and the target keeps every file —
+marker, credential and lock — so the next install's clobber guard can name who
+they belong to. An operator who reads neither can believe the remote process is
+gone until it reconnects.
 
 **Deleting the row is what ends a `direct` executor whose launcher could not be
 reached at uninstall.** Its next reconnect presents a credential for a row that

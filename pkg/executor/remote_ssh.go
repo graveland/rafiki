@@ -205,22 +205,34 @@ func remoteServeScript(binaryPath, instance, root, installID string) string {
 //
 // With stop, the marker's own process is stopped FIRST and only under that
 // same match: a marker for another install id leaves the process, the pid file
-// and the credential alone, and prints neither word.
+// and the credential alone, and prints neither word. A stop that is asked for
+// and not ACHIEVED removes nothing at all — not even the marker — and prints
+// neither word either: the marker is the only file that names which install the
+// leftover credential belongs to.
 func remoteCleanScript(instance, installID string, stop bool) string {
 	s := remoteDataDirScript(instance) +
 		`; f="$d/installed-executor"; ` +
 		`[ -f "$f" ] && [ "$(head -n 1 "$f")" = ` + shellQuote(installID) + ` ] || exit 0; `
 	if stop {
-		s += remoteStopScript()
+		s += remoteStopScript(installID)
 	}
 	return s + `rm -f "$f" && echo removed || true`
 }
 
-// remoteStopScript stops the detached executor named by $d/executor.pid and
+// remoteStopScript stops the detached executor recorded in $d/executor.pid and
 // removes the per-install state that would let it come back: the pid file, the
-// credential and the lock. TERM first, then up to 5s of 0.5s polls, then KILL.
-// It runs inside the matching-marker gate remoteCleanScript opens, never on its
-// own.
+// credential and the lock. TERM first, then up to 5s of 0.5s polls, then KILL
+// and the same again. It runs inside the matching-marker gate
+// remoteCleanScript opens, never on its own, and it ends the whole script
+// (exit 0, before the marker removal) when it cannot finish its job.
+//
+// A PID IS NOT AN IDENTITY. The kernel reuses pids, so this file can name an
+// unrelated process — or an unrelated session, since a session-leader pid is
+// its own group. Before anything is signalled the process's command line must
+// carry THIS install's id, which the detached child keeps in its --install-id
+// argv (--detach reshapes its parent's argv but keeps that flag). A ps that
+// cannot answer, prints nothing, or prints somebody else's command line is no
+// evidence at all: nothing is signalled and no file is touched.
 //
 // The detached executor is a session leader, so its pid is also its process
 // group id and one signal reaches everything it forked. That is true only of a
@@ -233,27 +245,39 @@ func remoteCleanScript(instance, installID string, stop bool) string {
 // signal, this ssh session included, so an implausible pid file is no pid.
 //
 // `stopped` is printed, and the per-install files removed, only once the process
-// is confirmed gone. A process that survives KILL keeps its credential and lock
-// on disk and the target reports neither word: telling the daemon an executor
-// stopped while it is still running is worse than saying nothing.
-func remoteStopScript() string {
-	return `p=""; [ -f "$d/executor.pid" ] && p=$(head -n 1 "$d/executor.pid"); ` +
-		`case "$p" in ''|0|0*|*[!0-9]*) p="" ;; esac; ` +
-		`case "$p" in ????????*) p="" ;; esac; ` +
-		`if [ -n "$p" ] && [ "$p" -lt 2 ]; then p=""; fi; ` +
-		`if [ -n "$p" ]; then ` +
+// is confirmed gone — where a ZOMBIE counts as gone, because a defunct process
+// holds a pid without doing any work, and waiting one out would wedge every
+// reinstall. Every other way out removes nothing and prints neither word: an
+// orphaned credential beside a removed marker leaves the next install's clobber
+// guard with nothing to name, and telling the daemon an executor stopped while
+// it is still running is worse than saying nothing.
+func remoteStopScript(installID string) string {
+	return `id=` + shellQuote(installID) + `; ` +
+		// gone is the one liveness question, so the poll and the success gate
+		// cannot disagree: a pid kill cannot find, or one ps calls a zombie.
+		`gone() { kill -0 "$1" 2>/dev/null || return 0; ` +
+		`case "$(ps -o stat= -p "$1" 2>/dev/null | tr -d '[:space:]')" in Z*) return 0 ;; esac; ` +
+		`return 1; }; ` +
+		`p=""; [ -f "$d/executor.pid" ] && p=$(head -n 1 "$d/executor.pid"); ` +
+		`[ -n "$p" ] || exit 0; ` +
+		`case "$p" in 0|0*|*[!0-9]*) exit 0 ;; esac; ` +
+		`case "$p" in ????????*) exit 0 ;; esac; ` +
+		`[ "$p" -ge 2 ] || exit 0; ` +
+		`if ! gone "$p"; then ` +
+		// $id is letters, digits, '-' and '_' (validateRemoteInstallID), so it
+		// is a literal in this pattern and never glob syntax.
+		`case "$(ps -o command= -p "$p" 2>/dev/null)" in *"$id"*) ;; *) exit 0 ;; esac; ` +
 		`g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d '[:space:]'); ` +
 		`tg="$p"; [ "$g" = "$p" ] && tg="-$p"; ` +
 		`kill -TERM "$tg" 2>/dev/null || true; ` +
-		`i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done; ` +
-		`if kill -0 "$p" 2>/dev/null; then ` +
+		`i=0; while ! gone "$p" && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done; ` +
+		`if ! gone "$p"; then ` +
 		`kill -KILL "$tg" 2>/dev/null || true; ` +
-		`i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done; ` +
+		`i=0; while ! gone "$p" && [ "$i" -lt 10 ]; do sleep 0.5; i=$((i+1)); done; ` +
 		`fi; ` +
-		`if ! kill -0 "$p" 2>/dev/null; then ` +
-		`rm -f "$d/executor.pid" "$d/executor.cred" "$d/executor.lock"; echo stopped; ` +
+		`gone "$p" || exit 0; ` +
 		`fi; ` +
-		`fi; `
+		`rm -f "$d/executor.pid" "$d/executor.cred" "$d/executor.lock"; echo stopped; `
 }
 
 // Validation limits. A destination is an ssh destination, not a command: the

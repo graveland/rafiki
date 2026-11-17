@@ -809,18 +809,6 @@ func TestRemoteProbeScriptRunsReachChecks(t *testing.T) {
 func TestRemoteCleanStopsOnlyAMatchingInstall(t *testing.T) {
 	c := assert.NewAborting(t)
 
-	// sleeper starts a process in its own process group, as the detached
-	// executor is, and reaps it the moment it dies so `kill -0` answers ESRCH
-	// rather than a zombie's success.
-	sleeper := func(t *testing.T) int {
-		t.Helper()
-		cmd := exec.Command("sleep", "60")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		c.Require().NoError(cmd.Start(), "start the sleeper")
-		go func() { _ = cmd.Wait() }()
-		t.Cleanup(func() { _ = cmd.Process.Kill() })
-		return cmd.Process.Pid
-	}
 	run := func(t *testing.T, home, installID string) string {
 		t.Helper()
 		cmd := exec.Command("/bin/sh", "-c", remoteCleanScript(paths.DefaultInstance, installID, true))
@@ -829,12 +817,12 @@ func TestRemoteCleanStopsOnlyAMatchingInstall(t *testing.T) {
 		c.Require().NoError(err, "run the clean script")
 		return string(out)
 	}
-	seed := func(t *testing.T) (home, dir string, pid int) {
+	seed := func(t *testing.T, installID string) (home, dir string, pid int) {
 		t.Helper()
 		home = t.TempDir()
 		dir = filepath.Join(home, ".local", "share", "rafiki")
 		c.Require().NoError(os.MkdirAll(dir, 0o755), "mkdir the data dir")
-		pid = sleeper(t)
+		pid = installProcess(t, installID)
 		c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.pid"),
 			[]byte(strconv.Itoa(pid)+"\n"), 0o600), "write the pid file")
 		c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.cred"), []byte("cred\n"), 0o600), "cred")
@@ -844,7 +832,7 @@ func TestRemoteCleanStopsOnlyAMatchingInstall(t *testing.T) {
 
 	t.Run("a matching marker stops the process", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		home, dir, pid := seed(t)
+		home, dir, pid := seed(t, "install-a")
 		c.Require().NoError(os.WriteFile(filepath.Join(dir, "installed-executor"),
 			[]byte("install-a\n"), 0o600), "write the marker")
 
@@ -860,7 +848,7 @@ func TestRemoteCleanStopsOnlyAMatchingInstall(t *testing.T) {
 
 	t.Run("a mismatched marker leaves everything alone", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		home, dir, pid := seed(t)
+		home, dir, pid := seed(t, "install-b")
 		c.Require().NoError(os.WriteFile(filepath.Join(dir, "installed-executor"),
 			[]byte("install-b\n"), 0o600), "write the marker")
 
@@ -876,54 +864,138 @@ func TestRemoteCleanStopsOnlyAMatchingInstall(t *testing.T) {
 
 	t.Run("stop requested with no pid file", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		home, dir, _ := seed(t)
+		home, dir, pid := seed(t, "install-a")
 		c.Require().NoError(os.Remove(filepath.Join(dir, "executor.pid")), "clear the pid file")
 		c.Require().NoError(os.WriteFile(filepath.Join(dir, "installed-executor"),
 			[]byte("install-a\n"), 0o600), "write the marker")
 
 		out := run(t, home, "install-a")
-		c.StrContains(out, "removed\n", "the marker is still removed")
+		// With no pid nothing about the process can be vouched for, so the stop
+		// is unachieved and the target keeps every file — including the marker,
+		// which is the only one naming the install the credential belongs to.
 		c.NotStrContains(out, "stopped", "nothing was stopped, so nothing reports a stop")
+		c.NotStrContains(out, "removed", "an unachieved stop removes nothing")
+		for _, name := range []string{"installed-executor", "executor.cred", "executor.lock"} {
+			_, err := os.Stat(filepath.Join(dir, name))
+			c.NoError(err, "%s was removed with no pid to stop", name)
+		}
+		c.False(remoteProcessDead(pid), "the target's process was stopped without a pid to name it")
 	})
+}
+
+// installProcess starts a stand-in for the target's detached executor: a
+// process in its own process group, carrying the install id in its command line
+// exactly as the real one carries it in --install-id, and reaped the moment it
+// dies so `kill -0` answers ESRCH rather than a zombie's success.
+func installProcess(t *testing.T, installID string) int {
+	t.Helper()
+	c := assert.NewAborting(t)
+	path := filepath.Join(t.TempDir(), "fake-executor")
+	c.Require().NoError(os.WriteFile(path, []byte("#!/bin/sh\nwhile :; do sleep 0.2; done\n"), 0o755),
+		"write the stand-in executor")
+	cmd := exec.Command(path)
+	// The ARGV, not the script body: the stop script reads the command line.
+	cmd.Args = []string{path, "executor", "serve", "--install-id", installID, "--detach"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Require().NoError(cmd.Start(), "start the stand-in executor")
+	go func() { _ = cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	return cmd.Process.Pid
 }
 
 // remoteStopRun is one execution of the clean script. kill is a shell FUNCTION
 // the test owns: the shell's kill is a BUILTIN, so a PATH stub would never run,
 // while a function shadows the builtin exactly where the script's own `kill`
-// calls look. It records its argv and returns a status, so no signal is ever
-// sent and every signal the script tried to send is a line.
+// calls look. It records its argv and answers from whether a signal has been
+// sent, so no real signal is ever sent and every signal the script tried to
+// send is a line.
 type remoteStopRun struct {
 	output string
 	kill   []string
 	dir    string
+	// sleeps counts the poll's sleeps, so the bound that keeps a survivor from
+	// hanging the uninstall for ever is observable.
+	sleeps int
+}
+
+// remoteStopPS is what the target's ps can answer about a pid. The zero value
+// is no ps at all — a target where nothing about a pid can be vouched for.
+type remoteStopPS struct {
+	available bool
+	// real symlinks the host's own ps, so the answers come from a real process.
+	real bool
+	// pgid overrides the group the stub reports; empty answers with the pid it
+	// was asked about, which is what a session leader's pgid is.
+	pgid string
+	// command and stat are the stub's answers to `-o command=` and `-o stat=`.
+	command string
+	stat    string
+}
+
+// installACmd is a command line shaped like the detached executor's: the
+// install id in its --install-id argv, which is what the stop script requires
+// before it signals anything.
+const installACmd = "/home/t/.cache/rafiki/bin/rafiki-v9.9.9 executor serve " +
+	"--connect daemon.example:8035 -P work --install-id install-a --ticket-stdin --detach"
+
+// hostPS is a target whose ps answers about real processes.
+var hostPS = remoteStopPS{available: true, real: true}
+
+// installs writes the ps this run gets: none at all, the host's own, or a stub
+// answering each of the three fields the stop script asks for.
+func (p remoteStopPS) install(t *testing.T, f *remoteFixture) {
+	t.Helper()
+	c := assert.NewAborting(t)
+	switch {
+	case !p.available:
+	case p.real:
+		real, err := exec.LookPath("ps")
+		c.Require().NoError(err, "ps must be on the test's PATH")
+		c.Require().NoError(os.Symlink(real, filepath.Join(f.bin, "ps")), "symlink ps")
+	default:
+		pgid := `"$pid"`
+		if p.pgid != "" {
+			pgid = shellQuote(p.pgid)
+		}
+		f.writeBin(t, "ps", "#!/bin/sh\nfield=\"\"; pid=\"\"; "+
+			"while [ $# -gt 0 ]; do case \"$1\" in -o) field=\"$2\"; shift 2 ;; "+
+			"-p) pid=\"$2\"; shift 2 ;; *) shift ;; esac; done; "+
+			"case \"$field\" in "+
+			"command=) printf '%s\\n' "+shellQuote(p.command)+" ;; "+
+			"stat=) printf '%s\\n' "+shellQuote(p.stat)+" ;; "+
+			"pgid=) printf '%s\\n' "+pgid+" ;; esac\n")
+	}
+}
+
+// countLines counts the lines a stub recorded, or 0 when it recorded none.
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(b), "\n")
 }
 
 // runRemoteStop seeds a target whose install marker matches install-a, puts
-// pidLine in executor.pid, and runs the full clean script under sh. ps selects
-// what the target can ask about the pid's process group: "" is no ps at all,
-// "real" is the host's own ps, anything else is a script printing a pgid.
-// alive makes the kill stub answer `kill -0` with success, so the process is
-// still running after both signals.
-func runRemoteStop(t *testing.T, pidLine string, alive bool, ps string) remoteStopRun {
+// pidLine in executor.pid, and runs the full clean script under sh. survivesKill
+// makes the kill stub keep answering `kill -0` with success, so nothing the
+// script signals can make the process look gone; otherwise the first real
+// signal does.
+func runRemoteStop(t *testing.T, pidLine string, survivesKill bool, ps remoteStopPS) remoteStopRun {
 	t.Helper()
 	c := assert.NewAborting(t)
 	f := &remoteFixture{bin: t.TempDir(), home: t.TempDir()}
-	// The poll's sleep is a no-op so the two 5s bounds cost the test nothing.
-	f.writeBin(t, "sleep", "#!/bin/sh\nexit 0\n")
+	// The poll's sleep is a no-op so the two 5s bounds cost the test nothing —
+	// and it counts, so the bound itself is observable.
+	sleeps := filepath.Join(f.home, "sleep.calls")
+	f.writeBin(t, "sleep", "#!/bin/sh\nprintf 's\\n' >> "+shellQuote(sleeps)+"\n")
 	for _, name := range []string{"head", "tr", "rm"} {
 		real, err := exec.LookPath(name)
 		c.Require().NoError(err, "%s must be on the test's PATH", name)
 		c.Require().NoError(os.Symlink(real, filepath.Join(f.bin, name)), "symlink %s", name)
 	}
-	switch ps {
-	case "":
-	case "real":
-		real, err := exec.LookPath("ps")
-		c.Require().NoError(err, "ps must be on the test's PATH")
-		c.Require().NoError(os.Symlink(real, filepath.Join(f.bin, "ps")), "symlink ps")
-	default:
-		f.writeBin(t, "ps", ps)
-	}
+	ps.install(t, f)
 
 	dir := filepath.Join(f.home, ".local", "share", "rafiki")
 	c.Require().NoError(os.MkdirAll(dir, 0o755), "mkdir the data dir")
@@ -932,22 +1004,32 @@ func runRemoteStop(t *testing.T, pidLine string, alive bool, ps string) remoteSt
 	c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.cred"), []byte("cred\n"), 0o600), "cred")
 	c.Require().NoError(os.WriteFile(filepath.Join(dir, "executor.lock"), nil, 0o600), "lock")
 
-	zero := "1"
-	if alive {
-		zero = "0"
+	// The process is alive until a signal is sent — for ever, when
+	// survivesKill — so `kill -0` answers from whether `gone` exists yet.
+	gone := filepath.Join(f.home, "gone")
+	afterSignal := ": > " + shellQuote(gone)
+	if survivesKill {
+		afterSignal = ":"
 	}
 	record := filepath.Join(f.home, "kill.argv")
-	stub := `kill() { printf '%s\n' "$*" >> ` + shellQuote(record) +
-		`; case "$1" in -0) return ` + zero + ` ;; *) return 0 ;; esac; }; `
+	stub := `kill() { printf '%s\n' "$*" >> ` + shellQuote(record) + `; case "$1" in ` +
+		`-0) [ ! -f ` + shellQuote(gone) + ` ] || return 1; return 0 ;; ` +
+		`*) ` + afterSignal + `; return 0 ;; esac; }; `
 
 	cmd := exec.Command("/bin/sh", "-c",
 		stub+remoteCleanScript(paths.DefaultInstance, "install-a", true))
 	cmd.Env = []string{"PATH=" + f.bin, "HOME=" + f.home}
 	out, err := cmd.Output()
 	c.Require().NoError(err, "run the clean script")
-	run := remoteStopRun{output: string(out), dir: dir}
+	run := remoteStopRun{output: string(out), dir: dir, sleeps: countLines(t, sleeps)}
 	if raw, rerr := os.ReadFile(record); rerr == nil {
-		run.kill = strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+		// `kill -0` is a liveness probe, not a signal: only what the script
+		// actually SENT is a signal.
+		for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+			if line != "" && !strings.HasPrefix(line, "-0 ") {
+				run.kill = append(run.kill, line)
+			}
+		}
 	}
 	return run
 }
@@ -969,76 +1051,119 @@ func standIn(t *testing.T, group bool) int {
 
 // TestRemoteStopRefusesAnImplausiblePid pins the pid guard: a plausible-looking
 // pid 1 reaches `kill -TERM -1` (every process the remote user may signal, this
-// ssh session included), and a pid the guard stops rejecting signals something
-// nobody vouched for.
+// ssh session included), so an implausible pid file is no pid — and a stop
+// nothing can be vouched for removes nothing, marker included.
 func TestRemoteStopRefusesAnImplausiblePid(t *testing.T) {
 	victim := standIn(t, true)
 
 	for _, pid := range []string{"", "0", "1", "-5", "12abc", "12345678901234567890"} {
 		t.Run("pid="+strconv.Quote(pid), func(t *testing.T) {
 			c := assert.NewAborting(t)
-			run := runRemoteStop(t, pid, false, "real")
+			run := runRemoteStop(t, pid, false, hostPS)
 			c.Eq(0, len(run.kill), "the stop script signalled %v for pid %q", run.kill, pid)
 			c.NotStrContains(run.output, "stopped", "pid %q was reported stopped", pid)
-			c.StrContains(run.output, "removed\n", "the marker is still removed for pid %q", pid)
-			for _, name := range []string{"executor.pid", "executor.cred", "executor.lock"} {
+			c.NotStrContains(run.output, "removed", "an unachieved stop removed the marker (pid %q)", pid)
+			for _, name := range []string{"installed-executor", "executor.pid", "executor.cred", "executor.lock"} {
 				c.FileExists(filepath.Join(run.dir, name), "%s was removed for pid %q", name, pid)
 			}
+			c.Eq(0, run.sleeps, "an implausible pid is refused before any polling (pid %q)", pid)
 			c.False(remoteProcessDead(victim), "the stand-in process was signalled")
 		})
 	}
 }
 
+// TestRemoteStopRefusesAPidItCannotIdentify pins the identity gate: a pid file
+// names a pid, not a process, and the kernel reuses pids. Nothing may be
+// signalled — or removed — unless ps shows THIS install's id in the command
+// line, which the detached child carries in its --install-id argv.
+func TestRemoteStopRefusesAPidItCannotIdentify(t *testing.T) {
+	for name, ps := range map[string]remoteStopPS{
+		"a command line naming another program": {available: true, stat: "S",
+			command: "/usr/bin/python3 /srv/other-daemon --listen 9000"},
+		"a ps that prints nothing": {available: true},
+		"no ps at all":             {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			run := runRemoteStop(t, "4242", false, ps)
+			c.Eq(0, len(run.kill), "the stop script signalled %v", run.kill)
+			c.NotStrContains(run.output, "stopped", "an unvouched-for pid was reported stopped")
+			c.NotStrContains(run.output, "removed", "an unachieved stop removed the marker")
+			for _, f := range []string{"installed-executor", "executor.pid", "executor.cred", "executor.lock"} {
+				c.FileExists(filepath.Join(run.dir, f), "%s was removed although no process could be vouched for", f)
+			}
+			c.Eq(0, run.sleeps, "nothing is polled for a pid that is not this install's")
+		})
+	}
+
+	t.Run("a real process that is not this install", func(t *testing.T) {
+		c := assert.NewAborting(t)
+		victim := standIn(t, true)
+		run := runRemoteStop(t, strconv.Itoa(victim), false, hostPS)
+		c.Eq(0, len(run.kill), "an unrelated process was signalled: %v", run.kill)
+		c.NotStrContains(run.output, "stopped", "an unrelated process was reported stopped")
+		c.NotStrContains(run.output, "removed", "an unachieved stop removed the marker")
+		c.False(remoteProcessDead(victim), "the unrelated process was killed")
+	})
+}
+
 // TestRemoteStopSignalsTheGroupOnlyForASessionLeader pins the pgid equality: a
 // group signal is only safe when ps says this pid IS the group's leader, and
-// anything else — a different pgid, no ps at all — is a plain pid signal.
+// anything else — a different pgid — is a plain pid signal.
 func TestRemoteStopSignalsTheGroupOnlyForASessionLeader(t *testing.T) {
 	t.Run("a session leader takes its group", func(t *testing.T) {
 		c := assert.NewAborting(t)
 		pid := standIn(t, true)
-		run := runRemoteStop(t, strconv.Itoa(pid), false, "real")
+		run := runRemoteStop(t, strconv.Itoa(pid), false, remoteStopPS{available: true, command: installACmd})
 		c.Require().NotEmpty(run.kill, "the stop script sent no signal")
 		c.Eq("-TERM -"+strconv.Itoa(pid), run.kill[0], "a session leader's pid is its process group")
 		c.StrContains(run.output, "stopped\n", "a process reported gone is stopped")
+		c.StrContains(run.output, "removed\n", "the marker goes with the process it named")
 		c.NoFileExists(filepath.Join(run.dir, "executor.pid"), "a stopped process's pid file is removed")
+		c.NoFileExists(filepath.Join(run.dir, "executor.cred"), "a stopped process's credential is removed")
 	})
 
 	t.Run("a pid outside its own group is signalled alone", func(t *testing.T) {
 		c := assert.NewAborting(t)
-		pid := standIn(t, false)
-		run := runRemoteStop(t, strconv.Itoa(pid), false, "real")
-		c.Require().NotEmpty(run.kill, "the stop script sent no signal")
-		c.Eq("-TERM "+strconv.Itoa(pid), run.kill[0], "a pid that leads no group must not take one with it")
-	})
-
-	t.Run("no ps means no group signal", func(t *testing.T) {
-		c := assert.NewAborting(t)
-		run := runRemoteStop(t, "4242", false, "")
-		c.Require().NotEmpty(run.kill, "the stop script sent no signal")
-		c.Eq("-TERM 4242", run.kill[0], "with no ps to vouch for it, the pid is signalled alone")
-	})
-
-	t.Run("a ps that disagrees means no group signal", func(t *testing.T) {
-		c := assert.NewAborting(t)
-		run := runRemoteStop(t, "4242", false, "#!/bin/sh\nprintf '  9999\\n'\n")
+		run := runRemoteStop(t, "4242", false,
+			remoteStopPS{available: true, command: installACmd, pgid: "9999", stat: "S"})
 		c.Require().NotEmpty(run.kill, "the stop script sent no signal")
 		c.Eq("-TERM 4242", run.kill[0], "a pgid that is not the pid is not this pid's group")
 	})
 }
 
-// TestRemoteStopLeavesStateWhenTheProcessSurvivesKill pins the success gate: a
-// live executor must keep its credential and lock, and the daemon must not be
-// told it stopped.
-func TestRemoteStopLeavesStateWhenTheProcessSurvivesKill(t *testing.T) {
+// TestRemoteStopLeavesEveryFileWhenTheProcessSurvivesKill pins the success
+// gate: a process that survives KILL keeps its pid file, credential, lock AND
+// marker, and the target reports neither word. An orphaned credential beside a
+// removed marker leaves the next install's clobber guard with nothing to name,
+// so an unachieved stop removes nothing at all.
+func TestRemoteStopLeavesEveryFileWhenTheProcessSurvivesKill(t *testing.T) {
 	c := assert.NewAborting(t)
-	run := runRemoteStop(t, "4242", true, "#!/bin/sh\nprintf '  4242\\n'\n")
+	run := runRemoteStop(t, "4242", true, remoteStopPS{available: true, command: installACmd, stat: "S"})
 
 	c.Require().NotEmpty(run.kill, "the stop script sent no signal")
 	c.Eq("-TERM -4242", run.kill[0], "the first signal is TERM")
 	c.Contains(run.kill, "-KILL -4242", "a survivor of TERM is sent KILL")
+	c.Eq(20, run.sleeps, "the poll is bounded: 10 after TERM, 10 after KILL")
 	c.NotStrContains(run.output, "stopped", "a process that survived KILL was reported stopped")
-	c.StrContains(run.output, "removed\n", "the marker is still removed")
-	for _, name := range []string{"executor.pid", "executor.cred", "executor.lock"} {
+	c.NotStrContains(run.output, "removed", "an unachieved stop removed the marker")
+	for _, name := range []string{"installed-executor", "executor.pid", "executor.cred", "executor.lock"} {
 		c.FileExists(filepath.Join(run.dir, name), "%s was removed although the process survived", name)
+	}
+}
+
+// TestRemoteStopCountsAZombieAsGone pins the zombie rule: a defunct process
+// holds a pid without doing any work, so a `kill -0` that keeps succeeding
+// would leave `stopped` false for ever and wedge the machine's reinstall behind
+// a process nobody can kill.
+func TestRemoteStopCountsAZombieAsGone(t *testing.T) {
+	c := assert.NewAborting(t)
+	run := runRemoteStop(t, "4242", true, remoteStopPS{available: true, command: installACmd, stat: "Z   "})
+
+	c.Eq(0, len(run.kill), "a zombie needs no signal: %v", run.kill)
+	c.StrContains(run.output, "stopped\n", "a zombie is gone as far as the install is concerned")
+	c.StrContains(run.output, "removed\n", "the marker goes with the process it named")
+	for _, name := range []string{"executor.pid", "executor.cred", "executor.lock"} {
+		c.NoFileExists(filepath.Join(run.dir, name), "%s survived a zombie's stop", name)
 	}
 }

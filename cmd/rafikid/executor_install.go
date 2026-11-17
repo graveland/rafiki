@@ -1590,6 +1590,15 @@ func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller
 	if derr := c.execStore.Delete(ctx, e.ID); derr != nil && !errors.Is(derr, executors.ErrNotFound) {
 		return translateExecutorErr(derr)
 	}
+	// Cut the connection NOW rather than on the pool's next row refresh (about
+	// 30s): the row it serves is gone, and until the pool notices the daemon
+	// still hands work to a machine the caller has just uninstalled. AFTER the
+	// delete on purpose — a connection cut first can reconnect into its own
+	// still-existing row. Nil-safe: a Controller built without a listener has no
+	// pool, and nothing connected to it to cut.
+	if c.execPool != nil {
+		c.execPool.Evict(e.ID)
+	}
 	// The row is gone, so nothing can be listed for this id again; drop its
 	// in-memory launch outcome rather than holding an entry nobody can read.
 	c.install.forgetOutcome(e.ID)
@@ -1612,7 +1621,8 @@ const directStillRunning = "the remote executor is still running; it stops itsel
 // (its remote process is the launcher's own ssh child, ended with the session
 // above); for a direct row it is a fact worth naming, because the row deletion
 // that follows is what ends that process, so a launcher this call could not
-// reach leaves work running on the target until the remote reconnects.
+// reach — or a target that could not confirm the process gone, and therefore
+// removed nothing — leaves work running there until the remote reconnects.
 func (c *Controller) cleanInstall(ctx context.Context, row executorinstall.Row) {
 	stop := row.EffectiveMode() == executorinstall.ModeDirect
 	launcherExec, live := c.liveExecutor(row.LauncherExecutorID)
@@ -1646,9 +1656,36 @@ func (c *Controller) cleanInstall(ctx context.Context, row executorinstall.Row) 
 			"target", row.Target, "install", row.ID, "error", cerr)
 		return
 	}
+	if stop && !stopped {
+		// A stop the target could not vouch for removes nothing there, the
+		// marker included (remoteStopScript), so this is the partially cleaned
+		// uninstall: the row goes and the process may not.
+		cleanInstallMissed(stop, false,
+			"uninstall: the target could not confirm the detached executor stopped; it left every file in place",
+			"target", row.Target, "install", row.ID, "removed", removed)
+		return
+	}
 	slog.Info("uninstall: cleaned the target", "target", row.Target,
 		"install", row.ID, "mode", row.EffectiveMode(), "removed", removed, "stopped", stopped)
 }
+
+// RULING — a partially cleaned uninstall is reported through the daemon's log,
+// not through the response. UninstallExecutorResponse is an EMPTY message, and
+// the launcher's RemoteCleanResponse carries only the two booleans
+// `removed`/`stopped`, so there is nowhere to put a warning; failing the RPC to
+// signal it instead would leave the AUTHORITATIVE row and recipe undeleted —
+// worse than the condition, because the deleted row is what ends a detached
+// process at all. The operator-visible channels are therefore exactly two, and
+// both are named: the Warn cleanInstallMissed emits, carrying the target, the
+// install id and the consequence, and the next install's clobber guard, which
+// names the leftover marker or credential (with the install id, since a failed
+// stop keeps the marker on purpose). A structured warning field would be a wire
+// change — proto, both SDKs and the generated clients — deliberately outside
+// this change.
+//
+// What being wrong costs: an operator who does not read the daemon log can
+// believe the remote process is gone for up to one reconnect, which is when the
+// deleted row refuses it a terminal 401 and it exits by itself.
 
 // cleanInstallMissed reports ONE reason an uninstall could not clean the target.
 // Each reason returns, so a direct row's consequence sentence is said once per
