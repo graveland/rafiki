@@ -227,12 +227,17 @@ Flags:
   (also 50); the daemon clamps anything above 500; a negative value is refused
   before the call.
 - `--cursor C`: continue after the previous page's last row. Take `C` from
-  the `next_cursor` the previous page reported (the plain table arm prints it
-  to stderr as `more: --cursor …`, so stdout stays clean for a pipe). A cursor
+  the `next_cursor` the previous page reported (every mode except `--all`
+  prints it to stderr as `more: --cursor …`, so stdout stays clean for a pipe
+  and `-J`'s one-row-per-line records carry no cursor of their own). A cursor
   is valid only for a request whose `--sort` and `--parent` match the page that
   produced it.
 - `--all`: follow `next_cursor` until the level is exhausted and print every
-  row, so no stderr hint is printed.
+  row, so no stderr hint is printed. With `--sort recent` the key is the
+  conversation's last activity, which moves while the walk runs, so a
+  conversation that becomes active mid-walk sorts above the cursor and is
+  missed by that pass; `--sort created` keys on the creation time and has no
+  such gap.
 - `--sort recent|created|relevance`: last activity (the default), creation
   time, or best match for `--query`; `relevance` without `--query` is refused.
 - `--parent <conv-id>`: list that conversation's members instead of the top

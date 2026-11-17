@@ -80,7 +80,11 @@ not of any node:
 It is immutable once set, like `fork_from`, and has exactly **two writers**:
 
 1. `capture.ResolveThreadConversation` sets a thread's parent at creation, from
-   the root it resolves before rewriting the `external_ref`.
+   the root it resolves before rewriting the `external_ref`. Capture permits a
+   thread to be created before its session's root exists
+   (`CaptureStore.threadRoot` answers "" then); such a thread is created with
+   no parent and is never repaired, because resolving an existing thread is
+   create-once and no other writer targets a thread. It stays a top-level row.
 2. `stampConversationParent` (`cmd/rafikid/conversation_parent.go`) sets a
    child's root conversation from the child row, on each child row write after
    the row upsert, only when a parent label is present and only into a NULL. A
@@ -89,15 +93,32 @@ It is immutable once set, like `fork_from`, and has exactly **two writers**:
    exist yet is retried on the child's next write, and a successful stamp is
    memoized per child so later writes cost nothing.
 
+Both the stamp and the `0073_conversation_parent` backfill point only at a
+**browsable** conversation (`node_count > 0` or `fork_from` set), the same
+predicate `ListConversations` uses for eligibility: a browser walks down from an
+eligible row, so a parent the listing cannot show would hide its whole subtree.
+A script child's task-ledger conversation (no messages, no `fork_from`) is
+exactly that shape, which is why a script coordinator's workers stay at the top
+level instead of under its ledger row. The thread writer names the session root
+without that check, and the backfill's thread arm refuses a root that is not
+browsable. The stamp's parent-missing and parent-not-yet-browsable cases stay
+unmemoized, so a parent conversation that stores its first message later still
+gets stamped on the child's next write.
+
 Nothing else writes it, and nothing reads child labels for nesting: the
 `0073_conversation_parent` migration backfilled both forms once, and
 `ListConversations` walks `parent_conversation_id` from then on.
 
-`conversation.updated_at` is the conversation's **last activity**: every
-`ConvBackend.Commit` that stores at least one message bumps it (a commit that
-inserts nothing, including a head retract, leaves it alone), and the migration
-backfilled it to each conversation's newest stored message. It is what
-`ListConversations` sorts by.
+`conversation.updated_at` is the conversation's **last activity**, which is
+broader than its last message. Every `ConvBackend.Commit` that stores at least
+one message bumps it (a commit that inserts nothing, including a head retract,
+leaves it alone), and so does every daemon write that touches the row without
+storing a message: a status change, a resume attempt, a rename. The
+`0073_conversation_parent` backfill only moves it FORWARD, to each
+conversation's newest stored message when that is later than the stored value,
+so a conversation whose bookkeeping write happened after its last message keeps
+that later timestamp. It is what `ListConversations` sorts by (`RECENT`) and
+what its `since`/`until` filters bound.
 
 ## Identity: `Canon` and the path hash
 

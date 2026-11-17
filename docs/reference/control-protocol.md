@@ -689,7 +689,7 @@ open, exited and closed conversations alike, kind-agnostically. Rows nest by
 | `kinds` | Child kinds. Empty means all; a non-empty list drops rows with no linked child. |
 | `name_contains`, `cwd_contains` | Case-insensitive substring over the conversation's name or cwd, and the linked child's name or cwd. `%`, `_` and `\` are literal. |
 | `labels` | Child labels the row's child must carry (containment). |
-| `since`, `until` | Bounds on `updated_at`; unset or the epoch means unbounded. |
+| `since`, `until` | Bounds on `updated_at`, the conversation's last activity (a stored message, or a bookkeeping write such as a status change, a resume attempt or a rename); unset or the epoch means unbounded. |
 
 What a page contains, in order of the rules that decide it:
 
@@ -697,7 +697,10 @@ What a page contains, in order of the rules that decide it:
    as `ConversationSearch` derives it), minus `recall.ExcludedEntrypoints`
    unconditionally (a filter cannot re-admit them), and minus conversations with
    no messages and no `fork_from` (a ledger row is not a browsable
-   conversation).
+   conversation). The runtime stamp and the `0073_conversation_parent` backfill
+   never parent to an ineligible conversation, so a script coordinator's
+   message-less ledger row never becomes a parent and its workers stay at the
+   top level instead of disappearing under it.
 2. **The linked child**, resolved by two equality arms: `child.conversation_id`
    first, else `child.child_id` matched against the first `:`-segment of
    `external_ref` (which is how a claude root thread and its `<child>:<thread>`
@@ -728,6 +731,17 @@ as one parent for the cursor, as they do for the page clause. Relevance pages ar
 best effort: the score is the best (lowest) match over the row's windows, and an
 ancestor that only appears because a descendant matched sorts by that
 descendant's score.
+
+**RECENT pages are best effort too, because their key is mutable.** `CREATED`
+keys on `created_at`, which never changes, so a page walk sees every row exactly
+once. `RECENT` keys on `updated_at`, which every stored message and every
+bookkeeping write moves: a conversation that gains activity after a page was
+served sorts above that page's cursor, so the continuation does not return it.
+Nothing is returned twice and nothing already listed is lost; a conversation
+that becomes active mid-walk is simply not in that pass, and a restart from the
+top level returns it first. A client that needs a complete set in one pass
+should restart from the top rather than assume a cursor covers it. Pinned by
+`TestListConversationsRecentPagingSkipsARowThatMoves` (`pkg/insights`).
 
 `RELEVANCE` without a `query` is `InvalidArgument`. A database without the
 `conversation_window_bm25` index (an embedded build, or one whose migrations

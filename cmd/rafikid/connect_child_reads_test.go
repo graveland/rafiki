@@ -379,10 +379,10 @@ func TestListConversationsAdapterMapsTheListingSentinels(t *testing.T) {
 }
 
 // TestListConversationsAdapterSortMappingPinsBothIotaBlocks pins the sort's
-// second hop: the connectapi sort reaches insights.ListSort under its OWN
-// name, so reordering either iota block, or replacing the named mapping with
-// a numeric cast that assumes the two blocks align, fails here. (The first
-// hop, proto enum to connectapi, is pinned by name in pkg/connectapi.)
+// second hop: the adapter converts by numeric cast (insights.ListSort(f.Sort)),
+// which is correct only while the connectapi and insights blocks agree, so a
+// reorder of either iota block fails here. (The first hop, proto enum to
+// connectapi, is pinned by name in pkg/connectapi.)
 func TestListConversationsAdapterSortMappingPinsBothIotaBlocks(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	for _, tc := range []struct {
