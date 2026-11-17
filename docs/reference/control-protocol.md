@@ -734,13 +734,18 @@ descendant's score.
 
 **RECENT pages are best effort too, because their key is mutable.** `CREATED`
 keys on `created_at`, which never changes, so a page walk sees every row exactly
-once. `RECENT` keys on `updated_at`, which every stored message and every
-bookkeeping write moves: a conversation that gains activity after a page was
-served sorts above that page's cursor, so the continuation does not return it.
-Nothing is returned twice and nothing already listed is lost; a conversation
-that becomes active mid-walk is simply not in that pass, and a restart from the
-top level returns it first. A client that needs a complete set in one pass
-should restart from the top rather than assume a cursor covers it. Pinned by
+once. `RECENT` keys on `updated_at`, the conversation's last activity: every
+stored message and every bookkeeping write (a status change, a resume attempt, a
+rename) moves it, and the migration that added `parent_conversation_id` moved it
+forward to each conversation's newest stored message and never backward, so a
+conversation whose bookkeeping write is newer than its last message keeps that
+later time. A conversation that gains activity after a page was served therefore
+sorts above that page's cursor, and the continuation does not return it. Because
+the key only moves forward, a row already returned stays above the cursor and is
+not repeated; what a pass can lose is an unseen row that moves. Such a
+conversation is simply not in that pass, and a restart from the top level returns
+it first. A client that needs a complete set in one pass should restart from the
+top rather than assume a cursor covers it. Pinned by
 `TestListConversationsRecentPagingSkipsARowThatMoves` (`pkg/insights`).
 
 `RELEVANCE` without a `query` is `InvalidArgument`. A database without the

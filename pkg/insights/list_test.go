@@ -410,9 +410,9 @@ func TestListConversationsPagingRecent(t *testing.T) {
 
 // TestListConversationsRecentPagingSkipsARowThatMoves pins the documented
 // best effort of a RECENT cursor: its key is updated_at, which is mutable, so
-// a conversation that gains activity between two pages sorts above the cursor
-// and the continuation does not return it. No row is repeated, and a restart
-// from the top does return the moved row.
+// a third conversation that gains activity between two pages sorts above the
+// cursor and the continuation does not return it. No row is returned twice in
+// that pass, and a restart from the top does return the moved row.
 func TestListConversationsRecentPagingSkipsARowThatMoves(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
@@ -446,6 +446,19 @@ func TestListConversationsRecentPagingSkipsARowThatMoves(t *testing.T) {
 	c.EqDeep([]string{seeded[2], seeded[1]}, listIDs(page2),
 		"the row that moved above the cursor is not returned by the continuation")
 	c.Eq("", next, "this pass has no third page")
+
+	// The pass returns every row but the one that moved, and returns each of
+	// them exactly once.
+	seen := map[string]int{}
+	for _, r := range append(append([]ConversationListing{}, page1...), page2...) {
+		seen[r.ID]++
+	}
+	for id, n := range seen {
+		c.Eq(1, n, "row %s was returned %d times in one pass", id, n)
+	}
+	c.Eq(4, len(seen), "the pass returned every row but the one that moved")
+	_, skipped := seen[moves]
+	c.False(skipped, "the row that gained activity must not be in this pass")
 
 	// Restarting from the top does return it, at the top.
 	restart, _, err := ins.ListConversations(ctx, ScopeOwner(owner),

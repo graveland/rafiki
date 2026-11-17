@@ -80,11 +80,13 @@ not of any node:
 It is immutable once set, like `fork_from`, and has exactly **two writers**:
 
 1. `capture.ResolveThreadConversation` sets a thread's parent at creation, from
-   the root it resolves before rewriting the `external_ref`. Capture permits a
-   thread to be created before its session's root exists
-   (`CaptureStore.threadRoot` answers "" then); such a thread is created with
-   no parent and is never repaired, because resolving an existing thread is
-   create-once and no other writer targets a thread. It stays a top-level row.
+   the root it resolves before rewriting the `external_ref`. The parent is
+   resolved once, when the thread conversation is created, and is not repaired
+   later. Capture permits a thread to be created before its session's root
+   exists (`CaptureStore.threadRoot` answers "" then); such a thread is created
+   with no parent and stays a top-level row, because resolving an existing thread
+   is create-once and no other writer targets a thread. The `0073` backfill
+   parented the threads that had a root at the time; it ran once.
 2. `stampConversationParent` (`cmd/rafikid/conversation_parent.go`) sets a
    child's root conversation from the child row, on each child row write after
    the row upsert, only when a parent label is present and only into a NULL. A
