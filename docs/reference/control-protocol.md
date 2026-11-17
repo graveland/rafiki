@@ -721,9 +721,13 @@ What a page contains, in order of the rules that decide it:
 the last row's keyset values (`updated_at` or `created_at`, plus the id; the BM25
 score for relevance). It is base64url JSON, its decoded values reach SQL only as
 bind parameters, and a cursor minted for a different sort or a different parent
-is `InvalidArgument` rather than a wrong page. Relevance pages are best effort:
-the score is the best (lowest) match over the row's windows, and an ancestor that
-only appears because a descendant matched sorts by that descendant's score.
+is `InvalidArgument` rather than a wrong page. The parent id is compared in its
+canonical lower-case spelling (Postgres renders every uuid that way, and so does
+`parent_conversation_id` on a row), so two spellings of one canonical uuid count
+as one parent for the cursor, as they do for the page clause. Relevance pages are
+best effort: the score is the best (lowest) match over the row's windows, and an
+ancestor that only appears because a descendant matched sorts by that
+descendant's score.
 
 `RELEVANCE` without a `query` is `InvalidArgument`. A database without the
 `conversation_window_bm25` index (an embedded build, or one whose migrations
@@ -732,7 +736,10 @@ empty page that looks like "no matches". Unwired insights answers `Unavailable`.
 
 The row's `owner` is the conversation's `owner_user_id`, and `model` is the model
 the conversation ran on. A child credential reading this RPC sees exactly what
-`ConversationSearch` shows it: its OWNER's whole corpus, never an admin's.
+`ConversationSearch` shows it: its OWNER's whole corpus, never an admin's. A
+child whose lineage has NO owner (an admin's or the unix socket's children) has
+no owner corpus to read, so it falls back to its own SUBTREE: the conversations
+of itself and its descendants.
 
 #### `EventSubject`
 
@@ -3500,7 +3507,7 @@ transport error, and never a successful result carrying the text.
 | `task_list` | Read the ledger; filter by status, metadata or assignee; dropped rows hidden unless `include_dropped` |
 | `quota_status` | The caller's own captured Anthropic subscription rate-limit snapshot; omitted when the daemon has no quota capture (a Materializer decline) |
 | `conversation_search` | Search the CALLER's own past conversations by time, model, source, status or first-message substring; summaries with turn/token/cost figures. An admin caller reads the whole daemon's; a child caller reads its OWNER's whole conversation corpus when its lineage has an owner (its own, its subtree's and other agents' alike, and a child of an admin reads that admin's own conversations, never the daemon's) and its own subtree's only when it has none; otherwise scoped to the caller's owner. Errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
-| `conversation_list` | List conversations by tree level: metadata only, never content, open, exited and closed alike, newest activity first. Rows nest by `parent_conversation_id`: an unfiltered call returns top-level conversations, each with a `child_count`, and passing `parent_conversation_id` returns that row's children (the count always equals what the expansion returns). Filters: `states`, `kinds`, `name_contains`, `cwd_contains`, `labels`, `since`/`until`, and a content `query` ranked by relevance. `sort` is `recent` (default), `created` or `relevance`; `next_cursor` pages, and it is bound to the sort and the parent it was minted for. Scoped exactly like `conversation_search`, and it never lists a daemon-internal conversation (`recall-summary`, `analyze`) or a message-less ledger row. Content is `conversation_export`'s job |
+| `conversation_list` | List conversations by tree level: metadata only, never content, open, exited and closed alike, newest activity first. Rows nest by `parent_conversation_id`: an unfiltered call returns top-level conversations, each with a `child_count`, and passing `parent_conversation_id` returns that row's children (the count always equals what the expansion returns). Filters: `states`, `kinds`, `name_contains`, `cwd_contains`, `labels`, `since`/`until`, and a content `query` ranked by relevance. `sort` is `recent` (default), `created` or `relevance`; `next_cursor` pages, and it is bound to the sort and the parent it was minted for (`limit` 0 asks for the default 50, the daemon clamps at 500, and a negative value is a tool error naming the field, the same refusal the Connect RPC gives it). Scoped exactly like `conversation_search`, and it never lists a daemon-internal conversation (`recall-summary`, `analyze`) or a message-less ledger row. Content is `conversation_export`'s job |
 | `conversation_export` | Read one conversation's full transcript (per-turn metrics, skills invoked), found by `conversation_search`; a conversation outside the caller's scope answers not-found, never a permission error. This is how a CLOSED agent's conversation is read: the conversation corpus outlives the child row, so `agent_view` cannot see a closed agent but `conversation_export` can |
 | `conversation_query` | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`, `spend`) over the caller's conversation history: typed columns rendered as tab-separated text. `tools` groups tool names case-insensitively and sorts by calls descending. Scoped like `conversation_search`; errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
 | `pymodule_put` | Save a reusable Python module (name, source, one-line description) to the caller's own pymodule store — the required `repo` argument must be `"local"` (the blob store's sentinel; repos are read-only through this tool, `CodeInvalidArgument` otherwise); saving again under an existing name is a new version, never an overwrite. A module that does not parse as Python is refused outright; advisory findings — `ruff` lint output, failed dependency-venv installs on the owner's executors — ride the result text as a notice and never block the save. A child caller writes its owner's bucket, like a fundi child's `pymodule_put` |
