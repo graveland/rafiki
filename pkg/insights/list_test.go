@@ -408,6 +408,52 @@ func TestListConversationsPagingRecent(t *testing.T) {
 	c.EqDeep(expected, got, "walked order")
 }
 
+// TestListConversationsRecentPagingSkipsARowThatMoves pins the documented
+// best effort of a RECENT cursor: its key is updated_at, which is mutable, so
+// a conversation that gains activity between two pages sorts above the cursor
+// and the continuation does not return it. No row is repeated, and a restart
+// from the top does return the moved row.
+func TestListConversationsRecentPagingSkipsARowThatMoves(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := listOwnerUser(t, pool, "paging-moves")
+	base := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+
+	// Five rows, oldest first, so seeded[0] sorts last.
+	seeded := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		seeded = append(seeded, listConversation(t, pool, listConvSeed{ownerID: owner, createdAt: ts, updatedAt: ts}))
+	}
+	moves := seeded[0]
+	ins := New(pool)
+
+	page1, cursor, err := ins.ListConversations(ctx, ScopeOwner(owner),
+		ListFilter{Excluded: listExcluded, Sort: ListSortRecent, Limit: 2})
+	c.Require().NoError(err, "page 1")
+	c.EqDeep([]string{seeded[4], seeded[3]}, listIDs(page1), "page 1 holds the two newest")
+	c.Require().NotEq("", cursor, "page 1 must mint a cursor")
+
+	// The unseen oldest row gains activity, so it sorts above the cursor.
+	_, err = pool.Exec(ctx,
+		`UPDATE conversations.conversation SET updated_at = now() WHERE id = $1::uuid`, moves)
+	c.Require().NoError(err, "bump the oldest row")
+
+	page2, next, err := ins.ListConversations(ctx, ScopeOwner(owner),
+		ListFilter{Excluded: listExcluded, Sort: ListSortRecent, Limit: 2, Cursor: cursor})
+	c.Require().NoError(err, "page 2")
+	c.EqDeep([]string{seeded[2], seeded[1]}, listIDs(page2),
+		"the row that moved above the cursor is not returned by the continuation")
+	c.Eq("", next, "this pass has no third page")
+
+	// Restarting from the top does return it, at the top.
+	restart, _, err := ins.ListConversations(ctx, ScopeOwner(owner),
+		ListFilter{Excluded: listExcluded, Sort: ListSortRecent, Limit: 2})
+	c.Require().NoError(err, "restart")
+	c.EqDeep([]string{moves, seeded[4]}, listIDs(restart), "a restart from the top returns the moved row first")
+}
+
 // TestListConversationsPagingCreated walks the created sort the same way.
 func TestListConversationsPagingCreated(t *testing.T) {
 	c := assert.NewAborting(t)
