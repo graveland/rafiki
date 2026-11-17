@@ -3200,9 +3200,13 @@ func (c *Controller) activateLiveChild(
 		SkipDerivedIndex:   snap.SkipDerivedIndex,
 		NotifyPolicy:       snap.NotifyPolicy,
 		WorkspaceMode:      snap.WorkspaceMode,
-		MaxDepth:           snap.MaxDepth,
-		MaxCost:            snap.MaxCost,
-		MaxChildren:        snap.MaxChildren,
+		// Read back, never re-resolved: dropping it here persists native mode, and
+		// the MCP face then stops serving the replacements for built-ins the
+		// child's argv still disallows.
+		WorkspaceTools: snap.WorkspaceTools,
+		MaxDepth:       snap.MaxDepth,
+		MaxCost:        snap.MaxCost,
+		MaxChildren:    snap.MaxChildren,
 	}
 	// Replace the old exited entry HERE, not back in Resume/RespawnChild
 	// before the Idle() wait above. Deleting there left the child absent from

@@ -203,6 +203,39 @@ func TestWorkspaceToolsCarriedOnResume(t *testing.T) {
 	}
 }
 
+// TestWorkspaceToolsSurviveResumedSession pins the other resume half: the
+// Session activateLiveChild inserts (and persists) must keep the mode, or the
+// MCP face stops serving the workspace tier to a child whose built-ins are
+// still disallowed, and every later resume launches native.
+func TestWorkspaceToolsSurviveResumedSession(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	ctx := t.Context()
+
+	res, err := ctrl.Spawn(ctx, protocol.SpawnRequest{
+		Kind:      protocol.KindClaude,
+		Cwd:       t.TempDir(),
+		PiBinary:  fakePiBin(t),
+		NoSession: true,
+	}, users.Identity{})
+	ck.Require().NoError(err, "spawn")
+
+	killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = ctrl.Kill(killCtx, res.ChildID, 2*time.Second, 500*time.Millisecond)
+	ck.Require().NoError(err, "kill")
+	waitForExited(t, ctrl.st, res.ChildID, 5*time.Second)
+
+	ck.Require().NoError(ctrl.st.Update(res.ChildID, func(s *childstore.Session) {
+		s.WorkspaceTools = protocol.WorkspaceToolsRafiki
+	}), "set mode")
+
+	_, err = ctrl.Resume(ctx, res.ChildID, "")
+	ck.Require().NoError(err, "resume")
+	ck.Eq(protocol.WorkspaceToolsRafiki, mustSnapshot(t, ctrl, res.ChildID).WorkspaceTools,
+		"the resumed Session literal dropped WorkspaceTools")
+}
+
 // TestWorkspaceToolsClaudeChildGetsBoundExecutorHomedOnLaunchHost pins the
 // binding claudeRunner registers for a rafiki-mode child: a boundExecutor built
 // from the child's own request and owner, homed on the executor its daraja was
