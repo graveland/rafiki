@@ -59,6 +59,10 @@ func (b *executorInstallBinding) Install(
 		Root:   req.Root,
 		Labels: req.Labels,
 		Admits: req.Admits,
+		// Mode is the model's transport choice and rides through unchecked: the
+		// daemon owns which values are legal and what each means for a target,
+		// so a copy of that rule on a second face is a copy that can drift.
+		Mode: req.Mode,
 	})
 	if err != nil {
 		return protocol.ExecutorInstallResult{}, err

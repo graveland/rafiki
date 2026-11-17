@@ -13,6 +13,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executorinstall"
 	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -255,6 +256,41 @@ func TestExecutorAdminListCarriesConnectionTimestamps(t *testing.T) {
 	}
 	ck.True(byID["exec-off"].ConnectedAt.IsZero(), "exec-off connected_at")
 	ck.True(byID["exec-off"].LastSeen.IsZero(), "exec-off last_seen")
+}
+
+// TestExecutorAdminListCarriesInstallModeAndLastLaunch pins the LISTING's half
+// of the install decoration. List applies the install display itself — the
+// recipe's transport and this daemon's last launch outcome — from the display
+// it already holds, so an installed executor reaches the Connect face with
+// install_mode and last_launch set (an enrolled machine has neither, and a
+// listing must not invent one).
+func TestExecutorAdminListCarriesInstallModeAndLastLaunch(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newExecutorStatusFixture(t)
+	f.setInstallMode("inst-kid", executorinstall.ModeDirect)
+	f.state.setOutcome("exec-kid-install", "ok: direct launch started in 1.2s")
+
+	rows, err := connectExecutorAdmin{c: f.ctrl}.List(context.Background(), "", 0)
+	ck.Require().NoError(err, "List over the install fixture")
+
+	byID := map[string]connectapi.ExecutorRow{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	kid, ok := byID["exec-kid-install"]
+	ck.Require().True(ok, "the installed executor must be listed: %v", rows)
+	ck.Eq(executorinstall.ModeDirect, kid.InstallMode, "install_mode on a listed installed row")
+	ck.Eq("ok: direct launch started in 1.2s", kid.LastLaunch, "last_launch on a listed installed row")
+	// The listing's decoration is one block; the two older halves stay pinned
+	// here so a rewrite cannot drop them while adding these.
+	ck.Eq(installTestLauncherN, kid.InstalledVia, "installed_via names the launcher")
+	ck.Eq("brent@kidbox", kid.InstalledTarget, "installed_target names the destination")
+
+	down, ok := byID["exec-down"]
+	ck.Require().True(ok, "the enrolled executor must be listed: %v", rows)
+	ck.Eq("", down.InstallMode, "an enrolled machine has no install_mode")
+	ck.Eq("", down.LastLaunch, "an enrolled machine has no last_launch")
 }
 
 // TestExecutorAdminLabelMapsTheRow pins the single-row mapping: the updated

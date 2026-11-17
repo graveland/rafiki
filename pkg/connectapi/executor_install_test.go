@@ -80,6 +80,26 @@ func TestInstallExecutorPassesRequestThrough(t *testing.T) {
 		"installer saw %+v, want the request's fields", got)
 }
 
+// TestInstallExecutorPassesModeThroughConnect pins the transport half of the
+// pass-through: the wire's `mode` reaches the installer unchanged, empty
+// included. The handler is a seam, not a validator — the daemon decides which
+// modes exist and what each means for a target, so a check here would be a
+// second rule with a second message.
+func TestInstallExecutorPassesModeThroughConnect(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, mode := range []string{"", "auto", "direct", "tunnel", "sideways"} {
+		s := NewServer(nil)
+		f := &fakeExecutorInstaller{row: &rafikiv1.ExecutorRow{Id: "exec-1"}}
+		s.SetExecutorInstaller(f)
+		_, err := s.InstallExecutor(context.Background(), connect.NewRequest(&rafikiv1.InstallExecutorRequest{
+			Target: "root@10.0.0.5", Mode: mode,
+		}))
+		c.Require().NoError(err, "InstallExecutor(mode=%q)", mode)
+		c.Require().NotNil(f.sawInstall, "the handler must reach the installer (mode=%q)", mode)
+		c.Eq(mode, f.sawInstall.GetMode(), "mode %q must ride through unchanged", mode)
+	}
+}
+
 // TestUninstallExecutorPassesRef pins that the handler hands the installer the
 // caller's ref verbatim and answers an empty response.
 func TestUninstallExecutorPassesRef(t *testing.T) {

@@ -149,8 +149,11 @@ c.delete_model_alias("ds")                             # not_found when there is
 
 # Executors installed over ssh: install_executor puts a rafiki executor on a
 # target through a launcher executor and returns the new row as a dict once it
-# connects; uninstall_executor removes one (by machine name or id).
-row = c.install_executor("ublk-s2", via="greyshift", labels={"rack": "r1"})
+# connects; uninstall_executor removes one (by machine name or id). `mode` picks
+# the transport: "" or "auto" probes the target and self-dials when it can,
+# "direct" requires that form, "tunnel" relays through the launcher. The row
+# carries `install_mode` and, once this daemon has launched it, `last_launch`.
+row = c.install_executor("ublk-s2", via="greyshift", labels={"rack": "r1"}, mode="direct")
 c.uninstall_executor("ublk-s2")
 
 # Forks and tags. A fork starts a child from a point in another child's

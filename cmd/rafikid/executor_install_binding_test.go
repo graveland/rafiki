@@ -318,3 +318,81 @@ func TestInstallFacesClaudeDescriptionNote(t *testing.T) {
 	c.StrContains(fundi, "Install and start a rafiki executor",
 		"the fundi child still gets the tool")
 }
+
+// fakeInstallController records the proto request the binding built and answers
+// the row it was seeded with. It stands in for *Controller so the binding's
+// field mapping can be pinned without a store, a pool or an ssh target.
+type fakeInstallController struct {
+	row      *rafikiv1.ExecutorRow
+	uninstl  []string
+	sawReq   *rafikiv1.InstallExecutorRequest
+	sawCalls int
+}
+
+func (f *fakeInstallController) InstallExecutor(
+	_ context.Context, _ installCaller, req *rafikiv1.InstallExecutorRequest,
+) (*rafikiv1.ExecutorRow, error) {
+	f.sawCalls++
+	f.sawReq = req
+	return f.row, nil
+}
+
+func (f *fakeInstallController) UninstallExecutor(_ context.Context, _ installCaller, ref string) error {
+	f.sawCalls++
+	f.uninstl = append(f.uninstl, ref)
+	return nil
+}
+
+// TestExecutorInstallBindingPassesMode pins that executor_install's `mode`
+// argument reaches the Controller unchanged — including "" when the model asked
+// for nothing, and including a value the daemon will refuse. The binding is not
+// a validator: the vocabulary and the refusal are the daemon's, so the one rule
+// lives in one place and the model reads the daemon's own message.
+func TestExecutorInstallBindingPassesMode(t *testing.T) {
+	c := assert.NewAborting(t)
+	for _, mode := range []string{"", "auto", "direct", "tunnel", "sideways"} {
+		ctrl := &fakeInstallController{row: &rafikiv1.ExecutorRow{Id: "exec-1", Machine: "ublk-s2"}}
+		b := &executorInstallBinding{c: ctrl, caller: installCaller{OwnerUserID: installTestOwner}}
+		res, err := b.Install(context.Background(), protocol.ExecutorInstallRequest{
+			Target: "brent@ublk-s2", Name: "ublk-s2", Mode: mode,
+		})
+		c.Require().NoError(err, "Install(mode=%q)", mode)
+		c.Require().NotNil(ctrl.sawReq, "the binding must reach the controller (mode=%q)", mode)
+		c.Eq(mode, ctrl.sawReq.GetMode(), "mode %q must ride through unchanged", mode)
+		c.Eq("brent@ublk-s2", ctrl.sawReq.GetTarget(), "target (mode=%q)", mode)
+		c.Eq("ublk-s2", ctrl.sawReq.GetName(), "name (mode=%q)", mode)
+		c.Eq("exec-1", res.ID, "the row's id (mode=%q)", mode)
+	}
+}
+
+// TestExecutorInstallMCPFaceAdvertisesTheModeEnum pins that `mode` reaches the
+// MCP face and not only the fundi runtime: both are served the same blueprint,
+// and a claude child picking a transport reads THIS schema. The enum is
+// asserted rather than the field's mere presence, because a parameter with no
+// vocabulary is one a model fills with a guess.
+func TestExecutorInstallMCPFaceAdvertisesTheModeEnum(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	seedInstallChild(t, f.ctrl, "c_kid", "", installTestOwnerName, protocol.KindFundi)
+	face, _ := mcpFaceFixture(t)
+	face.SetController(f.ctrl)
+	cs := mcpConnect(t, face.getServer(mcpChildRequest(installTestOwner, "c_kid", false)))
+
+	tool, ok := mcpToolsByName(t, cs)["executor_install"]
+	c.Require().True(ok, "the MCP face must offer executor_install")
+	schema, ok := tool.InputSchema.(map[string]any)
+	c.Require().True(ok, "tool schema is %T, want an object", tool.InputSchema)
+	props, ok := schema["properties"].(map[string]any)
+	c.Require().True(ok, "the install schema has no properties object")
+	raw, ok := props["mode"].(map[string]any)
+	c.Require().True(ok, "the MCP face must advertise mode; properties = %v", props)
+	c.Eq("string", raw["type"], "mode type")
+	enum, ok := raw["enum"].([]any)
+	c.Require().True(ok, "mode enum = %v", raw["enum"])
+	var got []string
+	for _, v := range enum {
+		s, _ := v.(string)
+		got = append(got, s)
+	}
+	c.EqDeep([]string{"auto", "direct", "tunnel"}, got, "mode enum on the MCP face")
+}

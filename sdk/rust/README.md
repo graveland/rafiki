@@ -83,8 +83,12 @@ holds the `rafiki.v1` messages and `daraja_pb` the `rafiki.daraja.v1` ones the
 `Daraja*` RPCs carry.
 
 `install_executor` puts an executor on an ssh `target` through a launcher
-executor (`via`) and answers the new row once it connects;
-`uninstall_executor(executor)` removes one by machine name or id.
+executor (`via`) and answers the new row once it connects. `mode` picks the
+transport: empty or `"auto"` probes the target and self-dials when it can,
+`"direct"` requires that form, `"tunnel"` relays through the launcher — the
+value is sent verbatim and the daemon's refusal is the error a bad one returns.
+The row carries `install_mode` and, once this daemon has launched it,
+`last_launch`. `uninstall_executor(executor)` removes one by machine name or id.
 
 `list_model_aliases` / `put_model_alias` / `delete_model_alias` manage the
 calling connection OWNER's model aliases: a slash-free `name` the owner

@@ -198,13 +198,23 @@ func (a connectExecutorAdmin) List(ctx context.Context, selector string, limit i
 		out = append(out, executorRowFrom(e))
 	}
 	// An executor installed over ssh carries the launch recipe the listing must
-	// show: the launcher machine and the ssh destination. Applied AFTER the
-	// owner filter, so the decoration can never widen what a caller sees.
+	// show: the launcher machine, the ssh destination, the transport the recipe
+	// was created with, and the daemon's outcome for its most recent launch.
+	// Applied AFTER the owner filter, so the decoration can never widen what a
+	// caller sees.
+	//
+	// These are installDisplay's own fields, taken straight: both renderers read
+	// the one struct, so a listing and the install verbs' own answer cannot
+	// disagree about a field, and the listing never builds a wire row it would
+	// only read two fields back from.
 	if views := a.c.installDisplays(ctx); views != nil {
 		for i := range out {
-			if v, ok := views[out[i].ID]; ok {
-				out[i].InstalledVia, out[i].InstalledTarget = v.Via, v.Target
+			v, ok := views[out[i].ID]
+			if !ok {
+				continue
 			}
+			out[i].InstalledVia, out[i].InstalledTarget = v.Via, v.Target
+			out[i].InstallMode, out[i].LastLaunch = v.Mode, v.LastLaunch
 		}
 	}
 	return out, nil

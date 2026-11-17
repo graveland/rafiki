@@ -34,7 +34,8 @@ type ExecutorLister interface {
 // the contract a model reads, and the docs restate it.
 const executorListDescription = "List the executors you can see, with whether each is connected right now. " +
 	"An installed one also shows the launcher and ssh destination it came from, so you can " +
-	"tell a machine you provisioned from one somebody else did. A down executor is not " +
+	"tell a machine you provisioned from one somebody else did, plus the transport it was " +
+	"installed with (direct or tunnel) and the daemon's last launch outcome. A down executor is not " +
 	"necessarily broken: an installed one restarts on its next use, as long as its launcher " +
 	"is reachable, while a disabled one never connects. Annotations are hints another agent " +
 	"left about that machine and may be stale. Takes no arguments."
@@ -128,6 +129,18 @@ func renderExecutors(rows []protocol.ExecutorStatus) string {
 				fmt.Fprintf(&b, "  installed: on %s via %s\n", target, e.InstalledVia)
 			} else {
 				fmt.Fprintf(&b, "  installed: on %s (launcher no longer connected)\n", target)
+			}
+		}
+		// The transport and the last launch outcome are facts about an INSTALL,
+		// so they follow the installed line and are absent for every other row:
+		// an enrolled executor has no recipe and no launch the daemon drove.
+		// "tunnel" is spelled out even though it is what an unrecorded recipe
+		// means, because a reader deciding whether a target can reach the daemon
+		// needs the answer, not the default.
+		if e.InstallMode != "" {
+			fmt.Fprintf(&b, "  mode: %s\n", e.InstallMode)
+			if e.LastLaunch != "" {
+				fmt.Fprintf(&b, "  last launch: %s\n", e.LastLaunch)
 			}
 		}
 	}

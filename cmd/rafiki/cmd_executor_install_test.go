@@ -7,6 +7,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/multigres/testkit/assert"
+	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -82,6 +83,38 @@ func TestCLIExecutorInstallDefaultsViaToThisMachine(t *testing.T) {
 			c.StrContains(out, want, "json install output missing")
 		}
 	})
+}
+
+// TestExecutorInstallCmdModeFlag is `--mode` end to end through the real
+// command: the flag's value lands in the request unchanged (an invalid one
+// included — the daemon owns the refusal), the default is auto so an operator
+// who never thought about transports still gets the probing form, and shell
+// completion offers exactly the three.
+func TestExecutorInstallCmdModeFlag(t *testing.T) {
+	c := assert.NewAborting(t)
+	srv := &executorStubControl{installRow: &rafikiv1.ExecutorRow{
+		Id: "exec-9", Machine: "ublk-s2", Enabled: true, Connected: true,
+	}}
+	executorTestDaemon(t, srv)
+	t.Setenv(paths.ExecutorName, "laptop")
+
+	for _, mode := range []string{"auto", "direct", "tunnel", "sideways"} {
+		runExecutorCLI(t, "install", "brent@ublk-s2", "--mode", mode)
+		c.Require().NotNil(srv.sawInstall, "--mode %s sent no request", mode)
+		c.Eq(mode, srv.sawInstall.GetMode(), "--mode %s must land in the request", mode)
+	}
+
+	srv.sawInstall = nil
+	runExecutorCLI(t, "install", "brent@ublk-s2")
+	c.Require().NotNil(srv.sawInstall, "an omitted --mode still installs")
+	c.Eq("auto", srv.sawInstall.GetMode(), "--mode defaults to auto")
+
+	cmd := newExecutorInstallCmd()
+	complete, ok := cmd.GetFlagCompletionFunc("mode")
+	c.Require().True(ok, "--mode must be completable")
+	values, directive := complete(cmd, nil, "")
+	c.EqDeep([]string{"auto", "direct", "tunnel"}, values, "completion values")
+	c.Eq(cobra.ShellCompDirectiveNoFileComp, directive, "completion directive")
 }
 
 // A refused install must reach the operator as the daemon's own message,

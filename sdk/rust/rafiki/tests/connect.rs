@@ -718,3 +718,55 @@ async fn delete_mcp_credential_carries_the_selector_and_returns_no_credential() 
         "the selector encodes verbatim, config path empty"
     );
 }
+
+// ─── executors installed over ssh ───────────────────────────────────────────
+
+/// The install transport reaches the daemon as the caller spelled it, and the
+/// two install facts the daemon reports come back on the row. `mode` is a field
+/// of the generated request, so the verb forwards it — this pins that the wire
+/// really carries it rather than the SDK silently building a request of its own.
+#[tokio::test]
+async fn install_executor_carries_the_mode_and_decodes_the_install_facts() {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let stub = recording_stub(
+        seen.clone(),
+        Arc::new(|_| {
+            let reply = pb::InstallExecutorResponse {
+                executor: Some(pb::ExecutorRow {
+                    id: "exec-1".to_string(),
+                    machine: "ublk-s2".to_string(),
+                    installed_via: "greyshift".to_string(),
+                    installed_target: "brent@ublk-s2".to_string(),
+                    install_mode: "direct".to_string(),
+                    last_launch: "ok: direct launch started in 1.2s".to_string(),
+                    ..Default::default()
+                }),
+            };
+            Response::new(full(reply.encode_to_vec()))
+        }),
+    );
+    let url = serve(stub).await;
+    let client = Client::new(&url, None).expect("a client");
+
+    let request = pb::InstallExecutorRequest {
+        target: "brent@ublk-s2".to_string(),
+        name: "ublk-s2".to_string(),
+        mode: "direct".to_string(),
+        ..Default::default()
+    };
+    let response = client
+        .install_executor(&request)
+        .await
+        .expect("install_executor");
+
+    let row = response.executor.expect("the installed row");
+    assert_eq!(row.install_mode, "direct");
+    assert_eq!(row.last_launch, "ok: direct launch started in 1.2s");
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "/rafiki.v1.Control/InstallExecutor");
+    let decoded = pb::InstallExecutorRequest::decode(seen[0].1.as_slice())
+        .expect("an InstallExecutorRequest");
+    assert_eq!(decoded, request, "mode encodes verbatim");
+}

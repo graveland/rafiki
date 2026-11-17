@@ -40,9 +40,15 @@ type ExecutorRow struct {
 	Reason      string
 	// InstalledVia and InstalledTarget are set for an executor installed over
 	// ssh: the launcher's machine name and the target's ssh destination. Empty
-	// for every other row.
+	// for every other row. InstallMode and LastLaunch are that same row's
+	// recipe transport ("direct" or "tunnel") and the daemon's outcome for its
+	// most recent launch; both stay empty on a row that was never installed, and
+	// LastLaunch is also empty until THIS daemon has launched it, because the
+	// outcome is in-memory.
 	InstalledVia    string
 	InstalledTarget string
+	InstallMode     string
+	LastLaunch      string
 }
 
 // ExecutorLister is the narrow slice of the daemon's Controller needed to
@@ -126,6 +132,8 @@ func toProtoExecutor(r ExecutorRow) *rafikiv1.ExecutorRow {
 		Reason:          r.Reason,
 		InstalledVia:    r.InstalledVia,
 		InstalledTarget: r.InstalledTarget,
+		InstallMode:     r.InstallMode,
+		LastLaunch:      r.LastLaunch,
 	}
 	if !r.ConnectedAt.IsZero() {
 		out.ConnectedAt = timestamppb.New(r.ConnectedAt)

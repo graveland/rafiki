@@ -181,6 +181,14 @@ impl Client {
     /// answer the new row once it has connected. `via` names the launcher
     /// (machine name or id; empty = the caller's default native executor); a
     /// child may install through a launcher it can reach.
+    ///
+    /// `mode` picks the transport: empty or `auto` probes the target for a route
+    /// to the daemon and starts a self-dialling process when it has one,
+    /// `direct` requires that form, and `tunnel` relays through the launcher.
+    /// The request is forwarded as given, so the daemon validates the value and
+    /// its own refusal is the error a bad one returns. The answered
+    /// [`pb::ExecutorRow`] carries `install_mode` and, once this daemon has
+    /// launched it, `last_launch`.
     pub async fn install_executor(
         &self,
         req: &pb::InstallExecutorRequest,

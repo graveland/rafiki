@@ -83,6 +83,12 @@ var (
 	executorWorkspaceModeValues = []string{"ephemeral", "pinned"}
 )
 
+// executorInstallModeValues is what `executor install --mode` OFFERS. It is the
+// flag's completion vocabulary, not a validation rule: which values the daemon
+// accepts, and what each means for a given target, is the daemon's to decide,
+// so an invalid value travels and comes back as its own refusal.
+var executorInstallModeValues = []string{"auto", "direct", "tunnel"}
+
 // bindExecutorEnumCompletions registers the closed-enum completions shared by
 // enroll and create.
 func bindExecutorEnumCompletions(cmd *cobra.Command) {

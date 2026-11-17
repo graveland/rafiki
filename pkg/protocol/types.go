@@ -915,6 +915,11 @@ type ExecutorInstallRequest struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// Admits is the executor-side admission selector over child labels.
 	Admits string `json:"admits,omitempty"`
+	// Mode is the install transport the caller asks for: "auto" (or empty) to
+	// probe the target and pick, "direct" to require the self-dialling form, or
+	// "tunnel" to relay through the launcher. The daemon validates it, so this
+	// package carries no rule of its own about which values are legal.
+	Mode string `json:"mode,omitempty"`
 }
 
 // ExecutorInstallResult is one installed executor, as a tool result renders it.

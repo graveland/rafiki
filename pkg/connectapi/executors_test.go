@@ -72,6 +72,33 @@ func TestListExecutorsKindScopedTimestampsRideThrough(t *testing.T) {
 	}
 }
 
+// TestExecutorListCarriesInstallModeAndLastLaunch pins the two install facts
+// riding the wire as their own fields: a listing that dropped either would
+// render an installed executor as one with no transport and no launch history,
+// which is exactly the question an operator asks when a machine is down.
+func TestExecutorListCarriesInstallModeAndLastLaunch(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := NewServer(nil)
+	s.SetExecutorLister(fakeExecutorLister{rows: []ExecutorRow{
+		{
+			ID: "exec-1", Machine: "ublk-s2",
+			InstalledVia: "laptop", InstalledTarget: "brent@ublk-s2",
+			InstallMode: "direct", LastLaunch: "ok: direct launch started in 1.2s",
+		},
+		{ID: "exec-2", Machine: "rack"},
+	}})
+	resp, err := s.ListExecutors(context.Background(), connect.NewRequest(&rafikiv1.ListExecutorsRequest{Kind: "fundi"}))
+	c.Require().NoError(err)
+	rows := resp.Msg.GetRows()
+	c.Require().Len(rows, 2, "want 2 rows, got %d", len(rows))
+	c.Eq("direct", rows[0].GetInstallMode(), "install_mode")
+	c.Eq("ok: direct launch started in 1.2s", rows[0].GetLastLaunch(), "last_launch")
+	// An executor nobody installed carries neither: the fields describe a
+	// recipe, and silence is what says there is none.
+	c.Eq("", rows[1].GetInstallMode(), "an enrolled row has no install mode")
+	c.Eq("", rows[1].GetLastLaunch(), "an enrolled row has no launch")
+}
+
 func TestListExecutorsUnwiredIsUnavailable(t *testing.T) {
 	s := NewServer(nil)
 	_, err := s.ListExecutors(context.Background(), connect.NewRequest(&rafikiv1.ListExecutorsRequest{}))

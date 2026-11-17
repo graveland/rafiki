@@ -46,6 +46,20 @@ const executorInstallDescription = "Install and start a rafiki executor on a mac
 // which do address executors) can use the result.
 const executorInstallNoWorkspaceNote = " You cannot run workspace tools on it yourself; agents you spawn can."
 
+// executorInstallModeDescription is the `mode` parameter's description
+// VERBATIM: its wording is the contract a model reads when it picks a
+// transport. The rule itself lives in the daemon, so the tool passes `mode`
+// through untouched.
+const executorInstallModeDescription = "auto (default): probe the target for a route to the daemon " +
+	"and install a self-dialling process if it has one, otherwise relay through the launcher's ssh " +
+	"tunnel. direct: require the self-dialling form (refused if the target cannot reach the daemon). " +
+	"tunnel: always relay through the launcher."
+
+// executorInstallModeValues is the closed set the SCHEMA advertises — the
+// model-facing vocabulary, not a validation rule. Which values are accepted,
+// and what a value means for a given target, is the daemon's decision.
+var executorInstallModeValues = []string{"auto", "direct", "tunnel"}
+
 // ExecutorInstallBlueprint is the static metadata for executor_install.
 type ExecutorInstallBlueprint struct{}
 
@@ -61,6 +75,7 @@ func (ExecutorInstallBlueprint) InputSchema() Schema {
 			{Name: "root", Type: "string", Description: "Directory the new executor serves. Omit for its home directory."},
 			{Name: "labels", Type: "object", Description: "Your own trust labels for the new executor, k=v. owner, machine and rafiki/ keys are written by the daemon and are refused here."},
 			{Name: "admits", Type: "string", Description: "Executor-side admission selector over child labels."},
+			{Name: "mode", Type: "string", Enum: executorInstallModeValues, Description: executorInstallModeDescription},
 		},
 		Required: []string{"target"},
 	}
@@ -98,6 +113,7 @@ func (t *executorInstallTool) Execute(ctx context.Context, in ToolInput) (ToolRe
 		Root   string            `json:"root"`
 		Labels map[string]string `json:"labels"`
 		Admits string            `json:"admits"`
+		Mode   string            `json:"mode"`
 	}
 	if err := in.Unmarshal(&raw); err != nil {
 		return ToolResult{}, fmt.Errorf("executor_install: %w", err)
@@ -113,6 +129,9 @@ func (t *executorInstallTool) Execute(ctx context.Context, in ToolInput) (ToolRe
 		Root:   raw.Root,
 		Labels: raw.Labels,
 		Admits: raw.Admits,
+		// Mode rides through unchanged: the daemon owns the vocabulary and the
+		// refusal, so a copy of the rule here could only drift from it.
+		Mode: raw.Mode,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("executor_install: %w", err)

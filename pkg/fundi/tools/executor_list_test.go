@@ -141,3 +141,57 @@ func TestExecutorListPropagatesTheStoreError(t *testing.T) {
 	c.True(errors.Is(err, boom), "want the store's error wrapped, got %v", err)
 	c.True(strings.Contains(err.Error(), "executor_list:"), "an error names the tool that produced it: %v", err)
 }
+
+// TestExecutorListToolShowsModeAndLastLaunch pins the two facts an operator
+// acts on after an install: which transport the recipe was created with, and
+// how the daemon's last launch of it went. Both belong to an INSTALL, so an
+// enrolled row renders neither; and because the outcome is in-memory, an
+// install the daemon has not launched since it started renders the mode alone
+// rather than an empty "last launch:" line.
+func TestExecutorListToolShowsModeAndLastLaunch(t *testing.T) {
+	c := assert.NewAborting(t)
+	lister := &fakeExecutorLister{rows: []protocol.ExecutorStatus{
+		{
+			ID: "e-installed", Name: "ublk-s2", Enabled: true, WorkspaceMode: "pinned",
+			InstalledVia: "laptop", InstalledTarget: "brent@ublk-s2",
+			InstallMode: "direct", LastLaunch: "ok: direct launch started in 1.2s",
+		},
+		{
+			ID: "e-quiet", Name: "ublk-s3", Enabled: true, WorkspaceMode: "pinned",
+			InstalledVia: "laptop", InstalledTarget: "brent@ublk-s3",
+			InstallMode: "tunnel",
+		},
+		{
+			// Enrolled, never installed: no recipe, so no transport and no launch.
+			ID: "e-enrolled", Name: "rack", Enabled: true, Connected: true, WorkspaceMode: "pinned",
+		},
+	}}
+	tool, err := ExecutorListBlueprint{}.Materialize(ToolOpts{Executors: lister})
+	c.Require().NoError(err, "Materialize executor_list")
+
+	res, err := tool.Execute(context.Background(), ToolInput(`{}`))
+	c.NoError(err, "executor_list")
+	want := "ublk-s2 (e-installed)\n" +
+		"  status: down, never seen\n" +
+		"  workspace pinned\n" +
+		"  installed: on brent@ublk-s2 via laptop\n" +
+		"  mode: direct\n" +
+		"  last launch: ok: direct launch started in 1.2s\n" +
+		"\n" +
+		"ublk-s3 (e-quiet)\n" +
+		"  status: down, never seen\n" +
+		"  workspace pinned\n" +
+		"  installed: on brent@ublk-s3 via laptop\n" +
+		"  mode: tunnel\n" +
+		"\n" +
+		"rack (e-enrolled)\n" +
+		"  status: live\n" +
+		"  workspace pinned\n"
+	c.Eq(want, res.Text, "rendered listing")
+
+	// The enrolled row's block stops after its capabilities: a "mode:" line on a
+	// machine nobody installed would read as a transport it does not have.
+	enrolled := res.Text[strings.Index(res.Text, "rack (e-enrolled)"):]
+	c.NotStrContains(enrolled, "mode:", "an enrolled executor has no install transport")
+	c.NotStrContains(enrolled, "last launch:", "an enrolled executor has no launch to report")
+}

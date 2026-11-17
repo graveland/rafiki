@@ -824,6 +824,7 @@ class Client:
         root: "str | None" = None,
         labels: "dict | None" = None,
         admits: "str | None" = None,
+        mode: str = "",
     ) -> dict:
         """Install an executor on the ssh ``target`` through a launcher
         executor, and return the new executor row as a dict once it has
@@ -831,7 +832,15 @@ class Client:
         caller's default native executor), ``name`` the machine name (unset =
         the destination's host part), ``root`` the remote workspace root, and
         ``labels``/``admits`` the row's admission facts. A child may install
-        through a launcher it can reach."""
+        through a launcher it can reach.
+
+        ``mode`` picks the transport: ``""`` (the default) or ``"auto"`` probes
+        the target for a route to the daemon and starts a self-dialling process
+        when it has one, ``"direct"`` requires that form, and ``"tunnel"`` relays
+        through the launcher. The value is sent unchanged — the daemon validates
+        it and its message is the error a bad value raises. The row it returns
+        carries ``install_mode`` and, once this daemon has launched it,
+        ``last_launch``."""
         req = _gen.control_pb.InstallExecutorRequest(
             target=target,
             via=via or "",
@@ -839,6 +848,7 @@ class Client:
             root=root or "",
             labels=_labels_wire(labels),
             admits=admits or "",
+            mode=mode,
         )
         row = self._call(
             "InstallExecutor", req, _gen.control_pb.InstallExecutorResponse

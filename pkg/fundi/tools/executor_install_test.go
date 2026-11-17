@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -63,7 +64,7 @@ func TestExecutorInstallToolRendersRow(t *testing.T) {
 
 	res, err := tool.Execute(context.Background(), ToolInput(
 		`{"target":"brent@ublk-s2","via":"laptop","name":"ublk-s2","root":"/src",`+
-			`"labels":{"env":"prod"},"admits":"owner=brent"}`))
+			`"labels":{"env":"prod"},"admits":"owner=brent","mode":"direct"}`))
 	c.NoError(err, "executor_install")
 	c.Eq("installed ublk-s2 (exec-1) on brent@ublk-s2 via laptop; connected", res.Text, "success text")
 
@@ -75,7 +76,35 @@ func TestExecutorInstallToolRendersRow(t *testing.T) {
 		Root:   "/src",
 		Labels: map[string]string{"env": "prod"},
 		Admits: "owner=brent",
+		Mode:   "direct",
 	}, inst.installs[0], "the request handed to the installer")
+}
+
+// TestExecutorInstallToolSchemaListsModeEnum pins the transport vocabulary the
+// model is OFFERED: the three modes, the exact sentence that explains them, and
+// mode's absence from `required`. The request comparison above pins that the
+// value the model picks reaches the daemon; this pins that it is offered at
+// all, which no request-shape assertion can see.
+func TestExecutorInstallToolSchemaListsModeEnum(t *testing.T) {
+	c := assert.NewAborting(t)
+	var schema struct {
+		Properties map[string]struct {
+			Type        string   `json:"type"`
+			Enum        []string `json:"enum"`
+			Description string   `json:"description"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	c.Require().NoError(json.Unmarshal(ExecutorInstallBlueprint{}.InputSchema().JSON(), &schema),
+		"decode the executor_install schema")
+
+	mode, ok := schema.Properties["mode"]
+	c.Require().True(ok, "executor_install must offer mode; properties = %v", schema.Properties)
+	c.Eq("string", mode.Type, "mode type")
+	c.EqDeep([]string{"auto", "direct", "tunnel"}, mode.Enum,
+		"mode enum: a schema missing one of the three would hide a transport from the model")
+	c.Eq(executorInstallModeDescription, mode.Description, "mode description is the model-facing contract")
+	c.EqDeep([]string{"target"}, schema.Required, "mode is optional: only target is required")
 }
 
 // An install that returns without a live connection says so: the connection is

@@ -36,6 +36,12 @@ install is one command you run deliberately.
 If ssh refuses (host key, auth), the error carries ssh's own message — fix it
 on the --via machine and retry.
 
+--mode picks the transport. auto (the default) probes the target for a route to
+the daemon and starts a process that dials it directly when there is one,
+otherwise it relays through the launcher's ssh tunnel. direct requires the
+dialling form and is refused when the target cannot reach the daemon. tunnel
+always relays through the launcher.
+
 The installed executor is restarted automatically on its next use, so a machine
 that reboots does not need re-installing.`,
 		Args: cobra.ExactArgs(1),
@@ -46,6 +52,11 @@ that reboots does not need re-installing.`,
 	cmd.Flags().String("root", "", "Directory the new executor serves; defaults to its home directory")
 	cmd.Flags().StringArray("label", nil, "Label to set on the new executor (repeatable, k=v)")
 	cmd.Flags().String("admits", "", "Executor-side admission selector over child labels")
+	cmd.Flags().String("mode", "auto", "Install transport: auto|direct|tunnel")
+	// Completion lists the modes without enforcing them: a wrong value is the
+	// daemon's refusal to give, so it is sent rather than swallowed here.
+	_ = cmd.RegisterFlagCompletionFunc("mode", cobra.FixedCompletions(
+		executorInstallModeValues, cobra.ShellCompDirectiveNoFileComp))
 	return cmd
 }
 
@@ -74,6 +85,9 @@ func runExecutorInstall(cmd *cobra.Command, args []string) error {
 	name, _ := cmd.Flags().GetString("name")
 	root, _ := cmd.Flags().GetString("root")
 	admits, _ := cmd.Flags().GetString("admits")
+	// installMode, not `mode`: the output mode already owns that name in this
+	// function, and the two are unrelated user decisions.
+	installMode, _ := cmd.Flags().GetString("mode")
 
 	resp, err := ep.control().InstallExecutor(cmdCtx(cmd), connect.NewRequest(&rafikiv1.InstallExecutorRequest{
 		Target: args[0],
@@ -82,6 +96,7 @@ func runExecutorInstall(cmd *cobra.Command, args []string) error {
 		Root:   root,
 		Labels: labels,
 		Admits: admits,
+		Mode:   installMode,
 	}))
 	if err != nil {
 		return connectVerbErr(err, ep.describe)
