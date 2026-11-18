@@ -504,6 +504,16 @@ func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool,
 
 	if t != nil && t.Requested != "" {
 		if e, ok := matchExecutorRef(t.Requested, reach); ok {
+			// An ephemeral child whose home was lost adopts the member the call
+			// names as its new home, so its cwd and project tier follow the work.
+			// A pinned home never moves, and a call that names the lost home
+			// itself matches nothing here.
+			if home := b.homeExecutor(); home != "" && home != e.ID && !reachableID(reach, home) &&
+				mayMigrate(b.binder.WorkspaceMode(home)) && b.binder.CanBeHome(e.ID) {
+				if merr := b.migrateHome(ctx, home, e.ID); merr != nil {
+					return "", multi, merr
+				}
+			}
 			setTarget(t, b.binder.DisplayName(e.ID), multi)
 			return e.ID, multi, nil
 		}

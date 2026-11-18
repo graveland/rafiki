@@ -3039,3 +3039,25 @@ func execNamed(be *boundExecutor, executor string) error {
 	_, err := be.Execute(namedCall(executor), "read", nil)
 	return err
 }
+
+// A named call to a surviving member moves an ephemeral child's lost home onto
+// it; a pinned home never moves, and a member that is not reachable moves
+// nothing.
+func TestBoundExecutorEphemeralNamedCallAdoptsItsTargetAsHome(t *testing.T) {
+	c := assert.NewAborting(t)
+	for _, tc := range []struct {
+		mode      string
+		wantMoves int
+	}{{"ephemeral", 1}, {"pinned", 0}} {
+		fb := newFakeBinder(&fakeExec{id: "a"}, &fakeExec{id: "b"})
+		fb.reachableTo("b")
+		fb.mode = tc.mode
+		fb.homeLabel = "a"
+		b := newBoundExecutor("c1", fb)
+		res, err := b.Execute(namedCall("b"), "read", nil)
+		c.Require().NoError(err, "%s: the named call itself works", tc.mode)
+		c.Eq("b:read", res.Text, "%s: served on the named member", tc.mode)
+		c.Eq(tc.wantMoves, fb.migrations, "%s: home migrations", tc.mode)
+		c.Eq(1, fb.provisionsOn("b"), "%s: one workspace on the target, as home or as an ordinary binding", tc.mode)
+	}
+}

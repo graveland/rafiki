@@ -572,3 +572,30 @@ func TestNoWorkspaceToolDeclaresExecutor(t *testing.T) {
 	}
 	c.Eq(len(WorkspaceTools())-len(claudeShapedNames), present, "workspace tools materialized")
 }
+
+type targetProbe struct{ seen *ExecutorTarget }
+
+func (p *targetProbe) Name() string        { return "probe" }
+func (p *targetProbe) Description() string { return "" }
+func (p *targetProbe) InputSchema() Schema { return Schema{} }
+func (p *targetProbe) Execute(ctx context.Context, _ ToolInput) (ToolResult, error) {
+	p.seen = ExecutorTargetFrom(ctx)
+	return ToolResult{Text: "ok"}, nil
+}
+
+// The wrapper copies the daemon-only home-default mark from the context onto the
+// target the binder reads, and a model cannot set it through the tool input.
+func TestExecutorTargetedCopiesHomeDefaultFromContext(t *testing.T) {
+	ck := assert.NewAborting(t)
+	probe := &targetProbe{}
+	w := &executorTargeted{tool: probe}
+
+	_, err := w.Execute(WithHomeDefault(context.Background()), ToolInput(`{}`))
+	ck.Require().NoError(err, "daemon-initiated call")
+	ck.Require().True(probe.seen != nil, "the inner tool sees a target")
+	ck.True(probe.seen.HomeDefault, "the context mark reaches the target")
+
+	_, err = w.Execute(context.Background(), ToolInput(`{"HomeDefault":true,"home_default":true}`))
+	ck.Require().NoError(err, "model call")
+	ck.False(probe.seen.HomeDefault, "a call without the context mark is never a home default, whatever its input says")
+}
