@@ -724,6 +724,7 @@ func TestConnectSpawnRequestCarriesEveryField(t *testing.T) {
 		SkipDerivedIndex:   true,
 		ExecutorSelector:   "env=home",
 		ExecutorRef:        "greyshift",
+		Executors:          []string{"greyshift", "x_1"},
 		Preset:             "impl",
 		Script:             &protocol.ScriptSpec{Repo: "local", Script: "driver", Args: []string{"--fast"}},
 		Prefill:            []protocol.PrefillRead{{Path: "/a.md", Start: 1, End: 9}},
@@ -744,6 +745,7 @@ func TestConnectSpawnRequestCarriesEveryField(t *testing.T) {
 		out.GetParentChildId() != in.ParentChildID || out.GetRecordRequests() != in.RecordRequests ||
 		out.GetPassthroughAuth() != in.PassthroughAuth || out.GetExecutorSelector() != in.ExecutorSelector ||
 		out.GetExecutorRef() != in.ExecutorRef || out.GetSkipDerivedIndex() != in.SkipDerivedIndex, "a scalar field was lost on the wire: %+v", out)
+	assert.NewAborting(t).EqDeep([]string{"greyshift", "x_1"}, out.GetExecutors(), "executors lost on the wire")
 	if out.GetLabels()["env"] != "home" || out.GetEnv()["K"] != "V" {
 		t.Fatalf("a map field was lost: labels=%v env=%v", out.GetLabels(), out.GetEnv())
 	}
@@ -1689,4 +1691,25 @@ func TestSpawnWithWarnings(t *testing.T) {
 		c.Require().NoError(err, "spawnWithWarnings")
 		c.Eq("", buf.String(), "the warnings written to w")
 	})
+}
+
+// --executors accepts a comma list and repeats; blanks are dropped, and an
+// absent flag leaves the field nil so the daemon applies its default set.
+func TestBuildSpawnRequest_ExecutorsFlag(t *testing.T) {
+	t.Setenv(paths.ExecutorSelector, "")
+	c := assert.NewCollecting(t)
+
+	cmd := newTestCreateCmd()
+	c.Require().NoError(cmd.Flags().Set("executors", "greyshift, x_1"))
+	c.Require().NoError(cmd.Flags().Set("executors", "all,"))
+	c.Require().NoError(cmd.Flags().Set("cwd", "/w"))
+	req, err := buildSpawnRequest(cmd, nil)
+	c.Require().NoError(err, "buildSpawnRequest")
+	c.EqDeep([]string{"greyshift", "x_1", "all"}, req.Executors, "Executors")
+
+	bare := newTestCreateCmd()
+	c.Require().NoError(bare.Flags().Set("cwd", "/w"))
+	req, err = buildSpawnRequest(bare, nil)
+	c.Require().NoError(err, "buildSpawnRequest bare")
+	c.Nil(req.Executors, "an absent flag must leave Executors nil")
 }

@@ -12,6 +12,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/compactfork"
 	"go.graveland.dev/rafiki/pkg/costfmt"
@@ -187,6 +188,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("executor", paths.Get(paths.Executor),
 		"target one specific executor by its machine name or id (e.g. greyshift); mutually exclusive with --executor-selector; also see RAFIKI_EXECUTOR")
 	cmd.MarkFlagsMutuallyExclusive("executor", "executor-selector")
+	cmd.Flags().StringSlice("executors", nil,
+		"executors this agent may address, by machine name, id or \"all\" (comma-separated or repeated)")
 	cmd.Flags().Bool("no-local-executor", false,
 		"do not offer this machine as a workspace; nothing here joins the daemon's executor pool for this session")
 	cmd.Flags().String("home", "",
@@ -244,6 +247,25 @@ func addSpawnFlags(cmd *cobra.Command) {
 			}
 		}
 		return completeModel(c, kind, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("executors", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		flagKind, _ := c.Flags().GetString("kind")
+		profileKind, profileName := "", ""
+		if p, err := resolveProfile(c); err == nil {
+			profileKind, profileName = p.Kind, p.Name
+		}
+		kind := resolveKind(flagKind, profileKind, clientstate.LastKindFor(profileName))
+		// A comma list completes its last element and keeps the typed prefix.
+		head, last := "", toComplete
+		if i := strings.LastIndex(toComplete, ","); i >= 0 {
+			head, last = toComplete[:i+1], toComplete[i+1:]
+		}
+		cands := append(completeExecutor(c, kind, last), childstore.ExecutorSetAll)
+		out := make([]string, 0, len(cands))
+		for _, cand := range filterByPrefix(cands, last) {
+			out = append(out, head+cand)
+		}
+		return out, cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace
 	})
 	_ = cmd.RegisterFlagCompletionFunc("executor", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		flagKind, _ := c.Flags().GetString("kind")
@@ -584,6 +606,13 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	// whether the user typed the flag, not whether the value is meaningful — so
 	// gating on it makes a computed default unreachable.
 	req.ExecutorSelector, _ = cmd.Flags().GetString("executor-selector")
+	if execs, _ := cmd.Flags().GetStringSlice("executors"); len(execs) > 0 {
+		for _, e := range execs {
+			if e = strings.TrimSpace(e); e != "" {
+				req.Executors = append(req.Executors, e)
+			}
+		}
+	}
 
 	// Read unconditionally, like the selector above: an explicit --home rides
 	// the wire VERBATIM, even for an executor this client cannot see as
@@ -622,10 +651,11 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 }
 
 // connectSpawnRequest converts the client-assembled request onto the Connect
-// wire message. Field-for-field with the daemon's own plane mapping
-// (cmd/rafikid's buildProtocolSpawnRequest consumed exactly this shape over
-// the framed plane; pkg/connectapi's connectapiSpawnParams reads it back),
-// so every field buildSpawnRequest set rides — including the operator-only
+// wire message. It carries every field buildSpawnRequest sets, which is the
+// shape the daemon's plane mapping (cmd/rafikid's buildProtocolSpawnRequest,
+// pkg/connectapi's connectapiSpawnParams) reads back; it does not mirror
+// every SpawnRequest field, only the ones this client assembles. They ride —
+// including the operator-only
 // 15–29 (config_dir … passthrough_auth), which the daemon refuses to a caller
 // with child provenance. The three budgets stay pointers end to end: unset
 // and zero mean opposite things per field, so collapsing them would silently
@@ -639,6 +669,7 @@ func connectSpawnRequest(req protocol.SpawnRequest) *rafikiv1.SpawnRequest {
 		Labels:             req.Labels,
 		ParentChildId:      req.ParentChildID,
 		ExecutorSelector:   req.ExecutorSelector,
+		Executors:          req.Executors,
 		ExecutorRef:        req.ExecutorRef,
 		HomeExecutor:       req.HomeExecutor,
 		Preset:             req.Preset,
