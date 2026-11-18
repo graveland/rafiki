@@ -1713,3 +1713,89 @@ func TestBuildSpawnRequest_ExecutorsFlag(t *testing.T) {
 	c.Require().NoError(err, "buildSpawnRequest bare")
 	c.Nil(req.Executors, "an absent flag must leave Executors nil")
 }
+
+// -i forces the form, which has no executors row, so --executors would be
+// parsed and then dropped. Refused at parse time like --home.
+func TestInteractiveWithExecutorsIsRefusedAtParseTime(t *testing.T) {
+	c := assert.NewAborting(t)
+	cmd := newCreateCmd()
+	cmd.SetArgs([]string{"-i", "--executors", "greyshift"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+	c.Require().Error(err, "-i with --executors must be refused: the form cannot show the set it would send")
+	c.StrContains(err.Error(), "interactive", "the refusal names the flag group")
+	c.StrContains(err.Error(), "executors", "the refusal names the flag group")
+}
+
+// A set plus a selector would name executors outside the set.
+func TestExecutorsWithSelectorIsRefusedAtParseTime(t *testing.T) {
+	c := assert.NewAborting(t)
+	cmd := newCreateCmd()
+	cmd.SetArgs([]string{"--executors", "greyshift", "--executor-selector", "owner=brent"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+	c.Require().Error(err, "--executors with --executor-selector must be refused")
+	c.StrContains(err.Error(), "executors", "the refusal names the flag group")
+	c.StrContains(err.Error(), "executor-selector", "the refusal names the flag group")
+}
+
+// A fundi spawn with a set must not start the local session executor: its
+// machine=<host> selector would ride beside the set. The env-default selector
+// is dropped for the same reason. --executor may still combine with a set.
+func TestRunCreateWithExecutorsSendsNoSelectorAndNoSessionExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
+	t.Setenv(paths.ExecutorName, "greyshift")
+	t.Setenv(paths.ExecutorSelector, "owner=brent")
+	stub := &createStubControl{}
+	serveCreateStub(t, stub)
+
+	started := false
+	seam := createStartSessionExecutor
+	createStartSessionExecutor = func(context.Context, string, profile.Resolved) (string, func(), error) {
+		started = true
+		return "machine=greyshift", func() {}, nil
+	}
+	t.Cleanup(func() { createStartSessionExecutor = seam })
+
+	cmd := createCmdForRun(t, "--detached", "--executors", "greyshift,x_1")
+	c.Require().NoError(runCreate(cmd, nil), "runCreate")
+	c.Require().NotNil(stub.spawned, "no Spawn reached the daemon")
+	c.False(started, "the session executor must not start when a set is given")
+	c.Eq("", stub.spawned.GetExecutorSelector(), "no selector may ride beside a set")
+	c.EqDeep([]string{"greyshift", "x_1"}, stub.spawned.GetExecutors(), "the set rides")
+}
+
+// --executor may ride beside a set: the daemon checks the home is in it.
+func TestRunCreateWithExecutorsAndExecutorKeepsBoth(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &createStubControl{}
+	serveCreateStub(t, stub)
+
+	cmd := createCmdForRun(t, "--detached", "--executors", "greyshift,x_1", "--executor", "greyshift")
+	c.Require().NoError(runCreate(cmd, nil), "runCreate")
+	c.Require().NotNil(stub.spawned, "no Spawn reached the daemon")
+	c.Eq("greyshift", stub.spawned.GetExecutorRef(), "--executor combines with a set")
+	c.EqDeep([]string{"greyshift", "x_1"}, stub.spawned.GetExecutors(), "the set rides")
+}
+
+// A comma list completes its last element and keeps the typed head.
+func TestExecutorsCompletionKeepsTheCommaHead(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+	resetProfileCache()
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	cmd := newTestCreateCmd()
+	fn, ok := cmd.GetFlagCompletionFunc("executors")
+	c.Require().True(ok, "no completion function registered for --executors")
+
+	got, _ := fn(cmd, nil, "greyshift,al")
+	c.EqDeep([]string{"greyshift,all"}, got, "the head is kept and the last element completed")
+
+	got, _ = fn(cmd, nil, "al")
+	c.EqDeep([]string{"all"}, got, "a bare element completes without a head")
+}

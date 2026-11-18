@@ -112,6 +112,9 @@ Set these defaults on a profile, not an environment variable: see
 	// accepting both would parse the flag and then silently drop it on the form
 	// path. Refuse at parse time instead, like --prefill-files above.
 	cmd.MarkFlagsMutuallyExclusive("interactive", "home")
+	// The form has no executors row either, so --executors would be parsed and
+	// then silently dropped on the form path.
+	cmd.MarkFlagsMutuallyExclusive("interactive", "executors")
 	cmd.Flags().String("prefill-files", "",
 		"File listing files the child reads before its first turn (one per line; path[:N-M] or a glob; '-' for stdin, only with --detached). fundi: read before turn 1; claude: added to its system prompt as files to read first.")
 	// The create form cannot carry a pre-fill (pkg/tui's SpawnRequest has no
@@ -189,7 +192,10 @@ func addSpawnFlags(cmd *cobra.Command) {
 		"target one specific executor by its machine name or id (e.g. greyshift); mutually exclusive with --executor-selector; also see RAFIKI_EXECUTOR")
 	cmd.MarkFlagsMutuallyExclusive("executor", "executor-selector")
 	cmd.Flags().StringSlice("executors", nil,
-		"executors this agent may address, by machine name, id or \"all\" (comma-separated or repeated)")
+		"executors this agent may address, by machine name, id or \"all\" (comma-separated or repeated); mutually exclusive with --executor-selector")
+	// A set plus a selector would let the request name executors outside the
+	// set, so the daemon would have two competing answers to "which executors".
+	cmd.MarkFlagsMutuallyExclusive("executors", "executor-selector")
 	cmd.Flags().Bool("no-local-executor", false,
 		"do not offer this machine as a workspace; nothing here joins the daemon's executor pool for this session")
 	cmd.Flags().String("home", "",
@@ -613,6 +619,12 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 			}
 		}
 	}
+	// The selector flag's default carries RAFIKI_EXECUTOR_SELECTOR, which cobra's
+	// exclusion cannot see (it only checks flags the user typed). An explicit set
+	// wins, so the request never carries a selector outside it.
+	if len(req.Executors) > 0 {
+		req.ExecutorSelector = ""
+	}
 
 	// Read unconditionally, like the selector above: an explicit --home rides
 	// the wire VERBATIM, even for an executor this client cannot see as
@@ -654,7 +666,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 // wire message. It carries every field buildSpawnRequest sets, which is the
 // shape the daemon's plane mapping (cmd/rafikid's buildProtocolSpawnRequest,
 // pkg/connectapi's connectapiSpawnParams) reads back; it does not mirror
-// every SpawnRequest field, only the ones this client assembles. They ride —
+// every SpawnRequest field, only the ones this client assembles. They ride,
 // including the operator-only
 // 15–29 (config_dir … passthrough_auth), which the daemon refuses to a caller
 // with child provenance. The three budgets stay pointers end to end: unset
@@ -1380,7 +1392,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	req.ExecutorRef, req.ExecutorSelector = ref, selector
 	sessionExecutorRan := false
 
-	if req.ExecutorRef == "" && req.ExecutorSelector == "" && req.Kind == protocol.KindFundi && !noLocalExecutor {
+	if req.ExecutorRef == "" && req.ExecutorSelector == "" && len(req.Executors) == 0 && req.Kind == protocol.KindFundi && !noLocalExecutor {
 		selector, stop, err := createStartSessionExecutor(cmdCtx(cmd), req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
