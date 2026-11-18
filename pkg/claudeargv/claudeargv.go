@@ -89,11 +89,12 @@ const coordinationWaiting = " Waiting: a subagent you spawn is not announced on 
 	"TOP-LEVEL agent it spawned; they are not your channel and are not a reason to poll."
 
 // coordinationInstall names the executor-install capability, for the same reason
-// coordinationWaiting exists: a claude child's own tools stop at the host it runs
-// on, so executor_install buys it nothing DIRECTLY and its description's "agents
-// you spawn can" is a fact about a tool the model has no occasion to reach for
-// unless the standing policy says it is there for its workers. One sentence,
-// stated where the child's other standing policy lives.
+// coordinationWaiting exists: the tool's description is a fact the model has no
+// occasion to act on unless the standing policy says it is there. A claude child's
+// native tools run on the host it launched on, while executor-routed tools reach
+// an installed executor, so installing a machine makes it addressable by name for
+// the child's workers and for those routed tools. One sentence, stated where the
+// child's other standing policy lives.
 const coordinationInstall = " executor_install puts a rafiki executor on any machine your executors can ssh to, " +
 	"and agents you spawn can then use it by name."
 

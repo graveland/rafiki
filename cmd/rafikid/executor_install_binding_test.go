@@ -11,9 +11,10 @@ package main
 // and compare what each answers. These tests do exactly that: one fixture, one
 // Controller, two faces.
 //
-// TestInstallFacesAdmitIdentically is the table; the note test pins the one
-// place the faces deliberately differ (a claude child is told it cannot use
-// what it installs, because its own tools stop at the host it runs on).
+// TestInstallFacesAdmitIdentically is the table, and
+// TestInstallFacesDescriptionIsIdenticalForEveryKind pins that the faces answer
+// every caller kind the same way: a claude child's native tools run on its
+// launch host, but executor-routed tools reach the installed executor.
 
 import (
 	"context"

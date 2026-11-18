@@ -99,7 +99,7 @@ func TestExecutorSetSurvivesSessionSnapshotRecordHops(t *testing.T) {
 			snap.ExecutorSet[0] = "mutated-snap"
 			c.EqDeep(tc.set, rec.ExecutorSet, "record aliases the snapshot's slice")
 			rec.ExecutorSet[0] = "mutated-rec"
-			c.EqDeep(tc.set, final.ExecutorSet, "rebuilt session aliases the record's slice")
+			c.EqDeep(tc.set, back.ExecutorSet, "rebuilt session aliases the record's slice")
 		})
 	}
 }

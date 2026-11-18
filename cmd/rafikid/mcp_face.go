@@ -581,9 +581,9 @@ var mcpBlueprints = []tools.Tool{
 	&tools.MemoryGetBlueprint{},
 	&tools.MemoryTreeBlueprint{},
 	&tools.MemoryDeleteBlueprint{},
-	// The ssh pair: a claude child's own tools stop at the host it runs on, so
-	// installing a machine for its SUBAGENTS is a workspace capability it
-	// otherwise has no way to reach. Both decline when the daemon has no
+	// The ssh pair: a claude child's native tools run on the host it launched
+	// on, while executor-routed tools reach an installed executor, so installing
+	// a machine is how a claude child gains one to address. Both decline when the daemon has no
 	// install recipe table (getServer's installStoreReady guard).
 	&tools.ExecutorInstallBlueprint{},
 	&tools.ExecutorUninstallBlueprint{},
