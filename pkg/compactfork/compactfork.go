@@ -382,6 +382,7 @@ func cloneRequest(req *rafikiv1.SpawnRequest) *rafikiv1.SpawnRequest {
 		Labels:             req.Labels,
 		ParentChildId:      req.ParentChildId,
 		ExecutorSelector:   req.ExecutorSelector,
+		Executors:          req.Executors,
 		ExecutorRef:        req.ExecutorRef,
 		Preset:             req.Preset,
 		Prefill:            req.Prefill,

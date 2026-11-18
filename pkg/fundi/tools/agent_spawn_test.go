@@ -258,3 +258,22 @@ func TestAgentResultDescriptionMentionsSilentTurnEnd(t *testing.T) {
 	assert.NewCollecting(t).StrContains(agentResultDescription,
 		"ending a turn without calling agent_result is silent", "agent_result description")
 }
+
+func TestAgentSpawnPassesExecutors(t *testing.T) {
+	c := assert.NewAborting(t)
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+
+	in := `{"prompt":"x","executors":[" pima ","","silvershift"]}`
+	if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(in)); err != nil {
+		t.Fatalf("agent_spawn: %v", err)
+	}
+	c.EqDeep([]string{"pima", "silvershift"}, sp.spawned[0].Executors, "trimmed, empties dropped")
+
+	sp2 := &fakeSpawner{}
+	reg2, ctx2 := newAgentTools(t, sp2)
+	if _, err := reg2.Execute(ctx2, "agent_spawn", json.RawMessage(`{"prompt":"x"}`)); err != nil {
+		t.Fatalf("agent_spawn: %v", err)
+	}
+	c.Nil(sp2.spawned[0].Executors, "an omitted executors list stays nil")
+}

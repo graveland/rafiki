@@ -121,6 +121,8 @@ type SpawnParams struct {
 	Preset           string
 	ParentChildID    string
 	ExecutorSelector string
+	// Executors: see SpawnRequest.executors; child-allowed.
+	Executors []string
 	// SkipDerivedIndex: see SpawnRequest.skip_derived_index; child-allowed.
 	SkipDerivedIndex bool
 	// Notify: see SpawnRequest.notify; child-allowed.

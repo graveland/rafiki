@@ -185,24 +185,3 @@ func TestExecutorInstallIsDaemonTier(t *testing.T) {
 		c.NotContains(ExecutorLocalTools(), name, "%s must never reach an executor's own registry", name)
 	}
 }
-
-// A claude caller cannot run workspace tools on an executor it installs, and
-// its description has to say so: a model told only "install" would install a
-// machine it then cannot use.
-func TestExecutorInstallDescriptionNoteForClaudeCallers(t *testing.T) {
-	c := assert.NewAborting(t)
-	inst := &fakeExecutorInstaller{}
-
-	plain, err := ExecutorInstallBlueprint{}.Materialize(ToolOpts{ExecutorInstaller: inst})
-	c.Require().NoError(err, "Materialize executor_install")
-	c.NotStrContains(plain.Description(), "You cannot run workspace tools",
-		"a caller that can address executors must not be told it cannot")
-
-	noted, err := ExecutorInstallBlueprint{}.Materialize(ToolOpts{
-		ExecutorInstaller:          inst,
-		CannotUseInstalledExecutor: true,
-	})
-	c.Require().NoError(err, "Materialize executor_install for a claude caller")
-	c.Eq(plain.Description()+executorInstallNoWorkspaceNote, noted.Description(),
-		"the note is appended verbatim and only when the caller cannot use the result")
-}

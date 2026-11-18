@@ -531,6 +531,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		FromTag:          m.GetFromTag(),
 		ParentChildID:    m.GetParentChildId(),
 		ExecutorSelector: m.GetExecutorSelector(),
+		Executors:        m.GetExecutors(),
 		SkipDerivedIndex: m.GetSkipDerivedIndex(),
 		Notify:           m.GetNotify(),
 		ExecutorRef:      m.GetExecutorRef(),

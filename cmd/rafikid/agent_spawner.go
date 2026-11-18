@@ -694,6 +694,7 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		MaxCost:               spec.MaxCost,
 		MaxChildren:           spec.MaxChildren,
 		ExecutorSelector:      spec.ExecutorSelector,
+		Executors:             spec.Executors,
 		WorkspaceMode:         spec.WorkspaceMode,
 		ForkFrom:              forkFromRequest(spec.ForkFrom),
 		FromTag:               spec.FromTag,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"go.graveland.dev/rafiki/pkg/prefill"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -100,17 +101,9 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 			{Name: "max_children", Type: "integer",
 				Description: "How many agents may be alive beneath it at once. Default 10."},
 			{Name: "executor", Type: "string",
-				Description: "Where to run this agent: a label selector over machines " +
-					"(e.g. \"env=work,os=linux\"), or a bare machine name (e.g. \"greyshift\") " +
-					"to target that one executor by name, like the CLI's --executor. " +
-					"Omit to use the machines you already reach: a spawned agent " +
-					"inherits your confinement, and a top-level agent (no parent, e.g. " +
-					"one spawned via MCP) gets any live executor that admits it. You " +
-					"can only ever narrow: naming a machine you cannot reach is " +
-					"refused, and the refusal says which machine and why. On a daemon " +
-					"with no executor pool the agent has no filesystem tools. " +
-					"A selector matching several executors lets the agent reach all " +
-					"of them; its workspace tools then take an executor argument."},
+				Description: "Where to place this agent: a machine name or id from your own executor set, or a label selector over your set (e.g. \"os=linux\"), which gives the agent every matching executor. Use executors to name several. Omit to give it your home executor."},
+			{Name: "executors", Type: "array", Items: &Schema{Type: "string"},
+				Description: "Executors this agent may address, by machine name or id, chosen from your own set (see executor_list). With one, its tools need no executor argument; with more than one, every workspace tool call must name one. [\"all\"] is available only when your own set is all. Omit to give it your home executor."},
 			{Name: "workspace", Type: "string",
 				Description: "Which executors may serve this agent, by the workspace_mode their " +
 					"operator declared, and what happens if that executor is lost. " +
@@ -240,6 +233,7 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		FromTag            string             `json:"from_tag,omitempty"`
 		Sandbox            *spawnSandboxParam `json:"sandbox,omitempty"`
 		Notify             string             `json:"notify,omitempty"`
+		Executors          []string           `json:"executors,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: invalid input: %w", err)
@@ -309,6 +303,7 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		MaxCost:            params.MaxCost,
 		MaxChildren:        params.MaxChildren,
 		ExecutorSelector:   params.Executor,
+		Executors:          trimNonEmpty(params.Executors),
 		Notify:             params.Notify,
 		WorkspaceMode:      params.Workspace,
 		Preset:             params.Preset,
@@ -347,4 +342,16 @@ func buildForkFrom(p *forkFromParam) (*ForkFromSpec, error) {
 		return nil, errors.New("fork_from requires child_id — name the agent whose history to borrow")
 	}
 	return &ForkFromSpec{ChildID: p.ChildID, Cursor: p.Cursor}, nil
+}
+
+// trimNonEmpty trims each entry and drops the empty ones, returning nil when
+// nothing is left so an omitted or blank list reads as "no set requested".
+func trimNonEmpty(in []string) []string {
+	var out []string
+	for _, e := range in {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }

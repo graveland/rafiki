@@ -334,6 +334,7 @@ class Client:
         parent_child_id: "str | None" = None,
         executor: "str | None" = None,
         executor_ref: "str | None" = None,
+        executors: "list[str] | None" = None,
         home_executor: "str | None" = None,
         script: "dict | _gen.control_pb.SpawnRequest.ScriptSpec | None" = None,
         prefill: "Iterable | None" = None,
@@ -391,6 +392,9 @@ class Client:
         for other kinds and without an executor pool. Any other value raises
         ``ValueError``.
 
+        ``executors`` names the executors the child may address (machine labels
+        or ids from the caller's own set, or ``["all"]``).
+
         ``home_executor`` names (machine label or id) the executor where
         ``cwd`` applies and project context (CLAUDE.md/AGENTS.md) and project
         skills are read from. It is NOT a default for tool calls, and it must
@@ -414,6 +418,7 @@ class Client:
             parent_child_id=parent_child_id or "",
             executor_selector=executor or "",
             executor_ref=executor_ref or "",
+            executors=list(executors or []),
             home_executor=home_executor or "",
             preset=preset or "",
             max_depth=max_depth,

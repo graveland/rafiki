@@ -39,13 +39,6 @@ const executorInstallDescription = "Install and start a rafiki executor on a mac
 	"(host key, auth), the error carries ssh's own message: fix that on the via " +
 	"machine and retry."
 
-// executorInstallNoWorkspaceNote is appended to the description for a caller
-// that cannot run workspace tools on the executor it installs. Its own tools
-// belong to the host it runs on, not to an executor it may choose, so an
-// install buys it nothing directly — only the agents it spawns (fundi children,
-// which do address executors) can use the result.
-const executorInstallNoWorkspaceNote = " You cannot run workspace tools on it yourself; agents you spawn can."
-
 // executorInstallModeDescription is the `mode` parameter's description
 // VERBATIM: its wording is the contract a model reads when it picks a
 // transport. The rule itself lives in the daemon, so the tool passes `mode`
@@ -89,11 +82,7 @@ func (b ExecutorInstallBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 	if inst == nil {
 		return nil, nil // decline
 	}
-	desc := b.Description()
-	if opts.CannotUseInstalledExecutor {
-		desc += executorInstallNoWorkspaceNote
-	}
-	return &executorInstallTool{inst: inst, desc: desc}, nil
+	return &executorInstallTool{inst: inst, desc: b.Description()}, nil
 }
 
 type executorInstallTool struct {

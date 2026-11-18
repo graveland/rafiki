@@ -590,6 +590,7 @@ func TestRunCloneRequestKeepsEveryField(t *testing.T) {
 		Labels:             map[string]string{"k": "v"},
 		ParentChildId:      "parent",
 		ExecutorSelector:   "selector",
+		Executors:          []string{"pima", "silvershift"},
 		ExecutorRef:        "ref",
 		Preset:             "preset",
 		Prefill:            []*rafikiv1.PrefillRead{{Path: "path"}},

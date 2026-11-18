@@ -39,6 +39,18 @@ def test_spawn_home_executor_maps_to_request():
     assert seen["request"].to_dict()["homeExecutor"] == "greyshift"
 
 
+def test_spawn_executors_maps_to_request():
+    seen = _capture(executors=["pima", "silvershift"])
+    assert list(seen["request"].executors) == ["pima", "silvershift"]
+    assert seen["request"].to_dict()["executors"] == ["pima", "silvershift"]
+
+
+def test_spawn_executors_default_leaves_field_unset():
+    seen = _capture()
+    assert list(seen["request"].executors) == []
+    assert "executors" not in seen["request"].to_dict()
+
+
 def test_spawn_home_executor_default_leaves_field_unset():
     seen = _capture()
     assert seen["request"].home_executor == ""

@@ -441,6 +441,7 @@ func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 		Labels:           p.Labels,
 		ParentChildID:    p.ParentChildID,
 		ExecutorSelector: p.ExecutorSelector,
+		Executors:        p.Executors,
 		SkipDerivedIndex: p.SkipDerivedIndex,
 		Notify:           p.Notify,
 		// Raw, un-normalized: Controller.Spawn is the one place an absent
