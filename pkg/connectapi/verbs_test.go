@@ -540,3 +540,14 @@ func TestSendSpawnKillUncodedErrorsAreRedactedAndLogged(t *testing.T) {
 		})
 	}
 }
+
+// TestSpawnPassesExecutors pins field 37 through the proto->SpawnParams mapping.
+func TestSpawnPassesExecutors(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeLifecycle{}
+
+	_, err := childScopedServer(f).Spawn(context.Background(),
+		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/tmp", Executors: []string{"greyshift", "x_1"}}))
+	c.Require().NoError(err, "child Spawn with executors refused")
+	c.EqDeep([]string{"greyshift", "x_1"}, f.got.Executors, "executors did not reach SpawnParams: %+v", f.got)
+}

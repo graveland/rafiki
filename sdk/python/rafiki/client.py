@@ -393,7 +393,8 @@ class Client:
         ``ValueError``.
 
         ``executors`` names the executors the child may address (machine labels
-        or ids from the caller's own set, or ``["all"]``).
+        or ids from the caller's own set, or ``["all"]``). A bare string raises
+        ``TypeError``.
 
         ``home_executor`` names (machine label or id) the executor where
         ``cwd`` applies and project context (CLAUDE.md/AGENTS.md) and project
@@ -409,6 +410,9 @@ class Client:
             raise ValueError('notify must be "all" or "result"')
         if workspace_tools is not None and workspace_tools not in ("native", "rafiki"):
             raise ValueError('workspace_tools must be "native" or "rafiki"')
+        if isinstance(executors, (str, bytes)):
+            # list("greyshift") would silently address eight one-letter executors.
+            raise TypeError("executors must be a list of strings, not a single string")
         req = _gen.control_pb.SpawnRequest(
             cwd=cwd if cwd else os.getcwd(),
             name=name or "",

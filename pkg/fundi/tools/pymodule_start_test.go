@@ -123,3 +123,19 @@ func TestPyModuleStartDeclinesWithoutSpawner(t *testing.T) {
 		t.Errorf("decline must be a registry absence, got %v", err)
 	}
 }
+
+// executors rides to the spawner trimmed, blanks dropped, so a stray empty
+// entry cannot turn into an address nothing matches.
+func TestPyModuleStartCarriesExecutors(t *testing.T) {
+	c := assert.NewCollecting(t)
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	_, err := reg.Execute(ctx, "pymodule_start", json.RawMessage(
+		`{"repo":"local","script":"job","executors":[" greyshift ","","x_1"]}`))
+	c.Require().NoError(err, "pymodule_start")
+	c.EqDeep([]string{"greyshift", "x_1"}, sp.spawned[0].Executors, "Executors")
+
+	_, err = reg.Execute(ctx, "pymodule_start", json.RawMessage(`{"repo":"local","script":"job","executors":["",""]}`))
+	c.Require().NoError(err, "pymodule_start blank")
+	c.Nil(sp.spawned[1].Executors, "an all-blank list must read as no set requested")
+}

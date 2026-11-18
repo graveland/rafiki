@@ -58,6 +58,7 @@ func (PyModuleStartBlueprint) InputSchema() Schema {
 			{Name: "max_cost", Type: "number", Description: "USD budget for this child and everything it spawns. Omit to inherit no limit — but if the script will spawn subagents, set one."},
 			{Name: "max_children", Type: "integer", Description: "How many agents may be alive beneath this child at once. Default 10."},
 			{Name: "executor", Type: "string", Description: "Where to run this child: a label selector over machines (e.g. \"env=work,os=linux\"), or a bare machine name (e.g. \"greyshift\") to target that one executor, like the CLI's --executor. Omit to inherit your confinement; you can only ever narrow. A selector matching several executors lets the agent reach all of them; its workspace tools then take an executor argument."},
+			{Name: "executors", Type: "array", Items: &Schema{Type: "string"}, Description: "Executors this child may address, by machine name or id, chosen from your own set (see executor_list). [\"all\"] is available only when your own set is all. Omit to leave the child on the default set."},
 			{Name: "cwd", Type: "string", Description: "Absolute working directory for the child's process. Omit to use your own. Only set this when the script must start somewhere specific — the script's code always comes from the synced pymodule cache, never from this directory."},
 		},
 		Required: []string{"script", "repo"},
@@ -89,6 +90,7 @@ type pymoduleStartInput struct {
 	MaxCost     *float64          `json:"max_cost,omitempty"`
 	MaxChildren *int              `json:"max_children,omitempty"`
 	Executor    string            `json:"executor,omitempty"`
+	Executors   []string          `json:"executors,omitempty"`
 	Cwd         string            `json:"cwd,omitempty"`
 }
 
@@ -152,6 +154,7 @@ func (t *pymoduleStartTool) Execute(ctx context.Context, input ToolInput) (ToolR
 		MaxCost:          in.MaxCost,
 		MaxChildren:      in.MaxChildren,
 		ExecutorSelector: in.Executor,
+		Executors:        trimNonEmpty(in.Executors),
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_start: %w", err)

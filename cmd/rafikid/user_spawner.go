@@ -88,23 +88,7 @@ func (s *userSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.Ag
 	// pkg/control's dispatch validates cwd absoluteness for the framed path
 	// and MCP does not go through it, while Controller.Spawn only stats cwd
 	// for kinds it forks locally — so this surface carries the check itself.
-	req := protocol.SpawnRequest{
-		Kind:             kind,
-		Name:             spec.Name,
-		Model:            spec.Model,
-		Cwd:              spec.Cwd,
-		MaxDepth:         spec.MaxDepth,
-		MaxCost:          spec.MaxCost,
-		MaxChildren:      spec.MaxChildren,
-		ExecutorSelector: spec.ExecutorSelector,
-		WorkspaceMode:    spec.WorkspaceMode,
-		ForkFrom:         forkFromRequest(spec.ForkFrom),
-		FromTag:          spec.FromTag,
-		// This is an MCP tool call, not an operator: a taken sibling name
-		// becomes name-2 instead of a refusal, exactly as agent_spawn does.
-		SuffixNameOnConflict: true,
-	}
-	applySpawnSpecShaping(&req, spec)
+	req := userSpawnRequest(kind, spec)
 	res, err := s.c.Spawn(ctx, req, s.owner)
 	if err != nil {
 		return tools.AgentInfo{}, err
@@ -243,4 +227,28 @@ func (s *userSpawner) Untag(ctx context.Context, tagID string) error {
 // Tags lists every tag the bound owner holds.
 func (s *userSpawner) Tags(ctx context.Context, q tools.TagQuery) ([]tools.TagInfo, error) {
 	return tagsWith(ctx, s.c, connectapi.TagCaller{Owner: s.owner}, q)
+}
+
+// userSpawnRequest maps a SpawnSpec onto the framed request. Extracted so the
+// field mapping is testable without a Controller behind it.
+func userSpawnRequest(kind string, spec tools.SpawnSpec) protocol.SpawnRequest {
+	req := protocol.SpawnRequest{
+		Kind:             kind,
+		Name:             spec.Name,
+		Model:            spec.Model,
+		Cwd:              spec.Cwd,
+		MaxDepth:         spec.MaxDepth,
+		MaxCost:          spec.MaxCost,
+		MaxChildren:      spec.MaxChildren,
+		ExecutorSelector: spec.ExecutorSelector,
+		Executors:        spec.Executors,
+		WorkspaceMode:    spec.WorkspaceMode,
+		ForkFrom:         forkFromRequest(spec.ForkFrom),
+		FromTag:          spec.FromTag,
+		// This is an MCP tool call, not an operator: a taken sibling name
+		// becomes name-2 instead of a refusal, exactly as agent_spawn does.
+		SuffixNameOnConflict: true,
+	}
+	applySpawnSpecShaping(&req, spec)
+	return req
 }

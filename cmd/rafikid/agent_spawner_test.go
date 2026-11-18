@@ -280,3 +280,12 @@ func TestControllerSpawnerReadSendAndKillStillRefuseSibling(t *testing.T) {
 	_, err = sp.View(ctx, tools.ViewSpec{ChildID: "c_b"})
 	c.Require().NoError(err, "the same target must remain readable")
 }
+
+// agent_spawn's executor list must reach the framed request Controller.Spawn
+// applies; an unmapped field silently widens the child to every executor.
+func TestAgentSpawnRequestCarriesExecutors(t *testing.T) {
+	c := assert.NewCollecting(t)
+	got := agentSpawnRequest("fundi", "/work", "c_self", "", tools.SpawnSpec{Executors: []string{"greyshift", "x_1"}})
+	c.EqDeep([]string{"greyshift", "x_1"}, got.Executors, "executors did not reach the framed request")
+	c.Eq("c_self", got.ParentChildID, "parent")
+}

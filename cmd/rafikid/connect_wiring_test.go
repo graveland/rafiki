@@ -353,3 +353,12 @@ func TestTagManagerIsWired(t *testing.T) {
 	_, err = bare.ListTags(context.Background(), connect.NewRequest(&rafikiv1.ListTagsRequest{}))
 	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "an unwired daemon answers Unavailable, got %v", err)
 }
+
+// The executor set rides Connect params onto the framed request verbatim.
+func TestBuildProtocolSpawnRequestCarriesExecutors(t *testing.T) {
+	c := assert.NewCollecting(t)
+	got := buildProtocolSpawnRequest(connectapi.SpawnParams{
+		Cwd: "/work", Executors: []string{"greyshift", "x_1"},
+	})
+	c.EqDeep([]string{"greyshift", "x_1"}, got.Executors, "executors did not reach the framed request")
+}

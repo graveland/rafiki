@@ -198,3 +198,11 @@ func TestUserSpawnerViewSendKillRejectUnknownChild(t *testing.T) {
 		t.Errorf("Kill(c_missing) must reject an unregistered id; got %v", err)
 	}
 }
+
+// The user-credential MCP surface must carry the executor list too: it is the
+// path an operator's own client takes.
+func TestUserSpawnRequestCarriesExecutors(t *testing.T) {
+	c := assert.NewCollecting(t)
+	got := userSpawnRequest("fundi", tools.SpawnSpec{Cwd: "/work", Executors: []string{"greyshift", "x_1"}})
+	c.EqDeep([]string{"greyshift", "x_1"}, got.Executors, "executors did not reach the framed request")
+}

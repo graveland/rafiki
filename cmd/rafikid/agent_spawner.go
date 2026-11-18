@@ -682,28 +682,7 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		spawnerConversationID = convID
 	}
 
-	req := protocol.SpawnRequest{
-		Kind:                  kind,
-		Name:                  spec.Name,
-		Model:                 spec.Model,
-		Cwd:                   cwd,
-		ParentChildID:         s.selfID,
-		Task:                  spec.Task,
-		SpawnerConversationID: spawnerConversationID,
-		MaxDepth:              spec.MaxDepth,
-		MaxCost:               spec.MaxCost,
-		MaxChildren:           spec.MaxChildren,
-		ExecutorSelector:      spec.ExecutorSelector,
-		Executors:             spec.Executors,
-		WorkspaceMode:         spec.WorkspaceMode,
-		ForkFrom:              forkFromRequest(spec.ForkFrom),
-		FromTag:               spec.FromTag,
-		// A model that asks for a name one of its live workers already has
-		// gets name-2 rather than a refusal it can do nothing useful with. Set
-		// HERE only: every operator surface refuses a taken name.
-		SuffixNameOnConflict: true,
-	}
-	applySpawnSpecShaping(&req, spec)
+	req := agentSpawnRequest(kind, cwd, s.selfID, spawnerConversationID, spec)
 	// The owner id is the caller's own row's, read from the same fetch that
 	// supplied Cwd: stored state, never a tool argument. An empty id is the
 	// anonymous-chain shape and stamps nothing, exactly as an empty identity
@@ -732,3 +711,31 @@ const labelTaskHandle = "rafiki/task"
 
 // unused import guard for the tasks package until Task 3 lands.
 var _ tasks.Status
+
+// agentSpawnRequest maps a SpawnSpec onto the framed request. Extracted so the
+// field mapping is testable without a Controller behind it.
+func agentSpawnRequest(kind, cwd, selfID, spawnerConversationID string, spec tools.SpawnSpec) protocol.SpawnRequest {
+	req := protocol.SpawnRequest{
+		Kind:                  kind,
+		Name:                  spec.Name,
+		Model:                 spec.Model,
+		Cwd:                   cwd,
+		ParentChildID:         selfID,
+		Task:                  spec.Task,
+		SpawnerConversationID: spawnerConversationID,
+		MaxDepth:              spec.MaxDepth,
+		MaxCost:               spec.MaxCost,
+		MaxChildren:           spec.MaxChildren,
+		ExecutorSelector:      spec.ExecutorSelector,
+		Executors:             spec.Executors,
+		WorkspaceMode:         spec.WorkspaceMode,
+		ForkFrom:              forkFromRequest(spec.ForkFrom),
+		FromTag:               spec.FromTag,
+		// A model that asks for a name one of its live workers already has
+		// gets name-2 rather than a refusal it can do nothing useful with. Set
+		// HERE only: every operator surface refuses a taken name.
+		SuffixNameOnConflict: true,
+	}
+	applySpawnSpecShaping(&req, spec)
+	return req
+}

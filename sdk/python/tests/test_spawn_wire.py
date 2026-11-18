@@ -45,6 +45,11 @@ def test_spawn_executors_maps_to_request():
     assert seen["request"].to_dict()["executors"] == ["pima", "silvershift"]
 
 
+def test_spawn_executors_bare_string_is_refused():
+    with pytest.raises(TypeError):
+        _capture(executors="greyshift")
+
+
 def test_spawn_executors_default_leaves_field_unset():
     seen = _capture()
     assert list(seen["request"].executors) == []
