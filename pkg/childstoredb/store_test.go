@@ -320,3 +320,42 @@ func TestAdoptOwnershipSkipsATombstonedRow(t *testing.T) {
 	_, ok := lookup(t, s, id)
 	c.False(ok, "adopting a tombstoned row resurrected it")
 }
+
+func TestExecutorSetRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
+	pool := testPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		set  []string
+	}{
+		{"nil", nil},
+		{"empty", []string{}},
+		{"all", []string{childstore.ExecutorSetAll}},
+		{"ids", []string{"a", "b"}},
+	}
+	for i, tc := range cases {
+		id := fmt.Sprintf("c_%s_%d", time.Now().Format("20060102150405.000000"), i)
+		t.Cleanup(func() { _ = s.Delete(ctx, id) })
+		rec := childstore.ChildRecord{
+			ChildID:     id,
+			Kind:        protocol.KindFundi,
+			Name:        "set-" + tc.name + "-" + id,
+			Status:      string(protocol.StatusIdle),
+			SpawnedAt:   time.Now(),
+			DaemonID:    "daemon-a",
+			ExecutorSet: tc.set,
+		}
+		c.Require().NoError(s.Upsert(ctx, rec), "Upsert "+tc.name)
+
+		got := findRecord(t, s, id)
+		if tc.set == nil {
+			c.True(got.ExecutorSet == nil, "%s: nil must stay nil, got %#v", tc.name, got.ExecutorSet)
+			continue
+		}
+		c.True(got.ExecutorSet != nil, "%s: must be non-nil", tc.name)
+		c.EqDeep(tc.set, got.ExecutorSet, tc.name)
+	}
+}

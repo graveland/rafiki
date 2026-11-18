@@ -60,7 +60,9 @@ type ChildRecord struct {
 	UpdatedAt time.Time
 
 	ExecutorSelector string
-	WorkspaceMode    string
+	// ExecutorSet: see Session.ExecutorSet.
+	ExecutorSet   []string
+	WorkspaceMode string
 
 	// SkipDerivedIndex gates recall indexing (embeddings and summaries) for this
 	// child's conversations. See childstore.Session.SkipDerivedIndex.
@@ -196,6 +198,7 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 		ExitSignal:   snap.ExitSignal,
 
 		ExecutorSelector: snap.ExecutorSelector,
+		ExecutorSet:      copySet(snap.ExecutorSet),
 		SkipDerivedIndex: snap.SkipDerivedIndex,
 		NotifyPolicy:     snap.NotifyPolicy,
 		WorkspaceTools:   snap.WorkspaceTools,
@@ -274,6 +277,7 @@ func SessionFromRecord(rec ChildRecord) *Session {
 		ExitSignal:   rec.ExitSignal,
 
 		ExecutorSelector: rec.ExecutorSelector,
+		ExecutorSet:      copySet(rec.ExecutorSet),
 		SkipDerivedIndex: rec.SkipDerivedIndex,
 		NotifyPolicy:     rec.NotifyPolicy,
 		WorkspaceTools:   rec.WorkspaceTools,

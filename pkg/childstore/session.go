@@ -131,6 +131,8 @@ type Session struct {
 	// property survives resume: a resumed child's effective set is still its
 	// parent's set intersected with what IT asked for.
 	ExecutorSelector string
+	// ExecutorSet is this child's executor set: ids, or [ExecutorSetAll]. nil for a row that predates executor sets; see ResolveSetSpec.
+	ExecutorSet []string
 
 	// SkipDerivedIndex is true when this child's conversations are not embedded
 	// or summarised by the recall indexer; resolved once at spawn (OR of the
@@ -274,6 +276,8 @@ type Snapshot struct {
 
 	// ExecutorSelector is the label selector this child was spawned with.
 	ExecutorSelector string
+	// ExecutorSet is this child's executor set: ids, or [ExecutorSetAll]. nil for a row that predates executor sets; see ResolveSetSpec.
+	ExecutorSet []string
 
 	// SkipDerivedIndex mirrors Session.SkipDerivedIndex — see its doc comment.
 	SkipDerivedIndex bool
@@ -373,6 +377,7 @@ func (s *Session) Snapshot() Snapshot {
 		RecordRequests: s.RecordRequests,
 
 		ExecutorSelector: s.ExecutorSelector,
+		ExecutorSet:      copySet(s.ExecutorSet),
 		SkipDerivedIndex: s.SkipDerivedIndex,
 		NotifyPolicy:     s.NotifyPolicy,
 		WorkspaceTools:   s.WorkspaceTools,

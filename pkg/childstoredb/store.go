@@ -34,15 +34,15 @@ INSERT INTO conversations.child
     (child_id, conversation_id, owner_user_id, kind, name, cwd, config_dir,
      pid, daemon_id, ns_token, provider, model, thinking, session_file, session_dir,
      session_id, no_session, status, last_status, spawned_at, last_activity,
-     exited_at, exit_code, exit_signal, executor_selector, workspace_mode,
+     exited_at, exit_code, exit_signal, executor_selector, workspace_mode, executor_set,
      max_depth, max_cost, max_children, config, labels, result, skip_derived_index,
      pending_question, last_turn_error, notify_policy, workspace_tools)
 VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7,
         $8, $9, $10, $11, $12, $13, $14, $15,
         $16, $17, $18, $19, $20, $21,
-        $22, $23, $24, $25, $26,
-        $27, $28, $29, $30, $31, $32, $33,
-        $34, $35, $36, $37)
+        $22, $23, $24, $25, $26, $27,
+        $28, $29, $30, $31, $32, $33, $34,
+        $35, $36, $37, $38)
 ON CONFLICT (child_id) DO UPDATE SET
     status            = EXCLUDED.status,
     last_status       = COALESCE(EXCLUDED.last_status, conversations.child.last_status),
@@ -67,6 +67,7 @@ ON CONFLICT (child_id) DO UPDATE SET
     exit_signal       = EXCLUDED.exit_signal,
     executor_selector = EXCLUDED.executor_selector,
     workspace_mode    = EXCLUDED.workspace_mode,
+    executor_set      = EXCLUDED.executor_set,
     max_depth         = EXCLUDED.max_depth,
     max_cost          = EXCLUDED.max_cost,
     max_children      = EXCLUDED.max_children,
@@ -122,7 +123,7 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 		rec.Status, nullString(rec.LastStatus),
 		rec.SpawnedAt, nullTime(rec.LastActivity), nullTime(rec.ExitedAt),
 		rec.ExitCode, rec.ExitSignal,
-		rec.ExecutorSelector, rec.WorkspaceMode,
+		rec.ExecutorSelector, rec.WorkspaceMode, rec.ExecutorSet,
 		rec.MaxDepth, rec.MaxCost, rec.MaxChildren,
 		config, labelsJSON, nullString(rec.Result), rec.SkipDerivedIndex,
 		nullString(rec.PendingQuestion), nullString(rec.LastTurnError), rec.NotifyPolicy,
@@ -249,7 +250,7 @@ SELECT child_id, COALESCE(conversation_id::text, ''), COALESCE(owner_user_id::te
        COALESCE(session_file,''), COALESCE(session_dir,''), COALESCE(session_id,''),
        no_session, status, COALESCE(last_status,''),
        spawned_at, last_activity, exited_at, exit_code, COALESCE(exit_signal,''),
-       COALESCE(executor_selector,''), COALESCE(workspace_mode,''), skip_derived_index,
+       COALESCE(executor_selector,''), COALESCE(workspace_mode,''), executor_set, skip_derived_index,
        max_depth, max_cost, max_children, config, labels, COALESCE(result, ''),
        COALESCE(pending_question, ''), COALESCE(last_turn_error, ''), notify_policy, workspace_tools, updated_at
   FROM conversations.child
@@ -288,7 +289,7 @@ func (s *Store) List(ctx context.Context) ([]childstore.ChildRecord, error) {
 			&rec.SessionFile, &rec.SessionDir, &rec.SessionID,
 			&rec.NoSession, &rec.Status, &rec.LastStatus,
 			&rec.SpawnedAt, &lastActivity, &exitedAt, &rec.ExitCode, &rec.ExitSignal,
-			&rec.ExecutorSelector, &rec.WorkspaceMode, &rec.SkipDerivedIndex,
+			&rec.ExecutorSelector, &rec.WorkspaceMode, &rec.ExecutorSet, &rec.SkipDerivedIndex,
 			&rec.MaxDepth, &rec.MaxCost, &rec.MaxChildren,
 			&configJSON, &labelsJSON, &rec.Result,
 			&rec.PendingQuestion, &rec.LastTurnError, &rec.NotifyPolicy, &rec.WorkspaceTools, &rec.UpdatedAt,
