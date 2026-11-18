@@ -1537,7 +1537,7 @@ each one at WARN as well. The texts, and what triggers each:
 - `no home executor: project instructions (CLAUDE.md) were not loaded; pass
   home_executor` — a multi-executor spawn with no `cwd` to probe, or a spawn
   with no reachable executor and no selection diagnostic to quote.
-- `no executor available yet; the child starts unbound: <diagnostic>` — none of
+- `no executor available yet; the child starts unbound: <diagnostic>`: none of
   the executors in the child's own set is reachable right now (or the reachable
   set could not be read). A spawn selector that matches no member of the
   SPAWNER's set, live or an offline installed one, is refused at spawn instead
