@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -720,4 +721,23 @@ func TestHomeExecutorNeverAnInstalledRow(t *testing.T) {
 		ck.Len(warnings, 0, "a refused spawn reports no warning")
 		ck.Eq(0, fb.provisions, "nothing may be provisioned for a refused home")
 	})
+}
+
+// The "Your machine" candidate is chosen through the child's own row: a legacy
+// row (nil set) reads its stored selector, never the request, which on a resume
+// names nothing and would pick whichever executor sorts first.
+func TestHomeInfoCandidateReadsTheLegacyRow(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := setController(t, machineExec("A", "a", nil), machineExec("B", "b", nil))
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_legacy", Status: protocol.StatusIdle, StartedAt: time.Now(),
+		Kind: protocol.KindFundi, Labels: map[string]string{}, ExecutorSelector: "machine=b",
+	})
+	be := &boundExecutor{childID: "c_legacy"}
+	reach := []executors.Executor{{ID: "B", Labels: map[string]string{"machine": "b"}, Enabled: true}}
+
+	info := c.homeInfo(context.Background(), protocol.SpawnRequest{}, executorOwner{}, be, "", false, nil, reach)
+
+	ck.Require().NotNil(info.Workspace, "a legacy child gets its machine block")
+	ck.Eq("b", info.Workspace.ExecutorName, "the block names the machine its stored selector reaches")
 }

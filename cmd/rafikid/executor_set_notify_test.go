@@ -86,14 +86,48 @@ func seedSetExecutor(f *installFixture, id, machine, owner string) {
 	}
 }
 
-// seedSetChild inserts a live child with the given stored set through the
-// store's own setter, so the set takes the path production writes use.
-func seedSetChild(t *testing.T, f *installFixture, id, owner string, status protocol.Status, set []string) {
+// resolveSetThroughSpawn is the set the production spawn resolver
+// (resolveSpawnExecutorSet) fixes for a top-level child of owner that names refs.
+// The named rows are made live for the resolution only, the way the pool lists
+// them, so the resolver reads them exactly as it does at a real spawn.
+func resolveSetThroughSpawn(t *testing.T, f *installFixture, owner string, refs []string) []string {
+	t.Helper()
+	saved := f.pool.live
+	live := slices.Clone(saved)
+	for _, ref := range refs {
+		row, ok := f.execs.execs[ref]
+		if !ok {
+			continue
+		}
+		if !slices.ContainsFunc(live, func(le execpool.LiveExecutor) bool { return le.Executor.ID == ref }) {
+			live = append(live, execpool.LiveExecutor{Executor: row})
+		}
+	}
+	f.pool.live = live
+	defer func() { f.pool.live = saved }()
+	req, err := f.ctrl.resolveSpawnExecutorSet(
+		protocol.SpawnRequest{Kind: protocol.KindFundi, Executors: refs},
+		executorOwner{Name: installTestOwnerName, UserID: owner})
+	assert.NewAborting(t).Require().NoError(err, "resolve the spawn's executor set")
+	return req.Executors
+}
+
+// seedSetChild inserts a live child whose stored set is the one the production
+// spawn resolver produces for refs: a nil refs is a legacy row (written before
+// sets existed, which no builder can produce), an empty one addresses nothing,
+// and a non-empty one is resolved. A child of another owner cannot resolve this
+// owner's executors, which is the point of the foreign-owner rows, so its set is
+// stored as given.
+func seedSetChild(t *testing.T, f *installFixture, id, owner string, status protocol.Status, refs []string) {
 	t.Helper()
 	f.ctrl.st.Insert(&childstore.Session{
 		ChildID: id, Status: status, StartedAt: time.Now(), OwnerUserID: owner,
 		Labels: map[string]string{"owner": installTestOwnerName, childstore.LabelRoot: id},
 	})
+	set := refs
+	if len(refs) > 0 && owner == installTestOwner {
+		set = resolveSetThroughSpawn(t, f, owner, refs)
+	}
 	if set != nil {
 		assert.NewAborting(t).Require().NoError(f.ctrl.st.SetExecutorSet(id, set), "seed set")
 	}
@@ -107,15 +141,13 @@ func seedLegacyChild(t *testing.T, f *installFixture, id, selector string) {
 		f.ctrl.st.Update(id, func(s *childstore.Session) { s.ExecutorSelector = selector }), "legacy selector")
 }
 
-// seedNativeThread inserts a native subagent row the way EnsureThreadChild does:
-// no owner of its own, a parent label, the parent's set cloned.
-func seedNativeThread(t *testing.T, f *installFixture, id, parent string, set []string) {
+// seedNativeThread creates a native subagent row through EnsureThreadChild, the
+// production builder, which clones the parent's set. thread is the id the row
+// takes ("<parent>~<thread>").
+func seedNativeThread(t *testing.T, f *installFixture, parent, thread string) string {
 	t.Helper()
-	f.ctrl.st.Insert(&childstore.Session{
-		ChildID: id, Status: protocol.StatusIdle, StartedAt: time.Now(), Native: true,
-		Labels: map[string]string{childstore.LabelParent: parent, labelNativeSubagent: "1"},
-	})
-	assert.NewAborting(t).Require().NoError(f.ctrl.st.SetExecutorSet(id, set), "seed thread set")
+	assert.NewAborting(t).Require().NoError(f.ctrl.EnsureThreadChild(parent, thread, ""), "EnsureThreadChild")
+	return threadChildID(parent, thread)
 }
 
 func setOf(f *installFixture, id string) []string {
@@ -137,22 +169,29 @@ func childInstallCaller(id string) installCaller {
 	return installCaller{OwnerUserID: installTestOwner, OwnerName: installTestOwnerName, ChildID: id}
 }
 
-// setRecordStore is a child store that keeps the executor set of each row it is
-// asked to write. err fails every write; block holds every write until it is
-// closed (or the write's context ends).
+// setRecordStore is the executor-set writer the controller persists through. It
+// keeps the set of each row it is asked to write. err fails every write; block
+// holds every write until it is closed (or the write's context ends).
 type setRecordStore struct {
-	stubChildStore
 	mu    sync.Mutex
 	sets  map[string][]string
 	calls int
 	err   error
 	block chan struct{}
+	// hook, when set, runs with the 1-based call number before the write
+	// is recorded and may block it.
+	hook func(call int, set []string)
 }
 
-func (s *setRecordStore) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
+func (s *setRecordStore) SetExecutorSet(ctx context.Context, childID string, set []string) error {
 	s.mu.Lock()
-	block, err := s.block, s.err
+	block, err, hook := s.block, s.err, s.hook
+	s.calls++
+	call := s.calls
 	s.mu.Unlock()
+	if hook != nil {
+		hook(call, set)
+	}
 	if block != nil {
 		select {
 		case <-block:
@@ -162,14 +201,13 @@ func (s *setRecordStore) Upsert(ctx context.Context, rec childstore.ChildRecord)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls++
 	if err != nil {
 		return err
 	}
 	if s.sets == nil {
 		s.sets = map[string][]string{}
 	}
-	s.sets[rec.ChildID] = slices.Clone(rec.ExecutorSet)
+	s.sets[childID] = slices.Clone(set)
 	return nil
 }
 
@@ -186,14 +224,30 @@ func (s *setRecordStore) writes() int {
 	return s.calls
 }
 
-// listGatedStore is the fixture's executor store with a List that fails or
-// blocks on demand and a Get that blocks on demand.
+// listGatedStore is the fixture's executor store with gates a test can close:
+// a List that fails or blocks, a Get that blocks (every call, or only the first
+// one, which reports that it arrived), a SetEnabled/Delete/SetLabels that block
+// until their context ends, and a Get rendezvous that waits for several callers
+// to be inside at once. dataMu makes the underlying map safe for the concurrent
+// tests, and SetEnabled really flips the row, unlike the plain fake.
 type listGatedStore struct {
 	*installExecStore
-	mu       sync.Mutex
-	listErr  error
-	listHold chan struct{}
-	getHold  chan struct{}
+	dataMu sync.Mutex
+
+	mu          sync.Mutex
+	listErr     error
+	listHold    chan struct{}
+	getHold     chan struct{}
+	writeStalls bool
+
+	firstGetHold     chan struct{}
+	firstGetEntered  chan struct{}
+	firstListHold    chan struct{}
+	firstListEntered chan struct{}
+
+	rendezvous        int
+	rendezvousTimeout time.Duration
+	arrivals          int
 }
 
 func (s *listGatedStore) gates() (listHold, getHold chan struct{}, listErr error) {
@@ -208,7 +262,24 @@ func (s *listGatedStore) failList(err error) {
 	s.listErr = err
 }
 
+// takeFirst returns the one-shot hold and its entered signal, clearing them.
+func takeFirst(mu *sync.Mutex, hold, entered *chan struct{}) (h, e chan struct{}) {
+	mu.Lock()
+	defer mu.Unlock()
+	h, e = *hold, *entered
+	*hold, *entered = nil, nil
+	return h, e
+}
+
 func (s *listGatedStore) List(ctx context.Context) ([]executors.Executor, error) {
+	if h, e := takeFirst(&s.mu, &s.firstListHold, &s.firstListEntered); h != nil {
+		close(e)
+		select {
+		case <-h:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	hold, _, listErr := s.gates()
 	if hold != nil {
 		select {
@@ -220,10 +291,49 @@ func (s *listGatedStore) List(ctx context.Context) ([]executors.Executor, error)
 	if listErr != nil {
 		return nil, listErr
 	}
+	s.dataMu.Lock()
+	defer s.dataMu.Unlock()
 	return s.installExecStore.List(ctx)
 }
 
+// enterGet is the rendezvous: Get calls are grouped in arrival order into
+// groups of n, and a call returns once its whole group has arrived, or after the
+// timeout (the serialised case, where the group can never assemble).
+func (s *listGatedStore) enterGet() {
+	s.mu.Lock()
+	n, d := s.rendezvous, s.rendezvousTimeout
+	if n == 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.arrivals++
+	target := (s.arrivals + n - 1) / n * n
+	s.mu.Unlock()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		together := s.arrivals >= target
+		s.mu.Unlock()
+		if together {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (s *listGatedStore) Get(ctx context.Context, id string) (executors.Executor, error) {
+	if h, e := takeFirst(&s.mu, &s.firstGetHold, &s.firstGetEntered); h != nil {
+		s.dataMu.Lock()
+		row, err := s.installExecStore.Get(ctx, id)
+		s.dataMu.Unlock()
+		close(e)
+		select {
+		case <-h:
+		case <-ctx.Done():
+			return executors.Executor{}, ctx.Err()
+		}
+		return row, err
+	}
 	_, hold, _ := s.gates()
 	if hold != nil {
 		select {
@@ -232,7 +342,64 @@ func (s *listGatedStore) Get(ctx context.Context, id string) (executors.Executor
 			return executors.Executor{}, ctx.Err()
 		}
 	}
-	return s.installExecStore.Get(ctx, id)
+	// The row is read before the rendezvous, so callers that meet here all hold
+	// a value read before any of them writes.
+	s.dataMu.Lock()
+	row, err := s.installExecStore.Get(ctx, id)
+	s.dataMu.Unlock()
+	s.enterGet()
+	return row, err
+}
+
+func (s *listGatedStore) stallWrites() {
+	s.mu.Lock()
+	s.writeStalls = true
+	s.mu.Unlock()
+}
+
+// stalled blocks until ctx ends when writes are stalled, and reports whether it did.
+func (s *listGatedStore) stalled(ctx context.Context) (bool, error) {
+	s.mu.Lock()
+	st := s.writeStalls
+	s.mu.Unlock()
+	if !st {
+		return false, nil
+	}
+	<-ctx.Done()
+	return true, ctx.Err()
+}
+
+func (s *listGatedStore) SetEnabled(ctx context.Context, id string, enabled bool) error {
+	if ok, err := s.stalled(ctx); ok {
+		return err
+	}
+	s.dataMu.Lock()
+	defer s.dataMu.Unlock()
+	e, ok := s.execs[id]
+	if !ok {
+		return executors.ErrNotFound
+	}
+	e.Enabled = enabled
+	s.execs[id] = e
+	return nil
+}
+
+func (s *listGatedStore) Delete(ctx context.Context, id string) error {
+	if ok, err := s.stalled(ctx); ok {
+		return err
+	}
+	s.dataMu.Lock()
+	defer s.dataMu.Unlock()
+	return s.installExecStore.Delete(ctx, id)
+}
+
+func (s *listGatedStore) SetLabels(ctx context.Context, id string, set map[string]string, remove []string) (executors.Executor, error) {
+	if ok, err := s.stalled(ctx); ok {
+		return executors.Executor{}, err
+	}
+	s.dataMu.Lock()
+	defer s.dataMu.Unlock()
+	return s.installExecStore.SetLabels(ctx, id, set, remove)
 }
 
 func gateExecStore(f *installFixture) *listGatedStore {
@@ -248,6 +415,13 @@ func shortLookups(t *testing.T) {
 	prev := executorSetLookupTimeout
 	executorSetLookupTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { executorSetLookupTimeout = prev })
+}
+
+// waitPersists waits for the background set writes, failing the test instead of
+// hanging when one never finishes.
+func waitPersists(t *testing.T, ctrl *Controller) {
+	t.Helper()
+	within(t, 5*time.Second, "the background set writes", ctrl.execSets.persists.Wait)
 }
 
 // within fails the test unless fn returns before d.
@@ -270,7 +444,7 @@ func TestInstallAddsToTheInstallersSet(t *testing.T) {
 	f := newInstallFixture(t)
 	log := attachSteerLog(f.ctrl)
 	store := &setRecordStore{}
-	f.ctrl.children = store
+	f.ctrl.setWriter = store
 	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
 	f.ctrl.seedAnnouncedExecutors(context.Background())
 	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{installTestLauncher, "exec-A"})
@@ -278,7 +452,7 @@ func TestInstallAddsToTheInstallersSet(t *testing.T) {
 
 	_, err := f.ctrl.InstallExecutor(context.Background(), childInstallCaller("c_kid"), installReq(installTestLauncherN))
 	c.Require().NoError(err, "install")
-	f.ctrl.execSets.persists.Wait()
+	waitPersists(t, f.ctrl)
 
 	want := []string{installTestLauncher, "exec-A", "exec-1"}
 	c.EqDeep(want, setOf(f, "c_kid"), "the installer's set")
@@ -316,7 +490,7 @@ func TestReinstallByAMemberChangesNothing(t *testing.T) {
 	f := newInstallFixture(t)
 	log := attachSteerLog(f.ctrl)
 	store := &setRecordStore{}
-	f.ctrl.children = store
+	f.ctrl.setWriter = store
 	f.seedInstalledExecutor()
 	f.ctrl.seedAnnouncedExecutors(context.Background())
 	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{installTestLauncher, "exec-1"})
@@ -325,7 +499,7 @@ func TestReinstallByAMemberChangesNothing(t *testing.T) {
 
 	_, err := f.ctrl.InstallExecutor(context.Background(), childInstallCaller("c_kid"), installReq(installTestLauncherN))
 	c.Require().NoError(err, "reinstall")
-	f.ctrl.execSets.persists.Wait()
+	waitPersists(t, f.ctrl)
 
 	c.EqDeep([]string{installTestLauncher, "exec-1"}, setOf(f, "c_kid"), "the set is unchanged")
 	c.Empty(log.of("c_kid"), "no EXECUTOR ADDED for a member")
@@ -414,7 +588,7 @@ func removalFixture(t *testing.T) (*installFixture, *steerLog, *setRecordStore) 
 	f := newInstallFixture(t)
 	log := attachSteerLog(f.ctrl)
 	store := &setRecordStore{}
-	f.ctrl.children = store
+	f.ctrl.setWriter = store
 	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
 	f.seedInstalledExecutor()
 	f.ctrl.seedAnnouncedExecutors(context.Background())
@@ -424,13 +598,13 @@ func removalFixture(t *testing.T) (*installFixture, *steerLog, *setRecordStore) 
 	seedSetChild(t, f, "c_a", installTestOwner, protocol.StatusIdle, []string{"exec-A"})
 	seedSetChild(t, f, "c_foreign", notifyOtherOwner, protocol.StatusIdle, []string{"exec-1"})
 	seedSetChild(t, f, "c_gone", installTestOwner, protocol.StatusExited, []string{"exec-A", "exec-1"})
-	seedNativeThread(t, f, "c_ap~t1", "c_ap", []string{"exec-A", "exec-1"})
-	seedNativeThread(t, f, "c_foreign~t1", "c_foreign", []string{"exec-1"})
+	seedNativeThread(t, f, "c_ap", "t1")
+	seedNativeThread(t, f, "c_foreign", "t1")
 	return f, log, store
 }
 
 func assertRemovedEverywhere(t *testing.T, f *installFixture, log *steerLog, store *setRecordStore) {
-	f.ctrl.execSets.persists.Wait()
+	waitPersists(t, f.ctrl)
 	c := assert.NewCollecting(t)
 	c.EqDeep([]string{"exec-A"}, setOf(f, "c_ap"), "c_ap")
 	c.EqDeep([]string{}, setOf(f, "c_p"), "c_p becomes empty, not nil")
@@ -441,8 +615,8 @@ func assertRemovedEverywhere(t *testing.T, f *installFixture, log *steerLog, sto
 	// An exited child is resumable and reads its stored set on resume.
 	c.EqDeep([]string{"exec-A"}, setOf(f, "c_gone"), "an exited child's stored set loses the id")
 	// A native subagent row has no owner of its own: its parent's decides.
-	c.EqDeep([]string{"exec-A"}, setOf(f, "c_ap~t1"), "a native thread of an owned parent loses the id")
-	c.EqDeep([]string{"exec-1"}, setOf(f, "c_foreign~t1"), "a native thread of another owner's parent is untouched")
+	c.EqDeep([]string{"exec-A"}, setOf(f, "c_ap:t1"), "a native thread of an owned parent loses the id")
+	c.EqDeep([]string{"exec-1"}, setOf(f, "c_foreign:t1"), "a native thread of another owner's parent is untouched")
 
 	c.EqDeep([]string{executorRemovedNotice("ublk-s2", []string{"alpha"})}, log.of("c_ap"), "c_ap notice")
 	c.EqDeep([]string{executorRemovedNotice("ublk-s2", nil)}, log.of("c_p"), "c_p notice")
@@ -450,12 +624,12 @@ func assertRemovedEverywhere(t *testing.T, f *installFixture, log *steerLog, sto
 	c.Empty(log.of("c_a"), "a child that never held it is not told")
 	c.Empty(log.of("c_foreign"), "another owner's child is not told")
 	c.Empty(log.of("c_gone"), "an exited child is not told")
-	c.Empty(log.of("c_ap~t1"), "a native thread is not a notice recipient; its parent is")
+	c.Empty(log.of("c_ap:t1"), "a native thread is not a notice recipient; its parent is")
 
 	stored, ok := store.stored("c_gone")
 	c.Eq(true, ok, "the exited child's row was written")
 	c.EqDeep([]string{"exec-A"}, stored, "the exited child's persisted set")
-	_, wroteThread := store.stored("c_ap~t1")
+	_, wroteThread := store.stored("c_ap:t1")
 	c.Eq(false, wroteThread, "a native row has no durable record, so none is written")
 }
 
@@ -527,7 +701,11 @@ func TestStaleExecutorIDInAStoredSetAddressesNothing(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
 	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+	seedSetExecutor(f, "exec-gone", "gone", installTestOwner)
 	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{"exec-gone", "exec-A"})
+	// The row disappears without set maintenance, as a stale stored write can
+	// leave it.
+	delete(f.execs.execs, "exec-gone")
 
 	all, ids, selector := f.ctrl.executorSetSpec("c_kid")
 	rows, err := f.execs.List(context.Background())
@@ -592,7 +770,7 @@ func TestPersistFailureNeverFailsTheInstallOrUninstall(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
 	store := &setRecordStore{err: errors.New("child store down")}
-	f.ctrl.children = store
+	f.ctrl.setWriter = store
 	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
 	f.ctrl.seedAnnouncedExecutors(context.Background())
 	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{installTestLauncher, "exec-A"})
@@ -602,7 +780,7 @@ func TestPersistFailureNeverFailsTheInstallOrUninstall(t *testing.T) {
 	_, err := f.ctrl.InstallExecutor(context.Background(), caller, installReq(installTestLauncherN))
 	c.Require().NoError(err, "install with a failing store")
 	c.Require().NoError(f.ctrl.UninstallExecutor(context.Background(), caller, "ublk-s2"), "uninstall with a failing store")
-	f.ctrl.execSets.persists.Wait()
+	waitPersists(t, f.ctrl)
 
 	c.Eq(true, store.writes() >= 2, "the writes were attempted")
 	c.EqDeep([]string{installTestLauncher, "exec-A"}, setOf(f, "c_kid"), "the in-memory set is right regardless")
@@ -614,7 +792,7 @@ func TestStuckChildStoreDoesNotHangTheInstallOrUninstall(t *testing.T) {
 	f := newInstallFixture(t)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	f.ctrl.children = &setRecordStore{block: release}
+	f.ctrl.setWriter = &setRecordStore{block: release}
 	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
 	f.ctrl.seedAnnouncedExecutors(context.Background())
 	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{installTestLauncher, "exec-A"})
@@ -673,7 +851,7 @@ func TestAnnounceNewSkipsSeededAndSandboxes(t *testing.T) {
 	seedSetChild(t, f, "c_exited", installTestOwner, protocol.StatusExited, []string{childstore.ExecutorSetAll})
 	seedSetChild(t, f, "c_ids", installTestOwner, protocol.StatusIdle, []string{"exec-A"})
 	seedSetChild(t, f, "c_foreign", notifyOtherOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
-	seedNativeThread(t, f, "c_all1~t1", "c_all1", []string{childstore.ExecutorSetAll})
+	seedNativeThread(t, f, "c_all1", "t1")
 
 	f.ctrl.announceIfNew("exec-A")
 	c.Empty(log.of("c_all1"), "a seeded executor reconnecting is not new")
@@ -687,7 +865,7 @@ func TestAnnounceNewSkipsSeededAndSandboxes(t *testing.T) {
 	c.Empty(log.of("c_exited"), "an exited child is not told")
 	c.Empty(log.of("c_ids"), "an ids child is not told")
 	c.Empty(log.of("c_foreign"), "another owner's child is not told")
-	c.Empty(log.of("c_all1~t1"), "a native thread is not told; its parent is")
+	c.Empty(log.of("c_all1:t1"), "a native thread is not told; its parent is")
 
 	f.execs.execs["exec-S"] = executors.Executor{
 		ID: "exec-S", Labels: map[string]string{"machine": "sbx", "rafiki/sandbox": "1"},
@@ -821,7 +999,7 @@ func TestSandboxRemovalUpdatesTheHoldersSet(t *testing.T) {
 
 // A connect that raced a failed install's rollback was announced to `all`
 // agents; the rollback tells them it is gone and forgets it.
-func TestRollbackAfterARacingConnectTellsAllAgents(t *testing.T) {
+func TestRollbackAfterAConnectTellsAllAgents(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
 	log := attachSteerLog(f.ctrl)
@@ -844,8 +1022,79 @@ func TestRollbackAfterARacingConnectTellsAllAgents(t *testing.T) {
 	c.Len(log.of("c_all"), 2, "a rollback nobody was told about tells nobody")
 }
 
+// The interleaving where a connect announces while the rollback is in flight:
+// the announcement has marked the executor and is reading its row when the
+// rollback starts. The rollback must wait for it, so the agents are told
+// "available" and then "removed", never the reverse, and never "available"
+// with no "removed" after the row is gone.
+func TestRollbackDuringAnAnnouncementWaitsForIt(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	log := attachSteerLog(f.ctrl)
+	gate := gateExecStore(f)
+	f.ctrl.seedAnnouncedExecutors(context.Background())
+	seedSetChild(t, f, "c_all", installTestOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
+	seedSetExecutor(f, "exec-R", "racer", installTestOwner)
+
+	hold, entered := make(chan struct{}), make(chan struct{})
+	gate.mu.Lock()
+	gate.firstGetHold, gate.firstGetEntered = hold, entered
+	gate.mu.Unlock()
+
+	done := make(chan struct{}, 2)
+	go func() { defer func() { done <- struct{}{} }(); f.ctrl.announceIfNew("exec-R") }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the announcement never read the row")
+	}
+	go func() { defer func() { done <- struct{}{} }(); f.ctrl.rollbackInstall("", "exec-R") }()
+	eventually(t, "the rollback to queue behind the announcement", func() bool { return waitersOn(f.ctrl, "exec-R") == 2 })
+	close(hold)
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the announcement and rollback did not both finish")
+		}
+	}
+
+	c.EqDeep([]string{
+		executorAvailableNotice("racer"),
+		executorRemovedNotice("racer", []string{childstore.ExecutorSetAll}),
+	}, log.of("c_all"), "available, then removed")
+	c.Eq(false, f.ctrl.execSets.wasAnnounced("exec-R"), "nothing is left announced")
+	_, still := f.execs.execs["exec-R"]
+	c.Eq(false, still, "the row is gone")
+}
+
+// waitersOn is how many operations hold or await executorID's ordering lock.
+func waitersOn(ctrl *Controller, executorID string) int {
+	k := &ctrl.execSets.ordering
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if e := k.entries[executorID]; e != nil {
+		return e.refs
+	}
+	return 0
+}
+
+// eventually polls cond until it holds, failing the test at the deadline.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // A removal must not overtake the announcement of the same executor: an agent
 // told "removed" and then "available" would believe a gone executor is usable.
+// The announcement is held inside its delivery, the removal is observed queued
+// on the ordering lock, and only then is the announcement released.
 func TestRemovalNeverOvertakesTheAnnouncement(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
@@ -864,21 +1113,351 @@ func TestRemovalNeverOvertakesTheAnnouncement(t *testing.T) {
 		}
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); f.ctrl.announceIfNew("exec-R") }()
-	<-inFlush
+	done := make(chan struct{}, 2)
+	go func() { defer func() { done <- struct{}{} }(); f.ctrl.announceIfNew("exec-R") }()
+	select {
+	case <-inFlush:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the announcement never reached delivery")
+	}
 	go func() {
-		defer wg.Done()
+		defer func() { done <- struct{}{} }()
 		f.ctrl.removeFromExecutorSets("exec-R", installTestOwner, "racer", map[string]string{"machine": "racer"})
 	}()
-	// Give the removal every chance to run ahead of the blocked announcement.
-	time.Sleep(50 * time.Millisecond)
+	// The removal is now contending for the executor's lock: holder plus waiter.
+	eventually(t, "the removal to queue behind the announcement", func() bool { return waitersOn(f.ctrl, "exec-R") == 2 })
 	close(release)
-	wg.Wait()
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the announcement and removal did not both finish")
+		}
+	}
 
 	c.EqDeep([]string{
 		executorAvailableNotice("racer"),
 		executorRemovedNotice("racer", []string{childstore.ExecutorSetAll}),
 	}, log.of("c_all"), "available first, then removed")
+}
+
+// rowUpsertForbidden is a child store that fails the test on any full-row
+// write: a set update must touch the executor_set column only.
+type rowUpsertForbidden struct {
+	stubChildStore
+	t *testing.T
+}
+
+func (s rowUpsertForbidden) Upsert(_ context.Context, rec childstore.ChildRecord) error {
+	s.t.Errorf("a full-row upsert of %s: a set update must write the executor_set column only", rec.ChildID)
+	return nil
+}
+
+// A set update never writes the row. A full-row write from a stale snapshot,
+// landing after a Close or an exit, clears closed_at or overwrites a newer
+// status and resurrects the child.
+func TestSetUpdateNeverUpsertsTheRow(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	attachSteerLog(f.ctrl)
+	f.ctrl.children = rowUpsertForbidden{t: t}
+	store := &setRecordStore{}
+	f.ctrl.setWriter = store
+	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+	f.seedInstalledExecutor()
+	f.ctrl.seedAnnouncedExecutors(context.Background())
+	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{"exec-A", "exec-1"})
+	seedSetChild(t, f, "c_gone", installTestOwner, protocol.StatusExited, []string{"exec-A", "exec-1"})
+
+	f.ctrl.removeFromExecutorSets("exec-1", installTestOwner, "ublk-s2", map[string]string{"machine": "ublk-s2"})
+	f.ctrl.addToExecutorSet("c_kid", "exec-B")
+	waitPersists(t, f.ctrl)
+
+	for _, id := range []string{"c_kid", "c_gone"} {
+		got, ok := store.stored(id)
+		c.Require().True(ok, "%s's set was written", id)
+		snap, _ := f.ctrl.st.Get(id)
+		c.EqDeep(snap.ExecutorSet, got, "%s: the stored set is the in-memory one", id)
+	}
+}
+
+// A closed child is gone from memory, so a write queued for it finds nothing to
+// write; the store's own closed_at guard covers a write already in flight.
+func TestSetUpdateOfAChildClosedMeanwhileWritesNothing(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	store := &setRecordStore{}
+	f.ctrl.setWriter = store
+	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusExited, []string{"exec-A"})
+	f.ctrl.st.Delete("c_kid")
+
+	f.ctrl.persistExecutorSets([]string{"c_kid"})
+	waitPersists(t, f.ctrl)
+
+	c.Eq(0, store.writes(), "nothing is written for a child that is no longer open")
+}
+
+// Two removals from one child's set, whose writes reach the store out of order:
+// the first write is held while the second removal updates memory and queues its
+// own write. The stored set must end as the newest in-memory set, not as the
+// stale snapshot the older write carries.
+func TestConcurrentRemovalsPersistTheNewestSet(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	attachSteerLog(f.ctrl)
+	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+	seedSetExecutor(f, "exec-B", "beta", installTestOwner)
+	seedSetExecutor(f, "exec-C", "gamma", installTestOwner)
+	f.ctrl.seedAnnouncedExecutors(context.Background())
+	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{"exec-A", "exec-B", "exec-C"})
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	store := &setRecordStore{hook: func(call int, _ []string) {
+		if call == 1 {
+			close(firstEntered)
+			<-releaseFirst
+		}
+	}}
+	f.ctrl.setWriter = store
+
+	f.ctrl.removeFromExecutorSets("exec-A", installTestOwner, "alpha", map[string]string{"machine": "alpha"})
+	select {
+	case <-firstEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first write never reached the store")
+	}
+	f.ctrl.removeFromExecutorSets("exec-B", installTestOwner, "beta", map[string]string{"machine": "beta"})
+	// The second write is queued behind the first on the child's write lock.
+	eventually(t, "the second write to queue", func() bool {
+		k := &f.ctrl.execSets.persistLocks
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		e := k.entries["c_kid"]
+		return e != nil && e.refs == 2
+	})
+	close(releaseFirst)
+	waitPersists(t, f.ctrl)
+
+	c.EqDeep([]string{"exec-C"}, setOf(f, "c_kid"), "memory lost both")
+	stored, ok := store.stored("c_kid")
+	c.Require().True(ok, "written")
+	c.EqDeep([]string{"exec-C"}, stored, "the last write is the newest set")
+}
+
+// Concurrent installs and removals by many children never lose a member.
+func TestConcurrentRemovalsOfDifferentExecutorsLoseNoMember(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	attachSteerLog(f.ctrl)
+	store := &setRecordStore{}
+	f.ctrl.setWriter = store
+	ids := []string{"exec-A", "exec-B", "exec-C", "exec-D", "exec-E", "exec-F"}
+	for _, id := range ids {
+		seedSetExecutor(f, id, "m-"+id, installTestOwner)
+	}
+	f.ctrl.seedAnnouncedExecutors(context.Background())
+	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, ids)
+
+	var wg sync.WaitGroup
+	for _, id := range ids[:5] {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f.ctrl.removeFromExecutorSets(id, installTestOwner, "m-"+id, map[string]string{"machine": "m-" + id})
+		}()
+	}
+	within(t, 5*time.Second, "the removals", wg.Wait)
+	waitPersists(t, f.ctrl)
+
+	c.EqDeep([]string{"exec-F"}, setOf(f, "c_kid"), "only the one never removed remains")
+	stored, _ := store.stored("c_kid")
+	c.EqDeep([]string{"exec-F"}, stored, "and the stored set agrees")
+}
+
+// Two legacy children's removals race: X's materialization lists the owner's
+// executors while Y's removal already converted the row to a finite set. X's
+// notice must name the true remainder, not claim nothing remains.
+func TestConcurrentLegacyRemovalsReportTheTrueRemainder(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	log := attachSteerLog(f.ctrl)
+	gate := gateExecStore(f)
+	seedSetExecutor(f, "exec-Z", "zeta", installTestOwner)
+	f.ctrl.seedAnnouncedExecutors(context.Background())
+	seedLegacyChild(t, f, "c_old", "role=w")
+	labels := map[string]string{"role": "w"}
+
+	hold, entered := make(chan struct{}), make(chan struct{})
+	gate.mu.Lock()
+	gate.firstListHold, gate.firstListEntered = hold, entered
+	gate.mu.Unlock()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		f.ctrl.removeFromExecutorSets("exec-X", installTestOwner, "xray", labels)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first removal never listed the executors")
+	}
+	f.ctrl.removeFromExecutorSets("exec-Y", installTestOwner, "yankee", labels)
+	close(hold)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first removal did not finish")
+	}
+
+	got := log.waitForNotices(t, "c_old", 2)
+	c.Len(got, 2, "one notice per removal")
+	for _, n := range got {
+		c.True(!strings.Contains(n, "Remaining: none"), "no notice may claim nothing remains: %q", n)
+		c.True(strings.Contains(n, "Remaining: zeta"), "each names the true remainder: %q", n)
+	}
+	c.EqDeep([]string{"exec-Z"}, setOf(f, "c_old"), "the stored set")
+}
+
+// Concurrent disables of one executor notify once, and the last notice always
+// agrees with the executor's final state.
+func TestConcurrentDisablesNoticeOnce(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	log := attachSteerLog(f.ctrl)
+	gate := gateExecStore(f)
+	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+	f.ctrl.seedAnnouncedExecutors(context.Background())
+	seedSetChild(t, f, "c_all", installTestOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
+	// Callers are held after reading the row until all four have read it; a
+	// serialised implementation lets only one in at a time, so the group never
+	// assembles and the rendezvous times out.
+	gate.mu.Lock()
+	gate.rendezvous, gate.rendezvousTimeout = 4, 100*time.Millisecond
+	gate.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.NoError(f.ctrl.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: "exec-A"}), "disable")
+		}()
+	}
+	within(t, 10*time.Second, "the disables", wg.Wait)
+
+	c.EqDeep([]string{executorDisabledNotice("alpha")}, log.of("c_all"), "one DISABLED notice")
+}
+
+// An enable and a disable racing leave the last notice in step with the final
+// state: a delayed disable must not announce DISABLED after an enable won.
+func TestRacingEnableAndDisableEndWithTheFinalState(t *testing.T) {
+	for range 20 {
+		f := newInstallFixture(t)
+		log := attachSteerLog(f.ctrl)
+		gate := gateExecStore(f)
+		seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+		f.ctrl.seedAnnouncedExecutors(context.Background())
+		seedSetChild(t, f, "c_all", installTestOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = f.ctrl.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: "exec-A"})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = f.ctrl.ExecutorEnable(protocol.ExecutorEnableRequest{ExecutorID: "exec-A"})
+		}()
+		within(t, 10*time.Second, "enable and disable", wg.Wait)
+
+		gate.dataMu.Lock()
+		final := f.execs.execs["exec-A"].Enabled
+		gate.dataMu.Unlock()
+		notices := log.of("c_all")
+		if len(notices) == 0 {
+			continue
+		}
+		want := executorDisabledNotice("alpha")
+		if final {
+			want = executorEnabledNotice("alpha")
+		}
+		if notices[len(notices)-1] != want {
+			t.Fatalf("the last notice %q disagrees with the final state (enabled=%v): %q", notices[len(notices)-1], final, notices)
+		}
+	}
+}
+
+// Every administrative executor call ends with its deadline when the store
+// never answers, including reference resolution and the row write.
+func TestAdminExecutorCallsAreBoundedByTheirDeadline(t *testing.T) {
+	prev := executorAdminTimeout
+	executorAdminTimeout = 80 * time.Millisecond
+	t.Cleanup(func() { executorAdminTimeout = prev })
+	f := newInstallFixture(t)
+	gate := gateExecStore(f)
+	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+	gate.stallWrites()
+
+	within(t, 3*time.Second, "disable with a stuck write", func() {
+		assert.NewAborting(t).Error(f.ctrl.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: "exec-A"}), "disable")
+	})
+	within(t, 3*time.Second, "enable with a stuck write", func() {
+		assert.NewAborting(t).Error(f.ctrl.ExecutorEnable(protocol.ExecutorEnableRequest{ExecutorID: "exec-A"}), "enable")
+	})
+	within(t, 3*time.Second, "delete with a stuck write", func() {
+		assert.NewAborting(t).Error(f.ctrl.ExecutorDelete(protocol.ExecutorDeleteRequest{ExecutorID: "exec-A"}), "delete")
+	})
+	within(t, 3*time.Second, "label with a stuck write", func() {
+		_, err := f.ctrl.ExecutorLabel(protocol.ExecutorLabelRequest{ExecutorID: "exec-A", Set: map[string]string{"k": "v"}})
+		assert.NewAborting(t).Error(err, "label")
+	})
+
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	gate.mu.Lock()
+	gate.getHold = hold
+	gate.mu.Unlock()
+	within(t, 3*time.Second, "reference resolution with a stuck read", func() {
+		assert.NewAborting(t).Error(f.ctrl.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: "exec-A"}), "disable")
+	})
+}
+
+// A wait on another operation's ordering lock ends at its deadline, and each
+// path degrades the way its contract says: a removal still maintains the sets
+// (unordered), an announcement is skipped and retried on the next connect, and
+// an enable or disable is refused as unavailable.
+func TestOrderingWaitsAreBounded(t *testing.T) {
+	prev := executorOrderTimeout
+	executorOrderTimeout = 60 * time.Millisecond
+	t.Cleanup(func() { executorOrderTimeout = prev })
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	log := attachSteerLog(f.ctrl)
+	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+	f.ctrl.seedAnnouncedExecutors(context.Background())
+	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{"exec-A"})
+	seedSetChild(t, f, "c_all", installTestOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
+
+	hold, ok := f.ctrl.execSets.ordering.lock(context.Background(), "exec-A")
+	c.Require().True(ok, "hold the executor's ordering lock")
+	t.Cleanup(hold)
+
+	within(t, 3*time.Second, "an announcement behind a held lock", func() {
+		f.ctrl.announceIfNew("exec-A")
+	})
+	c.Eq(false, f.ctrl.execSets.wasAnnounced("exec-A") && len(log.of("c_all")) > 0, "no announcement was delivered")
+
+	within(t, 3*time.Second, "a disable behind a held lock", func() {
+		err := f.ctrl.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: "exec-A"})
+		c.Error(err, "refused")
+	})
+
+	within(t, 3*time.Second, "a removal behind a held lock", func() {
+		f.ctrl.removeFromExecutorSets("exec-A", installTestOwner, "alpha", map[string]string{"machine": "alpha", "role": "w"})
+	})
+	c.EqDeep([]string{}, setOf(f, "c_kid"), "the removal still took the id out of the set")
 }

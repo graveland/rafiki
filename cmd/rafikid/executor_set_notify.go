@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -20,6 +21,20 @@ import (
 // maintenance paths make. An install or uninstall has already succeeded when
 // they run, so a stuck store must cost a skipped update, never a hung call.
 var executorSetLookupTimeout = installLookupTimeout
+
+// executorOrderTimeout (a variable so a test can shorten it) bounds how long a
+// notice path waits for another operation on the same executor. A wait that
+// runs out costs a skipped notice (or, for a removal, an unordered one), never a
+// hung install, uninstall, enable or disable.
+var executorOrderTimeout = 10 * time.Second
+
+// executorAdminTimeout (a variable so a test can shorten it) bounds one whole
+// administrative executor operation: reference resolution, the row write and the
+// notices that follow.
+var executorAdminTimeout = 30 * time.Second
+
+// executorSetPersistTimeout bounds one targeted set write.
+var executorSetPersistTimeout = 5 * time.Second
 
 // executorAddedNotice tells an agent its executor set grew. With two or more
 // members every workspace tool call must name one.
@@ -64,48 +79,86 @@ func executorEnabledNotice(name string) string {
 // executorSetNotifier is the state the set-maintenance paths share. mu guards
 // only the maps below and is never held across store or inbox I/O. announced
 // remembers which executors this daemon has already told `all` agents about, so
-// a reconnect is not a new executor. ordering serialises the notices about one
-// executor (announce, removal, enable, disable) so a "removed" can never
-// overtake the "available" that preceded it. persists tracks the background
-// row writes.
+// a reconnect is not a new executor. ordering serialises everything that
+// decides or announces one executor's state (announce, removal, enable, disable,
+// rollback), so a "removed" can never overtake the "available" that preceded it.
+// persistLocks serialises the stored-set write of one child, which makes the
+// last write the one carrying the newest in-memory set. persists tracks the
+// background writes.
 type executorSetNotifier struct {
-	mu        sync.Mutex
-	announced map[string]bool
-	ordering  map[string]*executorOrder
-	persists  sync.WaitGroup
+	mu           sync.Mutex
+	announced    map[string]bool
+	ordering     keyedMutex
+	persistLocks keyedMutex
+	persists     sync.WaitGroup
 }
 
-// executorOrder is one executor's ordering lock, reference counted so the map
-// does not grow with every executor id ever seen.
-type executorOrder struct {
-	mu   sync.Mutex
-	refs int
+// keyedMutex is a mutex per key whose acquisition ends with its context. An
+// entry exists only while someone holds or awaits it, so the map does not grow
+// with every key ever seen.
+type keyedMutex struct {
+	mu      sync.Mutex
+	entries map[string]*keyedEntry
 }
 
-// lockExecutor serialises notices about executorID and returns the unlock.
-func (n *executorSetNotifier) lockExecutor(executorID string) func() {
-	n.mu.Lock()
-	if n.ordering == nil {
-		n.ordering = map[string]*executorOrder{}
-	}
-	o := n.ordering[executorID]
-	if o == nil {
-		o = &executorOrder{}
-		n.ordering[executorID] = o
-	}
-	o.refs++
-	n.mu.Unlock()
+type keyedEntry struct {
+	token chan struct{}
+	refs  int
+}
 
-	o.mu.Lock()
-	return func() {
-		o.mu.Unlock()
-		n.mu.Lock()
-		o.refs--
-		if o.refs == 0 {
-			delete(n.ordering, executorID)
+// lock takes key's mutex or gives up when ctx ends. The returned unlock is
+// always safe to call; ok reports whether the mutex is held.
+func (k *keyedMutex) lock(ctx context.Context, key string) (unlock func(), ok bool) {
+	k.mu.Lock()
+	if k.entries == nil {
+		k.entries = map[string]*keyedEntry{}
+	}
+	e := k.entries[key]
+	if e == nil {
+		e = &keyedEntry{token: make(chan struct{}, 1)}
+		k.entries[key] = e
+	}
+	e.refs++
+	k.mu.Unlock()
+
+	release := func() {
+		k.mu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(k.entries, key)
 		}
-		n.mu.Unlock()
+		k.mu.Unlock()
 	}
+	select {
+	case e.token <- struct{}{}:
+		return func() {
+			<-e.token
+			release()
+		}, true
+	case <-ctx.Done():
+		release()
+		return func() {}, false
+	}
+}
+
+// lockExecutor serialises operations on executorID's announced state and
+// notices. When the wait ends first the returned unlock is a no-op and ok is
+// false; the caller decides whether to proceed unordered or skip.
+func (c *Controller) lockExecutor(executorID string) (unlock func(), ok bool) {
+	return c.lockExecutorWithin(context.Background(), executorID)
+}
+
+// lockExecutorWithin is lockExecutor bounded by parent as well as by
+// executorOrderTimeout.
+func (c *Controller) lockExecutorWithin(parent context.Context, executorID string) (unlock func(), ok bool) {
+	ctx, cancel := context.WithTimeout(parent, executorOrderTimeout)
+	defer cancel()
+	unlock, ok = c.execSets.ordering.lock(ctx, executorID)
+	if !ok {
+		slog.Warn("executor set: another operation on this executor did not finish in time",
+			"executor", shortID(executorID), "timeout", executorOrderTimeout)
+	}
+	return unlock, ok
 }
 
 // markAnnounced records executorID as announced and reports whether it was new.
@@ -241,23 +294,44 @@ func (m *legacyMaterializer) ids(snap childstore.Snapshot) (ids []string, ok boo
 	return ids, true
 }
 
-// persistExecutorSets writes the named children's rows in the background, one
-// goroutine per call. The in-memory set is already updated, so a slow or failed
-// write costs a stale stored row (healed by the next write of that row), never a
-// hung or failed install, uninstall or on-connect hook.
+// persistExecutorSets writes the named children's stored sets in the
+// background, one goroutine per call. The in-memory set is already updated, so a
+// slow or failed write costs a stale stored set (healed by the next set write),
+// never a hung or failed install, uninstall or on-connect hook.
+//
+// Only the executor_set column is written, never the row: a snapshot taken
+// here and written after a Close or an exit would otherwise clear closed_at or
+// overwrite a newer status. The set is read from memory under the child's own
+// write lock, so of two racing updates the last write always carries the newest
+// set.
 func (c *Controller) persistExecutorSets(childIDs []string) {
-	if len(childIDs) == 0 || c.children == nil {
+	if len(childIDs) == 0 || c.setWriter == nil {
 		return
 	}
 	c.execSets.persists.Add(1)
 	go func() {
 		defer c.execSets.persists.Done()
 		for _, id := range childIDs {
-			if err := c.writeRecord(id); err != nil {
+			if err := c.persistExecutorSet(id); err != nil {
 				slog.Warn("executor set: could not persist a child's set", "child", id, "error", err)
 			}
 		}
 	}()
+}
+
+func (c *Controller) persistExecutorSet(childID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), executorSetPersistTimeout)
+	defer cancel()
+	unlock, ok := c.execSets.persistLocks.lock(ctx, childID)
+	if !ok {
+		return ctx.Err()
+	}
+	defer unlock()
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return nil
+	}
+	return c.setWriter.SetExecutorSet(ctx, childID, snap.ExecutorSet)
 }
 
 // addToExecutorSet puts executorID into childID's set and tells the child, once,
@@ -328,7 +402,8 @@ func withMember(ids []string, id string) []string {
 
 // dropMember removes executorID from childID's stored set under the row's lock.
 // A nil (legacy) set becomes materialized, which the caller computed. It reports
-// the set afterwards and whether the id was in it.
+// the set afterwards, also when the id was already gone, and whether the id was
+// in it.
 func (c *Controller) dropMember(childID, executorID string, materialized []string) (rest []string, held bool) {
 	err := c.st.Update(childID, func(s *childstore.Session) {
 		cur := s.ExecutorSet
@@ -339,6 +414,9 @@ func (c *Controller) dropMember(childID, executorID string, materialized []strin
 			held = slices.Contains(cur, executorID)
 		}
 		if !held {
+			// A concurrent removal already took it out (or converted a legacy
+			// child): the stored set is the true remainder.
+			rest = slices.Clone(cur)
 			return
 		}
 		rest = make([]string, 0, len(cur))
@@ -363,9 +441,18 @@ func (c *Controller) dropMember(childID, executorID string, materialized []strin
 //
 // A sandbox row is reached by ownership, never by selection or by `all`, so only
 // a child that holds it by id changes and is told.
+//
+// Set maintenance outranks notice order: when the ordering wait runs out the
+// removal proceeds unordered rather than leave a removed id in a stored set.
 func (c *Controller) removeFromExecutorSets(executorID, ownerUserID, name string, labels map[string]string) {
-	unlock := c.execSets.lockExecutor(executorID)
+	unlock, _ := c.lockExecutor(executorID)
 	defer unlock()
+	c.removeFromExecutorSetsLocked(executorID, ownerUserID, name, labels)
+}
+
+// removeFromExecutorSetsLocked is removeFromExecutorSets for a caller already
+// holding the executor's ordering lock.
+func (c *Controller) removeFromExecutorSetsLocked(executorID, ownerUserID, name string, labels map[string]string) {
 	c.execSets.forgetAnnounced(executorID)
 	if c.st == nil {
 		return
@@ -498,7 +585,11 @@ func (c *Controller) allSetRecipients(ownerUserID string) []childstore.Snapshot 
 // labels the executor admits, about an executor the first time it connects.
 // Sandboxes are never announced: only the child that owns one holds it, by id.
 func (c *Controller) announceIfNew(executorID string) {
-	unlock := c.execSets.lockExecutor(executorID)
+	unlock, ok := c.lockExecutor(executorID)
+	if !ok {
+		// Not marked announced, so the next connect tries again.
+		return
+	}
 	defer unlock()
 	if !c.execSets.markAnnounced(executorID) {
 		return
@@ -522,15 +613,15 @@ func (c *Controller) announceIfNew(executorID string) {
 	}
 }
 
-// noticeExecutorEnabled tells every live `all` agent of the executor's owner that
-// the owner switched it off or on. No set changes: admission already excludes a
+// noticeExecutorEnabledLocked tells every live `all` agent of the executor's
+// owner that the owner switched it off or on. The caller holds the executor's
+// ordering lock, which is what keeps two transitions from duplicating or
+// reordering their notices. No set changes: admission already excludes a
 // disabled executor, and enabling restores it.
-func (c *Controller) noticeExecutorEnabled(e executors.Executor, enabled bool) {
+func (c *Controller) noticeExecutorEnabledLocked(e executors.Executor, enabled bool) {
 	if c.st == nil || isSandboxRow(e) {
 		return
 	}
-	unlock := c.execSets.lockExecutor(e.ID)
-	defer unlock()
 	name := installNameOf(e)
 	msg := executorDisabledNotice(name)
 	if enabled {
@@ -556,12 +647,23 @@ func (c *Controller) removeSandboxFromExecutorSets(row sandbox.Row) {
 		map[string]string{sandbox.RowLabelSandbox: "1"})
 }
 
-// forgetRolledBackExecutor drops what the announce path remembers about an
-// executor row an install rolled back. When a racing connect already announced
-// it, `all` agents were told it was available, so they are told it is gone too.
-func (c *Controller) forgetRolledBackExecutor(executorID string, row executors.Executor, haveRow bool) {
+// rollbackExecutorRow deletes the executor row of an install that did not reach
+// a connection, and tells `all` agents it is gone if a racing connect already
+// announced it. Reading the row, the announced check and the delete happen under
+// the executor's ordering lock, the same one announce holds: either the announce
+// ran first (and the removal follows it) or it runs after the delete, finds no
+// row and announces nothing. ctx bounds the whole rollback.
+func (c *Controller) rollbackExecutorRow(ctx context.Context, executorID string) {
+	unlock, ok := c.execSets.ordering.lock(ctx, executorID)
+	if !ok {
+		slog.Warn("executor set: rollback did not get the executor's ordering lock in time; deleting the row unordered",
+			"executor", shortID(executorID))
+	}
+	defer unlock()
+	row, haveRow := c.executorRowByID(ctx, executorID)
+	c.deleteExecutorRow(executorID)
 	if haveRow && c.execSets.wasAnnounced(executorID) {
-		c.removeFromExecutorSets(row.ID, row.OwnerUserID, installNameOf(row), row.Labels)
+		c.removeFromExecutorSetsLocked(row.ID, row.OwnerUserID, installNameOf(row), row.Labels)
 		return
 	}
 	c.execSets.forgetAnnounced(executorID)

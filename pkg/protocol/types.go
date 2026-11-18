@@ -401,6 +401,13 @@ type SpawnRequest struct {
 	// auto-labels; user-supplied Labels with that prefix are rejected.
 	ResumedFromSession string `json:"resumedFromSession,omitempty"`
 
+	// RowLabels is the label set the child's row will carry at spawn, fixed by
+	// the daemon once the request is resolved (user labels plus every daemon
+	// label known before the process starts). Executor admission reads it, so
+	// spawn-time admission and later reach agree. Daemon-internal: never on the
+	// wire, and a value a client sends is ignored.
+	RowLabels map[string]string `json:"-"`
+
 	// RecordRequests, when true, records raw LLM API request/response pairs
 	// to the debug raw_http_request table (agent-kind only; requires
 	// RAFIKI_RECORD_REQUESTS=1 at daemon startup).

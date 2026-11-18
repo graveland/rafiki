@@ -171,7 +171,22 @@ The set changes while the agent runs, and each change reaches a live agent as an
 - **Enrolling or installing an executor yourself** notifies every live `all`
   agent whose labels the executor admits. Their set already includes it.
 - **Disabling or re-enabling** an executor changes no set (admission excludes a
-  disabled executor, and enabling restores it); live `all` agents are told.
+  disabled executor, and enabling restores it); live `all` agents are told. The
+  state change and its notice are serialised per executor, so two disables
+  produce one notice and a notice never contradicts the final state.
+
+A set change is written to the child's row as the `executor_set` column alone,
+never as a whole-row write, so a late write cannot reopen a closed child or
+overwrite a newer status. Every wait on the store or on another operation about
+the same executor has a deadline: a stuck store costs a skipped or unordered
+notice, never a hung install, uninstall, enable or disable.
+
+`Admits` on an executor is evaluated against the labels the child's row carries,
+the same at spawn and afterwards: your own labels, the owner, and the
+`rafiki/*` labels the daemon writes before the process starts (`rafiki/kind`,
+`rafiki/cwd`, `rafiki/parent`, and so on). Labels that exist only after the
+process does (`rafiki/pid`, the workspace binding labels) are not part of
+admission.
 
 Within one owner, executors are not isolated from each other: an agent with a
 shell on one of your machines can usually reach the others with your own

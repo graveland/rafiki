@@ -932,15 +932,9 @@ func (c *Controller) rollbackInstall(installRowID, executorID string) {
 				"install", installRowID, "executor", shortID(executorID), "error", err)
 		}
 	}
-	// A connect that raced the rollback was announced to `all` agents; read the
-	// row before it goes so they can be told it is gone.
-	var row executors.Executor
-	var haveRow bool
-	if c.execSets.wasAnnounced(executorID) {
-		row, haveRow = c.executorRowByID(ctx, executorID)
-	}
-	c.deleteExecutorRow(executorID)
-	c.forgetRolledBackExecutor(executorID, row, haveRow)
+	// A connect that raced the rollback may already have announced the row to
+	// `all` agents; the rollback under the executor's ordering lock tells them.
+	c.rollbackExecutorRow(ctx, executorID)
 }
 
 // deleteExecutorRow removes an executor row this daemon just created. The

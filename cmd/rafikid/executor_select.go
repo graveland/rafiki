@@ -10,11 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorinstall"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/sandbox"
 )
@@ -312,25 +314,72 @@ func (c *Controller) explainNoLaunchMatch(req protocol.SpawnRequest, childSel ex
 	return errors.New(sb.String())
 }
 
-// admissionLabels returns the labels an executor's Admits selector is
-// evaluated against for a child that has no row yet: the labels Spawn is about
-// to give it, the request's own plus the owner the daemon attests for it. It is
-// the CHILD's labels, never its parent's: an Admits selector decides whether
-// this executor serves this child, so a parent that carries a label the child
-// lacks (or the reverse) must not change the answer.
-//
-// Getting the owner wrong is not cosmetic: an executor enrolled with Admits
-// "owner=<name>" (every session executor, see ExecutorSession) would refuse
-// EVERY spawn if the owner label were missing.
-func (c *Controller) admissionLabels(req protocol.SpawnRequest, owner executorOwner) map[string]string {
+// childLabelFacts are the inputs to a new child's labels that the request does
+// not carry: they are resolved by Spawn (model alias, preset row, fork source,
+// lineage) before the row is written.
+type childLabelFacts struct {
+	ModelAlias string
+	Preset     *presets.Record
+	ForkSource string
+	Parent     string
+	Root       string
+}
+
+// newChildLabels is the one builder of the labels a new child's row carries at
+// spawn: the user's labels, the owner, and every daemon label known before the
+// process starts. Spawn writes the row from it and executor admission reads it,
+// so an Admits term sees the same keys at spawn and in reach. The labels that
+// exist only after the process does (rafiki/pid, the workspace binding labels)
+// are added to the row later and are not part of admission.
+func newChildLabels(req protocol.SpawnRequest, ownerName string, f childLabelFacts) map[string]string {
 	labels := copyLabels(req.Labels)
 	if labels == nil {
 		labels = map[string]string{}
 	}
-	if owner.Name != "" {
-		labels["owner"] = owner.Name
+	if ownerName != "" {
+		labels["owner"] = ownerName
+	}
+	labels["rafiki/cwd"] = req.Cwd
+	labels["rafiki/kind"] = spawnKindLabel(req.Kind)
+	if req.Routing != "" {
+		labels["rafiki/routing"] = req.Routing
+	}
+	if f.ModelAlias != "" {
+		labels["rafiki/model-alias"] = f.ModelAlias
+	}
+	stampPresetLabels(labels, f.Preset)
+	if req.ConfigDir != "" {
+		labels["rafiki/config_dir"] = req.ConfigDir
+	}
+	if req.ResumedFromSession != "" {
+		labels["rafiki/resumed-from-session"] = req.ResumedFromSession
+	}
+	if f.ForkSource != "" {
+		labels["rafiki/forked-from"] = f.ForkSource
+	}
+	if f.Parent != "" {
+		labels[childstore.LabelParent] = f.Parent
+		labels[childstore.LabelRoot] = f.Root
 	}
 	return labels
+}
+
+// admissionLabels is the label set admission reads for a child whose row does
+// not exist yet: the one Spawn fixed on the request (RowLabels), or, for a
+// caller that has no resolved spawn (a pre-spawn listing), what the request
+// alone determines. It is the CHILD's labels, never its parent's: an Admits
+// selector decides whether this executor serves this child. The owner label is
+// part of it because an executor enrolled with Admits "owner=<name>" (every
+// session executor) would otherwise refuse the child that owns it.
+func (c *Controller) admissionLabels(req protocol.SpawnRequest, owner executorOwner) map[string]string {
+	if req.RowLabels != nil {
+		return copyLabels(req.RowLabels)
+	}
+	facts := childLabelFacts{}
+	if c.st != nil {
+		facts.Parent, facts.Root, _ = computeLineageLabels(c.st, req.ParentChildID)
+	}
+	return newChildLabels(req, owner.Name, facts)
 }
 
 // childAdmissionLabels is the one source of the labels admission reads for a

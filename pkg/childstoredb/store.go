@@ -137,6 +137,18 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 	return nil
 }
 
+// SetExecutorSet writes the executor_set column of a live row and nothing else.
+// The closed_at guard is what keeps a late write from reopening a child: the
+// upsert clears closed_at unconditionally, this never touches it.
+func (s *Store) SetExecutorSet(ctx context.Context, childID string, set []string) error {
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE conversations.child SET executor_set = $2
+		  WHERE child_id = $1 AND closed_at IS NULL`, childID, set); err != nil {
+		return fmt.Errorf("childstoredb: set executor set %s: %w", childID, err)
+	}
+	return nil
+}
+
 // isSiblingNameViolation reports whether err is the child_sibling_name_live
 // unique violation and nothing else. Matching on the constraint name as well as
 // the SQLSTATE is deliberate: the sibling-name rule has a caller-visible

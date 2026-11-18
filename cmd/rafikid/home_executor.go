@@ -493,7 +493,11 @@ func (c *Controller) homeInfo(ctx context.Context, req protocol.SpawnRequest, ow
 	case homeID != "":
 		row, _ = c.executorRow(homeID)
 	case req.HomeExecutor == "" && len(reach) == 1:
-		if chosen, cErr := c.chooseExecutorCandidate(req, owner); cErr == nil {
+		childID := ""
+		if be != nil {
+			childID = be.childID
+		}
+		if chosen, cErr := c.chooseExecutorCandidate(req, owner, childID); cErr == nil {
 			row = chosen
 		}
 	}

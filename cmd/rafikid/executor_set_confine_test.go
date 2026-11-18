@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/sandbox"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -257,6 +259,11 @@ func TestClaudeResumePinMustStillBeReachable(t *testing.T) {
 		le.Describe = exWithLaunch(le.Executor.ID, nil, "", "claude").Describe
 		return le
 	}
+	operatorSandbox := func(e *executors.Executor) { e.Labels[sandbox.RowLabelSandbox] = "1" }
+	childSandbox := func(e *executors.Executor) {
+		operatorSandbox(e)
+		e.Labels[sandbox.RowLabelOwnerChild] = "c_owner"
+	}
 	cases := []struct {
 		name   string
 		mutate func(*executors.Executor)
@@ -271,6 +278,12 @@ func TestClaudeResumePinMustStillBeReachable(t *testing.T) {
 		{"disabled", func(e *executors.Executor) { e.Enabled = false }, childstore.Snapshot{ExecutorSet: []string{"P"}}, "", false},
 		{"now owned by someone else", func(e *executors.Executor) { e.OwnerUserID = "other" }, childstore.Snapshot{ExecutorSet: []string{"P"}}, "", false},
 		{"Admits now excludes the child", func(e *executors.Executor) { e.Admits = "team=blue" }, childstore.Snapshot{ExecutorSet: []string{"P"}}, "", false},
+		// A sandbox is never reached through "all", only by naming it.
+		{"all set pinned to an operator sandbox", operatorSandbox, childstore.Snapshot{ExecutorSet: []string{allSet}}, "", false},
+		{"named set pinned to an operator sandbox", operatorSandbox, childstore.Snapshot{ExecutorSet: []string{"P"}}, "", true},
+		// A child-owned sandbox is its owner's alone; no stored set re-admits it.
+		{"named set pinned to a child-owned sandbox", childSandbox, childstore.Snapshot{ExecutorSet: []string{"P"}}, "", false},
+		{"all set pinned to a child-owned sandbox", childSandbox, childstore.Snapshot{ExecutorSet: []string{allSet}}, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -321,6 +334,14 @@ func TestEveryLocalForkPathSeesTheResolvedSet(t *testing.T) {
 				c := setController(t, machineExec("A", "a", nil))
 				setParent(t, c, "p_all", []string{allSet})
 
+				// A refusal must be the confinement guard's: a bare error would also
+				// pass for a runner that fails for an unrelated reason first.
+				refused := func(err error, what string, args ...any) {
+					t.Helper()
+					ck.Require().Error(err, append([]any{what}, args...)...)
+					ck.True(isConfinementRefusal(err), "%s: refused for another reason: %v", fmt.Sprintf(what, args...), err)
+				}
+
 				base := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir(), Script: &protocol.ScriptSpec{Repo: "local", Script: "s"}}
 				resolve := func(parent string, executors ...string) protocol.SpawnRequest {
 					req := base
@@ -332,19 +353,19 @@ func TestEveryLocalForkPathSeesTheResolvedSet(t *testing.T) {
 
 				// Fresh, resolved by production code: a finite set under an all parent
 				// and at the top level is confined and must not fork locally.
-				ck.Error(run(c, resolve("p_all", "A"), "c_fresh_all"), "finite set under an all parent")
-				ck.Error(run(c, resolve("", "A"), "c_fresh_top"), "finite set at the top level")
+				refused(run(c, resolve("p_all", "A"), "c_fresh_all"), "finite set under an all parent")
+				refused(run(c, resolve("", "A"), "c_fresh_top"), "finite set at the top level")
 
 				// Resume: the stored row decides, whatever the request says.
 				for id, set := range map[string][]string{"c_row_ids": {"A"}, "c_row_none": {}} {
 					setParent(t, c, id, set)
 					req := base
 					req.Executors = []string{allSet}
-					ck.Error(run(c, req, id), "a resumed child whose row holds %v", set)
+					refused(run(c, req, id), "a resumed child whose row holds %v", set)
 				}
 
 				// A fresh child that was never resolved cannot be shown unconfined.
-				ck.Error(run(c, base, "c_unresolved"), "an unresolved fresh set fails closed")
+				refused(run(c, base, "c_unresolved"), "an unresolved fresh set fails closed")
 
 				// An all child is not refused for confinement (it may still fail for
 				// another reason in the local runner).

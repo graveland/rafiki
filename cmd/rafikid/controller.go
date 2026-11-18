@@ -118,6 +118,9 @@ type Controller struct {
 	// children is the durable child-state store. Nil when pool is nil, which
 	// means children live in memory only and do not survive a restart.
 	children childstore.ChildStore
+	// setWriter writes only a child row's executor_set column; see
+	// childstore.ExecutorSetWriter. Nil without a database.
+	setWriter childstore.ExecutorSetWriter
 
 	// lineage resolves an ancestor's FULL subtree for the reads that must cover
 	// closed descendants too — subtree spend (checkBudget, sweepBudgets,
@@ -988,6 +991,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		c.coster = insights.New(pool)
 		childStore := childstoredb.New(pool)
 		c.children = childStore
+		c.setWriter = childStore
 		// The same store also resolves an ancestor's full lineage (closed
 		// descendants included); wire it so subtree spend and child conversation
 		// scope keep covering closed children.
@@ -2565,6 +2569,11 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// it reaches the stored session and every later resume reads it from the
 	// row. A sandboxed child addresses its sandbox and nothing else (set below).
 	// Runs while nothing is minted, so a refusal starts no process.
+	labelFacts := childLabelFacts{
+		ModelAlias: modelAlias, Preset: presetRec, ForkSource: forkSourceChild,
+		Parent: parentLabel, Root: rootLabel,
+	}
+	req.RowLabels = newChildLabels(req, ownerName, labelFacts)
 	if req.Sandbox == nil {
 		req, err = c.resolveSpawnExecutorSet(req, executorOwner{Name: ownerName, UserID: owner.UserID})
 		if err != nil {
@@ -2620,6 +2629,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		// else rewrites Cwd; an inherited host path would otherwise reach the
 		// executor verbatim.
 		req.Cwd = containerWorkdir
+		req.RowLabels = newChildLabels(req, ownerName, labelFacts)
 		sandboxOwnedChild = childID
 		defer func() {
 			if sandboxOwnedChild == "" {
@@ -2733,47 +2743,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// Build initial labels: user-supplied labels (already validated) plus
 	// static auto-labels. Model/provider labels are added after Idle() in
 	// activateLiveChild once pi reports its resolved model.
-	initLabels := copyLabels(req.Labels)
-	if initLabels == nil {
-		initLabels = make(map[string]string)
-	}
-	// ownerName was attested above, before agentRunner ran.
-	if ownerName != "" {
-		initLabels["owner"] = ownerName
-	}
-	initLabels["rafiki/cwd"] = req.Cwd
+	initLabels := newChildLabels(req, ownerName, labelFacts)
 	initLabels["rafiki/pid"] = strconv.Itoa(ch.PID())
-	initLabels["rafiki/kind"] = spawnKindLabel(req.Kind)
-	// The resolved routing spec mirrors the session's stored value (req.Routing
-	// below), the way rafiki/model mirrors the session's model. Daemon-written
-	// at spawn only; resume keeps the label the original spawn set.
-	if req.Routing != "" {
-		initLabels["rafiki/routing"] = req.Routing
-	}
-	// The alias the model was resolved through, if any — daemon-written at
-	// spawn only, like rafiki/routing; resume keeps the original spawn's label.
-	if modelAlias != "" {
-		initLabels["rafiki/model-alias"] = modelAlias
-	}
-	stampPresetLabels(initLabels, presetRec)
-	if req.ConfigDir != "" {
-		initLabels["rafiki/config_dir"] = req.ConfigDir
-	}
-	if req.ResumedFromSession != "" {
-		initLabels["rafiki/resumed-from-session"] = req.ResumedFromSession
-	}
-	// Where this conversation came from: the fork's source child, daemon-written
-	// at spawn only (like rafiki/routing; resume keeps the label the original
-	// spawn set). The node itself lives on the conversation's immutable fork
-	// edge; the label is the human-readable arm — what `rafiki get` shows and
-	// what an audit joins on.
-	if forkSourceChild != "" {
-		initLabels["rafiki/forked-from"] = forkSourceChild
-	}
-	if parentLabel != "" {
-		initLabels[childstore.LabelParent] = parentLabel
-		initLabels[childstore.LabelRoot] = rootLabel
-	}
 	// Merge the binding spawnAgentRuntimeOptions made before this record existed.
 	// A binding made AFTER it exists goes straight to the store — see NoteBinding.
 	//
@@ -6724,46 +6695,61 @@ func (c *Controller) ExecutorLabel(req protocol.ExecutorLabelRequest) (executors
 	if err := c.requireExecutorStore(); err != nil {
 		return executors.Executor{}, err
 	}
-	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
+	ctx, cancel := context.WithTimeout(context.Background(), executorAdminTimeout)
+	defer cancel()
+	e, err := c.resolveExecutorRef(ctx, req.ExecutorID)
 	if err != nil {
 		return executors.Executor{}, err
 	}
-	e, err = c.execStore.SetLabels(context.Background(), e.ID, req.Set, req.Remove)
+	e, err = c.execStore.SetLabels(ctx, e.ID, req.Set, req.Remove)
 	return e, translateExecutorErr(err)
 }
 
 // ExecutorDisable disables an executor.
 func (c *Controller) ExecutorDisable(req protocol.ExecutorDisableRequest) error {
-	if err := c.requireExecutorStore(); err != nil {
-		return err
-	}
-	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
-	if err != nil {
-		return err
-	}
-	if err := translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, false)); err != nil {
-		return err
-	}
-	if e.Enabled {
-		c.noticeExecutorEnabled(e, false)
-	}
-	return nil
+	return c.setExecutorEnabled(req.ExecutorID, false)
 }
 
 // ExecutorEnable re-enables a disabled executor.
 func (c *Controller) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
+	return c.setExecutorEnabled(req.ExecutorID, true)
+}
+
+// setExecutorEnabled switches an executor on or off and tells `all` agents when
+// the state actually changed. The row read, the write and the notice happen
+// under the executor's ordering lock: two disables cannot both see "enabled"
+// and both notify, and an older transition's notice cannot arrive after a newer
+// one's. The whole operation ends with executorAdminTimeout.
+func (c *Controller) setExecutorEnabled(ref string, enabled bool) error {
 	if err := c.requireExecutorStore(); err != nil {
 		return err
 	}
-	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
+	ctx, cancel := context.WithTimeout(context.Background(), executorAdminTimeout)
+	defer cancel()
+	e, err := c.resolveExecutorRef(ctx, ref)
 	if err != nil {
 		return err
 	}
-	if err := translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, true)); err != nil {
+	unlock, ok := c.lockExecutorWithin(ctx, e.ID)
+	if !ok {
+		return &connectapi.ControllerError{
+			Code:    protocol.ErrUnavailable,
+			Message: fmt.Sprintf("another operation on executor %s did not finish in time; retry", shortID(e.ID)),
+		}
+	}
+	defer unlock()
+	// Re-read under the lock: the row resolved above may predate a transition
+	// that finished while this call waited.
+	cur, err := c.execStore.Get(ctx, e.ID)
+	if err != nil {
+		return translateExecutorErr(err)
+	}
+	if err := translateExecutorErr(c.execStore.SetEnabled(ctx, cur.ID, enabled)); err != nil {
 		return err
 	}
-	if !e.Enabled {
-		c.noticeExecutorEnabled(e, true)
+	if cur.Enabled != enabled {
+		cur.Enabled = enabled
+		c.noticeExecutorEnabledLocked(cur, enabled)
 	}
 	return nil
 }
@@ -6774,7 +6760,9 @@ func (c *Controller) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
 	if err := c.requireExecutorStore(); err != nil {
 		return err
 	}
-	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
+	ctx, cancel := context.WithTimeout(context.Background(), executorAdminTimeout)
+	defer cancel()
+	e, err := c.resolveExecutorRef(ctx, req.ExecutorID)
 	if err != nil {
 		return err
 	}
@@ -6790,7 +6778,7 @@ func (c *Controller) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
 	// would otherwise be UNDELETABLE by any CLI — `rafiki sandbox rm` cannot
 	// find a tombstoned row — and would block its (owner, machine) name forever.
 	if _, isSandbox := e.Labels[sandbox.RowLabelSandbox]; isSandbox {
-		live, err := c.sandboxRowLive(context.Background(), e.Labels[sandbox.RowLabelID])
+		live, err := c.sandboxRowLive(ctx, e.Labels[sandbox.RowLabelID])
 		if err != nil {
 			return err
 		}
@@ -6807,7 +6795,7 @@ func (c *Controller) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
 			}
 		}
 	}
-	if err := translateExecutorErr(c.execStore.Delete(context.Background(), e.ID)); err != nil {
+	if err := translateExecutorErr(c.execStore.Delete(ctx, e.ID)); err != nil {
 		return err
 	}
 	// The row is gone, so what decides whose set shrinks and who is told (owner,

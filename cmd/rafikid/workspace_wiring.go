@@ -210,8 +210,12 @@ func (c *Controller) markUnbound(childID string) {
 // fixed for its lifetime, so omitting the block now means never. A nil
 // block (no candidate found) is acceptable — naming the wrong machine is
 // worse than none.
-func (c *Controller) chooseExecutorCandidate(req protocol.SpawnRequest, owner executorOwner) (executors.Executor, error) {
-	return c.chooseExecutor(req, owner)
+//
+// childID names the child's row when it has one, so its stored set and labels
+// decide the candidate exactly as they decide reach; a legacy (nil-set) row
+// reads its selector, not the request.
+func (c *Controller) chooseExecutorCandidate(req protocol.SpawnRequest, owner executorOwner, childID string) (executors.Executor, error) {
+	return c.chooseExecutorFor(req, owner, childID)
 }
 
 // releaseWorkspace tears down a workspace on an executor.

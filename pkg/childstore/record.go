@@ -166,6 +166,17 @@ type ChildStore interface {
 	AdoptOwnership(ctx context.Context, childID, daemonID string) error
 }
 
+// ExecutorSetWriter updates one durable column of a child row: its executor
+// set. It is its own seam, not part of ChildStore, because a set update must
+// never be a full-row upsert from a snapshot: such a write can land after a
+// Close or an exit and clear closed_at or overwrite a newer status.
+type ExecutorSetWriter interface {
+	// SetExecutorSet stores set (nil is a legacy row, empty addresses nothing)
+	// on childID's row if the row is not closed. A closed or missing row is a
+	// no-op, never an error and never a resurrection.
+	SetExecutorSet(ctx context.Context, childID string, set []string) error
+}
+
 // RecordFromSnapshot builds a durable record from a store snapshot.
 //
 // LastStatus is deliberately left empty: only the exit path knows a child's

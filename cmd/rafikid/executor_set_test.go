@@ -482,3 +482,51 @@ func TestExecutorSetSpecOfAnUnknownChildAddressesNothing(t *testing.T) {
 	all, _, _ = c.executorSetSpec("")
 	ck.True(all, "a top-level caller addresses every executor of its owner")
 }
+
+// Admits is evaluated at spawn against exactly the labels the child's row then
+// carries, daemon keys included, so spawn and reach agree: an executor that
+// admits rafiki/kind=fundi serves a fundi child at spawn and in reach, and one
+// that admits rafiki/kind=claude serves it in neither.
+func TestSpawnAdmitsReadsTheLabelsTheRowWillCarry(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := setController(t,
+		ex("A", map[string]string{"machine": "a"}, "rafiki/kind=fundi"),
+		ex("B", map[string]string{"machine": "b"}, "rafiki/kind=claude"),
+		ex("N", map[string]string{"machine": "n"}, "rafiki/kind!=fundi"))
+	setParent(t, c, "c_parent", []string{allSet})
+
+	snap, err := spawnFundi(t, c, protocol.SpawnRequest{ParentChildID: "c_parent", Executors: []string{"a"}})
+	ck.Require().NoError(err, "an executor admitting the child's daemon-written kind label")
+	ck.EqDeep([]string{"A"}, snap.ExecutorSet, "the set")
+	for id, want := range map[string]bool{"A": true, "B": false, "N": false} {
+		for _, le := range c.execPool.Live() {
+			if le.Executor.ID == id {
+				ck.Eq(want, executorAdmitsChild(le.Executor, snap.Labels, ""), "reach on the stored row's labels agrees for %s", id)
+			}
+		}
+	}
+
+	for _, name := range []string{"b", "n"} {
+		_, err = spawnFundi(t, c, protocol.SpawnRequest{ParentChildID: "c_parent", Executors: []string{name}})
+		ck.Error(err, "an executor whose Admits rejects the row's labels is refused at spawn: %s", name)
+	}
+}
+
+// newChildLabels carries every daemon label known at spawn, and admission reads
+// the request's resolved copy over a rebuild.
+func TestAdmissionLabelsPreferTheResolvedRowLabels(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := setController(t)
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: "/w", Routing: "r", ConfigDir: "/cfg", Labels: map[string]string{"team": "x"}}
+	labels := newChildLabels(req, "brent", childLabelFacts{ModelAlias: "al", ForkSource: "c_src", Parent: "c_p", Root: "c_r"})
+	ck.EqDeep(map[string]string{
+		"team": "x", "owner": "brent", "rafiki/cwd": "/w", "rafiki/kind": "fundi", "rafiki/routing": "r",
+		"rafiki/config_dir": "/cfg", "rafiki/model-alias": "al", "rafiki/forked-from": "c_src",
+		childstore.LabelParent: "c_p", childstore.LabelRoot: "c_r",
+	}, labels, "the labels")
+
+	req.RowLabels = labels
+	ck.EqDeep(labels, c.admissionLabels(req, executorOwner{Name: "other"}), "admission reads the resolved labels")
+	req.RowLabels = nil
+	ck.Eq("brent", c.admissionLabels(req, executorOwner{Name: "brent"})["owner"], "a request with none is rebuilt")
+}

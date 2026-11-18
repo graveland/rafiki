@@ -394,7 +394,7 @@ func TestGrant_NativeNarrowing(t *testing.T) {
 	// names the spawner's set as the reason.
 	_, err = g.grantSpawn(t, coordID, "env=work", "anthropic/claude-x")
 	c.Require().Error(err, "a worker outside its parent's set must be refused")
-	c.StrContains(err.Error(), "executor set", "the refusal must name the executor set: %v", err)
+	c.StrContains(err.Error(), `no executor satisfies "env=work"`, "the refusal must be the selector one, not another set refusal: %v", err)
 
 	// A worker naming env=home — inside the set — lands, and the child's
 	// store record carries the executor it landed on (the same label phase 09
