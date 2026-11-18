@@ -226,7 +226,9 @@ func TestChildCannotReachAnExecutorItsParentCouldNot(t *testing.T) {
 	ck.False(!strings.Contains(err.Error(), "parent") && !strings.Contains(err.Error(), "PARENT"), "the refusal must say the parent's set is why: %v", err)
 }
 
-func TestChildInheritsTheParentsSetWhenItNamesNoSelector(t *testing.T) {
+// A child's reach is its OWN stored set; its ancestors' selectors narrow
+// nothing, and a row without a set addresses what its own selector allows.
+func TestEffectiveSetIsTheChildsOwnSet(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		ex("exec-work", map[string]string{"env": "work"}, ""),
@@ -234,28 +236,17 @@ func TestChildInheritsTheParentsSetWhenItNamesNoSelector(t *testing.T) {
 	)
 	set, err := c.effectiveExecutorSet("c_child")
 	ck.NoError(err)
-	ck.False(len(set) != 1 || set[0].ID != "exec-home", "want only exec-home, got %+v", set)
-}
+	ck.Len(set, 2, "the parent's legacy selector must not narrow the child; got %+v", set)
 
-// Narrowing is transitive: a grandchild is bounded by its grandparent.
-func TestNarrowingIsTransitiveUpTheWholeChain(t *testing.T) {
-	ck := assert.NewAborting(t)
-	c := selectFixture(t, "env=home",
-		ex("a", map[string]string{"env": "home", "os": "linux"}, ""),
-		ex("b", map[string]string{"env": "home", "os": "darwin"}, ""),
-		ex("z", map[string]string{"env": "work", "os": "linux"}, ""),
-	)
-	_ = c.st.Update("c_child", func(s *childstore.Session) { s.ExecutorSelector = "os=linux" })
-	c.st.Insert(&childstore.Session{
-		ChildID: "c_grandchild", Status: protocol.StatusIdle, StartedAt: time.Now(),
-		Labels: map[string]string{
-			childstore.LabelParent: "c_child", childstore.LabelRoot: "c_parent",
-		},
-	})
-
-	set, err := c.effectiveExecutorSet("c_grandchild")
+	ck.NoError(c.st.SetExecutorSet("c_child", []string{"exec-home"}))
+	set, err = c.effectiveExecutorSet("c_child")
 	ck.NoError(err)
-	ck.False(len(set) != 1 || set[0].ID != "a", "grandchild must be bounded by env=home AND os=linux; got %+v", set)
+	ck.EqDeep([]string{"exec-home"}, reachIDs(set), "the child's own set")
+
+	ck.NoError(c.st.SetExecutorSet("c_child", []string{}))
+	set, err = c.effectiveExecutorSet("c_child")
+	ck.NoError(err)
+	ck.Empty(set, "an empty set addresses nothing")
 }
 
 // A top-level agent's set is everything live, subject to executor admission.

@@ -118,38 +118,12 @@ func TestReachableEmptySelectorDropsSandboxes(t *testing.T) {
 		sandboxExec("exec-sbx", "box", owner.UserID),
 	}
 	b := env.ctrl.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: owner.UserID})
+	insertChildRow(env.ctrl, "c1", "", owner.UserID)
 
 	got, err := b.Reachable("c1")
 	ck.Require().NoError(err, "Reachable")
 	ck.Len(got, 1, "the ordinary executor only; got %+v", got)
 	ck.Eq("exec-a", got[0].ID, "reachable[0]")
-}
-
-// A ref bypasses SEARCH, never confinement: it narrows the same narrowed set to
-// the one row it names, and a ref that names nothing reachable yields an empty
-// set (the caller reports it) rather than widening anywhere.
-func TestReachableExecutorRefNarrowsToOne(t *testing.T) {
-	ck := assert.NewAborting(t)
-	env := newSandboxEnv(t)
-	owner := sandboxOwner()
-	env.pool.live = []execpool.LiveExecutor{
-		nativeExec("exec-a", "a", owner.UserID),
-		nativeExec("exec-b", "b", owner.UserID),
-	}
-	b := env.ctrl.binderFor(protocol.SpawnRequest{ExecutorRef: "b"},
-		executorOwner{Name: "u", UserID: owner.UserID})
-
-	got, err := b.Reachable("c1")
-	ck.Require().NoError(err, "Reachable")
-	ck.Len(got, 1, "a ref names one executor; got %+v", got)
-	ck.Eq("exec-b", got[0].ID, "reachable[0]")
-
-	// A ref to something no live row carries is empty, never "everything".
-	b = env.ctrl.binderFor(protocol.SpawnRequest{ExecutorRef: "z"},
-		executorOwner{Name: "u", UserID: owner.UserID})
-	got, err = b.Reachable("c1")
-	ck.Require().NoError(err, "Reachable")
-	ck.Empty(got, "an unreachable ref reaches nothing")
 }
 
 // A store error is an ERROR, never "not owned" and never an empty set: reading
@@ -263,6 +237,7 @@ func TestReachableIncludesOfflineInstalledRow(t *testing.T) {
 	)
 	b := c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"})
 
+	insertChildRow(c, "c1", "", "u1")
 	got, err := b.Reachable("c1")
 	ck.Require().NoError(err, "Reachable")
 	ck.EqDeep([]string{"exec-grey", "exec-ublk"}, reachIDs(got),
@@ -275,7 +250,7 @@ func TestReachableIncludesOfflineInstalledRow(t *testing.T) {
 // live one is — by the spawn's selector, by the executor row's owner, and by
 // the install row's owner.
 func TestReachableOfflineInstalledStillNarrowed(t *testing.T) {
-	t.Run("a selector that does not match excludes it", func(t *testing.T) {
+	t.Run("a set that does not name it excludes it", func(t *testing.T) {
 		ck := assert.NewAborting(t)
 		installs := installStoreWith(t, "u1", "exec-ublk")
 		c := reachController("u1",
@@ -283,13 +258,14 @@ func TestReachableOfflineInstalledStillNarrowed(t *testing.T) {
 			map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u1")},
 			installs,
 		)
-		b := c.binderFor(protocol.SpawnRequest{ExecutorSelector: "machine=greyshift"},
-			executorOwner{Name: "u", UserID: "u1"})
+		b := c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"})
 
+		insertChildRow(c, "c1", "", "u1")
+		ck.Require().NoError(c.st.SetExecutorSet("c1", []string{"exec-grey"}))
 		got, err := b.Reachable("c1")
 		ck.Require().NoError(err, "Reachable")
 		ck.EqDeep([]string{"exec-grey"}, reachIDs(got),
-			"an installed executor the spawn's selector excludes is not reachable; got %v", reachIDs(got))
+			"an installed executor outside the child's set is not reachable; got %v", reachIDs(got))
 	})
 
 	t.Run("another owner's install row is never read", func(t *testing.T) {
@@ -303,6 +279,7 @@ func TestReachableOfflineInstalledStillNarrowed(t *testing.T) {
 		)
 		b := c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"})
 
+		insertChildRow(c, "c1", "", "u1")
 		got, err := b.Reachable("c1")
 		ck.Require().NoError(err, "Reachable")
 		ck.EqDeep([]string{"exec-grey"}, reachIDs(got),
@@ -320,6 +297,7 @@ func TestReachableOfflineInstalledStillNarrowed(t *testing.T) {
 		)
 		b := c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"})
 
+		insertChildRow(c, "c1", "", "u1")
 		got, err := b.Reachable("c1")
 		ck.Require().NoError(err, "Reachable")
 		ck.EqDeep([]string{"exec-grey"}, reachIDs(got),
@@ -339,132 +317,10 @@ func TestReachableOfflineInstalledStillNarrowed(t *testing.T) {
 		b := c.binderFor(protocol.SpawnRequest{WorkspaceMode: "ephemeral"},
 			executorOwner{Name: "u", UserID: "u1"})
 
+		insertChildRow(c, "c1", "", "u1")
 		got, err := b.Reachable("c1")
 		ck.Require().NoError(err, "Reachable")
 		ck.Empty(got, "a pinned installed executor cannot serve an ephemeral spawn; got %v", reachIDs(got))
-	})
-}
-
-// The installer's own grant: an executor installed by a child's ANCESTOR is
-// reachable to that child whatever the child's selector says, and to no other
-// tree. Authority flows down.
-func TestReachableInstallerLineageBypassesSelector(t *testing.T) {
-	ck := assert.NewAborting(t)
-	installs := installStoreWith(t, "u1", "exec-ublk")
-	c := reachController("u1",
-		[]execpool.LiveExecutor{
-			nativeExec("exec-grey", "greyshift", "u1"),
-			// Live, so this is an ordinary candidate the SELECTOR drops — which
-			// is what makes the second rule's bypass observable.
-			nativeExec("exec-ublk", "ublk-s2", "u1"),
-		},
-		map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u1")},
-		installs,
-	)
-	insertChildRow(c, "c_root", "", "u1")
-	insertChildRow(c, "c_mid", "c_root", "u1")
-	insertChildRow(c, "c_other", "c_root", "u1")
-	insertChildRow(c, "c_otherkid", "c_other", "u1")
-	// The grandparent installed it.
-	setInstaller(t, installs, "exec-ublk", "c_mid")
-
-	b := c.binderFor(protocol.SpawnRequest{ParentChildID: "c_mid", ExecutorSelector: "machine=greyshift"},
-		executorOwner{Name: "u", UserID: "u1"})
-	got, err := b.Reachable("c_gc")
-	ck.Require().NoError(err, "Reachable")
-	ck.EqDeep([]string{"exec-grey", "exec-ublk"}, reachIDs(got),
-		"the installer's grandchild reaches it even though its selector excludes it; got %v", reachIDs(got))
-
-	// A sibling tree under the same root: the installer is not on its chain.
-	other := c.binderFor(protocol.SpawnRequest{ParentChildID: "c_other", ExecutorSelector: "machine=greyshift"},
-		executorOwner{Name: "u", UserID: "u1"})
-	got, err = other.Reachable("c_otherkid")
-	ck.Require().NoError(err, "Reachable")
-	ck.EqDeep([]string{"exec-grey"}, reachIDs(got),
-		"a sibling tree must not inherit the installer's grant; got %v", reachIDs(got))
-
-	// An executor BOTH rules reach appears ONCE: a duplicate would make one
-	// machine look like two and turn every implicit call into "pass executor".
-	both := c.binderFor(protocol.SpawnRequest{ParentChildID: "c_mid"},
-		executorOwner{Name: "u", UserID: "u1"})
-	got, err = both.Reachable("c_gc")
-	ck.Require().NoError(err, "Reachable")
-	ck.EqDeep([]string{"exec-grey", "exec-ublk"}, reachIDs(got),
-		"a live installed executor on the installer's chain must not be listed twice; got %v", reachIDs(got))
-}
-
-// The installer's grant licenses a SELECTOR bypass and nothing else. An
-// executor's Admits selector and the workspace mode its row offers are
-// confinement facts — who may use the machine at all — so a descendant of the
-// installer does not get past them by being a descendant. Every case here uses
-// an OFFLINE installed row and a request selector the row cannot match, so rule
-// 1's pipeline rejects it on the same grounds and rule 2 is the only path that
-// could let it in: whatever is reachable here is rule 2's doing.
-func TestReachableInstallerGrantAppliesConfinement(t *testing.T) {
-	// lineageGrantEnv is one offline installed executor, installed by c_mid, and
-	// a request from c_mid's child that no selector can match the row with.
-	lineageGrantEnv := func(t *testing.T, row executors.Executor, req protocol.SpawnRequest) executorBinder {
-		t.Helper()
-		installs := installStoreWith(t, "u1", "exec-ublk")
-		c := reachController("u1", nil,
-			map[string]executors.Executor{"exec-ublk": row}, installs)
-		insertChildRow(c, "c_mid", "", "u1")
-		setInstaller(t, installs, "exec-ublk", "c_mid")
-		if req.ParentChildID == "" {
-			req.ParentChildID = "c_mid"
-		}
-		if req.ExecutorSelector == "" {
-			req.ExecutorSelector = "machine=greyshift"
-		}
-		return c.binderFor(req, executorOwner{Name: "u", UserID: "u1"})
-	}
-
-	t.Run("a workspace mode the row does not offer excludes it", func(t *testing.T) {
-		ck := assert.NewAborting(t)
-		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
-		row.WorkspaceMode = "pinned"
-		b := lineageGrantEnv(t, row, protocol.SpawnRequest{WorkspaceMode: "ephemeral"})
-
-		got, err := b.Reachable("c_gc")
-		ck.Require().NoError(err, "Reachable")
-		ck.Empty(got, "an ephemeral spawn must not be handed a pinned executor through lineage; got %v", reachIDs(got))
-	})
-
-	t.Run("an Admits selector that refuses the child excludes it", func(t *testing.T) {
-		ck := assert.NewAborting(t)
-		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
-		row.Admits = "owner=someone-else"
-		b := lineageGrantEnv(t, row, protocol.SpawnRequest{})
-
-		got, err := b.Reachable("c_gc")
-		ck.Require().NoError(err, "Reachable")
-		ck.Empty(got, "lineage must not walk a child past the row's own admission selector; got %v", reachIDs(got))
-	})
-
-	t.Run("the selector bypass survives when confinement allows it", func(t *testing.T) {
-		ck := assert.NewAborting(t)
-		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
-		row.Admits = "owner=u"
-		row.WorkspaceMode = "pinned"
-		b := lineageGrantEnv(t, row, protocol.SpawnRequest{WorkspaceMode: "pinned"})
-
-		got, err := b.Reachable("c_gc")
-		ck.Require().NoError(err, "Reachable")
-		ck.EqDeep([]string{"exec-ublk"}, reachIDs(got),
-			"the installer's grant still bypasses the SELECTOR — confinement alone must not refuse it; got %v", reachIDs(got))
-	})
-
-	t.Run("an unrequested workspace mode constrains nothing", func(t *testing.T) {
-		ck := assert.NewAborting(t)
-		row := installedExecRow("exec-ublk", "ublk-s2", "u1")
-		row.Admits = "owner=u"
-		row.WorkspaceMode = "pinned"
-		b := lineageGrantEnv(t, row, protocol.SpawnRequest{})
-
-		got, err := b.Reachable("c_gc")
-		ck.Require().NoError(err, "Reachable")
-		ck.EqDeep([]string{"exec-ublk"}, reachIDs(got),
-			"a request that asks for no mode is offered any mode, as narrowByWorkspaceMode says; got %v", reachIDs(got))
 	})
 }
 
@@ -503,6 +359,7 @@ func TestBoundExecutorAmbiguityCountsOfflineInstalled(t *testing.T) {
 		map[string]executors.Executor{"exec-ublk": installedExecRow("exec-ublk", "ublk-s2", "u1")},
 		installs,
 	)
+	insertChildRow(c, "c1", "", "u1")
 	be := newBoundExecutor("c1", c.binderFor(protocol.SpawnRequest{}, executorOwner{Name: "u", UserID: "u1"}))
 
 	_, err := be.Execute(context.Background(), "read", nil)

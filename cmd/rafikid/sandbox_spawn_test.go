@@ -55,8 +55,8 @@ func insertSandboxRow(env *sandboxEnv, row sandbox.Row) {
 // --- happy path and failure paths -------------------------------------------
 
 // TestSandboxSpawnHappyPath: a spawn with a sandbox creates the block, the
-// child owns it, its STORED selector pins the sandbox's machine (which confines
-// its descendants through lineage narrowing), and the binder reaches it.
+// child owns it, its STORED selector pins the sandbox's machine, its stored set
+// is its sandbox alone, and the binder reaches it.
 func TestSandboxSpawnHappyPath(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)

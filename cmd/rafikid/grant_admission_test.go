@@ -12,10 +12,9 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// Driven through the TOOL against a real controller and a fake pool. With
-// boundExecutor's lazy binding, the spawn succeeds and the constraint is
-// enforced at the first tool call — the boundary moved from resolve-time to
-// call-time, but chooseExecutor still enforces the parent's set on bind.
+// Driven through the TOOL against a real controller and a fake pool. A selector
+// outside the spawner's set matches nothing the spawner may address, so the
+// spawn is refused before anything starts.
 func TestSpawnToolCannotEscapeItsParentsExecutorSet(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
@@ -26,13 +25,13 @@ func TestSpawnToolCannotEscapeItsParentsExecutorSet(t *testing.T) {
 	got, err := sp.Spawn(context.Background(), tools.SpawnSpec{
 		Prompt: "x", Cwd: t.TempDir(), Model: "anthropic/sonnet-latest", ExecutorSelector: "env=work",
 	})
-	ck.NoError(err, "with lazy binding, spawn succeeds even when no executor matches")
-	ck.NotEq("", got.ChildID, "childID must not be empty")
+	ck.Error(err, "a selector outside the spawner's set must refuse the spawn")
+	ck.StrContains(err.Error(), "no executor satisfies", "refusal text")
+	ck.Eq("", got.ChildID, "no child may be created")
 }
 
 // A forged request, bypassing the tool entirely. The tool is UX; the
-// controller is the boundary. With lazy binding, the spawn succeeds and the
-// constraint fires on the first tool call rather than at spawn time.
+// controller is the boundary, and it refuses at spawn.
 func TestForgedSelectorAtTheControllerIsRefused(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home", ex("exec-work", map[string]string{"env": "work"}, ""))
@@ -42,8 +41,8 @@ func TestForgedSelectorAtTheControllerIsRefused(t *testing.T) {
 		Model:            "anthropic/sonnet-latest",
 		ExecutorSelector: "env=work",
 	}, users.Identity{})
-	ck.NoError(err, "with lazy binding, spawn succeeds")
-	ck.NotEq("", got.ChildID, "childID must not be empty")
+	ck.Error(err, "a forged selector outside the spawner's set must refuse the spawn")
+	ck.Eq("", got.ChildID, "no child may be created")
 }
 
 // Annotations can help a child FIND an executor it was already permitted to
@@ -52,9 +51,8 @@ func TestForgedSelectorAtTheControllerIsRefused(t *testing.T) {
 // being enforced separately — so it needs a test, or a later "optimisation"
 // that consults annotations earlier will quietly break it.
 //
-// With lazy binding, the spawn succeeds and the boundary fires on the first
-// tool call. The annotation cannot help — chooseExecutor narrows through the
-// parent's set regardless of what the child requests.
+// The annotation cannot help: the spawn narrows the spawner's set by what the
+// child requests, and the annotated executor is outside that set.
 func TestAnnotationsCannotWidenAChildsSet(t *testing.T) {
 	ck := assert.NewAborting(t)
 	work := ex("exec-work", map[string]string{"env": "work"}, "")
@@ -65,12 +63,11 @@ func TestAnnotationsCannotWidenAChildsSet(t *testing.T) {
 	got, err := sp.Spawn(context.Background(), tools.SpawnSpec{
 		Prompt: "x", Cwd: t.TempDir(), Model: "anthropic/sonnet-latest", ExecutorSelector: "sentinel-built=true",
 	})
-	ck.NoError(err, "with lazy binding, spawn succeeds")
-	ck.NotEq("", got.ChildID, "childID must not be empty")
+	ck.Error(err, "an annotation must not let a child past its spawner's set")
+	ck.Eq("", got.ChildID, "no child may be created")
 }
 
-// No match means the child starts unbound — not that spawn refuses. The
-// refusal fires on the first tool call (see TestBoundExecutorUnboundReturnsTheRefusalReason).
+// A selector that matches nothing refuses the spawn at once, naming why.
 func TestNoMatchingExecutorFailsImmediately(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "")
@@ -79,8 +76,10 @@ func TestNoMatchingExecutorFailsImmediately(t *testing.T) {
 	got, err := sp.Spawn(context.Background(), tools.SpawnSpec{
 		Prompt: "x", Cwd: t.TempDir(), Model: "anthropic/sonnet-latest", ExecutorSelector: "env=nowhere",
 	})
-	ck.NoError(err, "with lazy binding, spawn succeeds even with no match")
-	// Spawn succeeds fast — it neither waits for an executor to appear nor
+	ck.Error(err, "a selector that matches nothing must refuse the spawn")
+	ck.StrContains(err.Error(), "no executor satisfies", "refusal text")
+	ck.Eq("", got.ChildID, "no child may be created")
+	// The refusal is fast — it neither waits for an executor to appear nor
 	// blocks on selection failure. This fixture wires a fake pool and no
 	// executor store, so the waits a regression would have to introduce are
 	// ones it adds itself; the bound is set well below the waits the real
@@ -89,21 +88,4 @@ func TestNoMatchingExecutorFailsImmediately(t *testing.T) {
 	// room for an ordinary scheduling hiccup on a loaded host. 1s did not: a
 	// loaded run took 1.066s and tripped it.
 	ck.LessOrEqual(5*time.Second, time.Since(start), "spawn took")
-	ck.NotEq("", got.ChildID, "childID must not be empty")
-}
-
-// The spawn refusals no longer happen at scheduling time — verify the existing
-// admission tests still hold for the constraint itself (chooseExecutor still
-// enforces it). Directly test chooseExecutor against an escaped selector.
-func TestChooseExecutorStillEnforcesParentConfinement(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	c := selectFixture(t, "env=home",
-		ex("exec-work", map[string]string{"env": "work"}, ""),
-		ex("exec-home", map[string]string{"env": "home"}, ""),
-	)
-	_, err := c.chooseExecutor(protocol.SpawnRequest{
-		ParentChildID: "c_parent", ExecutorSelector: "env=work",
-	}, executorOwner{})
-	ck.Require().Error(err, "chooseExecutor must still refuse a selector the parent's set excludes")
-	ck.StrContains(err.Error(), "PARENT", "the refusal must name the parent's set: %v", err)
 }

@@ -13,10 +13,9 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// With lazy binding, spawn succeeds even when no executor matches. The task
-// ledger path is unchanged: the task is still assigned, and the child starts
-// unbound (its first tool call will surface the refusal).
-func TestUnboundSpawnStillAssignsTheTask(t *testing.T) {
+// A spawn refused for its executor set must leave the task ledger untouched:
+// the refusal happens before the child exists, so nothing may be assigned.
+func TestRefusedSpawnLeavesTheTaskUnassigned(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home", ex("exec-home", map[string]string{"env": "home"}, ""))
 	store := tasks.NewMemoryStore()
@@ -29,18 +28,14 @@ func TestUnboundSpawnStillAssignsTheTask(t *testing.T) {
 	}
 
 	sp := newControllerSpawner(c, "c_parent")
-	got, err := sp.Spawn(ctx, tools.SpawnSpec{
+	_, err := sp.Spawn(ctx, tools.SpawnSpec{
 		Prompt: "x", Cwd: t.TempDir(), Model: "anthropic/sonnet-latest",
 		Task: "1", ExecutorSelector: "env=nowhere",
 	})
-	ck.NoError(err, "spawn must succeed")
-	ck.NotEq("", got.ChildID, "childID must not be empty")
+	ck.Error(err, "the spawn must be refused")
 
-	// The task is assigned to the unbound child and stays pending: Assign sets
-	// the assignee, never the status, so an unbound child simply starts without
-	// error and the work it was handed is still visible to whoever delegated it.
 	rows, _ := store.List(ctx, tasks.ListFilter{ConversationID: "conv-parent"})
-	ck.Eq(got.ChildID, rows[0].Assignee, "assignee")
+	ck.Eq("", rows[0].Assignee, "assignee")
 	ck.Eq(tasks.StatusPending, rows[0].Status, "status")
 }
 

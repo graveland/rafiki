@@ -85,26 +85,16 @@ func TestChooseLaunchExecutorHonoursExecutorRefAndRequiresLaunchKind(t *testing.
 	ck.Eq("exec-1", exec.ID, "want exec-1, got")
 }
 
-// TestExecutorReasonLaunchBranchDetectsLineageExclusion is a regression test
-// for a gap the launch branch of executorReason had: it checked e.Enabled,
-// launchable[e.ID], its own admits selector, and the child's own selector --
-// but never parentSet membership, which is where an ANCESTOR's selector
-// (evaluated during lineage narrowing in effectiveExecutorSetFor) excludes an
-// executor. "work" here passes every launch-branch check the old code ran
-// (enabled, launchable, admits, childSel.Explain all pass) and is excluded
-// ONLY by the parent's env=home selector during lineage narrowing -- exactly
-// the case the missing check let slip through as "not excluded".
+// TestExecutorReasonLaunchBranchNamesTheSet pins the launch branch of
+// executorReason reporting set membership. "work" passes every other check in
+// that branch (enabled, launchable, admits, childSel.Explain) and is excluded
+// only because the spawner's set (a legacy env=home selector) leaves it out.
 //
-// chooseLaunchExecutor's own refusal (checked first, as a sanity check) does
-// NOT exercise this bug: its actual selection decision comes from
-// Narrow(parentSet, sel) inside narrowedExecutorCandidates, which is entirely
-// independent of executorReason and already excludes "work" correctly for
-// its own reasons. executorReason itself is used only to produce the
-// human-readable exclusion text (explainNoLaunchMatch's per-row message, and
-// -- the case that actually matters -- ListExecutorRows.Eligible), so the
-// regression must be asserted directly against executorReason's return
-// value, not inferred from chooseLaunchExecutor's error/success outcome.
-func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
+// chooseLaunchExecutor's own refusal does not exercise this: its decision comes
+// from narrowedExecutorCandidates, independent of executorReason, which only
+// produces the exclusion text (explainNoLaunchMatch and ListExecutorRows), so
+// the text is asserted directly.
+func TestExecutorReasonLaunchBranchNamesTheSet(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		exWithLaunch("work", map[string]string{"env": "work"}, "", "claude"),
@@ -113,17 +103,15 @@ func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
 
 	// Sanity: the end-to-end refusal is correct (and stays correct) either way.
 	if _, err := c.chooseLaunchExecutor(req, executorOwner{}, "claude"); err == nil {
-		t.Fatal("want a refusal — work is excluded by the parent's lineage selector")
+		t.Fatal("want a refusal: work is outside the spawner's set")
 	}
 
-	// The actual regression: ask executorReason directly, the same way
-	// explainNoLaunchMatch and ListExecutorRows do, whether "work" is
-	// excluded. Before the fix this returns "" (claims eligible) because the
-	// launch branch never checks parentSet membership.
+	// Ask executorReason directly, the same way explainNoLaunchMatch and
+	// ListExecutorRows do.
 	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, executorOwner{})
 	ck.NoError(err)
-	ck.Empty(candidates, "want zero post-selector candidates (lineage already excluded work), got")
-	ck.Empty(parentSet, "want work excluded from parentSet by the lineage narrowing, got")
+	ck.Empty(candidates, "want zero candidates (the set already excluded work), got")
+	ck.Empty(parentSet, "want work excluded from parentSet by the set, got")
 	launchable := launchKindSet(c.execPool.Live(), "claude")
 	var work executors.Executor
 	for _, le := range c.execPool.Live() {
@@ -132,5 +120,5 @@ func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
 		}
 	}
 	reason := executorReason(work, req, launchable, "claude", sel, childLabels, parentSet, "")
-	ck.NotEq("", reason, "executorReason claims work is eligible, but it is excluded by the parent's lineage selector")
+	ck.Eq("not in your executor set", reason)
 }

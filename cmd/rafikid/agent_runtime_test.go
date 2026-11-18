@@ -650,6 +650,10 @@ func TestABoundChildGetsTheWorkspaceBlock(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=home"
+	// The set Spawn fixes before the runtime is built; the child has no row yet,
+	// so the binder reads it from the request.
+	req, err := c.resolveSpawnExecutorSet(req, executorOwner{Name: "brent"})
+	ck.NoError(err)
 	ro, err := c.spawnAgentRuntimeOptions(req, "c1", false, "brent", "")
 	ck.NoError(err)
 	ck.NotNil(ro.Workspace, "a child that binds at spawn must get the workspace block; the "+

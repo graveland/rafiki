@@ -2905,6 +2905,11 @@ func TestHomeProvisionThatAcquiredTheSlotAfterAMigrationNamesTheMigrationExecuto
 // to the fixture's owner. The fixture's pool holds the launcher and nothing
 // else; the target executor is reachable through its install row while down.
 func (f *installFixture) installedBinder() *controllerBinder {
+	// The binder's child is "c1". Its stored row is what its executor set is
+	// read from, and a legacy row (no set) addresses every executor of its owner.
+	if _, ok := f.ctrl.st.Get("c1"); !ok {
+		insertChildRow(f.ctrl, "c1", "", installTestOwner)
+	}
 	return f.ctrl.binderFor(protocol.SpawnRequest{}, executorOwner{
 		Name: installTestOwnerName, UserID: installTestOwner,
 	}).(*controllerBinder)
@@ -2993,6 +2998,7 @@ func TestBoundExecutorRelaunchCoalescesConcurrentCalls(t *testing.T) {
 	// session of its own.
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
+	insertChildRow(f.ctrl, "c2", "", installTestOwner)
 	follower := newBoundExecutor("c2", binder)
 	_, ferr := follower.Execute(tools.WithExecutorTarget(cancelled, &tools.ExecutorTarget{Requested: "ublk-s2"}), "read", nil)
 	c.ErrorIs(ferr, context.Canceled, "a coalesced caller returns its own context's error")

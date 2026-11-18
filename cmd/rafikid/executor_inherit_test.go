@@ -12,42 +12,15 @@ import (
 	"github.com/multigres/testkit/assert"
 )
 
-// THE confinement escape. A confined parent spawning a child that names no
-// executor must not produce an unconfined child.
-//
-// An omitted selector used to mean "no executor": resolveExecutor returned
-// (nil, nil) and the child's tools ran IN THE DAEMON PROCESS on the daemon
-// host, outside every executor its parent was restricted to. And the child
-// stored "" as its own selector, so lineageChain skipped it and the entire
-// subtree beneath inherited the way out.
-func TestOmittedSelectorInheritsTheParentsConfinement(t *testing.T) {
+// Driven through Controller.Spawn itself, so that removing the set resolution
+// from Spawn, rather than from resolveSpawnExecutorSet, is also caught. A child
+// that names nothing gets a set that is a subset of its spawner's, stored on its
+// row: the spawner's legacy env=home selector leaves exec-home and nothing else.
+func TestSpawnStoresASetInsideTheSpawnersSet(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
+		ex("exec-work", map[string]string{"env": "work"}, ""),
 		ex("exec-home", map[string]string{"env": "home"}, ""),
-		ex("exec-work", map[string]string{"env": "work"}, ""),
-	)
-
-	req := c.inheritExecutorGrant(protocol.SpawnRequest{ParentChildID: "c_parent"})
-
-	ck.NotEq("", req.ExecutorSelector, "the child inherited no selector; it and its whole subtree are unconfined")
-	ck.Eq("env=home", req.ExecutorSelector, "selector")
-
-	// And the inherited selector must actually CONFINE, not merely be stored.
-	chosen, err := c.chooseExecutor(req, executorOwner{})
-	ck.NoError(err, "the child was not placed on an executor at all")
-	ck.Eq("exec-home", chosen.ID, "child placed on")
-}
-
-// The escape driven through Controller.Spawn itself, so that removing the
-// inheritance call from Spawn — rather than from inheritExecutorGrant — is
-// also caught. With boundExecutor, spawn succeeds even when no executor
-// matches: the child starts unbound and its first tool call surfaces the
-// refusal. This test verifies the inherited selector IS applied — the spawn
-// proceeds rather than failing, which is the new behaviour.
-func TestSpawnAppliesTheInheritedSelector(t *testing.T) {
-	ck := assert.NewAborting(t)
-	c := selectFixture(t, "env=home",
-		ex("exec-work", map[string]string{"env": "work"}, ""),
 	)
 	c.stateDir = t.TempDir()
 
@@ -56,13 +29,12 @@ func TestSpawnAppliesTheInheritedSelector(t *testing.T) {
 		Model:         "anthropic/sonnet-latest",
 		Cwd:           t.TempDir(),
 		ParentChildID: "c_parent",
-		// No ExecutorSelector.
 	}, users.Identity{})
-	ck.NoError(err, "spawn must not fail: a child starts unbound when no executor matches")
-	// The child received the inherited selector.
+	ck.NoError(err)
 	snap, ok := c.st.Get(got.ChildID)
 	ck.True(ok, "child not found in store after spawn")
-	ck.Eq("env=home", snap.ExecutorSelector, "the spawn did not apply the inherited selector; got")
+	ck.EqDeep([]string{"exec-home"}, snap.ExecutorSet, "the stored set")
+	ck.Eq("", snap.ExecutorSelector, "the executor selector is no longer inherited")
 }
 
 // Today's correct default, which the fix must not disturb: a top-level agent
@@ -129,27 +101,23 @@ func TestWorkspaceModeIsInheritedIndependentlyOfTheSelector(t *testing.T) {
 	ck.Eq("pinned", req.WorkspaceMode, "an explicit mode must be kept, got")
 }
 
-// The grant is read from the STORE, never from the request — the same rule
-// the limits checks follow. A caller that could name its own parent's grant
-// could widen it.
+// The workspace mode is read from the STORE, never from the request: a caller
+// that could name its own parent's grant could widen it. The executor selector
+// is not inherited at all; the set is resolved by resolveSpawnExecutorSet.
 func TestInheritanceReadsTheStoreNotTheRequest(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		ex("exec-home", map[string]string{"env": "home"}, ""),
-		ex("exec-work", map[string]string{"env": "work"}, ""),
 	)
-	// A grandchild whose parent is the confined child.
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_grand", Status: protocol.StatusIdle, StartedAt: time.Now(),
-		Kind: protocol.KindFundi, ExecutorSelector: "env=home",
+		Kind: protocol.KindFundi, ExecutorSelector: "env=home", WorkspaceMode: "ephemeral",
 		Labels: map[string]string{
 			childstore.LabelParent: "c_parent", childstore.LabelRoot: "c_parent",
 		},
 	})
 
 	req := c.inheritExecutorGrant(protocol.SpawnRequest{ParentChildID: "c_grand"})
-	ck.Eq("env=home", req.ExecutorSelector, "selector")
-	chosen, err := c.chooseExecutor(req, executorOwner{})
-	ck.NoError(err, "chooseExecutor")
-	ck.Eq("exec-home", chosen.ID, "a third-generation child reached")
+	ck.Eq("ephemeral", req.WorkspaceMode, "workspace mode")
+	ck.Eq("", req.ExecutorSelector, "the selector is not copied from the spawner")
 }

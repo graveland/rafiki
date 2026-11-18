@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorinstall"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -69,8 +70,7 @@ func isBareExecutorRef(s string) bool {
 
 // promoteBareExecutorRef rewrites a bare-word selector into an ExecutorRef so
 // it resolves through matchExecutorRef — machine label first, then id —
-// against the SAME confinement-narrowed candidate set a selector would have
-// produced (resolveRef runs on the eligible set, never the raw pool). This is
+// against the spawner's executor set (resolveSpawnExecutorSet). This is
 // the spawn-time normalization for the incident where an MCP caller passed
 // executor: "greyshift" and ParseSelector read it as "must carry a label named
 // greyshift", a guaranteed zero match against labels {owner, machine}.
@@ -127,7 +127,7 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest, owner executorOwn
 // narrowedExecutorCandidates computes chooseExecutor's candidate list without
 // picking a winner or explaining a failure — chooseLaunchExecutor narrows
 // this further by launch kind before doing either, so a change to admission
-// or lineage narrowing can never happen in only one of the two callers.
+// or executor-set narrowing can never happen in only one of the two callers.
 func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, owner executorOwner) (
 	candidates []executors.Executor, parentSet []executors.Executor, childLabels map[string]string, sel executors.Selector, err error,
 ) {
@@ -143,6 +143,13 @@ func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, owner
 	parentSet, err = c.effectiveExecutorSetFor(req.ParentChildID, childLabels, owner.UserID)
 	if err != nil {
 		return nil, nil, nil, executors.Selector{}, err
+	}
+
+	// A resolved request carries the child's own set (see
+	// resolveSpawnExecutorSet, and the stored row on a resume); nil means not
+	// resolved yet and restricts nothing. An empty non-nil set admits nothing.
+	if all, ids, _ := childstore.ResolveSetSpec(req.Executors, ""); req.Executors != nil && !all {
+		parentSet = filterBySet(parentSet, false, ids, "")
 	}
 
 	candidates = executors.Narrow(parentSet, sel)
@@ -211,7 +218,7 @@ func dropChildOwnedSandboxes(candidates []executors.Executor) []executors.Execut
 
 // chooseLaunchExecutor is chooseExecutor's sibling for a kind that must be
 // LAUNCHED (currently only "claude") rather than reached as an already-running
-// executor's tool surface. It runs the SAME admission/lineage/workspace-mode
+// executor's tool surface. It runs the SAME admission/set/workspace-mode
 // pipeline chooseExecutor does, then further requires the executor to
 // advertise launchKind among the DescribeResponse.LaunchKinds it self-reported
 // at connect time. Self-reporting is safe here for the same reason it is safe
@@ -336,9 +343,9 @@ func narrowByWorkspaceMode(candidates []executors.Executor, want string) []execu
 // unset row mode counts as pinned (see narrowByWorkspaceMode).
 //
 // It is its own predicate because two different paths ask this question:
-// narrowByWorkspaceMode (the live pipeline, and rule 1's offline installed rows)
-// and reachableInstalledCandidates' installer-lineage grant. A second spelling of
-// the comparison is exactly how that grant came to skip the check altogether.
+// narrowByWorkspaceMode (the live pipeline) and the offline installed rows of
+// reachableInstalledCandidates. A second spelling of the comparison is how a
+// path comes to skip the check altogether.
 func workspaceModeOffered(rowMode, want string) bool {
 	return want == "" || workspaceModeOrPinned(rowMode) == want
 }
@@ -347,12 +354,8 @@ func workspaceModeOffered(rowMode, want string) bool {
 // it at all: it is enabled, it belongs to the child's owner, and its Admits
 // selector matches the child's labels.
 //
-// This is the confinement half of admission, shared by the two places a
-// candidate can come from: the narrowing pipeline every live row runs through
-// (effectiveExecutorSetOver) and reachableInstalledCandidates' installer-lineage
-// grant. Sharing it is the point — the grant licenses a SELECTOR bypass, and a
-// second copy of this predicate is how it grew into a bypass of the row's own
-// admission selector as well.
+// This is the confinement half of admission, applied by the one narrowing
+// pipeline every candidate row runs through (effectiveExecutorSetOver).
 //
 // It deliberately does not consult the requesting agent's selectors (those are
 // executors.Narrow, applied by the callers) or the workspace mode (that is
@@ -380,18 +383,12 @@ func executorAdmitsChild(e executors.Executor, childLabels map[string]string, ow
 	return admits.Matches(childLabels)
 }
 
-// effectiveExecutorSet is every live executor childID may use.
+// effectiveExecutorSet is every live executor childID may use: the owner's
+// executors that admit it, intersected with the child's own stored set. A
+// top-level agent's set is every live executor that admits it.
 //
-// Computed by walking UP the lineage: a top-level agent's set is every live
-// executor that admits it; a child's set is its PARENT'S set intersected with
-// its own stored selector. Never computed by trying to prove a child's
-// selector implies its parent's — that is decidable for equality matches and a
-// logic puzzle the moment notin appears, and getting it wrong fails OPEN,
-// which is the wrong direction for a confidentiality boundary.
-//
-// Intersection is also what makes agent-written annotations safe: an
-// annotation can help a child FIND an executor it was already permitted to
-// use, but cannot manufacture permission.
+// An agent-written annotation can help a child FIND an executor it was already
+// permitted to use, but cannot manufacture permission.
 //
 // No caching. The store holds tens of children and the pool holds a handful of
 // executors; a cache here would be a second source of truth for an
@@ -431,44 +428,33 @@ func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[str
 }
 
 // effectiveExecutorSetOver is the whole narrowing, applied to a candidate ROW
-// set the caller supplies: owner, then the executor's own admission selector,
-// then every lineage selector root-first.
+// set the caller supplies: the owner and the executor's own admission selector,
+// then childID's own executor set.
+//
+// Ancestors are not consulted: a child's set was fixed to a subset of its
+// parent's at spawn, so the parent's reach is already inside it.
 //
 // It exists as a separate function so Reachable can run the executors installed
 // over ssh through EXACTLY the pipeline the live ones get. A second copy of this
 // ordering would be a second place for the confinement rule to be wrong.
 func (c *Controller) effectiveExecutorSetOver(rows []executors.Executor, childID string, childLabels map[string]string, ownerUserID string) ([]executors.Executor, error) {
-	// Start from every candidate that ADMITS the child. The executor-side
-	// selector is evaluated once, against the child's own labels, because an
-	// agent-side selector alone is permissive by default: it says what the
-	// agent wants, not what the executor will take. executorAdmitsChild is the
-	// same predicate the installer-lineage grant applies.
-	var set []executors.Executor
-	for _, e := range rows {
-		if !executorAdmitsChild(e, childLabels, ownerUserID) {
-			continue
-		}
-		set = append(set, e)
-	}
+	all, ids, selector := c.executorSetSpec(childID)
+	return admittedBySet(rows, childLabels, ownerUserID, all, ids, selector), nil
+}
 
-	// Then narrow by every selector from the root down to and including this
-	// child. Root-first order is not cosmetic: it means an ancestor's
-	// constraint can never be widened by a descendant's.
-	chain, err := c.lineageChain(childID)
-	if err != nil {
-		return nil, err
-	}
-	for _, ancestorSelector := range chain {
-		if ancestorSelector == "" {
-			continue
+// admittedBySet is effectiveExecutorSetOver with the set spec supplied, for the
+// one caller whose child has no stored row yet (a fresh spawn's eager bind).
+func admittedBySet(rows []executors.Executor, childLabels map[string]string, ownerUserID string, all bool, ids []string, selector string) []executors.Executor {
+	// Start from every candidate that ADMITS the child. The executor-side
+	// selector is evaluated once, against the child's own labels, because a set
+	// alone says what the agent wants, not what the executor will take.
+	var admitted []executors.Executor
+	for _, e := range rows {
+		if executorAdmitsChild(e, childLabels, ownerUserID) {
+			admitted = append(admitted, e)
 		}
-		sel, err := executors.ParseSelector(ancestorSelector)
-		if err != nil {
-			return nil, fmt.Errorf("stored executor selector %q is unparseable: %w", ancestorSelector, err)
-		}
-		set = executors.Narrow(set, sel)
 	}
-	return set, nil
+	return filterBySet(admitted, all, ids, selector)
 }
 
 // installLookupTimeout bounds the install-table reads the reachable set and the
@@ -526,35 +512,12 @@ func (c *Controller) executorRowByID(ctx context.Context, executorID string) (ex
 	return e, true
 }
 
-// reachableInstalledCandidates is the part of an agent's reachable set the live
-// pool cannot answer for: the executors installed over ssh.
-//
-// Two rules, both read from the install row and both owned here:
-//
-//  1. an installed executor that is NOT live is still reachable, through the
-//     SAME narrowing the live rows get — owner, admission selector, lineage
-//     selectors, this spawn's own selector, workspace mode. A down machine
-//     therefore stays a name the agent can call, and the call relaunches it
-//     (controllerBinder.EnsureConnected).
-//  2. every installed executor whose InstalledByChild is the agent itself or
-//     one of its ANCESTORS is reachable to that lineage whatever the SELECTOR
-//     says: the installer's own grant. Authority flows down the tree, so a
-//     spawner's install is usable by what it spawned; a sibling tree's is not,
-//     because it is not on this chain. The bypass is the selector and only the
-//     selector — the row's own confinement still applies, through the very
-//     predicates rule 1 uses (executorAdmitsChild, workspaceModeOffered, and
-//     the child-owned-sandbox drop), so lineage can never hand a child a
-//     machine the row refuses it or a workspace mode it does not offer.
-//
-// A read failure adds NOTHING and is logged: this path only ever WIDENS reach,
-// so a failure here must never widen it. Ordering is the caller's
-// (sortCandidates over the combined slice).
-func (c *Controller) reachableInstalledCandidates(
-	req protocol.SpawnRequest, childID string, childLabels map[string]string,
-	sel executors.Selector, owner executorOwner,
-) ([]executors.Executor, error) {
+// offlineInstalledRows is the owner's installed executors that are not live,
+// read from their durable rows. A read failure adds NOTHING and is logged: this
+// only ever WIDENS reach, so a failure must never widen it.
+func (c *Controller) offlineInstalledRows(owner executorOwner) []executors.Executor {
 	if c.install == nil || c.install.store == nil || c.execStore == nil {
-		return nil, nil
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), installLookupTimeout)
 	defer cancel()
@@ -565,20 +528,14 @@ func (c *Controller) reachableInstalledCandidates(
 	if err != nil {
 		slog.Warn("could not list installed executors; only live ones are reachable",
 			"owner", owner.Name, "error", err)
-		return nil, nil
+		return nil
 	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-
 	live := map[string]bool{}
 	if c.execPool != nil {
 		for _, le := range c.execPool.Live() {
 			live[le.Executor.ID] = true
 		}
 	}
-
-	// Rule 1: the offline rows, through the live pipeline.
 	var offline []executors.Executor
 	for _, row := range rows {
 		if live[row.ExecutorID] {
@@ -588,97 +545,36 @@ func (c *Controller) reachableInstalledCandidates(
 			offline = append(offline, e)
 		}
 	}
-	// The same two steps narrowedExecutorCandidates applies to the live rows:
-	// the parent's effective set (which is where lineage narrowing happens),
-	// then this spawn's own selector and workspace mode.
-	narrowed, nerr := c.effectiveExecutorSetOver(offline, req.ParentChildID, childLabels, owner.UserID)
-	if nerr != nil {
-		return nil, nerr
-	}
-	narrowed = executors.Narrow(narrowed, sel)
-	narrowed = narrowByWorkspaceMode(narrowed, req.WorkspaceMode)
-	narrowed = dropChildOwnedSandboxes(narrowed)
-
-	out := make([]executors.Executor, 0, len(narrowed)+len(rows))
-	seen := make(map[string]bool, len(narrowed))
-	add := func(e executors.Executor) {
-		if seen[e.ID] {
-			return
-		}
-		seen[e.ID] = true
-		out = append(out, e)
-	}
-	for _, e := range narrowed {
-		add(e)
-	}
-
-	// Rule 2: the installer's own grant, live or offline.
-	for _, row := range rows {
-		if seen[row.ExecutorID] {
-			continue
-		}
-		if !c.installerOnChain(req, childID, row.InstalledByChild) {
-			continue
-		}
-		e, ok := c.executorRowByID(ctx, row.ExecutorID)
-		if !ok || isChildOwnedSandboxRow(e) {
-			continue
-		}
-		// The grant skips the SELECTOR (and every lineage selector, which rule 1
-		// already folded into its set), never confinement: enabled, owned by this
-		// owner, and admitted by the row's own Admits selector, then the workspace
-		// mode it offers. Both predicates are rule 1's, not a second spelling, so
-		// the two rules cannot drift apart again.
-		if !executorAdmitsChild(e, childLabels, owner.UserID) {
-			continue
-		}
-		if !workspaceModeOffered(e.WorkspaceMode, req.WorkspaceMode) {
-			continue
-		}
-		add(e)
-	}
-	return out, nil
+	return offline
 }
 
-// installerOnChain reports whether installerChildID is childID itself or one of
-// its ANCESTORS.
+// reachableInstalledCandidates is the part of an agent's reachable set the live
+// pool cannot answer for: installed executors that are not live. A down machine
+// stays a name the agent can call when it is a member of the child's OWN
+// executor set and the row admits the child; the call relaunches it
+// (controllerBinder.EnsureConnected). They go through the same narrowing the live
+// rows get (owner, admission selector, the child's set), then the workspace mode
+// and the child-owned-sandbox drop.
 //
-// A fresh spawn's own row does not exist yet, so the walk starts at its PARENT
-// in that case — the spawner, which is the only child an install at spawn time
-// can have been made by. Bounded by maxLineageWalk like every other walk of the
-// parent chain: a corrupt record must not wedge selection.
-func (c *Controller) installerOnChain(req protocol.SpawnRequest, childID, installerChildID string) bool {
-	if c.st == nil || installerChildID == "" || childID == "" {
-		return false
+// Ordering is the caller's (sortCandidates over the combined slice).
+func (c *Controller) reachableInstalledCandidates(
+	req protocol.SpawnRequest, childID string, childLabels map[string]string, owner executorOwner,
+) []executors.Executor {
+	offline := c.offlineInstalledRows(owner)
+	if len(offline) == 0 {
+		return nil
 	}
-	cur := childID
-	if _, ok := c.st.Get(cur); !ok {
-		cur = req.ParentChildID
-	}
-	for range maxLineageWalk {
-		if cur == "" {
-			return false
-		}
-		if cur == installerChildID {
-			return true
-		}
-		parent, ok := c.st.ParentOf(cur)
-		if !ok {
-			return false
-		}
-		cur = parent
-	}
-	return false
+	all, ids, selector := c.boundSetSpec(req, childID)
+	narrowed := admittedBySet(offline, childLabels, owner.UserID, all, ids, selector)
+	narrowed = narrowByWorkspaceMode(narrowed, req.WorkspaceMode)
+	return dropChildOwnedSandboxes(narrowed)
 }
 
 // appendExecutorRows appends the rows whose id the set does not already hold,
 // preserving both orders.
 //
-// Needed because the two reach rules can name the same executor: a LIVE installed
-// executor the selector already admits satisfies rule 1's narrowing (so it is in
-// the live candidate list) AND rule 2's installer grant. A duplicate would make
-// one reachable machine look like two and turn every implicit call on that host
-// into "pass executor".
+// A duplicate would make one reachable machine look like two and turn every
+// implicit call on that host into "pass executor".
 func appendExecutorRows(set []executors.Executor, rows ...executors.Executor) []executors.Executor {
 	have := make(map[string]bool, len(set)+len(rows))
 	for _, e := range set {
@@ -694,35 +590,14 @@ func appendExecutorRows(set []executors.Executor, rows ...executors.Executor) []
 	return set
 }
 
-// inheritExecutorGrant fills in an executor grant the request left silent,
-// from the SPAWNER's stored record.
+// inheritExecutorGrant fills in the workspace mode a request left silent, from
+// the SPAWNER's stored record. Only the workspace mode is inherited; the
+// executor set is resolved by resolveSpawnExecutorSet.
 //
-// An omitted selector used to mean "no executor", which made it a confinement
-// escape rather than a default: resolveExecutor returned (nil, nil), so the
-// child's tools ran IN THE DAEMON PROCESS on the daemon host — outside every
-// executor its parent was restricted to. Worse, the escape compounded: the
-// child stored "" as its own selector, so lineageChain skipped it and its
-// entire subtree inherited the way out.
-//
-// Inheritance is the right default rather than a refusal. It is what
-// agent_spawn's tool description already promises the model ("omit to use the
-// same machines you can"), it keeps every existing top-level agent working,
-// and it composes: the child's stored selector is now non-empty, so ITS
-// children inherit in turn and the subtree cannot leak out a generation later.
-//
-// Read from the store, never from the request. That is the same rule the
-// limits checks follow, and for the same reason: a request is written by the
-// caller, and a caller that could name its own parent's grant could widen it.
-//
-// The two fields are independent. A parent confined to ephemeral workspaces
-// whose child inherits the selector but silently defaults to "pinned" has been
-// handed a wider grant than its parent's through the back door; and an
-// inherited mode no live executor's ROW offers excludes every candidate in
-// narrowByWorkspaceMode, refusing the spawn, which is the safe direction.
-//
-// A top-level spawn (no parent) has nothing to inherit; on a daemon with an
-// executor pool it still gets an executor — an empty selector means "any live
-// executor that admits this child" (see agentRuntimeOptionsFor), never "none".
+// Read from the store, never from the request: a caller that could name its own
+// parent's grant could widen it. An inherited mode no live executor's ROW offers
+// excludes every candidate in narrowByWorkspaceMode, refusing the spawn, which
+// is the safe direction.
 func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.SpawnRequest {
 	if req.ParentChildID == "" {
 		return req
@@ -733,59 +608,10 @@ func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.Sp
 		// checkSpawnLimits; inheriting nothing here is not the enforcement.
 		return req
 	}
-	if req.ExecutorSelector == "" {
-		req.ExecutorSelector = parent.ExecutorSelector
-	}
 	if req.WorkspaceMode == "" {
 		req.WorkspaceMode = parent.WorkspaceMode
 	}
 	return req
-}
-
-// persistRefAsSelector resolves a ref-only executor grant — a bare machine
-// name promoted by promoteBareExecutorRef, or the CLI's --executor — into a
-// selector that says the same thing, and clears the ref. A ref that stays
-// ref-only silently breaks three things, because ONLY the selector column
-// reaches them:
-//
-//  1. the stored session (childstore.Session.ExecutorSelector): a "" selector
-//     puts the child's whole subtree outside lineage narrowing — the exact
-//     escape inheritExecutorGrant's doc comment describes — and loses the pin
-//     on resume/respawn, which rebuild the request from the snapshot;
-//  2. the workspace block, whose row fallback reads the request;
-//  3. nothing else, since agentRuntimeOptionsFor keys off the pool, not the
-//     selector — but "the selector is the grant" is the invariant every other
-//     reader (limits, ListExecutorRows) is written against.
-//
-// The selector chosen is the resolved row's machine label: machine labels are
-// unique per owner (executors_owner_machine_unique), so `machine=<label>`
-// admits exactly that row among the executors this child may reach, and the
-// binder's later re-selection (ChooseFor re-runs chooseExecutor) lands on the
-// same machine. The resolution is the SAME confinement-checked pipeline a
-// selector would go through — chooseExecutor with the ref set — so a ref
-// naming a machine outside the caller's reach is refused here, at spawn, with
-// resolveRef's legible diagnostic, and never becomes a stored selector.
-//
-// A row without a machine label cannot be expressed as a selector (selectors
-// match labels, never ids), so the ref survives as-is: the child still binds
-// through it this generation, with claude's inherently-pinned posture — its
-// stored selector stays "" and nothing constrains its descendants. Rows
-// without machine labels are operator errors the enrollment flow warns about;
-// refusing the spawn for them would trade a documented edge for a new
-// failure mode.
-func (c *Controller) persistRefAsSelector(req protocol.SpawnRequest, owner executorOwner) (protocol.SpawnRequest, error) {
-	if req.ExecutorRef == "" || req.ExecutorSelector != "" || c.execPool == nil {
-		return req, nil
-	}
-	chosen, err := c.chooseExecutor(req, owner)
-	if err != nil {
-		return protocol.SpawnRequest{}, err
-	}
-	if lbl := chosen.Labels["machine"]; lbl != "" {
-		req.ExecutorSelector = "machine=" + lbl
-		req.ExecutorRef = ""
-	}
-	return req, nil
 }
 
 // lineageChain returns the stored executor selectors from the root down to
@@ -827,7 +653,7 @@ const maxLineageWalk = 64
 //
 // The two branches are NOT the same shape and must stay that way: the launch
 // path's admission-exclusion message carries no child-labels suffix and has
-// no separate "excluded by your PARENT's set" message (an existing,
+// no separate set-membership message in its admission branch (an existing,
 // preserved asymmetry — not something this refactor corrects), and the
 // non-launch path checks workspace_mode, which the launch path never has.
 //
@@ -863,13 +689,11 @@ func executorReason(
 		case !admitsSel.Matches(childLabels):
 			return fmt.Sprintf("excluded by ITS admission selector %q", e.Admits)
 		}
-		// parentSet already reflects LINEAGE narrowing (every ancestor's
-		// selector, root-first — see effectiveExecutorSetFor), which the
-		// three checks above do not: they only re-check e's OWN admits
-		// selector against childLabels, a single-level check. An executor
-		// excluded purely by an ANCESTOR's selector during lineage narrowing
-		// passes enabled/launchable/admits/childSel.Explain fine and must
-		// still be caught here, or it reads as eligible when it is not.
+		// parentSet already reflects the executor set, which the three checks
+		// above do not: they only re-check e's OWN admits selector against
+		// childLabels. An executor outside the set passes
+		// enabled/launchable/admits/childSel.Explain fine and must still be
+		// caught here, or it reads as eligible when it is not.
 		inParentSet := false
 		for _, p := range parentSet {
 			if p.ID == e.ID {
@@ -878,21 +702,16 @@ func executorReason(
 			}
 		}
 		if !inParentSet {
-			// This is the ORIGINAL, unsplit fallback string (preserved
-			// verbatim) for the only case explainNoLaunchMatch's loop can
-			// ever actually reach: kept-empty means no live executor is
-			// truly eligible, so none can be genuinely in parentSet AND
-			// unexcluded by the child's own selector at the same time — see
-			// the comment on the "excluded by your PARENT's set" fallback in
-			// the non-launch branch below for the identical reasoning.
-			return "excluded by your selector or your parent's set"
+			// The only case explainNoLaunchMatch's loop can ever actually reach:
+			// kept-empty means no live executor is truly eligible, so none can be
+			// both in the set and unexcluded by the child's own selector.
+			return "not in your executor set"
 		}
 		if explain := childSel.Explain(e.Labels); explain != "" {
 			return fmt.Sprintf("excluded by your selector:   %s", explain)
 		}
-		// Enabled, launch-capable, admits this child, in the parent's
-		// (lineage-narrowed) set, and the child's own selector does not
-		// exclude it: nothing here excludes e. This branch was unreachable
+		// Enabled, launch-capable, admits this child, in the executor set, and
+		// the child's own selector does not exclude it: nothing here excludes e. This branch was unreachable
 		// from explainNoLaunchMatch's original call site (it only enumerates
 		// AFTER the overall attempt already failed, so no live executor
 		// could reach here with an empty explain), but ListExecutorRows
@@ -933,7 +752,7 @@ func executorReason(
 			return ""
 		}
 	}
-	return "excluded by your PARENT's set"
+	return "not in your executor set"
 }
 
 // explainNoMatch builds a refusal message naming the excluding predicate per

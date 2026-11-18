@@ -2553,18 +2553,17 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// match against {owner, machine} labels, and exactly why an MCP caller's
 	// executor: "greyshift" was refused while the same word works on the CLI
 	// (--executor is a ref). Promotion rewrites it so resolveRef matches the
-	// machine label against the SAME confinement-narrowed candidate set.
+	// machine label against the spawner's executor set.
 	req = promoteBareExecutorRef(req)
 
-	// A ref-only grant is persisted as a selector, or it never reaches the
-	// stored session: lineage narrowing would see "" and the whole subtree
-	// would escape the pin, and resume/respawn would rebuild without it.
+	// The child's executor set is fixed here, as a subset of the spawner's, so
+	// it reaches the stored session and every later resume reads it from the
+	// row. A sandboxed child addresses its sandbox and nothing else (set below).
 	// Runs while nothing is minted, so a refusal starts no process.
-	req, err = c.persistRefAsSelector(req, executorOwner{Name: ownerName, UserID: owner.UserID})
-	if err != nil {
-		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
-			Code:    protocol.ErrInvalidArgs,
-			Message: "executor grant: " + err.Error(),
+	if req.Sandbox == nil {
+		req, err = c.resolveSpawnExecutorSet(req, executorOwner{Name: ownerName, UserID: owner.UserID})
+		if err != nil {
+			return protocol.SpawnResponseData{}, err
 		}
 	}
 
@@ -2588,10 +2587,9 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// start toolless or native.
 	//
 	// On success the request's sibling grant is rewritten to the sandbox's
-	// machine label. This is NOT routed through persistRefAsSelector: that
-	// resolves a ref by selection, which now (correctly) excludes child-owned
-	// sandbox rows, so it could never express the pin. The stored selector is
-	// what confines the child's DESCENDANTS through lineage narrowing.
+	// machine label, and its executor set to the sandbox alone: selection
+	// excludes child-owned sandbox rows, so a set resolved by selection could
+	// never express the pin.
 	//
 	// sandboxOwnedChild, while non-empty, is the child whose sandbox a later
 	// failure must tear down. It is cleared once the child's own row is written.
@@ -2607,6 +2605,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		}
 		req.ExecutorRef = ""
 		req.ExecutorSelector = "machine=" + machine
+		req.Executors = []string{executor.ID}
 		// The child's cwd is a path in the CONTAINER, not on the daemon host.
 		// agent_spawn (and the operator CLI) default cwd to the PARENT's — a host
 		// path the executor, running inside the container, cannot see, so every
@@ -2851,6 +2850,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		ExtraArgs:          req.ExtraArgs,
 		RecordRequests:     req.RecordRequests,
 		ExecutorSelector:   req.ExecutorSelector,
+		ExecutorSet:        req.Executors,
 		SkipDerivedIndex:   req.SkipDerivedIndex,
 		NotifyPolicy:       notifyPolicy,
 		WorkspaceMode:      req.WorkspaceMode,

@@ -37,17 +37,6 @@ func TestChooseLaunchExecutorRefusesWhenNoneAdvertiseTheKind(t *testing.T) {
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "does not support launching"), "want a launch-kind refusal, got %v", err)
 }
 
-func TestChooseLaunchExecutorStillHonoursLineageNarrowing(t *testing.T) {
-	ck := assert.NewAborting(t)
-	c := selectFixture(t, "env=home",
-		exWithLaunch("work", map[string]string{"env": "work"}, "", "claude"),
-		exWithLaunch("home", map[string]string{"env": "home"}, "", "claude"),
-	)
-	exec, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
-	ck.NoError(err)
-	ck.Eq("home", exec.ID, "parent's env=home set must still apply, got")
-}
-
 func TestChooseLaunchExecutorRespectsAdmission(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "",

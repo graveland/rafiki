@@ -63,7 +63,17 @@ func (b *controllerBinder) ChooseFor(childID string) (string, error) {
 		return sandboxExec.ID, nil
 	}
 
-	chosen, err := b.c.chooseExecutor(b.req, b.owner)
+	// The stored row is the authority for the set once it exists, so a set
+	// changed after this binder was built applies here as it does in Reachable.
+	// Before the row exists (the eager bind of a fresh spawn) the request carries
+	// the set resolveSpawnExecutorSet fixed.
+	req := b.req
+	if b.c.st != nil {
+		if snap, ok := b.c.st.Get(childID); ok {
+			req.Executors = snap.ExecutorSet
+		}
+	}
+	chosen, err := b.c.chooseExecutor(req, b.owner)
 	if err != nil {
 		return "", err
 	}
@@ -122,10 +132,11 @@ func (b *controllerBinder) ownedSandboxExecutor(childID string) (*executors.Exec
 }
 
 // Reachable is every executor childID may call RIGHT NOW, freshly computed from
-// the live pool — never a cached set. It is the same confinement-narrowed
-// candidate list chooseExecutor picks a winner from (parent's effective set ∩
-// this child's selector, child-owned sandboxes dropped, sorted), so "what I can
-// reach" and "what I would bind to" can never disagree.
+// the live pool and the child's stored set — never a cached set. It is the
+// child's OWN executor set intersected with the executors that admit it (owner
+// plus Admits), plus the offline installed members of that set, child-owned
+// sandboxes dropped and sorted. A set changed since the child started takes
+// effect on the next call.
 //
 // A spawn-block sandbox is exclusive: it is the only reachable executor, and a
 // sandbox that is not fully live is an ERROR rather than an empty set, so an
@@ -139,37 +150,35 @@ func (b *controllerBinder) Reachable(childID string) ([]executors.Executor, erro
 	if sandboxExec != nil {
 		return []executors.Executor{*sandboxExec}, nil
 	}
+	if b.c.execPool == nil {
+		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
+	}
 
-	candidates, _, childLabels, sel, err := b.c.narrowedExecutorCandidates(b.req, b.owner)
-	if err != nil {
-		return nil, err
-	}
-	// The executors installed over ssh: offline rows through the same pipeline,
-	// plus the installer's own grant. Appended BEFORE the ref and ambiguity
-	// handling, so a down installed machine is a name the caller can pass and
-	// counts as one when the call names nothing.
-	installed, ierr := b.c.reachableInstalledCandidates(b.req, childID, childLabels, sel, b.owner)
-	if ierr != nil {
-		return nil, ierr
-	}
-	if len(installed) > 0 {
-		candidates = appendExecutorRows(candidates, installed...)
-		sortCandidates(candidates)
-	}
-	if b.req.ExecutorRef != "" {
-		// An explicit ref bypasses SEARCH, never confinement: the hit must come
-		// out of the narrowed set.
-		if hit, ok := matchExecutorRef(b.req.ExecutorRef, candidates); ok {
-			return []executors.Executor{hit}, nil
+	childLabels := b.c.admissionLabels(b.req, b.owner)
+	if b.c.st != nil {
+		if snap, ok := b.c.st.Get(childID); ok {
+			childLabels = snap.Labels
 		}
-		return nil, nil
 	}
-	// As in chooseExecutor: a caller that named neither a ref nor a selector
-	// has not asked for any particular machine, so a sandbox must never be an
-	// implicit choice.
-	if !hasExplicitSelector(b.req) {
+	live := b.c.execPool.Live()
+	rows := make([]executors.Executor, 0, len(live))
+	for _, le := range live {
+		rows = append(rows, le.Executor)
+	}
+	all, ids, selector := b.c.boundSetSpec(b.req, childID)
+	set := admittedBySet(rows, childLabels, b.owner.UserID, all, ids, selector)
+	set = narrowByWorkspaceMode(set, b.req.WorkspaceMode)
+	candidates := dropChildOwnedSandboxes(set)
+
+	// The executors installed over ssh that are down: a name the caller can pass
+	// and that counts as one when the call names nothing.
+	candidates = appendExecutorRows(candidates, b.c.reachableInstalledCandidates(b.req, childID, childLabels, b.owner)...)
+
+	// A sandbox is never reached through "all", and never an implicit choice.
+	if all {
 		candidates = dropSandboxCandidates(candidates)
 	}
+	sortCandidates(candidates)
 	return candidates, nil
 }
 
