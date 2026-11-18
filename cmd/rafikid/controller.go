@@ -6800,7 +6800,7 @@ func (c *Controller) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
 	}
 	// The row is gone, so what decides whose set shrinks and who is told (owner,
 	// name, labels) comes from the row read above.
-	c.removeFromExecutorSets(e.ID, e.OwnerUserID, installNameOf(e), e.Labels)
+	c.removeFromExecutorSets(e.ID, e.OwnerUserID, installNameOf(e), e.Labels, e.Admits)
 	return nil
 }
 

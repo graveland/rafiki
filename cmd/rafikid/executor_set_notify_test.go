@@ -686,7 +686,7 @@ func TestRemovalWithUnlistableExecutorsOmitsTheRemainingLine(t *testing.T) {
 	delete(f.execs.execs, "exec-B")
 	gate.failList(errors.New("store down"))
 
-	f.ctrl.removeFromExecutorSets(row.ID, row.OwnerUserID, "beta", row.Labels)
+	f.ctrl.removeFromExecutorSets(row.ID, row.OwnerUserID, "beta", row.Labels, "")
 
 	c.Eq(true, setOf(f, "c_old") == nil, "the legacy set is untouched")
 	got := log.of("c_old")
@@ -828,7 +828,7 @@ func TestStuckExecutorStoreDoesNotHangRemovalOrTheConnectHook(t *testing.T) {
 	gate.mu.Unlock()
 
 	within(t, 2*time.Second, "removal with a stuck listing", func() {
-		f.ctrl.removeFromExecutorSets("exec-B", installTestOwner, "beta", map[string]string{"role": "w"})
+		f.ctrl.removeFromExecutorSets("exec-B", installTestOwner, "beta", map[string]string{"role": "w"}, "")
 	})
 	c.Eq(true, setOf(f, "c_old") == nil, "the legacy set is untouched")
 	c.Len(log.of("c_old"), 1, "the legacy child is told without a Remaining line")
@@ -1122,7 +1122,7 @@ func TestRemovalNeverOvertakesTheAnnouncement(t *testing.T) {
 	}
 	go func() {
 		defer func() { done <- struct{}{} }()
-		f.ctrl.removeFromExecutorSets("exec-R", installTestOwner, "racer", map[string]string{"machine": "racer"})
+		f.ctrl.removeFromExecutorSets("exec-R", installTestOwner, "racer", map[string]string{"machine": "racer"}, "")
 	}()
 	// The removal is now contending for the executor's lock: holder plus waiter.
 	eventually(t, "the removal to queue behind the announcement", func() bool { return waitersOn(f.ctrl, "exec-R") == 2 })
@@ -1169,7 +1169,7 @@ func TestSetUpdateNeverUpsertsTheRow(t *testing.T) {
 	seedSetChild(t, f, "c_kid", installTestOwner, protocol.StatusIdle, []string{"exec-A", "exec-1"})
 	seedSetChild(t, f, "c_gone", installTestOwner, protocol.StatusExited, []string{"exec-A", "exec-1"})
 
-	f.ctrl.removeFromExecutorSets("exec-1", installTestOwner, "ublk-s2", map[string]string{"machine": "ublk-s2"})
+	f.ctrl.removeFromExecutorSets("exec-1", installTestOwner, "ublk-s2", map[string]string{"machine": "ublk-s2"}, "")
 	f.ctrl.addToExecutorSet("c_kid", "exec-B")
 	waitPersists(t, f.ctrl)
 
@@ -1222,13 +1222,13 @@ func TestConcurrentRemovalsPersistTheNewestSet(t *testing.T) {
 	}}
 	f.ctrl.setWriter = store
 
-	f.ctrl.removeFromExecutorSets("exec-A", installTestOwner, "alpha", map[string]string{"machine": "alpha"})
+	f.ctrl.removeFromExecutorSets("exec-A", installTestOwner, "alpha", map[string]string{"machine": "alpha"}, "")
 	select {
 	case <-firstEntered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the first write never reached the store")
 	}
-	f.ctrl.removeFromExecutorSets("exec-B", installTestOwner, "beta", map[string]string{"machine": "beta"})
+	f.ctrl.removeFromExecutorSets("exec-B", installTestOwner, "beta", map[string]string{"machine": "beta"}, "")
 	// The second write is queued behind the first on the child's write lock.
 	eventually(t, "the second write to queue", func() bool {
 		k := &f.ctrl.execSets.persistLocks
@@ -1265,7 +1265,7 @@ func TestConcurrentRemovalsOfDifferentExecutorsLoseNoMember(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			f.ctrl.removeFromExecutorSets(id, installTestOwner, "m-"+id, map[string]string{"machine": "m-" + id})
+			f.ctrl.removeFromExecutorSets(id, installTestOwner, "m-"+id, map[string]string{"machine": "m-" + id}, "")
 		}()
 	}
 	within(t, 5*time.Second, "the removals", wg.Wait)
@@ -1297,14 +1297,14 @@ func TestConcurrentLegacyRemovalsReportTheTrueRemainder(t *testing.T) {
 	done := make(chan struct{}, 2)
 	go func() {
 		defer func() { done <- struct{}{} }()
-		f.ctrl.removeFromExecutorSets("exec-X", installTestOwner, "xray", labels)
+		f.ctrl.removeFromExecutorSets("exec-X", installTestOwner, "xray", labels, "")
 	}()
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the first removal never listed the executors")
 	}
-	f.ctrl.removeFromExecutorSets("exec-Y", installTestOwner, "yankee", labels)
+	f.ctrl.removeFromExecutorSets("exec-Y", installTestOwner, "yankee", labels, "")
 	close(hold)
 	select {
 	case <-done:
@@ -1457,7 +1457,7 @@ func TestOrderingWaitsAreBounded(t *testing.T) {
 	})
 
 	within(t, 3*time.Second, "a removal behind a held lock", func() {
-		f.ctrl.removeFromExecutorSets("exec-A", installTestOwner, "alpha", map[string]string{"machine": "alpha", "role": "w"})
+		f.ctrl.removeFromExecutorSets("exec-A", installTestOwner, "alpha", map[string]string{"machine": "alpha", "role": "w"}, "")
 	})
 	c.EqDeep([]string{}, setOf(f, "c_kid"), "the removal still took the id out of the set")
 }
@@ -1486,4 +1486,19 @@ func TestDisableAndEnableNoticesHonourAdmitsAgainstTheChildsLabels(t *testing.T)
 
 	c.EqDeep([]string{executorDisabledNotice("alpha"), executorEnabledNotice("alpha")}, log.of("c_in"), "the admitted child hears both")
 	c.Empty(log.of("c_out"), "a child the executor does not admit hears neither")
+}
+
+func TestRemovalNoticeHonoursAdmitsAgainstTheChildsLabels(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	log := attachSteerLog(f.ctrl)
+	seedSetChild(t, f, "c_in", installTestOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
+	seedSetChild(t, f, "c_out", installTestOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
+	c.Require().NoError(f.ctrl.st.Update("c_in", func(s *childstore.Session) { s.Labels["owner"] = installTestOwnerName }), "label")
+	c.Require().NoError(f.ctrl.st.Update("c_out", func(s *childstore.Session) { s.Labels["owner"] = "someone-else" }), "relabel")
+
+	f.ctrl.removeFromExecutorSets("exec-Z", installTestOwner, "zulu", map[string]string{"machine": "zulu"}, "owner="+installTestOwnerName)
+
+	c.EqDeep([]string{executorRemovedNotice("zulu", []string{childstore.ExecutorSetAll})}, log.of("c_in"), "the admitted child is told")
+	c.Empty(log.of("c_out"), "a child the removed executor never admitted is not told")
 }

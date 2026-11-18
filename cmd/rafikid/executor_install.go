@@ -1604,7 +1604,7 @@ func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller
 	// The row is gone, so nothing can be listed for this id again; drop its
 	// in-memory launch outcome rather than holding an entry nobody can read.
 	c.install.forgetOutcome(e.ID)
-	c.removeFromExecutorSets(e.ID, e.OwnerUserID, installNameOf(e), e.Labels)
+	c.removeFromExecutorSets(e.ID, e.OwnerUserID, installNameOf(e), e.Labels, e.Admits)
 	return nil
 }
 

@@ -436,7 +436,7 @@ func (c *Controller) dropMember(childID, executorID string, materialized []strin
 // removeFromExecutorSets takes a removed executor out of the stored set of every
 // non-closed child of its owner (exited and native subagent rows included, since
 // a resumed child reads the stored set) and notifies the live ones. The row is
-// already gone, so the caller passes its name and labels: a legacy selector
+// already gone, so the caller passes its name, labels and admission selector: a legacy selector
 // child is recognised by the labels the row carried.
 //
 // A sandbox row is reached by ownership, never by selection or by `all`, so only
@@ -444,20 +444,21 @@ func (c *Controller) dropMember(childID, executorID string, materialized []strin
 //
 // Set maintenance outranks notice order: when the ordering wait runs out the
 // removal proceeds unordered rather than leave a removed id in a stored set.
-func (c *Controller) removeFromExecutorSets(executorID, ownerUserID, name string, labels map[string]string) {
+func (c *Controller) removeFromExecutorSets(executorID, ownerUserID, name string, labels map[string]string, admits string) {
 	unlock, _ := c.lockExecutor(executorID)
 	defer unlock()
-	c.removeFromExecutorSetsLocked(executorID, ownerUserID, name, labels)
+	c.removeFromExecutorSetsLocked(executorID, ownerUserID, name, labels, admits)
 }
 
 // removeFromExecutorSetsLocked is removeFromExecutorSets for a caller already
 // holding the executor's ordering lock.
-func (c *Controller) removeFromExecutorSetsLocked(executorID, ownerUserID, name string, labels map[string]string) {
+func (c *Controller) removeFromExecutorSetsLocked(executorID, ownerUserID, name string, labels map[string]string, admits string) {
 	c.execSets.forgetAnnounced(executorID)
 	if c.st == nil {
 		return
 	}
-	isSandbox := isSandboxRow(executors.Executor{Labels: labels})
+	gone := executors.Executor{Labels: labels, Admits: admits}
+	isSandbox := isSandboxRow(gone)
 
 	var persist []string
 	m := &legacyMaterializer{c: c}
@@ -466,7 +467,9 @@ func (c *Controller) removeFromExecutorSetsLocked(executorID, ownerUserID, name 
 		all, ids, selector := childstore.ResolveSetSpec(snap.ExecutorSet, snap.ExecutorSelector)
 		switch {
 		case all:
-			if live && !isSandbox {
+			// An executor that does not admit the child's labels was never one the
+			// child could address, so its removal is not news to it.
+			if live && !isSandbox && executorAdmitsLabels(gone, snap.Labels) {
 				c.sendSteer(snap.ChildID, executorRemovedNotice(name, []string{childstore.ExecutorSetAll}))
 			}
 		case selector != "":
@@ -648,7 +651,7 @@ func (c *Controller) removeSandboxFromExecutorSets(row sandbox.Row) {
 		name = shortID(row.ExecutorID)
 	}
 	c.removeFromExecutorSets(row.ExecutorID, row.OwnerUserID, name,
-		map[string]string{sandbox.RowLabelSandbox: "1"})
+		map[string]string{sandbox.RowLabelSandbox: "1"}, "")
 }
 
 // rollbackExecutorRow deletes the executor row of an install that did not reach
@@ -667,7 +670,7 @@ func (c *Controller) rollbackExecutorRow(ctx context.Context, executorID string)
 	row, haveRow := c.executorRowByID(ctx, executorID)
 	c.deleteExecutorRow(executorID)
 	if haveRow && c.execSets.wasAnnounced(executorID) {
-		c.removeFromExecutorSetsLocked(row.ID, row.OwnerUserID, installNameOf(row), row.Labels)
+		c.removeFromExecutorSetsLocked(row.ID, row.OwnerUserID, installNameOf(row), row.Labels, row.Admits)
 		return
 	}
 	c.execSets.forgetAnnounced(executorID)
