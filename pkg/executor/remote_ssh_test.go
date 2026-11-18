@@ -480,54 +480,6 @@ func TestRemoteServeRelaysAndSweepsOnStreamEnd(t *testing.T) {
 	})
 }
 
-func TestRemoteNoSSHLaunchRefusesAllFour(t *testing.T) {
-	c := assert.NewAborting(t)
-	f := newRemoteFixture(t)
-	srv := NewServer(Options{Root: t.TempDir(), Env: f.env, NoSSHLaunch: true})
-	client := newRemoteClient(t, srv)
-
-	const want = "ssh launch is disabled on this executor (--no-ssh-launch)"
-	ctx := context.Background()
-	target := &executorpb.RemoteTarget{Destination: "target", Instance: paths.DefaultInstance}
-	refused := func(err error, what string) {
-		t.Helper()
-		c.Require().Error(err, "%s was not refused", what)
-		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s", what)
-		c.StrContains(err.Error(), want, "%s", what)
-	}
-
-	_, err := client.RemoteProbe(ctx, connect.NewRequest(&executorpb.RemoteProbeRequest{Target: target}))
-	refused(err, "RemoteProbe")
-
-	_, err = client.RemoteClean(ctx, connect.NewRequest(&executorpb.RemoteCleanRequest{Target: target, InstallId: "install-1"}))
-	refused(err, "RemoteClean")
-
-	install := client.RemoteInstall(ctx)
-	_ = install.Send(&executorpb.RemoteInstallRequest{
-		Msg: &executorpb.RemoteInstallRequest_Header{Header: &executorpb.RemoteInstallHeader{
-			Target:     target,
-			BinaryPath: "$HOME/.cache/rafiki/bin/rafiki-v1",
-			Sha256:     strings.Repeat("0", 64),
-		}},
-	})
-	_, err = install.CloseAndReceive()
-	refused(err, "RemoteInstall")
-
-	serve := client.RemoteServe(ctx)
-	_ = serve.Send(&executorpb.RemoteServeRequest{
-		Msg: &executorpb.RemoteServeRequest_Start{Start: &executorpb.RemoteServeStart{
-			Target:     target,
-			BinaryPath: "$HOME/.cache/rafiki/bin/rafiki-v1",
-			InstallId:  "install-1",
-		}},
-	})
-	_, err = serve.Receive()
-	refused(err, "RemoteServe")
-
-	_, statErr := os.Stat(f.record)
-	c.True(os.IsNotExist(statErr), "ssh must not run when ssh launch is disabled")
-}
-
 func TestRemoteCleanOnlyRemovesMatchingMarker(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newRemoteFixture(t)

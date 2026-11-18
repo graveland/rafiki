@@ -368,16 +368,6 @@ func validateRemoteInstallID(installID string) error {
 	return nil
 }
 
-// refuseSSHLaunch is the operator's opt-out: `executor serve --no-ssh-launch`
-// makes this executor refuse every Remote* RPC, before it validates anything.
-func (s *Server) refuseSSHLaunch() error {
-	if s.opts.NoSSHLaunch {
-		return connect.NewError(connect.CodePermissionDenied,
-			errors.New("ssh launch is disabled on this executor (--no-ssh-launch)"))
-	}
-	return nil
-}
-
 // lookPathIn resolves name against the PATH in env, not the process's own. The
 // executor's pinned env is what every subprocess it spawns runs under, so ssh
 // must be found the same way a tool shell would find it.
@@ -472,9 +462,6 @@ func (s *Server) RemoteProbe(
 	ctx context.Context,
 	req *connect.Request[executorpb.RemoteProbeRequest],
 ) (*connect.Response[executorpb.RemoteProbeResponse], error) {
-	if err := s.refuseSSHLaunch(); err != nil {
-		return nil, err
-	}
 	target := req.Msg.GetTarget()
 	if err := validateRemoteTarget(target); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
@@ -563,9 +550,6 @@ func (s *Server) RemoteInstall(
 	ctx context.Context,
 	stream *connect.ClientStream[executorpb.RemoteInstallRequest],
 ) (*connect.Response[executorpb.RemoteInstallResponse], error) {
-	if err := s.refuseSSHLaunch(); err != nil {
-		return nil, err
-	}
 	if !stream.Receive() {
 		if err := stream.Err(); err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("remote install: no header: %w", err))
@@ -686,9 +670,6 @@ func (s *Server) RemoteServe(
 	ctx context.Context,
 	stream *connect.BidiStream[executorpb.RemoteServeRequest, executorpb.RemoteServeResponse],
 ) error {
-	if err := s.refuseSSHLaunch(); err != nil {
-		return err
-	}
 	first, err := stream.Receive()
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("remote serve: no start message: %w", err))
@@ -954,9 +935,6 @@ func (s *Server) RemoteClean(
 	ctx context.Context,
 	req *connect.Request[executorpb.RemoteCleanRequest],
 ) (*connect.Response[executorpb.RemoteCleanResponse], error) {
-	if err := s.refuseSSHLaunch(); err != nil {
-		return nil, err
-	}
 	target := req.Msg.GetTarget()
 	if err := validateRemoteTarget(target); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)

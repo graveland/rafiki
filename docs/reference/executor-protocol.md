@@ -399,7 +399,7 @@ Describe() → { executorId, platform, roots[], concurrency, isolation,
                workspaceMode, tools[], version, selfReportedLabels,
                proxies[], launchKinds[], skillsSync, pymodulesSync,
                sandboxMountRoots[], sandboxRelayDir, sandboxRelayVolume,
-               mcpCommands[], sshLaunch }
+               mcpCommands[] }
 ```
 
 Unary. Called at startup and periodically to discover the executor's
@@ -428,12 +428,6 @@ workspace_mode rules exist to forbid — unlike those two fields, which the
 executor does not report at all. `skillsSync` and `pymodulesSync` self-report
 the same way (see their Sync sections): each only narrows whether the daemon
 may push that corpus here, and both default to off.
-
-`sshLaunch` reports that this executor accepts the `Remote*` RPCs of
-"Installing over ssh", so it may install and run executors on other machines.
-Self-reported, and therefore narrowing only: `rafiki executor serve
---no-ssh-launch` reports false, which takes this machine out of the install path
-entirely.
 
 `sandboxMountRoots[]`, `sandboxRelayDir` and `sandboxRelayVolume` self-report
 the launcher's `--sandbox-mount-root` directories and its relay — `--relay-dir`
@@ -1653,10 +1647,9 @@ over an in-flight claim, or a launch the daemon abandoned would connect anyway.
 Any NATIVE executor — one whose row's `isolation` is not `container` — by
 default: the capability equals what `bash` on that machine can already do. A
 container-isolated executor is never a launcher (it has no ssh keys of its own),
-a disabled executor is refused (disabling is a revocation), and an executor
-reporting `sshLaunch=false` is refused — the operator's `--no-ssh-launch`.
-Those three are one gate, run at install time AND on every relaunch, because
-the facts are live.
+and a disabled executor is refused (disabling is a revocation). Those two are
+one gate, run at install time AND on every relaunch, because the facts are
+live.
 
 A child credential may install only through a launcher in its own reachable
 set — the same confinement-narrowed set a spawn gets — and its default launcher

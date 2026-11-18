@@ -224,10 +224,7 @@ message DescribeResponse {
   // only ever NARROWS what this executor will do, and it is enforced on this
   // side, before anything is spawned.
   repeated string mcp_commands = 19;
-  // ssh_launch reports that this executor accepts the Remote* RPCs, so it
-  // may install and run executors on other machines over ssh. Self-reported:
-  // false when the operator passed --no-ssh-launch; it only narrows.
-  bool ssh_launch = 20;
+  reserved 20;
 }
 
 message HealthRequest {}

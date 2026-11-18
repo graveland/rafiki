@@ -1109,12 +1109,6 @@ func installLauncherGate(le execpool.LiveExecutor) error {
 		return installErr(protocol.ErrFailedPrecondition,
 			"executor %s is container-isolated and cannot install executors", installNameOf(le.Executor))
 	}
-	if !le.Describe.GetSshLaunch() {
-		// Self-reported, so it only ever NARROWS: an operator's
-		// --no-ssh-launch takes this executor out of the install path entirely.
-		return installErr(protocol.ErrFailedPrecondition,
-			"executor %s has ssh launch disabled (--no-ssh-launch)", installNameOf(le.Executor))
-	}
 	return nil
 }
 
@@ -1273,7 +1267,7 @@ func (c *Controller) runLaunch(ctx context.Context, executorID, modeOverride str
 			"launcher %s is not connected", c.launcherName(ctx, row.LauncherExecutorID))
 	}
 	// The gate runs on THIS path too, not only at install time: its facts are
-	// live (a container label, an operator's later --no-ssh-launch), and a
+	// live (a container label, a later executor disable), and a
 	// relaunch must not be the way around a rule the install honoured.
 	if err := installLauncherGate(launcher); err != nil {
 		return err

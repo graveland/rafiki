@@ -630,7 +630,7 @@ func installLauncherLive(id, machine, instance, workspaceMode string) execpool.L
 			OwnerUserID:   installTestOwner,
 			Enabled:       true,
 		},
-		Describe: &executorpb.DescribeResponse{SshLaunch: true, SelfReportedLabels: map[string]string{"instance": instance}},
+		Describe: &executorpb.DescribeResponse{SelfReportedLabels: map[string]string{"instance": instance}},
 	}
 }
 
@@ -835,17 +835,6 @@ func TestInstallContainerLauncherRefused(t *testing.T) {
 	expectControllerError(t, err, protocol.ErrFailedPrecondition,
 		"executor greyshift is container-isolated and cannot install executors")
 	assert.NewAborting(t).Eq(0, f.launcher.probeCalls(), "a refused launcher runs no ssh")
-}
-
-// --no-ssh-launch is the operator's opt-out, and it only ever narrows.
-func TestInstallNoSSHLaunchRefused(t *testing.T) {
-	f := newInstallFixture(t)
-	f.pool.live[0].Describe = &executorpb.DescribeResponse{SshLaunch: false}
-
-	_, err := f.ctrl.InstallExecutor(context.Background(), installUserCaller(), installReq(""))
-	expectControllerError(t, err, protocol.ErrFailedPrecondition,
-		"executor greyshift has ssh launch disabled (--no-ssh-launch)")
-	assert.NewAborting(t).Eq(0, f.launcher.probeCalls(), "a refusing launcher runs no ssh")
 }
 
 // A child may only install through a launcher it could already call. A machine
@@ -1147,17 +1136,17 @@ func TestRelaunchCancelDiscardsTicket(t *testing.T) {
 }
 
 // The launcher gate runs on the RELAUNCH path too. Its facts are live: an
-// operator who adds --no-ssh-launch after an install must not be routed around
+// operator who disables the launcher after an install must not be routed around
 // by the next relaunch.
 func TestRelaunchRefusesADisabledLauncher(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
 	f.seedInstalledExecutor()
-	f.pool.live[0].Describe = &executorpb.DescribeResponse{SshLaunch: false}
+	f.pool.live[0].Executor.Enabled = false
 
 	err := f.ctrl.launchInstalled(context.Background(), "exec-1")
 	expectControllerError(t, err, protocol.ErrFailedPrecondition,
-		"executor greyshift has ssh launch disabled (--no-ssh-launch)")
+		"executor greyshift is disabled")
 	c.Eq(0, f.launcher.serveCalls(), "a relaunch must not run ssh through a refusing launcher")
 }
 

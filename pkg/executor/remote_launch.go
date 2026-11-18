@@ -137,9 +137,6 @@ func (s *Server) RemoteLaunch(
 	ctx context.Context,
 	stream *connect.ClientStream[executorpb.RemoteLaunchRequest],
 ) (*connect.Response[executorpb.RemoteLaunchResponse], error) {
-	if err := s.refuseSSHLaunch(); err != nil {
-		return nil, err
-	}
 	start, err := receiveRemoteLaunchFrame(stream, "start")
 	if err != nil {
 		return nil, err
@@ -285,9 +282,6 @@ func (s *Server) RemoteLogTail(
 	ctx context.Context,
 	req *connect.Request[executorpb.RemoteLogTailRequest],
 ) (*connect.Response[executorpb.RemoteLogTailResponse], error) {
-	if err := s.refuseSSHLaunch(); err != nil {
-		return nil, err
-	}
 	target := req.Msg.GetTarget()
 	if err := validateRemoteTarget(target); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)

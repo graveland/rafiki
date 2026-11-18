@@ -762,7 +762,6 @@ func newExecutorServeCmd() *cobra.Command {
 		sandboxMountRoots  []string
 		relayDir           string
 		relayFootholdImage string
-		noSSHLaunch        bool
 		stdio              bool
 		installID          string
 		ticketStdin        bool
@@ -1015,7 +1014,6 @@ every existing install already has; any other name lives under profiles/<name>.`
 				SandboxRelayDir:     resolvedRelayDir,
 				SandboxRelayVolume:  relayVolume,
 				BeforeSandboxCreate: beforeCreate,
-				NoSSHLaunch:         noSSHLaunch,
 				// The address a launcher should dial to reach the SAME daemon —
 				// host:port on the TCP transport, empty on the socket one, which
 				// has no address anything else could dial.
@@ -1155,8 +1153,6 @@ every existing install already has; any other name lives under profiles/<name>.`
 			"other platforms the relay dir is opt-in. "+
 			"--relay-dir= (empty) disables it")
 	cmd.Flags().StringVar(&relayFootholdImage, "relay-foothold-image", "", relayFootholdImageHelp)
-	cmd.Flags().BoolVar(&noSSHLaunch, "no-ssh-launch", false,
-		"refuse to install or run executors on other machines over ssh")
 	cmd.Flags().BoolVar(&stdio, "stdio", false,
 		"speak the executor protocol on stdin/stdout, for an ssh launcher: the one-shot ticket is "+
 			"the first line of stdin, stdout carries only the protocol, and every log line goes to stderr")

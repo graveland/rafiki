@@ -179,11 +179,7 @@ type DescribeResponse struct {
 	// Safe to self-report for the same reason as proxies and launch_kinds — it
 	// only ever NARROWS what this executor will do, and it is enforced on this
 	// side, before anything is spawned.
-	McpCommands []string `protobuf:"bytes,19,rep,name=mcp_commands,json=mcpCommands,proto3" json:"mcp_commands,omitempty"`
-	// ssh_launch reports that this executor accepts the Remote* RPCs, so it
-	// may install and run executors on other machines over ssh. Self-reported:
-	// false when the operator passed --no-ssh-launch; it only narrows.
-	SshLaunch     bool `protobuf:"varint,20,opt,name=ssh_launch,json=sshLaunch,proto3" json:"ssh_launch,omitempty"`
+	McpCommands   []string `protobuf:"bytes,19,rep,name=mcp_commands,json=mcpCommands,proto3" json:"mcp_commands,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -349,13 +345,6 @@ func (x *DescribeResponse) GetMcpCommands() []string {
 		return x.McpCommands
 	}
 	return nil
-}
-
-func (x *DescribeResponse) GetSshLaunch() bool {
-	if x != nil {
-		return x.SshLaunch
-	}
-	return false
 }
 
 type HealthRequest struct {
@@ -6098,7 +6087,7 @@ var File_executor_proto protoreflect.FileDescriptor
 const file_executor_proto_rawDesc = "" +
 	"\n" +
 	"\x0eexecutor.proto\x12\x12rafiki.executor.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x11\n" +
-	"\x0fDescribeRequest\"\xc2\x06\n" +
+	"\x0fDescribeRequest\"\xa9\x06\n" +
 	"\x10DescribeResponse\x12\x1f\n" +
 	"\vexecutor_id\x18\x01 \x01(\tR\n" +
 	"executorId\x12\x1a\n" +
@@ -6121,12 +6110,10 @@ const file_executor_proto_rawDesc = "" +
 	"\x11sandbox_relay_dir\x18\x10 \x01(\tR\x0fsandboxRelayDir\x120\n" +
 	"\x14sandbox_relay_volume\x18\x11 \x01(\tR\x12sandboxRelayVolume\x12\x1b\n" +
 	"\ttree_sync\x18\x12 \x01(\bR\btreeSync\x12!\n" +
-	"\fmcp_commands\x18\x13 \x03(\tR\vmcpCommands\x12\x1d\n" +
-	"\n" +
-	"ssh_launch\x18\x14 \x01(\bR\tsshLaunch\x1aE\n" +
+	"\fmcp_commands\x18\x13 \x03(\tR\vmcpCommands\x1aE\n" +
 	"\x17SelfReportedLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x0f\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x14\x10\x15\"\x0f\n" +
 	"\rHealthRequest\"\x91\x01\n" +
 	"\x0eHealthResponse\x12\x12\n" +
 	"\x04load\x18\x01 \x01(\x01R\x04load\x12'\n" +

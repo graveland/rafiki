@@ -183,8 +183,8 @@ re-probes, so a network that changed under you is an operator's reinstall.
   install; clearing someone else's is the one `ssh <target> rm -f …` command
   the refusal spells out.
 - Only a NATIVE executor can be a launcher: a container-isolated executor is
-  refused, and `rafiki executor serve --no-ssh-launch` opts a machine out of
-  the install path entirely (self-reported, so it only narrows).
+  refused. Whether a machine can ssh anywhere is a matter of its keys and
+  firewall, not an executor setting.
 - A down installed executor **restarts on its next use** — lazily, on the first
   workspace call that names it, which carries a note saying it was restarted.
   The restart goes through the launcher, so a launcher that is offline is why a
