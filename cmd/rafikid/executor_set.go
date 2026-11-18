@@ -225,7 +225,9 @@ func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner ex
 			default:
 				return protocol.SpawnRequest{}, setRefusal("executor selector %q matches only a session executor, which ends with its terminal and cannot be the whole of a set; name a durable executor", req.ExecutorSelector)
 			}
-			if req.HomeExecutor == "" {
+			// The session executor is a home only inside a set that is all: a
+			// finite set excludes it, and a home outside the set is refused.
+			if req.HomeExecutor == "" && parentAll {
 				req.HomeExecutor = transient[0].ID
 			}
 		}
@@ -244,7 +246,9 @@ func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner ex
 		result = []string{childstore.ExecutorSetAll}
 
 	default:
-		result = c.defaultChildSet(req, parentRows, parentAll)
+		if result, err = c.defaultChildSet(req, parentRows, parentAll); err != nil {
+			return protocol.SpawnRequest{}, err
+		}
 	}
 
 	req.Executors = result
@@ -336,12 +340,17 @@ func (c *Controller) resolvePoolessExecutorSet(req protocol.SpawnRequest) (proto
 
 // defaultChildSet is the set a child gets when it names nothing: the spawner's
 // home when it can serve the child's kind, else a copy of the spawner's set.
-func (c *Controller) defaultChildSet(req protocol.SpawnRequest, parentRows []executors.Executor, parentAll bool) []string {
+// A session executor ends with the terminal that started it, so its id is never
+// stored: a session home does not become the child's single member, and a
+// finite spawner's set is copied without its session members. A set that
+// would be left empty by that is refused rather than stored as nothing.
+func (c *Controller) defaultChildSet(req protocol.SpawnRequest, parentRows []executors.Executor, parentAll bool) ([]string, error) {
 	if home := c.persistedHome(req.ParentChildID); home != "" {
-		inSet := false
+		inSet, transient := false, false
 		for _, e := range parentRows {
 			if e.ID == home {
 				inSet = true
+				transient = e.Labels["kind"] == "session"
 				break
 			}
 		}
@@ -349,14 +358,18 @@ func (c *Controller) defaultChildSet(req protocol.SpawnRequest, parentRows []exe
 		if !launches {
 			launches = launchKindSet(c.execPool.Live(), string(req.Kind))[home]
 		}
-		if inSet && launches {
-			return []string{home}
+		if inSet && launches && !transient {
+			return []string{home}, nil
 		}
 	}
 	if parentAll {
-		return []string{childstore.ExecutorSetAll}
+		return []string{childstore.ExecutorSetAll}, nil
 	}
-	return idsOf(parentRows)
+	stable := dropTransientRows(parentRows)
+	if len(stable) == 0 && len(parentRows) > 0 {
+		return nil, setRefusal("your executor set holds only a session executor, which ends with its terminal and cannot be handed on; name a durable executor")
+	}
+	return idsOf(stable), nil
 }
 
 // spawnerCandidateRows is every row the spawner could address before its own

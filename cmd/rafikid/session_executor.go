@@ -73,9 +73,11 @@ func connectIdentity(ctx context.Context) users.Identity {
 // one-shot ticket and evicted when ctx ends.
 //
 // The selector is IDENTICAL in both cases, and deliberately so: it names the
-// machine rather than a specific executor, so a child can be moved between the
-// two without its stored selector — the thing its whole subtree inherits — ever
-// being rewritten.
+// machine rather than a specific executor, so the same spawn request works
+// whichever of the two answers the client got. A spawn that matches a session
+// executor stores the set \"all\" and uses the session executor only as the
+// child's initial home: the transient id is never stored in a set, because it
+// ends with the terminal.
 //
 // Every field that gates access is written HERE, from the identity, never
 // from the request. A client that could name its own owner or admits would be

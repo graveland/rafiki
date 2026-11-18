@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -264,10 +263,10 @@ func TestSessionSelectorUnderARestrictedSpawnerNeverStoresTheSessionID(t *testin
 	ck.Require().Error(err, "a set made only of the transient executor is refused")
 }
 
-// The script launch path itself reads the child's row. Launching past the
-// executor choice needs a daraja pool this fixture does not have, so reaching
-// the launch (an error or panic from it) is the evidence the choice succeeded;
-// the choice's own refusal is the failure.
+// The script launch path itself reads the child's row. The fixture has no
+// daraja pool, so the launch that follows the choice fails; failing in the launch
+// and naming the chosen executor is the evidence the choice succeeded. Any other
+// outcome (a panic, a success, the choice's own refusal) fails the test.
 func TestScriptLaunchOfALegacyChildChoosesFromItsRow(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := setController(t, exWithLaunch("L", map[string]string{"machine": "a"}, "", protocol.KindScript))
@@ -280,14 +279,9 @@ func TestScriptLaunchOfALegacyChildChoosesFromItsRow(t *testing.T) {
 		Script: &protocol.ScriptSpec{Repo: "local", Script: "s"},
 	}
 
-	var err error
-	func() {
-		defer func() { _ = recover() }()
-		_, err = c.darajaScriptRunner(req, "c_legacy_script", "", "")
-	}()
-	if err != nil {
-		ck.False(strings.Contains(err.Error(), "no executor can launch"), "the launch executor must be chosen from the row: %v", err)
-	}
+	_, err := c.darajaScriptRunner(req, "c_legacy_script", "", "")
+	ck.Require().Error(err, "the launch has no daraja pool to run on")
+	ck.StrContains(err.Error(), "launch daraja on executor L:", "the executor was chosen from the row, and the failure is the launch's")
 }
 
 // A selector places the child on what can host it now. A stale enrolled row of
@@ -345,4 +339,63 @@ func TestPrefillReadsGoToTheHomeOfAnAmbiguousSet(t *testing.T) {
 	c.execPool = &fakePool{live: []execpool.LiveExecutor{nativeExec("A", "a", "u1")}}
 	_, err = prefill()
 	ck.Error(err, "a home that is not reachable is never replaced by a guess")
+}
+
+// A worker spawned with no executor by a child that is homed on the session
+// executor never stores the transient id: after the terminal closes the worker
+// still reaches the owner's other executors.
+func TestSessionPlacedChildsWorkerSurvivesEviction(t *testing.T) {
+	ck := assert.NewAborting(t)
+	sess := machineExec("sess-01", "laptop", map[string]string{"kind": "session", "owner": "u"})
+	durable := machineExec("D", "server", nil)
+	c := setController(t, sess, durable)
+
+	parent, err := spawnFundi(t, c, protocol.SpawnRequest{ExecutorSelector: "machine=laptop"})
+	ck.Require().NoError(err, "session-placed parent")
+	ck.Eq("sess-01", parent.Labels[homeExecutorLabel], "the parent is homed on the session executor")
+
+	worker, err := spawnFundi(t, c, protocol.SpawnRequest{ParentChildID: parent.ChildID})
+	ck.Require().NoError(err, "default worker spawn")
+	ck.EqDeep([]string{allSet}, worker.ExecutorSet, "the worker never stores the session id")
+
+	c.execPool = &fakePool{live: []execpool.LiveExecutor{durable}}
+	ck.EqDeep([]string{"D"}, reachFor(t, c, worker.ChildID, protocol.SpawnRequest{}), "after eviction the worker still reaches the other executor")
+}
+
+// A legacy parent (no stored set, a session-style selector) hands its default
+// worker the durable matches only; one whose only match is the session
+// executor is refused rather than given an empty set.
+func TestLegacySessionParentsDefaultWorkerNeverStoresTheSessionID(t *testing.T) {
+	ck := assert.NewAborting(t)
+	sess := machineExec("sess-01", "laptop", map[string]string{"kind": "session"})
+	durable := machineExec("D", "laptop", nil)
+	c := setController(t, sess, durable)
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_legacy", Status: protocol.StatusIdle, Kind: protocol.KindFundi,
+		MaxDepth: 2, MaxChildren: 8, Labels: map[string]string{}, ExecutorSelector: "machine=laptop",
+	})
+
+	worker, err := spawnFundi(t, c, protocol.SpawnRequest{ParentChildID: "c_legacy"})
+	ck.Require().NoError(err, "default worker of a legacy session parent")
+	ck.EqDeep([]string{"D"}, worker.ExecutorSet, "only the durable member is stored")
+
+	c.execPool = &fakePool{live: []execpool.LiveExecutor{sess}}
+	_, err = spawnFundi(t, c, protocol.SpawnRequest{ParentChildID: "c_legacy"})
+	ck.Require().Error(err, "a parent that reaches only the session executor cannot hand it on")
+	ck.StrContains(err.Error(), "session executor", "the refusal says why")
+}
+
+// Under a finite spawner a session selector stores the durable matches and the
+// spawn still succeeds, homed inside that set.
+func TestSessionSelectorUnderARestrictedSpawnerSpawnsInsideTheSet(t *testing.T) {
+	ck := assert.NewAborting(t)
+	sess := machineExec("sess-01", "laptop", map[string]string{"kind": "session"})
+	durable := machineExec("D", "laptop", nil)
+	c := setController(t, sess, durable)
+	setParent(t, c, "c_parent", []string{"sess-01", "D"})
+
+	snap, err := spawnFundi(t, c, protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "machine=laptop"})
+	ck.Require().NoError(err, "the spawn must not be refused for a home outside its set")
+	ck.EqDeep([]string{"D"}, snap.ExecutorSet, "only the durable member")
+	ck.NotEq("sess-01", snap.Labels[homeExecutorLabel], "the session executor is never the home of a finite set")
 }
