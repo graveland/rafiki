@@ -132,20 +132,34 @@ the executors in it.
   outside the spawner's set is refused, and `all` is available only to an agent
   whose own set is `all`. Omitted, the child gets its spawner's home executor
   (or a copy of the spawner's set when that home cannot launch the child's
-  kind). A top-level spawn (CLI, cockpit, MCP client) defaults to `all`;
+  kind). A top-level spawn (CLI, cockpit, MCP client) defaults to `all`, and
+  the session executor default (`rafiki create` without flags) only picks where
+  the child is placed: the child's set is still `all`. Installed executors are
+  never a lazy home. Spawn resolution counts enrolled executors that are
+  offline, so naming one that is not connected still succeeds. Disable and
+  enable notices reach only the agents whose set admits the executor.
   `rafiki create --executors a,b` (comma-separated or repeated; exclusive with
   `--executor-selector` and with `-i`) names a set, and the Python SDK's
   `spawn(executors=[...])` does the same.
-- **One member, no argument; more, name one.** With a single member the
-  workspace tools need no `executor` argument. With two or more (or `all`),
-  every call must name one: a command never lands on a machine because an
-  argument was forgotten.
+- **Children that predate executor sets.** A child row with no stored set is
+  interpreted at read time (`childstore.ResolveSetSpec`), with no backfill and
+  nothing frozen at load. With no stored selector its set is `all`, exactly
+  what an unselected child could reach before; with a stored selector the
+  selector is still resolved dynamically, as before.
+- **One member, no argument; more, name one.** Whether a call may omit the
+  `executor` argument is decided from the child's declared set, not from how
+  many executors are connected. A set with exactly one member needs no
+  argument. A set with two or more members, or `all`, always requires one,
+  even when only one of them is live: a command never lands on a machine
+  because an argument was forgotten.
 - **A selector picks placement.** `executor` given a label selector
-  (`os=linux`) is matched once, at spawn, against the spawner's set, and every
+  (`os=linux`) is matched at spawn against the spawner's set, and every
   matching member is frozen into the child's set. A selector that matches
-  nothing in the spawner's set refuses the spawn. It is never consulted again
-  after the spawn, and it never grants an executor the spawner could not
-  address. When `executors` is given it decides the set and the selector is not
+  nothing in the spawner's set refuses the spawn. The frozen set is what the
+  child may address, and the selector never grants an executor the spawner
+  could not address. A selector still places within the set: it is matched
+  again when an executor is chosen for the child and when the child resumes, but
+  only ever among the members of that set. When `executors` is given it decides the set and the selector is not
   used.
 - **`Admits` is read against the child.** An executor's `Admits` selector is
   evaluated against the CHILD's labels, both when the set is fixed and on every
@@ -515,8 +529,10 @@ Each child gets a workspace provisioned before it starts and released when it
 exits, at the child's cwd.
 
 - **ephemeral** — the operator declares these machines interchangeable; if
-  the executor is lost, an implicit tool call re-binds the child onto the
-  single reachable executor.
+  the executor is lost, the child's home moves to another member of its own
+  set. Re-placement never makes an ambiguous set implicit: a child whose set
+  is `all` or names two or more executors still has to name one on every
+  call, and only a set with exactly one member needs no argument.
 - **pinned** — the executor exposes an existing tree. Losing it never ends the
   child: calls to that executor fail until it reconnects, and the workspace is
   re-provisioned only on that same executor when it returns.

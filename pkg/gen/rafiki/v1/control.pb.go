@@ -2463,7 +2463,7 @@ type SpawnRequest struct {
 	Prefill []*PrefillRead           `protobuf:"bytes,13,rep,name=prefill,proto3" json:"prefill,omitempty"`
 	Script  *SpawnRequest_ScriptSpec `protobuf:"bytes,14,opt,name=script,proto3" json:"script,omitempty"`
 	// Fields 15-29 are OPERATOR-ONLY: Spawn refuses them with PermissionDenied when the caller has child provenance.
-	// This is enforced as a child-ALLOWED set (fields 1-14, 30-36, see verbs.go's
+	// This is enforced as a child-ALLOWED set (fields 1-14, 30-37, see verbs.go's
 	// childAllowedSpawnFields), not a literal list of these 15 -- so a NEW
 	// SpawnRequest field is OPERATOR-ONLY by default. Adding one requires an
 	// explicit decision: either add its number to childAllowedSpawnFields (and

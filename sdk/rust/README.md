@@ -120,6 +120,14 @@ serves rafiki's executor-routed tools over MCP instead. It is fixed at spawn
 the same way — `workspace_tools: "rafiki".into()` on the generated
 `SpawnRequest`, no wrapper.
 
+`SpawnRequest.executors` names the executors the child may address (machine
+labels or ids), chosen from the spawner's own set: set it on the generated
+`SpawnRequest` (`executors: vec!["greyshift".into()]`), no wrapper. A one-member
+set needs no `executor` argument on workspace tools; a larger set makes every
+call name one. `vec!["all".into()]` gives the child every executor of its owner
+and is accepted only from an `all` spawner. Empty leaves the daemon default: the
+spawner's home executor, or `all` for a top-level spawn.
+
 `SpawnRequest.home_executor` names (machine label or id) the executor where
 `cwd` applies and project context (CLAUDE.md/AGENTS.md) and project skills are
 read from — not a default for tool calls, and it must be in the child's

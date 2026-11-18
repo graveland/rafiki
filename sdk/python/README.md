@@ -59,6 +59,14 @@ quiet = c.spawn("audit this", kind="fundi", skip_derived_index=True)
 # spawn and not inherited; anything else raises ValueError.
 coordinator = c.spawn("run the plan", kind="fundi", notify="result")
 
+# `executors` names the executors the child may address (machine labels or
+# ids), chosen from the spawner's own set; a one-member set needs no `executor`
+# argument on workspace tools, a larger set makes every call name one. A bare
+# string raises TypeError. `["all"]` gives the child every executor of its owner
+# and is accepted only from an `all` spawner. Omitted, the child gets its
+# spawner's home executor (a top-level spawn defaults to `all`).
+pinned = c.spawn("check the build", kind="fundi", executors=["greyshift", "fedora"])
+
 # `home_executor` names (machine label or id) the executor where `cwd` applies
 # and project context (CLAUDE.md/AGENTS.md) and project skills are read from —
 # NOT a default for tool calls; it must be in the child's reachable set or the

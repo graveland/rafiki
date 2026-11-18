@@ -1439,7 +1439,7 @@ winner, so rename that row by hand and boot again. Pinned by
 
 #### Spawn's operator-only fields (15–29)
 
-`SpawnRequest` fields 1–14 and 30–35 are the child-ALLOWED set
+`SpawnRequest` fields 1-14 and 30-37 are the child-ALLOWED set
 (`childAllowedSpawnFields`, `pkg/connectapi/verbs.go`): a caller with child
 provenance may set them, and `Spawn` forces `parent_child_id` to the caller's
 own id. Fields 15–29 (`config_dir`, `append_system_prompt`, `thinking`,
@@ -1626,8 +1626,8 @@ the child it was spawned for (`owner_child`); its lifecycle follows the child.
   (`childstore.IsDescendant`). The hint is fail-closed: a wrong or empty one can
   only fail to find an owned sandbox, never admit an unrelated one. A
   descendant binds through this lookup, never through its stored executor set,
-  which holds no other child's sandbox. Every `ChooseFor` — for every child, sandboxed or
-  not — runs this lookup, so a bind now depends on the sandbox table; a store
+  which holds no other child's sandbox. Every `ChooseFor`, for every child, sandboxed or
+  not, runs this lookup, so a bind now depends on the sandbox table; a store
   error fails the bind closed rather than reading as "not owned". The lookup is
   a single indexed read of the owner's live rows (`ListLive`, partial index
   `sandbox_owner_live`, migration 0048) with a 5 s budget.
