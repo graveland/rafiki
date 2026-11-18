@@ -72,8 +72,10 @@ type ChildRecord struct {
 	NotifyPolicy string
 
 	// WorkspaceTools is protocol.WorkspaceToolsRafiki for a claude child using
-	// rafiki's executor-routed tools, and empty for the default (native); it is
-	// resolved once at spawn and never changes.
+	// rafiki's executor-routed tools, and empty for Claude Code's own built-ins;
+	// it is resolved once at spawn and never changes. Empty records the RESOLVED
+	// mode, not "undeclared": the daemon's default (rafiki wherever it can serve
+	// it) was already applied when this was written.
 	WorkspaceTools string
 
 	MaxDepth    int

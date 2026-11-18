@@ -543,7 +543,7 @@ the question for every kind in one vocabulary:
 | `--no-local-executor` | — | Do not offer this machine as a workspace at all |
 | `--notify <all\|result>` | — | Spawn with `SpawnRequest.notify` (field 34, child-allowed): `all` (the default) wakes the spawner on every settle and heartbeat; `result` wakes it only for a recorded result, a pending question, a turn error, the child's own budget cap, or exit/failure. Any other value is `InvalidArgument`. Fixed at spawn, not inherited, not a preset field |
 | `--skip-derived-index` | — | Spawn with `SpawnRequest.skip_derived_index` (field 30, child-allowed) true: the recall indexer then does not embed or summarise this child's conversations or any descendant's, while windows and keyword (BM25) search still work. OR-inherited down the subtree at spawn and never clearable beneath a parent that set it; a resumed child keeps its stored value |
-| `--workspace-tools <rafiki\|native>` | — | claude only: `SpawnRequest.workspace_tools` (field 36, child-allowed). `rafiki` disallows Claude Code's built-in file and shell tools and has the MCP face serve rafiki's executor-routed ones in their place; `native`/empty keeps the built-ins. Resolved once at spawn, refused for any other kind, and needs the daemon's executor pool and a proxied claude — see "Workspace tools mode" below |
+| `--workspace-tools <rafiki\|native>` | — | claude only: `SpawnRequest.workspace_tools` (field 36, child-allowed). `rafiki` disallows Claude Code's built-in file and shell tools and has the MCP face serve rafiki's executor-routed ones in their place; `native` keeps the built-ins. **Left off is the daemon's default: rafiki mode wherever that daemon can serve it (executor pool plus a proxied claude), the built-ins where it cannot** — so the same command can land either way on two machines, and `-J`/`GetChild` reports what was resolved. Both names are pins and are never re-made; an explicit `rafiki` this daemon cannot honour is refused rather than downgraded. Resolved once at spawn and refused for any other kind — see "Workspace tools mode" below |
 
 Tab-completion: `--executor` and `--executors` (per list element, plus `all`) complete machine names (ids for unlabeled
 executors) from the daemon's `ListExecutors` RPC, scoped to the resolved
@@ -580,22 +580,36 @@ warnings name what it is missing.
 ### Workspace tools mode (`--workspace-tools`)
 
 A claude child runs its file and shell work wherever the Claude Code binary
-sits, which is its launch host. `rafiki create --kind claude --workspace-tools
-rafiki` moves that work onto an executor instead: Claude Code's built-in
-`Bash`/`Read`/`Write`/`Edit` (and `NotebookEdit`, `LSP`, `EnterWorktree`,
-`ExitWorktree`) are disallowed, deferred tool search is forced off so the
-replacements are not hidden behind it, and the MCP face serves Claude-shaped
-`Read`/`Write`/`Edit`/`Bash`, the search/list and job verbs, and the eight
-`lsp_*` replacements for the disallowed `LSP` tool — a call names an executor
-when the child reaches more than one, and a tool the child's executor does not
-serve (the `lsp_*` eight on a machine with no language server) is never offered.
-`native`, the default, leaves the built-ins alone. The daemon refuses `rafiki` for any other kind (a fundi
-child already runs rafiki's tools), on a daemon with no executor pool, and on a
-daemon that serves the child no MCP face at all; the CLI applies the same kind
-rule before sending, judged against the FINAL kind so a claude preset still
-works. The mode is resolved once at spawn and persisted, so a resume keeps it
-whatever a preset says afterwards. The wire field, its refusals and the values
-are in [control-protocol.md](reference/control-protocol.md#child-workspace-tools).
+sits, which is its launch host — with no way for the model to name another
+machine. A claude spawn that leaves `--workspace-tools` off gets the daemon's
+DEFAULT, which is the executor-routed mode below wherever that daemon can serve
+it (an executor pool plus a proxied claude) and the built-ins only where it
+cannot, so a lone laptop is unchanged and a server stops reading the launch
+host. `--workspace-tools native` pins the built-ins on either. The mode that was
+resolved is what `rafiki list -J` reports as `workspace_tools`.
+
+`--workspace-tools rafiki` moves that work onto an executor instead: Claude
+Code's built-in `Bash`/`Read`/`Write`/`Edit` (and `NotebookEdit`, `LSP`,
+`EnterWorktree`, `ExitWorktree`) are disallowed, deferred tool search is forced
+off so the replacements are not hidden behind it, and the MCP face serves
+Claude-shaped `Read`/`Write`/`Edit`/`Bash`, the search/list and job verbs, and
+the eight `lsp_*` replacements for the disallowed `LSP` tool — a call names an
+executor when the child reaches more than one, and a tool the child's executor
+does not serve (the `lsp_*` eight on a machine with no language server) is never
+offered. `native` leaves the built-ins alone. The daemon refuses an explicit
+`rafiki` for any other kind (a fundi child already runs rafiki's tools), on a
+daemon with no executor pool, and on a daemon that serves the child no MCP face
+at all — a refusal, never a silent downgrade, because a caller that asked for
+executor-routed tools must not get a child reading the launch host. The CLI
+applies the same kind rule before sending, judged against the FINAL kind so a
+claude preset still works. The mode is resolved once at spawn and persisted, so
+a resume keeps it whatever a preset says afterwards — and a resume the daemon
+can no longer honour (the executor pool or the proxy face went away since the
+spawn) is refused with the reason rather than relaunched with every built-in
+disabled and nothing serving their place: restore what is missing, or spawn a
+replacement with `--workspace-tools native`. The wire field, its
+refusals and the values are in
+[control-protocol.md](reference/control-protocol.md#child-workspace-tools).
 
 A claude preset can pin the mode, so a seat means the same thing every time it
 is dispatched:

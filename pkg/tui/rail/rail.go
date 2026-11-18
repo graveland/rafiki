@@ -113,9 +113,11 @@ type Node struct {
 	Model string
 
 	// WorkspaceTools is the workspace tools mode the daemon RESOLVED AT SPAWN for
-	// a claude child, from ListChildren: "" (native, the default) or "rafiki".
-	// A rail row is the snapshot a spawn is reconstructed from, so a model switch
-	// reads it here to keep the source's mode instead of reverting to native.
+	// a claude child, from ListChildren: "" (Claude Code's built-ins) or
+	// "rafiki". A rail row is the snapshot a spawn is reconstructed from, so a
+	// model switch reads it here to RE-DECLARE the source's mode — "" is the
+	// built-ins and is sent as the native pin, because the daemon's default would
+	// otherwise decide again and change the child's tools mid-conversation.
 	WorkspaceTools string
 
 	// Latest is the highest ordinal known to exist for this child; it drives the

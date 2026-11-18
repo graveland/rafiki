@@ -138,10 +138,10 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 
 	// Workspace tools: the preset fills only a request that named nothing, the
 	// same request-wins rule as model and provider. The value is stored verbatim
-	// ("native" included); Spawn's NormalizeWorkspaceTools is the one place an
-	// absent choice and "native" collapse to the same "". Resolved once here,
-	// like every other preset field: resume rebuilds from the child's own row
-	// and never comes back through this function.
+	// ("native" included); Spawn's resolveWorkspaceTools is the one place an
+	// absent choice, a preset's pin and the daemon's default are decided. Resolved
+	// once here, like every other preset field: resume rebuilds from the child's
+	// own row and never comes back through this function.
 	if req.WorkspaceTools == "" && rec.WorkspaceTools != nil {
 		req.WorkspaceTools = *rec.WorkspaceTools
 	}

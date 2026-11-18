@@ -444,8 +444,10 @@ func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 		Executors:        p.Executors,
 		SkipDerivedIndex: p.SkipDerivedIndex,
 		Notify:           p.Notify,
-		// Raw, un-normalized: Controller.Spawn is the one place an absent
-		// choice and "native" collapse, and the place the refusals live.
+		// Raw, un-normalized: Controller.Spawn is the one place an absent choice
+		// becomes the daemon's default (rafiki mode wherever it can serve it),
+		// the one place "native" collapses onto the stored "", and the place the
+		// refusals live.
 		WorkspaceTools: p.WorkspaceTools,
 		ExecutorRef:    p.ExecutorRef,
 		HomeExecutor:   p.HomeExecutor,

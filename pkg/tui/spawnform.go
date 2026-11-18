@@ -29,9 +29,27 @@ import (
 // typo waiting to cost a round trip.
 var spawnKinds = []string{protocol.KindFundi, protocol.KindClaude}
 
-// workspaceModes are the values the workspace tools row offers, in cycle order.
-// Index 0 is the default: Claude Code keeps its built-in file and shell tools.
-var workspaceModes = []string{protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki}
+// workspaceMode is one option of the workspace tools row: the value that rides
+// the wire and the word the row shows for it. They are distinct because the
+// default IS the empty value, and a row rendering "( )" is not a choice anybody
+// can read.
+type workspaceMode struct{ value, label string }
+
+// workspaceModes are the workspace tools row's options, in cycle order.
+//
+// Index 0 is the DEFAULT, and it sends "": the daemon decides — rafiki's
+// executor-routed workspace tools wherever it can actually serve them, Claude
+// Code's built-in file and shell tools otherwise. It is first because it is
+// what a form nobody has touched must produce: the daemon knows which mode this
+// machine can honour and the form does not.
+//
+// The other two are PINS and ride the wire verbatim, so a client that knows
+// which tools it wants cannot have that decision re-made for it.
+var workspaceModes = []workspaceMode{
+	{value: "", label: "default"},
+	{value: protocol.WorkspaceToolsRafiki, label: "rafiki"},
+	{value: protocol.WorkspaceToolsNative, label: "native"},
+}
 
 // spawnField indexes the form's rows. The order is the tab order, and it runs
 // most-edited to least: a name is what you always set and a cwd is what you
@@ -96,10 +114,11 @@ type spawnParams struct {
 	// spawn this form issues, resolved daemon-side via Controller.Spawn.
 	preset string
 	// workspaceTools is the workspace tools row's value, sent VERBATIM for a
-	// claude child ("native" as well as "rafiki") and empty for every other
-	// kind. The row is a declaration like the kind row: it outranks a preset's
-	// workspace_tools, and sending "" for the row's own native default would
-	// let the preset silently overrule what the form shows.
+	// claude child ("native" and "rafiki" as well as the empty default) and
+	// empty for every other kind. The row is a declaration like the kind row:
+	// it outranks a preset's workspace_tools, so the empty value it sends has
+	// to mean what the daemon means by empty — "the default for this daemon" —
+	// rather than being folded into a native pin the form never showed.
 	workspaceTools string
 	// forkFrom, when set, starts the new child from a point in another child's
 	// history (borrowed conversation, immutable fork edge). switchSource names
@@ -140,14 +159,14 @@ func (p spawnParams) tailSource() string {
 // other budget field common enough that a person sets it per-spawn rather
 // than once in a preset, so it earns the keystroke the others don't.
 // Workspace tools earns its row because it decides WHICH tools a claude child
-// has, and there is no safe ambient default to hide it behind: the choice is
-// the spawn's, and the row says which one is in force.
+// has, and the row is where a declared choice overrides the daemon's default:
+// the row opens on that default, and moving it is how a spawn pins either mode.
 type spawnForm struct {
 	inputs [spawnFieldCount]textinput.Model
 	kindIx int
 	// workspaceIx is the workspace tools row's position in workspaceModes. It
 	// is kept when the row is hidden (a non-claude kind), so switching back to
-	// claude restores the choice instead of resetting it to native.
+	// claude restores the choice instead of resetting it to the daemon default.
 	workspaceIx int
 	focus       spawnField
 
@@ -364,7 +383,7 @@ func (f *spawnForm) kind() string { return spawnKinds[f.kindIx] }
 func (f *spawnForm) showsWorkspaceTools() bool { return f.kind() == protocol.KindClaude }
 
 // workspaceTools is the row's current value.
-func (f *spawnForm) workspaceTools() string { return workspaceModes[f.workspaceIx] }
+func (f *spawnForm) workspaceTools() string { return workspaceModes[f.workspaceIx].value }
 
 func (f *spawnForm) cycleWorkspaceTools(delta int) {
 	f.workspaceIx = (f.workspaceIx + delta + len(workspaceModes)) % len(workspaceModes)
@@ -391,10 +410,11 @@ func (f *spawnForm) prefill(d SpawnDefaults, cur *clientstate.Currency) {
 		f.inputs[fieldMaxCost].SetValue(costField(*d.MaxCost, cur))
 	}
 	// A declared workspace-tools mode (rafiki create -i --workspace-tools …)
-	// prefills the row it now has. An absent (or unknown) value matches nothing
-	// and leaves the form's native default, which is what an absent flag means.
+	// prefills the row it now has. An absent value matches the DEFAULT option
+	// (index 0), which is what an absent flag means: the daemon decides. An
+	// unknown value matches nothing and leaves the row where it was.
 	for i, m := range workspaceModes {
-		if m == d.WorkspaceTools {
+		if m.value == d.WorkspaceTools {
 			f.workspaceIx = i
 		}
 	}
@@ -433,7 +453,7 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 		keepSource:   f.branches(),
 	}
 	// The row is a claude-only choice, and its value rides the wire even when it
-	// is native: see spawnParams.workspaceTools.
+	// is the empty default: see spawnParams.workspaceTools.
 	if f.showsWorkspaceTools() {
 		p.workspaceTools = f.workspaceTools()
 	}
@@ -806,7 +826,11 @@ func (f *spawnForm) kindView() string {
 // workspaceView renders the workspace tools row the same way, for the same
 // reason: the row has two values and only one is in force.
 func (f *spawnForm) workspaceView() string {
-	return cycleView(workspaceModes, f.workspaceIx)
+	labels := make([]string, len(workspaceModes))
+	for i, m := range workspaceModes {
+		labels[i] = m.label
+	}
+	return cycleView(labels, f.workspaceIx)
 }
 
 // cycleView renders a closed option set with the selected value marked.

@@ -859,7 +859,7 @@ call at all — and is described under "Owner isolation between users" below.
 | `Send` | unary · childScoped | ownerGuarded | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child or a `/exit` slash command (see "`Send` and the durable inbox" and "Slash commands in a prompt" below). Optional `steps` run at send time and their rendered output is appended to the text; refused with `ABORT` (see "`Send` steps" below). An image block is resized on ingest to at most 1568px on either edge and 1.15MP (PNG stays PNG, JPEG stays JPEG, EXIF orientation applied; GIF/WebP pass through); a PNG/JPEG source above 50 megapixels (`imagefit.MaxSourcePixels`) is refused `InvalidArgument` before decoding; what is stored, echoed and sent to the model is the resized image. An image block whose bytes claim PNG/JPEG but do not decode is refused `InvalidArgument` |
 | `ListChildren` | unary · childScoped | ownerFiltered | List children, optionally filtered by status (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost` per child, plus the server-derived display fields `display_state`/`waiting_on`/`display_msg` — see "Operator display state"). `scope` (`ListScope`) picks a child credential's view: `LIST_SCOPE_UNSPECIFIED` (0, the unset sentinel) resolves to today's answer — the caller's own subtree — and `LIST_SCOPE_SUBTREE` asks for the same; `LIST_SCOPE_OWNER` adds every other live agent of the caller's owner, the subtree rows first. On an `OWNER` list made by a child credential each row carries `ChildSummary.in_subtree` (`true` for the caller's own subtree, `false` for its owner's other agents, which are readable but not steerable); it is `optional` and absent on every other list, because `false` would be a claim about a caller with no position in the tree. Every value is a no-op for the unix socket, admin and user credentials — they have no position in the tree, so their root is already everything they may see — and an unrecognised enum value is `CodeInvalidArgument` |
 | `GetChild` | unary · childScoped | ownerGuarded | Get one child's summary by id (reports `started_at`/`last_activity` as `Timestamp`s, `latest_ordinal`, `cost_usd` and `max_cost`, plus the server-derived display fields `display_state`/`waiting_on`/`display_msg` — see "Operator display state"). Post-spawn state is observable here: `Spawn` is unary and returns as soon as the child is registered, so state is read back through `GetChild`, not through the spawn call. A per-child credential reads a target `ChildScope.AuthorizeRead` admits (subtree OR same non-empty owner), not `Authorize`'s strict subtree; foreign, unknown and unowned ids answer one identical `CodePermissionDenied` |
-| `Spawn` | unary · childScoped | ownerGuarded | Create a child with budget, executor, and label options. `kind` selects the child: `fundi` (default), `claude`, or `script` — a saved pymodule run as the child's process (§"Script children" below). For `kind: script` the request carries `script` (`ScriptSpec{repo, script, modules, args}`); every fundi/claude-only field is refused on a script spawn, and `prefill` with them. `prefill` is honoured for `fundi` (pre-read into history) and `claude` (rendered into the system-prompt appendix as files to Read first). Fields 15–29 are operator-only (§"Spawn's operator-only fields" below); `notify` (34) and `workspace_tools` (36) are child-allowed. `workspace_tools` applies to `claude` children only: `"rafiki"` disallows Claude Code's built-in file and shell tools and serves rafiki's executor-routed ones over MCP instead, resolved ONCE at spawn and persisted on the child (a resume reads the row, so editing a preset never reaches a running child). It is refused `CodeInvalidArgument` for a value outside that vocabulary and for any other kind, when the daemon has no executor pool, and when this daemon would serve that child no MCP surface at all (no proxy URL, or claude outside `RAFIKI_PROXY_KINDS`); `"native"` and empty both store as `""` (built-ins kept), and a preset may pin the mode (§"Presets"). `fork_from`/`from_tag` start the new child from a node of another child's history (§"Forks and tags" below). A `name` a live sibling already holds is refused `CodeAlreadyExists` naming the holder, before anything is started; only a tool spawn suffixes instead, and the `child_sibling_name_live` index refuses a lost race through the same code (§"Child names are unique among live siblings") |
+| `Spawn` | unary · childScoped | ownerGuarded | Create a child with budget, executor, and label options. `kind` selects the child: `fundi` (default), `claude`, or `script` — a saved pymodule run as the child's process (§"Script children" below). For `kind: script` the request carries `script` (`ScriptSpec{repo, script, modules, args}`); every fundi/claude-only field is refused on a script spawn, and `prefill` with them. `prefill` is honoured for `fundi` (pre-read into history) and `claude` (rendered into the system-prompt appendix as files to Read first). Fields 15–29 are operator-only (§"Spawn's operator-only fields" below); `notify` (34) and `workspace_tools` (36) are child-allowed. `workspace_tools` applies to `claude` children only: `"rafiki"` disallows Claude Code's built-in file and shell tools and serves rafiki's executor-routed ones over MCP instead, resolved ONCE at spawn and persisted on the child (a resume reads the row, so editing a preset never reaches a running child). An EMPTY value is the daemon's default for a claude child — rafiki mode wherever this daemon can serve it, the built-ins only where it cannot (no executor pool, or no MCP surface for this child) — while `"native"` and `"rafiki"` are PINS that are never re-made; `"native"` and empty both store as `""`, so the row records the resolved mode with no memory of which it was. A pin the daemon cannot honour is refused `CodeInvalidArgument` with the reason: a value outside that vocabulary, `"rafiki"` for any other kind, `"rafiki"` with no executor pool, and `"rafiki"` when this daemon would serve that child no MCP surface at all (no proxy URL, or claude outside `RAFIKI_PROXY_KINDS`). A preset may pin the mode (§"Presets"), and a pin outranks the default. A resume of a row carrying a mode this daemon can no longer serve is refused `CodeFailedPrecondition` rather than launched toolless (§"Child workspace tools"). `fork_from`/`from_tag` start the new child from a node of another child's history (§"Forks and tags" below). A `name` a live sibling already holds is refused `CodeAlreadyExists` naming the holder, before anything is started; only a tool spawn suffixes instead, and the `child_sibling_name_live` index refuses a lost race through the same code (§"Child names are unique among live siblings") |
 | `Kill` | unary · childScoped | ownerGuarded | Stop a child gracefully, escalating to SIGKILL if necessary. `shutdown_timeout`/`kill_timeout` (Durations) bound the graceful window and the SIGTERM→SIGKILL escalation; each unset or zero selects the daemon default (2 s / 2.5 s — a kill interrupts, it does not wait out a turn). `include_descendants` first stops every live descendant, all at once (the sweep costs the slowest child, not the sum; reported in `descendant_ids`), then the target; a descendant that cannot be stopped leaves the target alone. Off, the subtree is left running. `scope` (`DescendantScope`) supersedes the flag: `TARGET_ONLY`, `TARGET_AND_DESCENDANTS`, `DESCENDANTS_ONLY` (stops the descendants and leaves the target running, so the response's `exit_code`/`signal`/`duration`/`escalated` are unset) — `EXITED_DESCENDANTS_ONLY` is `InvalidArgument` here. `UNSPECIFIED` defers to `include_descendants`; an explicit `scope` the flag contradicts (`TARGET_ONLY` with `include_descendants=true`) is `InvalidArgument`. A daemon that predates `scope` ignores it, so a client that needs `DESCENDANTS_ONLY` against a possibly older daemon cannot be sure it was honoured |
 | `Close` | unary · childScoped | ownerGuarded | Finalize an exited child: it leaves the store and its `conversations.child` row is dropped. An error for a live child — closing is never an implicit kill. `include_descendants` closes every descendant first, deepest first, each of which must already be exited (reported in `descendant_ids`). A descendant that cannot be ended aborts before the parent is touched, so no child is orphaned; one already exited or gone is skipped. Native Task subagents are never listed: they end and close with their parent. The daemon never refuses a parent for having descendants; the CLI and cockpit ask first. `scope` supersedes `include_descendants` as for `Kill`: `DESCENDANTS_ONLY` closes the descendants (each must already be exited) and leaves the target open; `EXITED_DESCENDANTS_ONLY` closes only the descendants that are exited AND have no live descendant beneath them (closing one above a live child would strand it), skips any row that went live since the daemon listed them, and never touches the target or a live row. `descendant_ids` reports what was closed |
 | `SetBudget` | unary · childScoped | ownerGuarded | Change one child's `max_cost` (0 = unlimited). A user credential acts with operator authority — any child, no lineage or remaining-grant check; a per-child credential gets `agent_set_budget`'s rule — a direct child only, bounded by the caller's own remaining grant |
@@ -2682,17 +2682,51 @@ written before the rename report it too.
 `SpawnRequest.workspace_tools` (36) and `PresetRow.workspace_tools` (24) carry
 the mode; `ChildSummary.workspace_tools` (30) reports it RESOLVED AT SPAWN for a
 claude child: `""` for native (Claude Code's built-in file and shell tools on the
-launch host — the default), `rafiki` for those disallowed and rafiki's
-executor-routed tools served over MCP instead. The vocabulary, the
-`""`/`native` fold and the three refusals are the `Spawn` row's; resolution
-happens ONCE, in `Controller.Spawn` (`protocol.NormalizeWorkspaceTools`, beside
-the kind it depends on), and is persisted on `childstore.Session.WorkspaceTools`,
-which a resume reads back and never re-resolves. The field exists so a client can
-reconstruct the spawn a child came from: the cockpit's model switch seeds its
-workspace tools row from it, so a continuation keeps the source's mode instead of
-silently reverting to the built-ins. The launch half — the `--disallowedTools`
-list, `ENABLE_TOOL_SEARCH=false` and the Claude-shaped replacements — is
-`docs/reference/executor-protocol.md` under `workspace_tools`.
+launch host), `rafiki` for those disallowed and rafiki's executor-routed tools
+served over MCP instead.
+
+A claude spawn that names no mode gets rafiki mode, which is the default: the
+built-ins act on whatever host the child was launched on with no way for the
+model to say which machine it meant. The default is a CAPABILITY question, so
+the daemon resolves it against what it can actually serve — an executor pool to
+route a workspace tool to, and an MCP face for this child — and falls back to
+the built-ins where either is missing. Declaring `rafiki` there is a refusal,
+never a downgrade: a caller that asked for executor-routed tools must not get a
+child that quietly reads the launch host instead. `native` is a pin and always
+means the built-ins, on every daemon.
+
+The vocabulary, the `""`/`native` fold and the three refusals are the `Spawn`
+row's; resolution happens ONCE, in `Controller.Spawn`
+(`Controller.resolveWorkspaceTools`, `cmd/rafikid/workspace_tools.go`, beside
+the kind it depends on), and is persisted on
+`childstore.Session.WorkspaceTools`, which a resume reads back and never
+re-resolves. Because the row keeps only the RESOLVED mode, a client composing a
+continuation from a `ChildSummary` re-DECLARES it — the cockpit's model switch
+sends `native` for a source that reports `""` — rather than leaving the field
+empty for the daemon to default a second time. The launch half — the
+`--disallowedTools` list, `ENABLE_TOOL_SEARCH=false` and the Claude-shaped
+replacements — is `docs/reference/executor-protocol.md` under `workspace_tools`.
+The default degrades QUIETLY on a daemon with no executor pool (the laptop
+shape, where the built-ins are simply correct) and at WARN on a daemon that HAS
+the pool — there the only missing piece is the MCP surface, a misconfiguration
+whose sole other symptom is a tool surface quietly reverting.
+
+A RESUME (and a respawn) relaunches from that row and never re-resolves it, so
+it is the one place that can meet a mode this daemon can no longer serve. It is
+refused `CodeFailedPrecondition` (`protocol.ErrNotResumable`) rather than
+launched: the argv still disallows the eight built-ins while nothing replaces
+them, so the child would come back toolless with its row still claiming a mode
+nothing serves, and downgrading it to the built-ins would change its tools
+mid-conversation and rewrite a decision nobody re-made. The message names what
+to restore and the `workspace_tools "native"` pin a replacement can use.
+
+Pinned by `TestWorkspaceToolsDefaultsToRafikiWhereServable`,
+`TestWorkspaceToolsDefaultOnAnUnservableDaemonStoresTheBuiltins`,
+`TestWorkspaceToolsResumeRefusedWhenTheDaemonCannotServe` and
+`TestWorkspaceToolsResumeRefusalIgnoresServableAndNativeChildren`
+(`cmd/rafikid`), and by
+`TestWorkspaceToolsRafikiClaudeChildReportsTheModeItSpawnedWith`
+(`test/integration`, which also resumes a served rafiki-mode child).
 
 ### Operator display state
 

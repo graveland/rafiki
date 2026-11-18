@@ -52,9 +52,10 @@ type Record struct {
 	MaxDepth           *int
 	MaxChildren        *int
 	// WorkspaceTools, for a claude child: nil = unset (the spawn's own choice
-	// stands), "native" = Claude Code's built-in file and shell tools on the
-	// launch host, "rafiki" = those disallowed and rafiki's executor-routed
-	// tools served over MCP instead. Resolved once at spawn, never on resume.
+	// stands, which for an undeclared spawn is the daemon's default), "native" =
+	// a pin on Claude Code's built-in file and shell tools, "rafiki" = those
+	// disallowed and rafiki's executor-routed tools served over MCP instead.
+	// Resolved once at spawn, never on resume.
 	WorkspaceTools *string
 	WrittenByChild string     // "" = written by the operator
 	DeletedAt      *time.Time // non-nil only on rows returned by History

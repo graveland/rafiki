@@ -2349,52 +2349,32 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 
 	// workspace_tools resolves ONCE here, beside the kind it depends on, and
 	// is persisted on the session like NotifyPolicy: a preset edit must never
-	// reach a running or resumed child. The three refusals below are all
-	// rolled into this class — a value the child cannot honour — and each is
-	// made before anything is minted, forked or written, so a refusal starts
-	// no process.
-	workspaceTools, wsOK := protocol.NormalizeWorkspaceTools(req.WorkspaceTools)
-	if !wsOK {
+	// reach a running or resumed child. resolveWorkspaceTools owns both halves
+	// — the UNDECLARED default (rafiki's executor-routed tools for a claude
+	// child, wherever this daemon can serve them) and the refusal for a pin it
+	// cannot honour — so a spawn that named no mode and one that named a mode
+	// are decided by the same predicate. Every refusal happens before anything
+	// is minted, forked or written, so a refusal starts no process.
+	//
+	// req carries the RESOLVED value from here on rather than the caller's
+	// spelling: the launch paths (claudeargv.ParamsFromSpawnRequest, daraja's
+	// ClaudeParamsForRequest) and claudeRunner's workspace binding all read
+	// req.WorkspaceTools, and a resume reads the row this persists.
+	workspaceTools, wsRefusal, wsDegraded := c.resolveWorkspaceTools(req.Kind, req.WorkspaceTools)
+	if wsRefusal != "" {
 		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
-			Message: fmt.Sprintf("workspace_tools %q is not one of %q, %q", req.WorkspaceTools, protocol.WorkspaceToolsNative, protocol.WorkspaceToolsRafiki),
+			Message: wsRefusal,
 		}
 	}
-	if workspaceTools == protocol.WorkspaceToolsRafiki {
-		// Only a claude child has built-in workspace tools to replace: a fundi
-		// child already runs on rafiki's, so the mode is meaningless there
-		// rather than merely unsupported.
-		if req.Kind != protocol.KindClaude {
-			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
-				Code:    protocol.ErrInvalidArgs,
-				Message: "workspace_tools applies to claude children; fundi always uses rafiki's workspace tools",
-			}
-		}
-		// The replacements are served over the executor pool: a claude child on
-		// the daemon's own host has no executor to route a workspace tool to,
-		// and falling back to running them in the daemon process is the one
-		// thing the executor architecture exists to prevent.
-		if !c.claudeExecutorRouted() {
-			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
-				Code:    protocol.ErrInvalidArgs,
-				Message: "workspace_tools \"rafiki\" needs the executor pool: a claude child on the daemon host has no executor to route to",
-			}
-		}
-		// ...and over the MCP face, which darajaClaudeParams gates on a
-		// configured proxy URL AND this kind being proxied at all. Without both,
-		// it injects no mcp__rafiki__* surface: the eight built-ins are
-		// disallowed and nothing replaces them, so the child would be toolless.
-		// Both halves come from the same resolvers that gate reads
-		// (proxyEndpoint, proxyRoutesKind) — never a second notion of
-		// "configured" — because a URL whose RAFIKI_PROXY_KINDS excludes claude
-		// produces exactly the same toolless child, only harder to diagnose.
-		url, _ := c.proxyEndpoint()
-		if url == "" || !proxyRoutesKind(req.Kind) {
-			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
-				Code:    protocol.ErrInvalidArgs,
-				Message: "workspace_tools \"rafiki\" needs the MCP surface: this daemon serves no proxy for claude children (no proxy URL, or claude outside RAFIKI_PROXY_KINDS), so the built-in workspace tools would be disallowed and unreplaced",
-			}
-		}
+	req.WorkspaceTools = workspaceTools
+	if wsDegraded != "" {
+		// The spawn still proceeds — an undeclared mode is a default, and a
+		// default never refuses a spawn — but this daemon HAS the executor
+		// pool, so the only thing missing is the MCP surface and the operator
+		// needs to know their claude children are quietly on the built-ins.
+		slog.Warn("spawn: workspace tools defaulted to Claude Code's built-ins",
+			"kind", req.Kind, "reason", wsDegraded)
 	}
 
 	// A fork resolves ONCE, here: the node the new child's conversation starts
@@ -3562,6 +3542,17 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 		if err := checkClaudeResumeToken(snap, hasHistory); err != nil {
 			return protocol.SpawnResponseData{}, err
 		}
+		// The row carries the mode RESOLVED at spawn and a resume never
+		// re-resolves it, so this is the only place that notices a mode this
+		// daemon can no longer serve — see workspaceToolsResumeRefusal.
+		if refusal := c.workspaceToolsResumeRefusal(snap.Kind, snap.WorkspaceTools); refusal != "" {
+			slog.Warn("resume refused: workspace tools mode cannot be served",
+				"childId", childID, "workspaceTools", snap.WorkspaceTools)
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+				Code:    protocol.ErrNotResumable,
+				Message: refusal,
+			}
+		}
 		slog.Info("resuming claude child", "childId", childID, "resumeSession", snap.SessionID, "autoResume", autoResume)
 	}
 
@@ -3719,6 +3710,18 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	// through the owner-less `rafikid fundi` subprocess path — so the
 	// resolved default rides on the request too, mirroring Spawn.
 	req.Kind = kind
+
+	// A respawn relaunches from the row exactly as a resume does, so it owes
+	// the same answer about a mode this daemon can no longer serve — see
+	// workspaceToolsResumeRefusal.
+	if refusal := c.workspaceToolsResumeRefusal(req.Kind, req.WorkspaceTools); refusal != "" {
+		slog.Warn("respawn refused: workspace tools mode cannot be served",
+			"childId", childID, "workspaceTools", req.WorkspaceTools)
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
+			Code:    protocol.ErrNotResumable,
+			Message: refusal,
+		}
+	}
 
 	env, vals := c.buildEnv(req, childID, c.socketPath)
 	// See Resume's identical guard: claudeEnv is dead weight once

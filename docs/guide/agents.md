@@ -303,6 +303,15 @@ child uses Claude Code's built-in file and shell tools or rafiki's
 executor-routed ones (`--workspace-tools` on `rafiki create` and `rafiki preset
 put`, see [agent-cli.md](../agent-cli.md)).
 
+A claude child that names no `workspace_tools` gets rafiki's executor-routed
+tools wherever the daemon can serve them — an executor pool to route to and an
+MCP face for the child — and Claude Code's own built-ins only where it cannot.
+So a developer's laptop, which hosts claude children itself, is unchanged,
+while a daemon with executors stops asking a worker's `Read`/`Bash` to act on
+whatever machine happened to launch it. Pinning `native` in a preset keeps the
+built-ins on every daemon; the resolved mode is on the child
+(`workspace_tools` in `rafiki list -J`), so it is never a guess afterwards.
+
 ## MCP servers and OAuth
 
 A child's MCP servers come from an `.mcp.json` file (`--mcp-config`, else

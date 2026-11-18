@@ -143,9 +143,10 @@ type Session struct {
 	NotifyPolicy string
 
 	// WorkspaceTools is protocol.WorkspaceToolsRafiki for a claude child using
-	// rafiki's executor-routed tools, and empty for the default (native). It is
-	// resolved once at spawn and never re-resolved on resume: the mode is launch
-	// argv, so a resumed child must not regain its native tools.
+	// rafiki's executor-routed tools, and empty for Claude Code's own built-ins.
+	// It is the mode RESOLVED at spawn — the daemon's default (rafiki wherever it
+	// can serve it) is already applied — and is never re-resolved on resume: the
+	// mode is launch argv, so a resumed child must not regain its native tools.
 	WorkspaceTools string
 
 	// WorkspaceMode is "ephemeral" or "pinned" as requested at spawn.

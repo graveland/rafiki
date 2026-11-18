@@ -77,10 +77,11 @@ pinned = c.spawn("check the build", kind="fundi", executors=["greyshift", "fedor
 on_workstation = c.spawn("check the build", kind="fundi", home_executor="greyshift")
 
 # `workspace_tools="rafiki"`, for a claude child, disallows Claude Code's
-# built-in Read/Write/Edit/Bash on the launch host and serves rafiki's
-# executor-routed tools over MCP instead; unset or "native" (the default)
-# leaves them alone. Fixed at spawn (launch argv), refused for other kinds and
-# without an executor pool.
+# built-in Read/Write/Edit/Bash and serves rafiki's executor-routed tools over
+# MCP instead; "native" pins the built-ins. Left unset is the daemon's DEFAULT:
+# rafiki wherever it can serve that, the built-ins where it cannot. Fixed at
+# spawn (launch argv); an explicit "rafiki" is refused for other kinds and
+# without an executor pool rather than downgraded.
 remote = c.spawn(preset="impl", kind="claude", workspace_tools="rafiki")
 
 c.send(child, "and a second turn")        # prompt (queues), "steer", "abort"

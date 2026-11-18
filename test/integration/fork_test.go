@@ -654,16 +654,18 @@ func TestCLITagVerbsAndForkFromCreate(t *testing.T) {
 	waitAssistantTurn(t, client, a, "done", 30*time.Second)
 
 	// add → list shows it; the name resolves for fork time.
-	out, err := cliCmd(t, d, "tag", "add", name, "checkpoint-"+uniqueSuffix()).CombinedOutput()
+	//
+	// The tag name carries this run's own suffix and the lookup is a NAME-PREFIX
+	// query for it: the shared test database is never reset, ListTags caps at 50
+	// rows, and a bare ListTags therefore stops containing this run's tag once
+	// earlier runs have filled the page — a failure with nothing wrong in the
+	// code under test.
+	tagName := "checkpoint-" + uniqueSuffix()
+	out, err := cliCmd(t, d, "tag", "add", name, tagName).CombinedOutput()
 	c.NoError(err, "tag add failed: %v\noutput: %s", err, out)
 
-	tagName := ""
-	for _, row := range listTags(t, client) {
-		if strings.HasPrefix(row.GetName(), "checkpoint-") {
-			tagName = row.GetName()
-		}
-	}
-	c.Require().NotEq("", tagName, "the created tag is listed")
+	c.Require().Eq(1, len(listTagsNamed(t, client, tagName)),
+		"the created tag is listed")
 
 	// --fork-from through the real create: the new child borrows the source's
 	// history, which is the proof the flag reached the wire request.
@@ -689,19 +691,23 @@ func TestCLITagVerbsAndForkFromCreate(t *testing.T) {
 	// rm tombstones by name; the name no longer resolves anywhere.
 	out, err = cliCmd(t, d, "tag", "rm", tagName).CombinedOutput()
 	c.NoError(err, "tag rm failed: %v\noutput: %s", err, out)
-	for _, row := range listTags(t, client) {
-		c.NotEq(tagName, row.GetName(), "the tag survives its rm")
-	}
+	c.Eq(0, len(listTagsNamed(t, client, tagName)), "the tag is still listed after its rm")
 
 	killChildren(t, client, a, newID)
 }
 
-// listTags returns the live tags visible to the socket's local trust.
-func listTags(t *testing.T, client rafikiv1connect.ControlClient) []*rafikiv1.TagRow {
+// listTagsNamed returns the live tags visible to the socket's local trust, by
+// name prefix.
+//
+// The prefix is how a DB-backed assertion here stays idempotent across runs:
+// the shared test database is never reset, so a global list is neither stable
+// nor complete (ListTags caps at 50), while a per-run unique prefix names
+// exactly this run's rows.
+func listTagsNamed(t *testing.T, client rafikiv1connect.ControlClient, prefix string) []*rafikiv1.TagRow {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	resp, err := client.ListTags(ctx, connect.NewRequest(&rafikiv1.ListTagsRequest{}))
+	resp, err := client.ListTags(ctx, connect.NewRequest(&rafikiv1.ListTagsRequest{NamePrefix: prefix}))
 	if err != nil {
 		t.Fatalf("list tags: %v", err)
 	}

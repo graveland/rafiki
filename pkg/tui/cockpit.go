@@ -378,9 +378,11 @@ type SpawnDefaults struct {
 	// Preset is sent with every spawn issued from the form and resolved
 	// daemon-side via Controller.Spawn.
 	Preset string
-	// WorkspaceTools is a DECLARED workspace tools mode ("native" or "rafiki") that
-	// prefills the claude-only workspace tools row. Empty leaves the row on its
-	// native default — the same value an absent `--workspace-tools` sends.
+	// WorkspaceTools is a DECLARED workspace tools mode ("native" or "rafiki")
+	// that prefills the claude-only workspace tools row. Empty leaves the row on
+	// its own default, which sends "" — the same value an absent
+	// `--workspace-tools` sends — and lets the daemon choose the mode this
+	// machine can actually serve.
 	WorkspaceTools string
 }
 
@@ -945,11 +947,18 @@ func (c *Cockpit) switchModelOf(id, model string) tea.Cmd {
 		c.form.sourceModel = n.Model
 		// The source's workspace tools mode is part of "the same conversation":
 		// every row of this form opens prefilled from the source's rail row, and
-		// what a row holds is what the fork gets. Seeding it here is what keeps a
-		// continuation on executor-routed tools instead of silently reverting it
-		// to Claude Code's built-ins on the launch host.
+		// what a row holds is what the fork gets. What the source REPORTS is its
+		// RESOLVED mode, so a "" is the built-ins and is re-declared as the
+		// native pin: left on the row's default instead, the daemon would decide
+		// again and a source that resolved to native (because it pinned them)
+		// would come back on executor-routed tools — a tool swap mid-conversation
+		// nobody asked for.
+		mode := n.WorkspaceTools
+		if mode == "" {
+			mode = protocol.WorkspaceToolsNative
+		}
 		for i, m := range workspaceModes {
-			if m == n.WorkspaceTools {
+			if m.value == mode {
 				c.form.workspaceIx = i
 			}
 		}

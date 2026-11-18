@@ -189,25 +189,117 @@ func TestWorkspaceToolsRefusedWithoutProxyURL(t *testing.T) {
 	}
 }
 
-// TestWorkspaceToolsCarriedOnResume pins the resume half of the plumbing: the
-// request every resume site rebuilds from the snapshot must carry the mode, or
-// a resumed child relaunches native while its MCP replacements stay served.
-func TestWorkspaceToolsCarriedOnResume(t *testing.T) {
-	ck := assert.NewAborting(t)
-	for _, want := range []string{"", protocol.WorkspaceToolsRafiki} {
-		req := resumeRequestFromSnapshot(childstore.Snapshot{
-			Kind:           protocol.KindClaude,
-			WorkspaceTools: want,
-		}, "")
-		ck.Eq(want, req.WorkspaceTools, "resume request WorkspaceTools for mode %q", want)
+// TestWorkspaceToolsDefaultsToRafikiWhereServable pins the DEFAULT, which is
+// the resolution's other half: a claude spawn that names no mode gets rafiki's
+// executor-routed workspace tools wherever this daemon can actually serve them,
+// and Claude Code's built-ins only where it cannot (no executor pool, or no MCP
+// face for claude children). The default is a capability question rather than a
+// preference, so the fallback NEVER refuses a spawn nobody declared a mode for
+// — that is what the pin tests above are for.
+//
+// An explicit "native" outranks the default on a servable daemon too: a pin is
+// a decision, and the daemon does not get to re-make it.
+func TestWorkspaceToolsDefaultsToRafikiWhereServable(t *testing.T) {
+	const (
+		poolMissing = `workspace_tools "rafiki" needs the executor pool: a claude child on the daemon host has no executor to route to`
+		noSurface   = `workspace_tools "rafiki" needs the MCP surface: this daemon serves no proxy for claude children (no proxy URL, or claude outside RAFIKI_PROXY_KINDS), so the built-in workspace tools would be disallowed and unreplaced`
+		fundiRefuse = `workspace_tools applies to claude children; fundi always uses rafiki's workspace tools`
+		invalid     = `workspace_tools "bogus" is not one of "native", "rafiki"`
+	)
+
+	for _, tc := range []struct {
+		name       string
+		pool       bool
+		proxyURL   string
+		proxyKinds string
+		kind       string
+		requested  string
+		want       string
+		wantErr    string
+		// wantDegraded: the default fell back on a daemon that HAS the executor
+		// pool, so the missing piece is the MCP surface and Spawn logs it. A
+		// pool-less daemon (the laptop shape) falls back quietly.
+		wantDegraded bool
+	}{
+		// The default, on every topology.
+		{name: "no executor pool keeps the built-ins", kind: protocol.KindClaude, want: ""},
+		{name: "a pool with no proxy URL is reported", pool: true, kind: protocol.KindClaude, want: "", wantDegraded: true},
+		{name: "claude outside the proxy kinds keeps the built-ins and is reported", pool: true, proxyURL: "http://127.0.0.1:1", proxyKinds: "fundi", kind: protocol.KindClaude, want: "", wantDegraded: true},
+		{name: "a servable daemon defaults to rafiki", pool: true, proxyURL: "http://127.0.0.1:1", proxyKinds: "claude", kind: protocol.KindClaude, want: protocol.WorkspaceToolsRafiki},
+		// A pin is never re-made.
+		{name: "explicit native on a servable daemon", pool: true, proxyURL: "http://127.0.0.1:1", proxyKinds: "claude", kind: protocol.KindClaude, requested: protocol.WorkspaceToolsNative, want: ""},
+		// A declared mode is never the default, so nothing degraded.
+		{name: "explicit native on a broken daemon is not a degraded default", pool: true, kind: protocol.KindClaude, requested: protocol.WorkspaceToolsNative, want: ""},
+		{name: "explicit rafiki on a servable daemon", pool: true, proxyURL: "http://127.0.0.1:1", proxyKinds: "claude", kind: protocol.KindClaude, requested: protocol.WorkspaceToolsRafiki, want: protocol.WorkspaceToolsRafiki},
+		// Pins the daemon cannot honour are refused, never downgraded.
+		{name: "explicit rafiki without a pool", kind: protocol.KindClaude, requested: protocol.WorkspaceToolsRafiki, wantErr: poolMissing},
+		{name: "explicit rafiki without a surface", pool: true, kind: protocol.KindClaude, requested: protocol.WorkspaceToolsRafiki, wantErr: noSurface},
+		{name: "rafiki is meaningless for fundi", pool: true, proxyURL: "http://127.0.0.1:1", proxyKinds: "claude", kind: protocol.KindFundi, requested: protocol.WorkspaceToolsRafiki, wantErr: fundiRefuse},
+		{name: "rafiki is meaningless for a script", pool: true, proxyURL: "http://127.0.0.1:1", proxyKinds: "claude", kind: protocol.KindScript, requested: protocol.WorkspaceToolsRafiki, wantErr: fundiRefuse},
+		// A fundi spawn that names nothing is not given a claude-only mode.
+		{name: "fundi has no default", pool: true, proxyURL: "http://127.0.0.1:1", proxyKinds: "claude", kind: protocol.KindFundi, want: ""},
+		{name: "an unknown value is invalid", kind: protocol.KindClaude, requested: "bogus", wantErr: invalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			t.Setenv("RAFIKI_URL", "")
+			t.Setenv("RAFIKI_PROXY_KINDS", tc.proxyKinds)
+			ctrl := &Controller{}
+			if tc.pool {
+				ctrl.execPoolConn = &execpool.Pool{}
+				ctrl.darajaPool = &darajapool.Pool{}
+			}
+			ctrl.proxyURL = tc.proxyURL
+			ctrl.proxyToken = "tok"
+
+			mode, refusal, degraded := ctrl.resolveWorkspaceTools(tc.kind, tc.requested)
+			ck.Eq(tc.wantErr, refusal, "refusal")
+			ck.Eq(tc.wantDegraded, degraded != "", "degraded reason reported")
+			if tc.wantErr != "" {
+				return
+			}
+			ck.Eq(tc.want, mode, "resolved mode")
+		})
 	}
 }
 
-// TestWorkspaceToolsSurviveResumedSession pins the other resume half: the
-// Session activateLiveChild inserts (and persists) must keep the mode, or the
-// MCP face stops serving the workspace tier to a child whose built-ins are
-// still disallowed, and every later resume launches native.
-func TestWorkspaceToolsSurviveResumedSession(t *testing.T) {
+// TestWorkspaceToolsDefaultOnAnUnservableDaemonStoresTheBuiltins pins the
+// default on the path that matters — the mode Spawn persists on the child's row,
+// which is what a resume rebuilds from and what the MCP face reads when deciding
+// to serve the replacement tools — for the one topology a unit test can drive
+// end to end. A default resolved into a local variable only would leave the row
+// disagreeing with the launch.
+//
+// Scope: this covers the FALLBACK half. The row carrying `rafiki` is pinned
+// end-to-end by TestWorkspaceToolsRafikiClaudeChildReportsTheModeItSpawnedWith
+// (test/integration), whose daemon really has the pool and the proxy face —
+// a unit-test controller with a pool cannot launch the daraja a rafiki-mode
+// child needs.
+func TestWorkspaceToolsDefaultOnAnUnservableDaemonStoresTheBuiltins(t *testing.T) {
+	ck := assert.NewAborting(t)
+	// newTestController configures no executor pool, so this daemon cannot
+	// serve rafiki mode and the default settles on the built-ins.
+	ctrl := newTestController(t)
+
+	res, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
+		Kind:      protocol.KindClaude,
+		Cwd:       t.TempDir(),
+		PiBinary:  fakePiBin(t),
+		NoSession: true,
+	}, users.Identity{})
+	ck.Require().NoError(err, "spawn a claude child that named no mode")
+	ck.Eq("", mustSnapshot(t, ctrl, res.ChildID).WorkspaceTools,
+		"a daemon that cannot serve rafiki mode must store the built-ins")
+}
+
+// TestWorkspaceToolsResumeRefusedWhenTheDaemonCannotServe pins the resume half
+// of the DEFAULT: a row carrying `rafiki` is relaunched with Claude Code's
+// built-ins disallowed and rafiki's replacements served in their place, and a
+// resume never re-resolves the mode — so a daemon that lost the pool or the MCP
+// surface since the spawn would otherwise bring the child back TOOLLESS, with
+// its row still claiming a mode nothing serves. It must refuse instead, naming
+// what to restore and the pin a replacement can use.
+func TestWorkspaceToolsResumeRefusedWhenTheDaemonCannotServe(t *testing.T) {
 	ck := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	ctx := t.Context()
@@ -226,15 +318,71 @@ func TestWorkspaceToolsSurviveResumedSession(t *testing.T) {
 	ck.Require().NoError(err, "kill")
 	waitForExited(t, ctrl.st, res.ChildID, 5*time.Second)
 
+	// The row claims rafiki mode, and this controller has no executor pool.
 	ck.Require().NoError(ctrl.st.Update(res.ChildID, func(s *childstore.Session) {
 		s.WorkspaceTools = protocol.WorkspaceToolsRafiki
 	}), "set mode")
 
 	_, err = ctrl.Resume(ctx, res.ChildID, "")
-	ck.Require().NoError(err, "resume")
-	ck.Eq(protocol.WorkspaceToolsRafiki, mustSnapshot(t, ctrl, res.ChildID).WorkspaceTools,
-		"the resumed Session literal dropped WorkspaceTools")
+	ck.Require().Error(err, "resume of an unservable rafiki-mode child must be refused")
+	cerr := ck.Require().ErrorAs[*connectapi.ControllerError](err)
+	ck.Eq(protocol.ErrNotResumable, cerr.Code, "code")
+	ck.StrContains(cerr.Message, `workspace_tools "rafiki"`, "the refusal names the row's mode")
+	ck.StrContains(cerr.Message, `workspace_tools "native"`, "the refusal names the remedy")
+	// Nothing was relaunched: the row keeps its own mode and stays exited.
+	snap := mustSnapshot(t, ctrl, res.ChildID)
+	ck.Eq(protocol.WorkspaceToolsRafiki, snap.WorkspaceTools, "a refused resume must not rewrite the row")
+	ck.Eq(protocol.StatusExited, snap.Status, "a refused resume must not relaunch the child")
 }
+
+// TestWorkspaceToolsResumeRefusalIgnoresServableAndNativeChildren pins the two
+// cases the refusal must stay out of: a native child (nothing to serve) and a
+// rafiki child on a daemon that can still serve it.
+func TestWorkspaceToolsResumeRefusalIgnoresServableAndNativeChildren(t *testing.T) {
+	ck := assert.NewAborting(t)
+	t.Setenv("RAFIKI_URL", "")
+	t.Setenv("RAFIKI_PROXY_KINDS", "claude")
+	servable := &Controller{
+		execPoolConn: &execpool.Pool{},
+		darajaPool:   &darajapool.Pool{},
+		proxyURL:     "http://127.0.0.1:1",
+		proxyToken:   "tok",
+	}
+	ck.Eq("", servable.workspaceToolsResumeRefusal(protocol.KindClaude, protocol.WorkspaceToolsRafiki),
+		"a servable daemon resumes a rafiki child")
+	ck.Eq("", servable.workspaceToolsResumeRefusal(protocol.KindClaude, ""),
+		"a native child never needs the refusal")
+	ck.Eq("", (&Controller{}).workspaceToolsResumeRefusal(protocol.KindClaude, ""),
+		"a native child on a bare daemon too")
+	ck.NotEq("", (&Controller{}).workspaceToolsResumeRefusal(protocol.KindClaude, protocol.WorkspaceToolsRafiki),
+		"a rafiki child on a daemon with no pool must be refused")
+	ck.Eq("", (&Controller{}).workspaceToolsResumeRefusal(protocol.KindFundi, protocol.WorkspaceToolsRafiki),
+		"only a claude child carries the mode")
+}
+
+// TestWorkspaceToolsCarriedOnResume pins the resume half of the plumbing: the
+// request every resume site rebuilds from the snapshot must carry the mode, or
+// a resumed child relaunches native while its MCP replacements stay served.
+func TestWorkspaceToolsCarriedOnResume(t *testing.T) {
+	ck := assert.NewAborting(t)
+	for _, want := range []string{"", protocol.WorkspaceToolsRafiki} {
+		req := resumeRequestFromSnapshot(childstore.Snapshot{
+			Kind:           protocol.KindClaude,
+			WorkspaceTools: want,
+		}, "")
+		ck.Eq(want, req.WorkspaceTools, "resume request WorkspaceTools for mode %q", want)
+	}
+}
+
+// The other resume half — the Session activateLiveChild inserts (and persists)
+// keeps the mode — is the same one-line copy from the snapshot, and it cannot
+// be reached from here any more: a rafiki-mode row may only be resumed by a
+// daemon that can SERVE it (workspaceToolsResumeRefusal), and a unit-test
+// controller with an executor pool cannot launch a daraja. It is pinned
+// end-to-end instead, by the kill-and-resume round trip in
+// TestWorkspaceToolsRafikiClaudeChildReportsTheModeItSpawnedWith
+// (test/integration): dropping `WorkspaceTools: snap.WorkspaceTools` from the
+// resume literal makes that resumed child report "".
 
 // TestWorkspaceToolsClaudeChildGetsBoundExecutorHomedOnLaunchHost pins the
 // binding claudeRunner registers for a rafiki-mode child: a boundExecutor built

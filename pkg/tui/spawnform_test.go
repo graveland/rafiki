@@ -92,9 +92,9 @@ func TestOpenCreatePrefillsTheExecutor(t *testing.T) {
 
 // The workspace tools row exists only for a claude child — no other kind has
 // built-in file and shell tools to replace — and its value rides the wire
-// VERBATIM, native included: on the wire "" means "let a preset decide", so
-// folding the row's default into it would let a preset silently overrule what
-// the form shows.
+// VERBATIM, the empty default included: "" is itself a declaration ("this
+// daemon's default"), so folding the row into a native pin would spawn a child
+// on the built-ins where executor-routed tools were available.
 func TestSpawnFormWorkspaceToolsOnlyForClaude(t *testing.T) {
 	ck := assert.NewCollecting(t)
 
@@ -112,7 +112,7 @@ func TestSpawnFormWorkspaceToolsOnlyForClaude(t *testing.T) {
 	c.form.moveFocus(+1)
 	ck.Eq(fieldExecutor, c.form.focus, "tab stepped onto a row that is not on screen")
 
-	// claude: the row is there, on native by default, offering both modes.
+	// claude: the row is there, on the daemon's default, offering every mode.
 	for i, k := range spawnKinds {
 		if k == protocol.KindClaude {
 			c.form.kindIx = i
@@ -121,12 +121,12 @@ func TestSpawnFormWorkspaceToolsOnlyForClaude(t *testing.T) {
 	out = ansi.Strip(c.form.view(80, 24, c.modelView, nil, nil))
 	ck.StrContains(out, "workspace tools", "a claude form is missing its workspace tools row")
 	for _, mode := range workspaceModes {
-		ck.StrContains(out, mode, "the row must offer every mode")
+		ck.StrContains(out, mode.label, "the row must offer every mode")
 	}
 	p, problem = c.form.params(nil)
 	ck.Require().Eq("", problem, "params")
-	ck.Eq(protocol.WorkspaceToolsNative, p.workspaceTools, "the row defaults to native")
-	ck.Eq(protocol.WorkspaceToolsNative, c.buildSpawnRequest(p).GetWorkspaceTools(), "wire WorkspaceTools, native")
+	ck.Eq("", p.workspaceTools, "the row defaults to the daemon's choice")
+	ck.Eq("", c.buildSpawnRequest(p).GetWorkspaceTools(), "wire WorkspaceTools, the daemon's default")
 
 	// It is a choice, not a text field: ←/→/space cycle it, and a printable
 	// key is swallowed rather than vanishing into an input nobody can see.

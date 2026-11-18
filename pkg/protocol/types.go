@@ -451,10 +451,13 @@ type SpawnRequest struct {
 	// ["all"]) before anything reads it. Empty means the daemon chooses.
 	Executors []string `json:"executors,omitempty"`
 
-	// WorkspaceTools, for a claude child: "" or "native" keeps Claude Code's
-	// built-in file and shell tools on the launch host; "rafiki" disallows them
-	// and serves rafiki's executor-routed tools over MCP instead. Refused for
-	// other kinds. Resolved once at spawn, persisted on the child.
+	// WorkspaceTools, for a claude child: "rafiki" disallows Claude Code's
+	// built-in file and shell tools and serves rafiki's executor-routed tools
+	// over MCP instead; "native" keeps the built-ins. Empty is the daemon's
+	// DEFAULT — "rafiki" wherever it can serve that mode, the built-ins where it
+	// cannot — while both names are pins (an explicit "rafiki" the daemon cannot
+	// serve is refused, never downgraded). Refused for other kinds. Resolved once
+	// at spawn, persisted on the child.
 	// Child-allowed on the Connect wire (SpawnRequest.workspace_tools = 36).
 	WorkspaceTools string `json:"workspaceTools,omitempty"`
 
@@ -530,9 +533,13 @@ const (
 )
 
 // NormalizeWorkspaceTools resolves a spawn's workspace_tools value: "" and
-// "native" are the stored default (""), WorkspaceToolsRafiki is itself, and any
-// other value reports ok=false. This is the one place the empty string is read
-// as "native".
+// "native" both fold to the stored "" (the built-ins), WorkspaceToolsRafiki is
+// itself, and any other value reports ok=false. This is the one place the empty
+// string is read as "native" — but it is NOT where an undeclared spawn's mode
+// is decided: "" from the wire means "nothing declared", and the daemon fills
+// that with its default (rafiki mode wherever it can serve it) in
+// Controller.resolveWorkspaceTools. The fold exists so the stored row has one
+// spelling for the built-ins whichever way the caller asked for them.
 func NormalizeWorkspaceTools(s string) (normalized string, ok bool) {
 	switch s {
 	case "", WorkspaceToolsNative:
@@ -623,11 +630,14 @@ type ChildSummary struct {
 	// everywhere else.
 	InSubtree *bool `json:"in_subtree,omitempty"`
 	// WorkspaceTools is the workspace tools mode RESOLVED AT SPAWN for a claude
-	// child, mirrored from childstore.Session.WorkspaceTools: "" (native, the
-	// default) or protocol.WorkspaceToolsRafiki. It is persisted on the child and
-	// never re-resolved on resume, so a client reconstructing a spawn — the
-	// cockpit's model switch — carries the same mode rather than silently
-	// reverting a rafiki-mode child to its built-in tools.
+	// child, mirrored from childstore.Session.WorkspaceTools: "" (Claude Code's
+	// built-in file and shell tools) or protocol.WorkspaceToolsRafiki (rafiki's
+	// executor-routed tools over MCP). Which one an undeclared spawn gets is the
+	// DAEMON's default — rafiki mode wherever it can serve it — so this field
+	// reports an outcome, not the request. It is persisted on the child and never
+	// re-resolved on resume, so a client reconstructing a spawn — the cockpit's
+	// model switch — re-declares the mode it reads here rather than leaving the
+	// field empty for the daemon to decide again.
 	WorkspaceTools string `json:"workspaceTools,omitempty"`
 }
 

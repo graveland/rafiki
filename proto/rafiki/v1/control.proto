@@ -366,10 +366,11 @@ message ChildSummary {
   optional bool in_subtree = 29;
   // workspace_tools is the workspace tools mode RESOLVED AT SPAWN for a claude
   // child: "" keeps Claude Code's built-in file and shell tools on the launch
-  // host (native, the default), "rafiki" disallows them and serves rafiki's
-  // executor-routed tools over MCP instead. It is persisted on the child and
-  // never re-resolved on resume, so a client can reconstruct the spawn a child
-  // came from — the cockpit's model switch carries it onto the fork.
+  // host, "rafiki" disallows them and serves rafiki's executor-routed tools
+  // over MCP instead — which is the spawn's default wherever the daemon can
+  // serve it. It is persisted on the child and never re-resolved on resume, so
+  // a client reconstructing the spawn a child came from (the cockpit's model
+  // switch) re-declares this resolved mode rather than leaving it unset.
   string workspace_tools = 30;
 }
 
@@ -549,11 +550,14 @@ message SpawnRequest {
   // executor, or the one executor where cwd exists) — or the child has none.
   string home_executor = 35;
 
-  // workspace_tools, for a claude child: "" or "native" keeps Claude Code's
-  // built-in file and shell tools on the launch host; "rafiki" disallows them
-  // and serves rafiki's executor-routed tools over MCP instead. Refused for
-  // other kinds. Resolved once at spawn, persisted on the child.
-  // Child-allowed: it only narrows the child's own tool set.
+  // workspace_tools, for a claude child: "rafiki" disallows Claude Code's
+  // built-in file and shell tools and serves rafiki's executor-routed tools
+  // over MCP instead; "native" keeps the built-ins. Empty is the daemon's
+  // DEFAULT — "rafiki" wherever it can serve that mode, the built-ins where it
+  // cannot — while both names are pins the daemon never re-makes (an explicit
+  // "rafiki" it cannot serve is refused). Refused for other kinds. Resolved
+  // once at spawn, persisted on the child. Child-allowed: it only narrows the
+  // child's own tool set.
   string workspace_tools = 36;
 
   // executors names the executors this child may address: machine labels or
@@ -1900,9 +1904,10 @@ message PresetRow {
   // deleted_at is unset while the preset is live.
   google.protobuf.Timestamp deleted_at = 23;
   // workspace_tools, for a claude child: empty means unset (the spawn's own
-  // choice stands); "native" keeps Claude Code's built-in file and shell tools,
-  // "rafiki" disallows them and serves rafiki's executor-routed tools over MCP
-  // instead. Resolved once at spawn, never on resume.
+  // choice stands, default included); "native" pins Claude Code's built-in file
+  // and shell tools, "rafiki" disallows them and serves rafiki's
+  // executor-routed tools over MCP instead. Resolved once at spawn, never on
+  // resume.
   string workspace_tools = 24;
 
   reserved 20, 21;

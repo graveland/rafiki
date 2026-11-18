@@ -201,7 +201,9 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("home", "",
 		"executor where --cwd applies and CLAUDE.md is read from; defaults to this machine when it is eligible")
 	cmd.Flags().String("workspace-tools", "",
-		"claude only: rafiki replaces the built-in file and shell tools with rafiki's executor-routed ones")
+		"claude only: rafiki replaces the built-in file and shell tools with rafiki's executor-routed ones; "+
+			"omitted means the daemon's default (rafiki wherever it can serve that, the built-ins otherwise), "+
+			"and native pins the built-ins")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs

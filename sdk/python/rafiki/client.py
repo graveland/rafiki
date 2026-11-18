@@ -384,12 +384,16 @@ class Client:
         is who is woken. Any other value raises ``ValueError``.
 
         ``workspace_tools``, for a claude child, chooses where its file and
-        shell work happens. ``None`` or ``"native"`` (the default) keeps Claude
-        Code's built-in ``Read``/``Write``/``Edit``/``Bash`` on the launch host.
-        ``"rafiki"`` disallows those built-ins and serves rafiki's
-        executor-routed tools over MCP instead, so every local effect names an
-        executor. The mode is fixed at spawn — it is launch argv — and refused
-        for other kinds and without an executor pool. Any other value raises
+        shell work happens. ``"rafiki"`` disallows Claude Code's built-in
+        ``Read``/``Write``/``Edit``/``Bash`` and serves rafiki's executor-routed
+        tools over MCP instead, so every local effect names an executor;
+        ``"native"`` pins the built-ins. ``None`` (left unset) is the daemon's
+        DEFAULT — ``"rafiki"`` wherever that daemon can serve it (an executor
+        pool and a proxied claude), the built-ins where it cannot — so the same
+        call may resolve either way on two daemons; read ``workspace_tools`` on
+        the child to see what it got. The mode is fixed at spawn — it is launch
+        argv — and ``"rafiki"`` is refused for other kinds and without an
+        executor pool (never downgraded). Any other value raises
         ``ValueError``.
 
         ``executors`` names the executors the child may address (machine labels

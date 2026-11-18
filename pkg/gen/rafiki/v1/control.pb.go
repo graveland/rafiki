@@ -1900,10 +1900,11 @@ type ChildSummary struct {
 	InSubtree *bool `protobuf:"varint,29,opt,name=in_subtree,json=inSubtree,proto3,oneof" json:"in_subtree,omitempty"`
 	// workspace_tools is the workspace tools mode RESOLVED AT SPAWN for a claude
 	// child: "" keeps Claude Code's built-in file and shell tools on the launch
-	// host (native, the default), "rafiki" disallows them and serves rafiki's
-	// executor-routed tools over MCP instead. It is persisted on the child and
-	// never re-resolved on resume, so a client can reconstruct the spawn a child
-	// came from — the cockpit's model switch carries it onto the fork.
+	// host, "rafiki" disallows them and serves rafiki's executor-routed tools
+	// over MCP instead — which is the spawn's default wherever the daemon can
+	// serve it. It is persisted on the child and never re-resolved on resume, so
+	// a client reconstructing the spawn a child came from (the cockpit's model
+	// switch) re-declares this resolved mode rather than leaving it unset.
 	WorkspaceTools string `protobuf:"bytes,30,opt,name=workspace_tools,json=workspaceTools,proto3" json:"workspace_tools,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -2530,11 +2531,14 @@ type SpawnRequest struct {
 	// home itself (executor_ref, the parent's home, a single reachable
 	// executor, or the one executor where cwd exists) — or the child has none.
 	HomeExecutor string `protobuf:"bytes,35,opt,name=home_executor,json=homeExecutor,proto3" json:"home_executor,omitempty"`
-	// workspace_tools, for a claude child: "" or "native" keeps Claude Code's
-	// built-in file and shell tools on the launch host; "rafiki" disallows them
-	// and serves rafiki's executor-routed tools over MCP instead. Refused for
-	// other kinds. Resolved once at spawn, persisted on the child.
-	// Child-allowed: it only narrows the child's own tool set.
+	// workspace_tools, for a claude child: "rafiki" disallows Claude Code's
+	// built-in file and shell tools and serves rafiki's executor-routed tools
+	// over MCP instead; "native" keeps the built-ins. Empty is the daemon's
+	// DEFAULT — "rafiki" wherever it can serve that mode, the built-ins where it
+	// cannot — while both names are pins the daemon never re-makes (an explicit
+	// "rafiki" it cannot serve is refused). Refused for other kinds. Resolved
+	// once at spawn, persisted on the child. Child-allowed: it only narrows the
+	// child's own tool set.
 	WorkspaceTools string `protobuf:"bytes,36,opt,name=workspace_tools,json=workspaceTools,proto3" json:"workspace_tools,omitempty"`
 	// executors names the executors this child may address: machine labels or
 	// ids from the spawner's own executor set, or the single entry "all" (only
@@ -10254,9 +10258,10 @@ type PresetRow struct {
 	// deleted_at is unset while the preset is live.
 	DeletedAt *timestamppb.Timestamp `protobuf:"bytes,23,opt,name=deleted_at,json=deletedAt,proto3" json:"deleted_at,omitempty"`
 	// workspace_tools, for a claude child: empty means unset (the spawn's own
-	// choice stands); "native" keeps Claude Code's built-in file and shell tools,
-	// "rafiki" disallows them and serves rafiki's executor-routed tools over MCP
-	// instead. Resolved once at spawn, never on resume.
+	// choice stands, default included); "native" pins Claude Code's built-in file
+	// and shell tools, "rafiki" disallows them and serves rafiki's
+	// executor-routed tools over MCP instead. Resolved once at spawn, never on
+	// resume.
 	WorkspaceTools string `protobuf:"bytes,24,opt,name=workspace_tools,json=workspaceTools,proto3" json:"workspace_tools,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache

@@ -244,10 +244,12 @@ func (c *Cockpit) buildSpawnRequest(p spawnParams) *rafikiv1.SpawnRequest {
 		// tea.Cmd closure and Update writes that cache concurrently.
 		HomeExecutor: p.home,
 		// WorkspaceTools rides for a claude child only, and carries the row's
-		// value VERBATIM — "native" as well as "rafiki". On the wire "" means
-		// "unset, let a preset decide", so folding the row's native default into
-		// it would let a preset's rafiki outrank the value the form displays.
-		// params() leaves it empty for every other kind.
+		// value VERBATIM — "native" and "rafiki" as well as the row's default,
+		// which sends "". On the wire "" is a DECLARATION ("the daemon's
+		// default"), so folding the row into a native pin would spawn a child on
+		// the built-ins where executor-routed tools were available, and a preset
+		// could not have said otherwise. params() leaves it empty for every other
+		// kind.
 		WorkspaceTools: p.workspaceTools,
 	}
 	if p.forkFrom != nil {

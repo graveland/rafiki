@@ -1324,7 +1324,9 @@ executor forwards the four non-secret ones as `daraja serve` flags
 (`RAFIKI_DARAJA_PROXY_TOKEN`) — the same ps-visibility treatment the ticket
 gets, and for the same reason.
 
-`workspace_tools` (`"rafiki"`, or empty/`"native"`) is the opposite: it is
+`workspace_tools` (`"rafiki"`, or empty/`"native"` — the daemon resolves the
+mode before the spec is built, so the empty spelling only reaches here when the
+child kept its built-ins) is the opposite: it is
 ARGV-shaped, so the executor forwards it as `--workspace-tools` and daraja
 re-reads it from every `Restart`'s spec. It disallows Claude Code's local-effect
 built-ins — `Bash`, `Read`, `Write`, `Edit`, `NotebookEdit`, `LSP`,

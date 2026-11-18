@@ -113,12 +113,15 @@ exit/failure. Anything else is refused `invalid_argument`. Set `notify` on the
 generated `SpawnRequest` (`notify: "result".into()`); no wrapper is added.
 
 `SpawnRequest.workspace_tools` picks where a claude child's file and shell work
-happens: empty or `"native"` (the default) keeps Claude Code's built-in
-`Read`/`Write`/`Edit`/`Bash` on the launch host, `"rafiki"` disallows them and
-serves rafiki's executor-routed tools over MCP instead. It is fixed at spawn
-(launch argv), refused for other kinds and without an executor pool, and set
-the same way — `workspace_tools: "rafiki".into()` on the generated
-`SpawnRequest`, no wrapper.
+happens: `"rafiki"` disallows Claude Code's built-in
+`Read`/`Write`/`Edit`/`Bash` and serves rafiki's executor-routed tools over MCP
+instead, `"native"` pins the built-ins. Empty is the daemon's DEFAULT — rafiki
+wherever it can serve that mode, the built-ins where it cannot — so a client
+that leaves the field alone gets whichever this daemon supports, and
+`ChildSummary.workspace_tools` reports what it resolved to. It is fixed at
+spawn (launch argv), an explicit `"rafiki"` is refused for other kinds and
+without an executor pool, and it is set the same way —
+`workspace_tools: "rafiki".into()` on the generated `SpawnRequest`, no wrapper.
 
 `SpawnRequest.executors` names the executors the child may address (machine
 labels or ids), chosen from the spawner's own set: set it on the generated
