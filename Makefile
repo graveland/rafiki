@@ -76,13 +76,13 @@ build: build-daemon build-cli ## Build both Go binaries into bin/.
 .PHONY: build-daemon
 build-daemon: ## Build the rafiki daemon (bin/rafikid).
 	mkdir -p $(BIN_DIR)
-	$(eval GO_VERSION := $(shell git describe --always --dirty))
+	$(eval GO_VERSION := $(shell git describe --tags --always --dirty))
 	$(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/$(DAEMON_BIN) ./cmd/rafikid
 
 .PHONY: build-cli
 build-cli: ## Build the rafiki CLI client (bin/rafiki).
 	mkdir -p $(BIN_DIR)
-	$(eval GO_VERSION := $(shell git describe --always --dirty))
+	$(eval GO_VERSION := $(shell git describe --tags --always --dirty))
 	$(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/$(CLI_BIN) ./cmd/rafiki
 
 # There is no CI on this repo, so nothing else exercises GOOS=linux — the
@@ -92,7 +92,7 @@ build-cli: ## Build the rafiki CLI client (bin/rafiki).
 build-linux: ## Cross-compile for linux/amd64 (catches Linux-only breaks; no CI runs this).
 	mkdir -p $(BIN_DIR)/linux
 	GOOS=linux GOARCH=amd64 $(GO) vet ./...
-	$(eval GO_VERSION := $(shell git describe --always --dirty))
+	$(eval GO_VERSION := $(shell git describe --tags --always --dirty))
 	GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/linux/$(DAEMON_BIN) ./cmd/rafikid
 	GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/linux/$(CLI_BIN) ./cmd/rafiki
 
