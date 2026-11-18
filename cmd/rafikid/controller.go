@@ -3197,9 +3197,11 @@ func (c *Controller) activateLiveChild(
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
 		ExecutorSelector:   snap.ExecutorSelector,
-		SkipDerivedIndex:   snap.SkipDerivedIndex,
-		NotifyPolicy:       snap.NotifyPolicy,
-		WorkspaceMode:      snap.WorkspaceMode,
+		// Read back verbatim: nil stays a legacy row, empty stays "addresses nothing".
+		ExecutorSet:      snap.ExecutorSet,
+		SkipDerivedIndex: snap.SkipDerivedIndex,
+		NotifyPolicy:     snap.NotifyPolicy,
+		WorkspaceMode:    snap.WorkspaceMode,
 		// Read back, never re-resolved: dropping it here persists native mode, and
 		// the MCP face then stops serving the replacements for built-ins the
 		// child's argv still disallows.
@@ -3303,6 +3305,7 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		ExecutorSelector:   snap.ExecutorSelector,
+		Executors:          snap.ExecutorSet,
 		// The child's persisted home executor, carried into the request so home
 		// resolution REPRODUCES it exactly rather than re-running the rules and
 		// landing the child on a different machine than the one its cwd and

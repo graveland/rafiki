@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/child"
@@ -97,7 +98,10 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 		// The subagent folds into the parent's subtree, so it inherits the
 		// parent's derived-index suppression rather than re-deriving it.
 		SkipDerivedIndex: parent.SkipDerivedIndex,
-		Labels:           labels,
+		// Copied, never left nil: nil is a legacy row, which resolves to every
+		// executor of the owner, so a subagent of a restricted parent would escape.
+		ExecutorSet: slices.Clone(parent.ExecutorSet),
+		Labels:      labels,
 	})
 
 	// The native twin of a real Spawn's child_spawned (controller.go). Without

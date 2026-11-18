@@ -168,3 +168,22 @@ func TestHandleSubagentObservationJoinsTheThreadByMessageID(t *testing.T) {
 		t.Errorf("name changed on an unresolvable observation: %q", snap2.Name)
 	}
 }
+
+// A native subagent folds into its parent's subtree, so it carries the
+// parent's executor set; nil would mean "every executor" and widen it.
+func TestEnsureThreadChildInheritsExecutorSet(t *testing.T) {
+	for name, set := range executorSetShapes {
+		t.Run(name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			c := newTestController(t)
+			c.st.Insert(&childstore.Session{
+				ChildID: "c_parent", Kind: protocol.KindClaude, Status: protocol.StatusIdle, ExecutorSet: set,
+			})
+			ck.Require().NoError(c.EnsureThreadChild("c_parent", "thread-a", ""), "EnsureThreadChild")
+			snap, ok := c.st.Get(threadChildID("c_parent", "thread-a"))
+			ck.Require().True(ok, "row")
+			ck.EqDeep(set, snap.ExecutorSet, "set")
+			ck.Eq(set == nil, snap.ExecutorSet == nil, "nil-ness changed")
+		})
+	}
+}
