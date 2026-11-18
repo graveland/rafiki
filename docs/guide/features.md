@@ -53,8 +53,13 @@
 - **Executor plane** — a subagent's filesystem/shell/LSP tools run on
   whatever executor it's bound to, not the daemon's own process, and can
   only touch what exists there: install one inside a VM or container and an
-  agent using it is confined to that VM/container's filesystem, nothing on
-  the host. `rafikid` itself can run in Kubernetes with no local filesystem
+  agent using it sees that VM/container's filesystem, nothing on the host.
+  That is a statement about the filesystem only. For a sandbox to isolate an
+  agent it must also not be given your SSH agent, `~/.ssh` or cloud
+  credentials; rafiki does not yet verify that itself. Each agent addresses
+  an executor set chosen by whoever spawned it, which prevents mistakes and is
+  not a security boundary (see
+  [what an agent can address](executors.md#what-an-agent-can-address)). `rafikid` itself can run in Kubernetes with no local filesystem
   of interest at all — you connect from the cockpit on your laptop and start
   agents against executors elsewhere, isolated per agent if you want it.
   Background jobs survive a 600s `bash` ceiling and notify on completion;

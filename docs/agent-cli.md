@@ -536,7 +536,7 @@ the question for every kind in one vocabulary:
 
 | Flag | Env default | Meaning |
 |------|-------------|---------|
-| `--executor <ref>` | `$RAFIKI_EXECUTOR` | Target ONE specific executor by its machine name (e.g. `greyshift`) or raw id. Sent as `SpawnRequest.ExecutorRef`; resolved by the daemon against the same confinement checks any candidate must pass, so a pin bypasses search, never confinement. **Mutually exclusive with `--executor-selector`** — passing both is a usage error, not a silent precedence rule |
+| `--executor <ref>` | `$RAFIKI_EXECUTOR` | Target ONE specific executor by its machine name (e.g. `greyshift`) or raw id. Sent as `SpawnRequest.ExecutorRef`; resolved by the daemon against the spawner's executor set, so a name outside it is refused. **Mutually exclusive with `--executor-selector`** — passing both is a usage error, not a silent precedence rule |
 | `--executor-selector <sel>` | `$RAFIKI_EXECUTOR_SELECTOR` | A label selector choosing from the daemon's pool (e.g. `owner=brent,env=home`). A selector matching several executors lets the agent reach all of them; its workspace tools then take an executor argument |
 | `--executors <list>` | none | The executors this child may address, by machine name or id, or `all`; comma-separated or repeated. Sent as `SpawnRequest.executors` (field 37). Omitted: the daemon's default set. With one executor the child's workspace tools need no executor argument; with several, every call names one. **Mutually exclusive with `--executor-selector` and with `-i`** (the form has no executors row): the set is the whole answer, so the client sends no selector (including a `$RAFIKI_EXECUTOR_SELECTOR` default) and starts no local session executor. `--executor` may combine with it; the daemon refuses the spawn unless that executor is in the set |
 | `--home <executor>` | — | The executor where `--cwd` applies and where `CLAUDE.md`/`AGENTS.md` and project skills are read from, by machine name or id. It is NOT a default for tool calls: with 2+ reachable, a call still names an executor. It must be in the child's reachable set, or the daemon refuses the spawn. Empty (the default): the client fills in this machine when the spawn's selector matches it, and otherwise the daemon resolves a home itself — `--executor`, the spawner's home, a single reachable executor, or the one executor where `--cwd` exists — or the child has none. Mutually exclusive with `-i`, whose form has no home row |
@@ -863,7 +863,7 @@ It DOES carry the source's `rafiki/home-executor` label, verbatim: the
 continuation keeps the machine where its cwd and `CLAUDE.md` came from, and the
 daemon refuses a carried home the fork cannot reach (naming the executor)
 rather than silently dropping it. What the switch does NOT carry, because
-`GetChild` does not expose it: the source's executor SELECTOR or sandbox block
+`GetChild` does not expose it: the source's executor set, selector or sandbox block
 (a SANDBOXED source refuses the switch outright rather than continue
 unconfined — fork it by hand with an explicit `--sandbox` block), and the
 fan-out grants (`max-depth`/`max-children` reset to their defaults — a
@@ -1018,9 +1018,9 @@ the interpreter on the resolved argv, and does NOT respawn a script — a
 script's exit is its result. `--launch script` implies `--pymodules-sync` and
 `--repo-sync` unless each is refused explicitly. A script spawn on a
 daemon whose executors declare no `script` launch kind falls back to the
-daemon's own host (the owner's saved modules only), and under an
-executor-granted parent that fallback is refused instead — the grant would be
-widened by a fork on the daemon's host.
+daemon's own host (the owner's saved modules only), and under a
+parent whose executor set is not `all` that fallback is refused instead — the set
+would be bypassed by a fork on the daemon's host.
 
 A daraja-routed `--kind claude` child is proxied through the daemon (capture,
 cost accounting, routing visibility) while still billing the user's own

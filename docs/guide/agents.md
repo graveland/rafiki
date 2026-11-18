@@ -230,21 +230,33 @@ as an agent row — its cost still rolls up into its parent's total.
 
 ### Where a subagent runs
 
-`agent_spawn` takes `executor` (a label selector, e.g. `env=work,os=linux`)
-and `workspace` (`ephemeral`/`pinned`, see [workspace lifecycle](executors.md#workspace-lifecycle)) — the entire placement
-grant. Neither creates an isolated checkout; every workspace on an executor
-shares its root, and isolation is `cwd` — a coordinator wanting an isolated
-worker creates a git worktree and passes it. **A selector can only narrow**:
-the daemon intersects the parent's effective executor set with the child's
-selector, so a child can never reach an executor its parent couldn't, by
-construction. The worker is told where it landed (machine, isolation,
-workspace mode, roots) in its own system prompt.
+`agent_spawn` takes `executor` (a machine name or id from your own executor
+set, or a label selector over it, e.g. `os=linux`), `executors` and `workspace`
+(`ephemeral`/`pinned`, see [workspace lifecycle](executors.md#workspace-lifecycle)).
+Neither creates an isolated checkout; every workspace on an executor shares its
+root, and isolation is `cwd`: a coordinator wanting an isolated worker creates
+a git worktree and passes it.
 
-Two things these grants don't defend against, worth knowing: **MCP bypasses
-them entirely** (any agent may use any MCP tool, regardless of executor
-confinement), and **a native executor grants everything its user can
-reach** — the mitigation is that admission is rare, not that scope is
-narrow. Grants defend against the model, not a compromised executor host.
+`executors` is the child's executor set, in the tool's own words:
+
+> Executors this agent may address, by machine name or id, chosen from your own set (see executor_list). With one, its tools need no executor argument; with more than one, every workspace tool call must name one. ["all"] is available only when your own set is all. Omit to give it your home executor.
+
+A selector in `executor` is placement: it is matched once against your set and
+the matching executors are frozen into the child's set, and one that matches
+nothing in your set refuses the spawn. `pymodule_start` takes the same
+`executors` parameter, and `rafiki create --executors` and the Python SDK's
+`spawn(executors=[...])` set it from outside. A preset's `executor` is a
+placement input, not a limit on descendants. The full model, including how the
+set changes when executors are installed, removed or enrolled, is in
+[what an agent can address](executors.md#what-an-agent-can-address). The worker
+is told where it landed (machine, isolation, workspace mode, roots) in its own
+system prompt.
+
+The executor set prevents mistakes, not access. **MCP bypasses it entirely**
+(any agent may use any MCP tool, regardless of its executor set), and **a native
+executor grants everything its user can reach**, including your other machines
+over ssh. The only isolation is a sandbox that carries none of your
+credentials.
 
 ### Limits
 

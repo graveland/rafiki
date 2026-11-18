@@ -178,25 +178,35 @@ on this link.
 
 ## Reaching several executors
 
-A child's workspace tools can reach more than one machine. Which machines is
-decided at spawn by the shape of the request, and it is re-evaluated on every
-call — never cached, so an executor that connects after the child started is
-usable on the next call and one that has gone is not usable on this one.
+A child's workspace tools can reach the executors in its **executor set**: ids
+fixed on its row at spawn, or `all`. The set is chosen by the spawner from its
+own (`SpawnRequest.executors`, field 37; `executor_ref` and `executor_selector`
+are placement inputs that resolve into it) and is evaluated on every call,
+never cached, so an executor that connects after the child started is usable
+on the next call if the set names it (always for `all`) and one that has gone
+is not usable on this one.
 
-| Spawn shape | Reachable set | `executor` argument |
+| Spawn shape | Stored set | `executor` argument |
 |---|---|---|
-| A name (`ExecutorRef`) | exactly that executor, if it is inside the child's confinement | optional |
-| A label selector | every executor it matches, inside the child's confinement | required when 2+ are live |
-| Empty | every executor the child is admitted to | required when 2+ are live |
+| `executors` | exactly those, each inside the spawner's set (`["all"]` only from an `all` spawner) | optional with one, required with 2+ |
+| A name (`ExecutorRef`) | exactly that executor, if it is in the spawner's set | optional |
+| A label selector | every member of the spawner's set it matches, frozen at spawn; none matching refuses the spawn | optional with one, required with 2+ |
+| Empty, a parent | the spawner's home when it can launch the kind, else a copy of its set | as above |
+| Empty, top level | `all` | required when 2+ are live |
+| A sandbox | its own sandbox only | optional |
 
-The set is always the parent's effective set intersected with this child's
-selector and the operator's `workspace_mode`: a descendant can narrow what it
-reaches, never widen it.
+Reach is the set, narrowed again by owner and by the executor's `Admits`
+evaluated against the CHILD's labels. `workspace_mode` filters which executors a selector or ephemeral spawn may freeze into the set. A
+parent's set shrinking later changes no descendant, and a resumed child keeps
+the set stored on its row. Installs, uninstalls, deletes, sandbox removals and
+new executors change stored sets and notify live agents (see the executor-sets
+section of `docs/guide/executors.md`). None of this is a security boundary:
+within one owner an executor with a shell can reach the owner's other machines.
 
 `Admits`, on the executor's row, is how an operator keeps a special-purpose
-machine out of unscoped agents: it narrows what a selector can match, so an
-executor declared `admits=env=lab` is reached only by a child whose grant
-carries that selector and never by an empty-selector spawn.
+machine away from some agents: an executor declared `admits=env=lab` serves
+only a child whose labels match it, whatever set names it. That steers; it does
+not isolate.
 
 Every `TierWorkspace` tool takes an optional `executor` property — a machine
 name or executor id — added once by the registry
@@ -1652,7 +1662,7 @@ one gate, run at install time AND on every relaunch, because the facts are
 live.
 
 A child credential may install only through a launcher in its own reachable
-set — the same confinement-narrowed set a spawn gets — and its default launcher
+set (the child's own executor set) and its default launcher
 is its home executor, else its launch host, else the single native executor it
 can reach. A user credential (or the local socket) names one with `via`, and
 otherwise takes the single native executor it owns. Several candidates and no

@@ -86,6 +86,9 @@ EOF
 - A `claude`-kind preset honours only `model`, `provider`,
   `append_system_prompt`, `executor`, `labels` and budgets — every fundi-only
   knob is rejected.
+- A preset's `executor` is a placement input (where the child lands, chosen from
+  the spawner's executor set); it does not confine the child's descendants. The
+  child's executor set is fixed at spawn and a preset edit never changes it.
 - Spawn-time fields may override `model`/`thinking`/budgets and only narrow
   tools/skills/mcp_servers/context_files. A preset edit never reaches a running
   or resumed child (resolution happens once, at spawn).

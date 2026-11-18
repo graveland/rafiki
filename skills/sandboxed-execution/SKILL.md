@@ -20,7 +20,7 @@ create-body allowlist admits nothing else, so **a sandbox hosts fundi and script
 but never `claude`** (the image carries no claude binary). A claude-kind spawn into one is refused outright (`spawn
 refused: no executor can launch a "claude" child …`), and there is **no fallback**: a
 sandboxed child never forks locally (`localForkRefused`, see `executor-plane`), a child
-narrowed to a sandbox cannot widen to another executor, and overriding a preset's kind is
+spawned with a sandbox has that sandbox as its whole executor set and cannot be handed another, and overriding a preset's kind is
 refused (`kind "fundi" conflicts with preset "…" (kind "claude")`).
 
 Consequence: **a preset group whose value is a claude reviewer or final-reviewer cannot

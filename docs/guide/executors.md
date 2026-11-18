@@ -121,6 +121,71 @@ implied forms (`--launch claude`, `RAFIKI_EXECUTOR_SKILLS_SYNC`) are silently
 switched off, and an explicit `--skills-sync=true` without a
 `CLAUDE_CONFIG_DIR` is refused with the variable that fixes it.
 
+### What an agent can address
+
+Every agent has an **executor set**: a list of executor ids, or `all` (every
+enabled executor you own, resolved at call time). Workspace tools reach only
+the executors in it.
+
+- **Choosing it.** A spawner picks the set with `executor` (one machine name or
+  id) or `executors` (several, or `["all"]`), always from its own set. A name
+  outside the spawner's set is refused, and `all` is available only to an agent
+  whose own set is `all`. Omitted, the child gets its spawner's home executor
+  (or a copy of the spawner's set when that home cannot launch the child's
+  kind). A top-level spawn (CLI, cockpit, MCP client) defaults to `all`;
+  `rafiki create --executors a,b` (comma-separated or repeated; exclusive with
+  `--executor-selector` and with `-i`) names a set, and the Python SDK's
+  `spawn(executors=[...])` does the same.
+- **One member, no argument; more, name one.** With a single member the
+  workspace tools need no `executor` argument. With two or more (or `all`),
+  every call must name one: a command never lands on a machine because an
+  argument was forgotten.
+- **A selector picks placement.** `executor` given a label selector
+  (`os=linux`) is matched once, at spawn, against the spawner's set, and every
+  matching member is frozen into the child's set. A selector that matches
+  nothing in the spawner's set refuses the spawn. It is never consulted again
+  after the spawn, and it never grants an executor the spawner could not
+  address. When `executors` is given it decides the set and the selector is not
+  used.
+- **`Admits` is read against the child.** An executor's `Admits` selector is
+  evaluated against the CHILD's labels, both when the set is fixed and on every
+  call, so an executor that excludes a child cannot be put in its set.
+- **A sandboxed child addresses its own sandbox and nothing else.**
+- **A resumed child keeps the set stored on its row.** Neither a changed preset
+  nor a shrunk parent set alters it, and a spawner's set shrinking later changes
+  no descendant.
+- **No daemon-local fallback for a bounded child.** When no executor can launch
+  a `claude` or `script` child, the daemon would fork it on its own host; that
+  is refused for any child whose set is not `all`.
+
+The set changes while the agent runs, and each change reaches a live agent as an
+`executor` notice (`<rafiki-event source="executor">`):
+
+- **Install** (`executor_install`, including a reinstall) adds the executor to
+  the installer's set; the notice says that workspace tools now require
+  `executor` once the set has more than one member. An installer whose set is
+  `all` changes nothing and is told like any other `all` agent.
+- **Uninstall, delete, or removing a sandbox** removes the id from the set of
+  every non-closed holder. Live holders get a notice; exited ones are updated
+  silently, so a resume does not bring the dead id back.
+- **Enrolling or installing an executor yourself** notifies every live `all`
+  agent whose labels the executor admits. Their set already includes it.
+- **Disabling or re-enabling** an executor changes no set (admission excludes a
+  disabled executor, and enabling restores it); live `all` agents are told.
+
+Within one owner, executors are not isolated from each other: an agent with a
+shell on one of your machines can usually reach the others with your own
+credentials. The executor set prevents mistakes, not access. `Admits` on an
+executor steers which children it serves, also not a security boundary. The
+only isolation is a sandbox that carries none of your credentials; rafiki does
+not yet verify that a sandbox carries none (see "Sandboxes" below), so do not
+give one your SSH agent, `~/.ssh` or cloud credentials if it is meant to
+isolate.
+
+This replaces the earlier model in which a selector (and the launch host)
+confined a child and its descendants. A selector is no longer a fence: for
+steering use `Admits` plus child labels, and for isolation use a sandbox.
+
 ### Installing an executor over ssh
 
 If one of your executors can `ssh X`, an executor can be put on X with one
@@ -217,23 +282,25 @@ re-probes, so a network that changed under you is an operator's reinstall.
 - Agents get the same pair as `executor_install` / `executor_uninstall` on both
   the fundi and the MCP face, bound to the calling agent, so a coordinator can
   provision a worker's machine. A child may install only through a launcher in
-  its own reachable set, and may uninstall only what it or an ancestor
-  installed.
+  its own executor set, and may uninstall only what it or an ancestor
+  installed. A successful install adds the executor to the installer's set
+  ("What an agent can address" above); the uninstall rule is the only thing
+  the installer record decides, never what a child can reach.
 - `executor_list` is the read that goes with that pair, on both faces: each
-  executor the caller can see, with whether it is connected right now, when it
-  last joined the pool and when it was last seen, its roots, the child kinds it
-  can launch, its labels and annotations, and — for an installed one — the
+  executor in the caller's own set, with whether it is connected right now, when
+  it last joined the pool and when it was last seen, its roots, the child kinds
+  it can launch, its labels and annotations, and, for an installed one, the
   launcher and ssh destination it came from, the transport it was installed
   with (`direct`/`tunnel`) and the daemon's last launch outcome. It takes no
-  arguments and is scoped by the daemon. A **child** sees the machine it is bound
-  to plus the executors its own lineage installed (the rule uninstall enforces),
-  never its owner's wider fleet — the borrowed identity Connect's `userOnly`
-  `ListExecutors` refuses a child. A **human** sees the executors it owns — what
-  `rafiki executor list` shows that credential, except that an admin's extra
-  view of the unowned rows is not included, because this is the read half of the
-  install pair and install authority is owner-scoped. A down executor is not
-  necessarily broken: an installed one restarts on its next use while its
-  launcher is reachable, and a disabled one never connects.
+  arguments and is scoped by the daemon. A **child** sees the executors in its
+  own set (all of its owner's for `all`), never its owner's wider fleet: the
+  borrowed identity Connect's `userOnly` `ListExecutors` refuses a child. A
+  **human** sees the executors it owns, what `rafiki executor list` shows that
+  credential, except that an admin's extra view of the unowned rows is not
+  included, because this is the read half of the install pair and install
+  authority is owner-scoped. A down executor is not necessarily broken: an
+  installed one restarts on its next use while its launcher is reachable, and a
+  disabled one never connects.
 
 On the target the launcher starts one of two commands. `--mode direct` runs
 `rafiki executor serve --connect <the launcher's own address> -P <instance>
@@ -448,6 +515,14 @@ A **sandbox** is a container the daemon creates on your behalf, through a
 **launcher** executor you declare, so an agent's workspace tools run inside a
 container instead of on the host. The daemon never touches a container runtime
 itself; the launcher is the only process that speaks to Docker.
+
+A child spawned with a sandbox has an executor set of its own sandbox only and
+cannot be handed another. The container's filesystem is the boundary the agent
+works inside. Whether the container is also free of your credentials is not
+something rafiki checks: it has not verified that a sandbox carries no
+`SSH_AUTH_SOCK`, no mounted `~/.ssh` and no cloud credentials, so a sandbox is
+only an isolation boundary if you keep those out of it (a mount root or image
+that carries them undoes it).
 
 Declare a launcher where the Docker engine is reachable — a durable executor
 started with three flags: a proxy named exactly `docker` pointing at the

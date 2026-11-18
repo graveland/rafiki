@@ -13,7 +13,7 @@ compose a dispatch that works.
 
 `agent_spawn` creates a separate, cross-process, potentially cross-machine,
 dollar-metered agent. It outlives your conversation, appears in `rafiki list`,
-and is budget-, depth- and executor-constrained.
+and is budget- and depth-limited, and given an explicit executor set.
 
 Reach for it when the work should survive independently, run on different
 hardware, use a different model, or be watched from outside your session. For a
@@ -201,6 +201,11 @@ independence.
 *reschedulability* flag — whether the daemon may re-bind the child to a
 different executor. `Provision` serves the executor's single root, so on one
 executor two "ephemeral" siblings share a working tree and overwrite each other.
+
+Where a worker runs is separate: give a worker one executor (`executor: "<name>"`)
+unless it must work across machines; a coordinator usually holds `all`. An agent
+with more than one executor must name one on every workspace tool call. The set
+prevents mistakes, not access.
 
 Make the isolation yourself:
 

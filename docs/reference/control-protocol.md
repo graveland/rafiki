@@ -1493,6 +1493,16 @@ executor-loss or job-exit fragments, or the child's own task-residue nudge,
 and it does not change the display state: a launcher of a quiet child still
 shows `waiting` on `children`.
 
+Field 37 (`executors`) is the child's executor set: machine names or ids from
+the spawner's own set, or the single entry `all` (only from a spawner whose own
+set is `all`, never combined). Empty means the daemon chooses (the spawner's
+home, else a copy of the spawner's set; a top-level spawn gets `all`). It is
+child-ALLOWED, since a child can only hand on what it can already address, and
+it decides the set when `executor_ref` or `executor_selector` are also sent.
+`resolveSpawnExecutorSet` (`cmd/rafikid/executor_set.go`) fixes it on fresh
+spawns only; a resumed child keeps the set on its row. The CLI flag is
+`rafiki create --executors`. The model is in `docs/guide/executors.md`.
+
 Field 35 (`home_executor`) is child-ALLOWED: it can only name an executor
 already in the caller's reachable set, and the daemon refuses anything else.
 `home_executor` is where `cwd` applies and where project context
@@ -1516,7 +1526,7 @@ The daemon resolves a home at spawn, first match wins
    provision diagnostic when every failure was a missing workdir.
 
 A candidate from rules 2–3 outside the reachable set is SKIPPED, never used:
-reach is the confinement-narrowed live set and home is a choice within it. The
+reach is the child's executor set (live members) and home is a choice within it. The
 chosen home is written to the child's row as `rafiki/home-executor`; a child
 with no home starts unbound, with the warning below. Nothing about the
 project tier is ever read from a non-home executor — a project file from the
@@ -1603,7 +1613,7 @@ the child it was spawned for (`owner_child`); its lifecycle follows the child.
   `controllerBinder.ChooseFor` and NEVER falls through to an ordinary
   executor, which would run it natively on a host the operator never offered.
   Child-owned sandboxes are dropped from ordinary selection candidates, so a
-  `self` descendant (whose stored selector narrows to the sandbox) resolves to
+  `self` descendant (whose stored set names only the sandbox) resolves to
   nothing and fails closed. `subtree` admits descendants to the same container
   (concurrent workspaces separated by workdir only; no path scoping). A fresh
   `subtree` descendant binds on its FIRST (eager) bind — which runs before its
@@ -1800,7 +1810,7 @@ is configured AND a live executor advertises `--launch script`, the child is
 launched under daraja ON that executor; otherwise the local runner stays the
 fallback — the daemon forks the pymodule on its own host. The routing
 predicate is the SAME one `checkKindNarrowing` consults, so a child whose
-parent carries an executor grant is admitted exactly when it would launch on
+set is not `all` is admitted exactly when it would launch on
 the pool and refused when its fallback would fork on the daemon's host — the
 two can never drift.
 
@@ -2974,7 +2984,7 @@ launch — a stored stale outcome would be a claim about a launch nobody watched
 
 The launcher must be a NATIVE, enabled executor; a
 container-isolated one is never a launcher. A CHILD credential may install only
-through a launcher in its own reachable set (the same confinement-narrowed set
+through a launcher in its own executor set (the same set
 a spawn gets), so it reaches exactly the machines it could already call;
 several candidates and no `via` is an error listing them.
 
@@ -3509,7 +3519,7 @@ transport error, and never a successful result carrying the text.
 
 | Tool | Purpose |
 |---|---|
-| `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget/depth/executor-constrained; reworded to assert preference over a client's own native subagent tool (an earlier wording deferred to it for "lightweight" work, which Claude Code read as the whole rule and the surface was never used). `fork_from` (`child_id` + `cursor`) or `from_tag` starts it from a point in another agent's history, by reference |
+| `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget- and depth-limited, with an explicit executor set; reworded to assert preference over a client's own native subagent tool (an earlier wording deferred to it for "lightweight" work, which Claude Code read as the whole rule and the surface was never used). `fork_from` (`child_id` + `cursor`) or `from_tag` starts it from a point in another agent's history, by reference |
 | `agent_list` | Every agent the daemon knows: id, name, model, current status, working directory, assigned task handle. A CHILD credential sees its subtree by default; `scope="owner"` adds every other agent its owner owns, marked read-only (readable, not steerable), and an empty `scope` is the narrow `subtree` default. One page is at most 50 rows for EVERY caller (a user credential's whole-daemon list included): the first 50 render and an exact "N more agents not shown; narrow with status=<state>" trailer names the rest, so a page is never mistaken for the whole set; `status=` narrows to one status |
 | `agent_view` | Transcript of one agent — prompts, replies, tool calls with their results; newest entries by default, paged/searched/expanded by cursor (`before`, `after`, `entry`, `find`; only `find`+`after` combine) on a stored conversation, newest page only for a live/exited child without one; a deliberate check, not a polling loop. A cursor names a row of the transcript, so one minted before a retract (`m:<ordinal>` of a row the head no longer reaches) refuses rather than silently returning its neighbours. A child caller reads its subtree AND its owner's other agents; a CLOSED agent has no live row, so `agent_view` cannot see it — read its conversation with `conversation_export` instead |
 | `agent_send` | Deliver a prompt to a running agent |
