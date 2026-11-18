@@ -337,11 +337,8 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// installCallerFromContext, the SAME function connectExecutorInstaller uses,
 	// so a credential becomes one installCaller on both faces and a launcher it
 	// may not reach is refused identically on either (TestInstallFacesAdmitIdentically).
-	// A claude child cannot run workspace tools on an executor it installs -- its
-	// own tools belong to the host it runs on -- so its description says so.
 	if ctrl.installStoreReady() {
 		opts.ExecutorInstaller = newExecutorInstallBinding(ctrl, installCallerFromContext(r.Context(), ctrl))
-		opts.CannotUseInstalledExecutor = isChild && childIsClaude(ctrl, id.ChildID)
 	}
 	// executor_list needs only the executor STORE, so it declines on a DB-less
 	// daemon -- the same nil-means-decline rule, but a separate guard from the

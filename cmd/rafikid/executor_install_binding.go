@@ -95,14 +95,3 @@ func (b *executorInstallBinding) Uninstall(ctx context.Context, executor string)
 func (c *Controller) installStoreReady() bool {
 	return c != nil && c.install != nil && c.install.store != nil
 }
-
-// childIsClaude reports whether this daemon's stored row for childID is a
-// claude-kind child. An unknown child is not claude: nothing is stored about it,
-// so nothing is known to say, and the Controller's own refusal answers the call.
-func childIsClaude(ctrl *Controller, childID string) bool {
-	if ctrl == nil || ctrl.st == nil || childID == "" {
-		return false
-	}
-	snap, ok := ctrl.st.Get(childID)
-	return ok && snap.Kind == protocol.KindClaude
-}

@@ -342,12 +342,6 @@ type RuntimeOptions struct {
 	// no-caller-identity rule as Sandboxes — see tools.ExecutorLister.
 	Executors tools.ExecutorLister
 
-	// CannotUseInstalledExecutor appends a sentence to executor_install's
-	// description for a caller that cannot run workspace tools on the executor
-	// it installs. The daemon sets it for a claude-kind child on the MCP face;
-	// fundi children address executors directly and leave it false.
-	CannotUseInstalledExecutor bool
-
 	// Quota, when non-nil, gives this child the quota_status tool -- its own
 	// captured Anthropic subscription rate-limit snapshot. Supplied by the
 	// daemon as a per-user adapter; nil when no quota source is configured
@@ -796,34 +790,33 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	toolOpts := tools.ToolOpts{
-		Env:                        mergedEnv,
-		Cwd:                        opts.Cwd,
-		FileTracker:                fileTracker,
-		OutputPolicy:               outputPolicy,
-		Skills:                     discovered,
-		RTK:                        tools.ParseRTKMode(opts.RTK),
-		Web:                        opts.ToolsWeb,
-		LSP:                        lspClient,
-		FileChanged:                lspNotifier,
-		Tasks:                      taskStore,
-		ChildID:                    opts.Ref,
-		Agents:                     opts.Agents,
-		Sandboxes:                  opts.Sandboxes,
-		ExecutorInstaller:          opts.ExecutorInstaller,
-		Executors:                  opts.Executors,
-		CannotUseInstalledExecutor: opts.CannotUseInstalledExecutor,
-		Parent:                     opts.Parent,
-		Schedules:                  opts.Schedules,
-		Quota:                      opts.Quota,
-		Conversations:              opts.Conversations,
-		PyModules:                  opts.PyModules,
-		PyModulesInventory:         opts.PyModulesInventory,
-		Presets:                    opts.Presets,
-		Recall:                     opts.Recall,
-		Executor:                   opts.Executor,
-		ExecutorTools:              tools.ServedSet(opts.ExecutorTools),
-		RemoteSkillBody:            opts.RemoteSkillBody,
-		InlineSkillBody:            opts.InlineSkillBody,
+		Env:                mergedEnv,
+		Cwd:                opts.Cwd,
+		FileTracker:        fileTracker,
+		OutputPolicy:       outputPolicy,
+		Skills:             discovered,
+		RTK:                tools.ParseRTKMode(opts.RTK),
+		Web:                opts.ToolsWeb,
+		LSP:                lspClient,
+		FileChanged:        lspNotifier,
+		Tasks:              taskStore,
+		ChildID:            opts.Ref,
+		Agents:             opts.Agents,
+		Sandboxes:          opts.Sandboxes,
+		ExecutorInstaller:  opts.ExecutorInstaller,
+		Executors:          opts.Executors,
+		Parent:             opts.Parent,
+		Schedules:          opts.Schedules,
+		Quota:              opts.Quota,
+		Conversations:      opts.Conversations,
+		PyModules:          opts.PyModules,
+		PyModulesInventory: opts.PyModulesInventory,
+		Presets:            opts.Presets,
+		Recall:             opts.Recall,
+		Executor:           opts.Executor,
+		ExecutorTools:      tools.ServedSet(opts.ExecutorTools),
+		RemoteSkillBody:    opts.RemoteSkillBody,
+		InlineSkillBody:    opts.InlineSkillBody,
 	}
 	// A process that is its own workspace satisfies the executor rule with a
 	// real in-process client rather than an exemption. Build it here, where the

@@ -282,15 +282,21 @@ func seedForeignInstall(t *testing.T, f *installFixture) {
 	}), "seed a recipe installed by a sibling")
 }
 
-// TestInstallFacesClaudeDescriptionNote pins the one deliberate difference
-// between the faces: a claude child cannot run workspace tools on the executor
-// it installs, so executor_install says so — and a fundi child, which addresses
-// executors directly, is not told that lie.
-func TestInstallFacesClaudeDescriptionNote(t *testing.T) {
+// TestInstallFacesDescriptionIsIdenticalForEveryKind pins that executor_install
+// carries no per-kind caveat: native Claude tools stay on the launch host, but
+// a rafiki-mode claude child's executor-routed tools reach the executor it
+// installs, so telling any caller it cannot use the executor would be false.
+func TestInstallFacesDescriptionIsIdenticalForEveryKind(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newInstallFixture(t)
 	seedInstallChild(t, f.ctrl, "c_claude", "", installTestOwnerName, protocol.KindClaude)
 	seedInstallChild(t, f.ctrl, "c_fundi", "", installTestOwnerName, protocol.KindFundi)
+	f.ctrl.st.Insert(&childstore.Session{
+		ChildID: "c_rafiki_mode", Kind: protocol.KindClaude, Status: protocol.StatusIdle,
+		StartedAt: time.Now(), OwnerUserID: installTestOwner,
+		WorkspaceTools: protocol.WorkspaceToolsRafiki,
+		Labels:         map[string]string{"owner": installTestOwnerName, childstore.LabelRoot: "c_rafiki_mode"},
+	})
 
 	descriptionFor := func(childID string) string {
 		t.Helper()
@@ -308,15 +314,11 @@ func TestInstallFacesClaudeDescriptionNote(t *testing.T) {
 		return ""
 	}
 
-	claude := descriptionFor("c_claude")
-	c.StrContains(claude, "You cannot run workspace tools on it yourself; agents you spawn can.",
-		"a claude child must be told it cannot use the executor it installs")
-
-	fundi := descriptionFor("c_fundi")
-	c.NotStrContains(fundi, "You cannot run workspace tools",
-		"a fundi child addresses executors directly and must not be told otherwise")
-	c.StrContains(fundi, "Install and start a rafiki executor",
-		"the fundi child still gets the tool")
+	for _, id := range []string{"c_claude", "c_rafiki_mode", "c_fundi"} {
+		d := descriptionFor(id)
+		c.NotStrContains(d, "You cannot run workspace tools", "%s must not be told it cannot use the executor", id)
+		c.StrContains(d, "Install and start a rafiki executor", "%s still gets the tool", id)
+	}
 }
 
 // fakeInstallController records the proto request the binding built and answers

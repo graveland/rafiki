@@ -382,13 +382,6 @@ type ToolOpts struct {
 	// other. Bound to ONE caller at construction; see ExecutorLister.
 	Executors ExecutorLister
 
-	// CannotUseInstalledExecutor appends a sentence to executor_install's
-	// description for a caller that cannot run workspace tools on the executor
-	// it installs: only the agents it spawns can. Set for a claude-kind child,
-	// whose own tools belong to the host it runs on rather than to an executor
-	// it may choose.
-	CannotUseInstalledExecutor bool
-
 	// Parent, when non-nil, gives this caller agent_report and agent_result.
 	Parent ParentReporter
 
