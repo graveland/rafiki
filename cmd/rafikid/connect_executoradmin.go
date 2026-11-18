@@ -162,7 +162,16 @@ func (a connectExecutorAdmin) Delete(ctx context.Context, executorID string) err
 	if err := a.refuseForeignExecutor(ctx, executorID); err != nil {
 		return err
 	}
-	return a.c.ExecutorDelete(protocol.ExecutorDeleteRequest{ExecutorID: executorID})
+	// The row is read BEFORE the delete: afterwards its owner, name and labels,
+	// which decide who is told and whose set shrinks, are gone.
+	row, found := a.c.executorForOwnerCheck(ctx, executorID)
+	if err := a.c.ExecutorDelete(protocol.ExecutorDeleteRequest{ExecutorID: executorID}); err != nil {
+		return err
+	}
+	if found {
+		a.c.removeFromExecutorSets(row.ID, row.OwnerUserID, installNameOf(row), row.Labels)
+	}
+	return nil
 }
 
 // List is the plain listing behind ListExecutors with an empty kind. The limit

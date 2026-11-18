@@ -591,6 +591,11 @@ type Controller struct {
 	// listener is not configured (require the pool to mint tokens).
 	execStore executors.Store
 
+	// execSets serialises child executor-set updates and remembers which
+	// executors `all` agents were already told about. See
+	// executor_set_notify.go.
+	execSets executorSetNotifier
+
 	// install is the executor-install orchestrator: the launch-recipe store,
 	// this daemon's binary depot, and the two seams into the executor pool (a
 	// launcher's ExecutorService client and the tunnel server). Nil when the

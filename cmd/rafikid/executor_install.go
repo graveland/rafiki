@@ -871,6 +871,12 @@ func (c *Controller) InstallExecutor(
 		}
 	}
 	launched = true
+	// The install CONNECTED, fresh or reinstall: the installing agent's set gains
+	// the executor whoever made the row, because the row's author does not decide
+	// who may use it.
+	if caller.ChildID != "" {
+		c.addToExecutorSet(caller.ChildID, executorID)
+	}
 	return c.installedProtoRow(ctx, executorID)
 }
 
@@ -1596,6 +1602,7 @@ func (c *Controller) UninstallExecutor(ctx context.Context, caller installCaller
 	// The row is gone, so nothing can be listed for this id again; drop its
 	// in-memory launch outcome rather than holding an entry nobody can read.
 	c.install.forgetOutcome(e.ID)
+	c.removeFromExecutorSets(e.ID, e.OwnerUserID, installNameOf(e), e.Labels)
 	return nil
 }
 

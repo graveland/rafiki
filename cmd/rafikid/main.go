@@ -969,11 +969,13 @@ func runDaemon(opts runDaemonOpts) error {
 		// fires per connection — which is also what resumes the recovered
 		// children waiting for THIS executor (pending_resume.go): the sweep
 		// runs on every connect and leaves still-unsatisfied children pended.
+		ctrl.seedAnnouncedExecutors(baseCtx)
 		execPool.SetOnConnect(func(id string) {
 			ctrl.sweepPendingResumes()
 			// A launch waits on the connection ARRIVING, never on a poll: the
 			// installer's one-shot waiters for this executor fire here.
 			ctrl.installConnected(id)
+			ctrl.announceIfNew(id)
 			if ctrl.skillPusher != nil {
 				if err := ctrl.skillPusher.pushIfEligible(baseCtx, id); err != nil {
 					slog.Warn("skill sync on connect failed", "executor", id, "error", err)
