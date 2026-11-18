@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/multigres/testkit/assert"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/executorinstall"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -143,34 +144,84 @@ func TestExecutorStatusesScopeForAHuman(t *testing.T) {
 	c.Eq("brent@kidbox", kid.InstalledTarget, "an install names its ssh destination")
 }
 
-// A child caller sees only what its own provisioning can touch: the machine it
-// is bound to, and the machines its LINEAGE installed. Its owner's wider fleet
-// is invisible — the borrowed-identity rule Connect's userOnly ListExecutors
-// enforces, kept narrower here rather than widened.
-func TestExecutorStatusesScopeForAChild(t *testing.T) {
-	c := assert.NewAborting(t)
-	f := newExecutorStatusFixture(t)
-
-	rows, err := f.ctrl.ExecutorStatuses(context.Background(), installCaller{
-		OwnerUserID: statusHuman, OwnerName: installTestOwnerName, ChildID: statusChild,
-	})
-	c.NoError(err, "ExecutorStatuses for a child caller")
-	c.EqDiff([]string{"homebox", "kidbox"}, statusNames(rows),
-		"the bound machine plus what this child's lineage installed")
+func (f *executorStatusFixture) setChildSet(id string, set []string) {
+	f.t.Helper()
+	if err := f.ctrl.st.SetExecutorSet(id, set); err != nil {
+		f.t.Fatalf("set executor set on %s: %v", id, err)
+	}
 }
 
-// A sibling's install is not the caller's to see, even though the same owner
-// owns both rows: lineage, not owner, decides the child half of the scope.
-func TestExecutorStatusesChildDoesNotSeeASiblingsInstall(t *testing.T) {
+func (f *executorStatusFixture) childRows(id string) []protocol.ExecutorStatus {
+	f.t.Helper()
+	rows, err := f.ctrl.ExecutorStatuses(context.Background(), installCaller{
+		OwnerUserID: statusHuman, OwnerName: installTestOwnerName, ChildID: id,
+	})
+	if err != nil {
+		f.t.Fatalf("ExecutorStatuses for %s: %v", id, err)
+	}
+	return rows
+}
+
+// A child sees exactly the owner's rows its executor set names, whether or not
+// it is bound to or installed any of them.
+func TestExecutorStatusesChildSeesItsSet(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newExecutorStatusFixture(t)
+	f.setChildSet(statusChild, []string{"exec-down"})
 
-	rows, err := f.ctrl.ExecutorStatuses(context.Background(), installCaller{
-		OwnerUserID: statusHuman, OwnerName: installTestOwnerName, ChildID: statusSibling,
-	})
-	c.NoError(err, "ExecutorStatuses for the sibling")
-	c.EqDiff([]string{"sibbox"}, statusNames(rows),
-		"a sibling sees its own install only")
+	c.EqDiff([]string{"bluebox"}, statusNames(f.childRows(statusChild)),
+		"only the named row, not the bound machine or the lineage's install")
+
+	f.setChildSet(statusChild, []string{"exec-down", "exec-sibling"})
+	c.EqDiff([]string{"bluebox", "sibbox"}, statusNames(f.childRows(statusChild)), "every named row")
+
+	f.setChildSet(statusChild, []string{})
+	c.Len(f.childRows(statusChild), 0, "an empty set addresses nothing")
+}
+
+// A set may name another owner's executor id; the owner match still hides it.
+func TestExecutorStatusesChildNeverSeesAForeignRowInItsSet(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newExecutorStatusFixture(t)
+	f.setChildSet(statusChild, []string{"exec-foreign", "exec-down"})
+	c.EqDiff([]string{"bluebox"}, statusNames(f.childRows(statusChild)), "the foreign id is dropped")
+}
+
+// "all" is every row the owner owns, the human arm's row set, and never a
+// foreign owner's.
+func TestExecutorStatusesAllChildSeesTheOwnersRows(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newExecutorStatusFixture(t)
+	f.setChildSet(statusChild, []string{childstore.ExecutorSetAll})
+
+	c.EqDiff([]string{"bluebox", "greyshift", "homebox", "kidbox", "sibbox"}, statusNames(f.childRows(statusChild)),
+		"the owner's whole fleet and no foreign row")
+}
+
+// A legacy row (nil set) reads through its selector: a match shows those rows,
+// an empty selector is all, a malformed one shows nothing.
+func TestExecutorStatusesLegacyChildSeesItsSelector(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newExecutorStatusFixture(t)
+	setSelector := func(sel string) {
+		if err := f.ctrl.st.Update(statusChild, func(s *childstore.Session) { s.ExecutorSelector = sel }); err != nil {
+			t.Fatalf("set selector: %v", err)
+		}
+	}
+
+	setSelector("machine=bluebox")
+	c.EqDiff([]string{"bluebox"}, statusNames(f.childRows(statusChild)), "the selector's match")
+
+	setSelector("machine=notmine")
+	c.Len(f.childRows(statusChild), 0, "a selector matching only a foreign row shows nothing")
+
+	setSelector("")
+	c.Len(f.childRows(statusChild), 5, "an empty legacy selector is all of the owner's rows")
+
+	setSelector("not a selector !!")
+	c.Len(f.childRows(statusChild), 0, "a malformed selector shows nothing")
+
+	c.Len(f.childRows("c_no_row"), 0, "a caller with no row shows nothing")
 }
 
 // An owner with no executors of its own gets an empty listing, not another
@@ -190,6 +241,7 @@ func TestExecutorStatusesIsEmptyForAnUnknownOwner(t *testing.T) {
 func TestExecutorListOnTheMCPFaceScopesToTheChild(t *testing.T) {
 	c := assert.NewAborting(t)
 	f := newExecutorStatusFixture(t)
+	f.setChildSet(statusChild, []string{"exec-home", "exec-kid-install"})
 	face, _ := mcpFaceFixture(t)
 	face.SetController(f.ctrl)
 

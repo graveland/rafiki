@@ -5,9 +5,12 @@ package main
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sort"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/executorinstall"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -42,18 +45,16 @@ func (b *executorStatusBinding) List(ctx context.Context) ([]protocol.ExecutorSt
 //     install authority is owner-scoped on both faces (installCaller carries no
 //     admin bit). Widening here would show a machine the caller could not
 //     install onto or remove.
-//   - A child sees what its own provisioning can already affect: the executors
-//     its LINEAGE installed (installedByLineage — the rule UninstallExecutor
-//     enforces, so a machine it may remove is a machine it may see), plus the
-//     executor its own child row is BOUND to, which is the machine it is
-//     running on and can already run workspace tools on. A sibling's, a
-//     descendant's or a stranger's machine is invisible, which keeps this
-//     narrower than the owner-wide listing Connect refuses a child (its
-//     ListExecutors is userOnly because a child reading its OWNER's fleet is the
-//     borrowed identity Spawn refuses).
+//   - A child sees exactly the owner's rows its own executor set admits: every
+//     row the owner owns when the set is "all" (the human arm's row set), the
+//     rows with those ids when it lists ids, and the rows a legacy selector
+//     matches when the stored set is nil (a malformed selector shows nothing).
+//     Connect refuses a child its owner's whole fleet (ListExecutors is
+//     userOnly), so a child's listing is bounded by the same set that bounds
+//     where it may run.
 //
-// Both rules also require the owner match every other verb on this daemon uses,
-// so a recipe row pointing at a foreign executor cannot widen the listing.
+// Every arm also requires the owner match every other verb on this daemon
+// uses, so no set or selector can show another owner's machine.
 //
 // The result is sorted by name then id: a listing a model re-reads must not
 // reshuffle under it because the store returned rows in another order.
@@ -67,12 +68,12 @@ func (c *Controller) ExecutorStatuses(
 	if err != nil {
 		return nil, err
 	}
-	// One read answers both halves of the child scope: which executors this
-	// lineage installed, and — after decoration — which launcher and ssh
-	// destination each installed row came from.
 	recipes := c.liveInstallRows(ctx)
 	displays := c.installDisplaysFor(ctx, recipes)
-	bound := c.boundExecutorID(caller.ChildID)
+	var visible func(executors.Executor) bool
+	if caller.ChildID != "" {
+		visible = c.childExecutorFilter(caller.ChildID)
+	}
 	launch := c.liveLaunchKinds()
 
 	out := make([]protocol.ExecutorStatus, 0, len(execs))
@@ -80,7 +81,7 @@ func (c *Controller) ExecutorStatuses(
 		if e.OwnerUserID != caller.OwnerUserID {
 			continue
 		}
-		if caller.ChildID != "" && !c.executorVisibleToChild(caller.ChildID, e.ID, bound, recipes) {
+		if visible != nil && !visible(e) {
 			continue
 		}
 		st := protocol.ExecutorStatus{
@@ -115,35 +116,31 @@ func (c *Controller) ExecutorStatuses(
 	return out, nil
 }
 
-// executorVisibleToChild is the child half of ExecutorStatuses' scope: the
-// machine the child is bound to, or one an executor its own lineage installed.
-func (c *Controller) executorVisibleToChild(
-	childID, executorID, boundExecutorID string, recipes []executorinstall.Row,
-) bool {
-	if boundExecutorID != "" && executorID == boundExecutorID {
-		return true
-	}
-	for _, r := range recipes {
-		if r.ExecutorID == executorID && c.installedByLineage(childID, r.InstalledByChild) {
-			return true
-		}
-	}
-	return false
-}
-
-// boundExecutorID is the executor this child's workspace lives on, recorded by
-// controllerBinder.NoteBinding. Empty when the child has no row (a caller whose
-// credential names none) or has never been bound to a machine, which is the
-// in-process case.
-func (c *Controller) boundExecutorID(childID string) string {
-	if c == nil || c.st == nil || childID == "" {
-		return ""
+// childExecutorFilter is the child half of ExecutorStatuses' scope: it admits
+// the rows the child's executor set admits. A child with no row, or one whose
+// legacy selector does not parse, sees nothing; the owner match is the
+// caller's.
+func (c *Controller) childExecutorFilter(childID string) func(executors.Executor) bool {
+	none := func(executors.Executor) bool { return false }
+	if c == nil || c.st == nil {
+		return none
 	}
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return ""
+		return none
 	}
-	return snap.Labels[executorBindingLabel]
+	all, ids, selector := childstore.ResolveSetSpec(snap.ExecutorSet, snap.ExecutorSelector)
+	if all {
+		return func(executors.Executor) bool { return true }
+	}
+	if selector != "" {
+		sel, err := executors.ParseSelector(selector)
+		if err != nil {
+			return none
+		}
+		return func(e executors.Executor) bool { return sel.Matches(e.Labels) }
+	}
+	return func(e executors.Executor) bool { return slices.Contains(ids, e.ID) }
 }
 
 // liveLaunchKinds maps each live executor's id to the child kinds it

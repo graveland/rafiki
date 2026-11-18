@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -429,32 +428,31 @@ func grantedChildren(req protocol.SpawnRequest) int {
 }
 
 // checkKindNarrowing refuses a child whose kind would escape its parent's
-// executor grant.
+// executor set.
 //
-// Kinds split by how they host. A fundi child honours the grant directly:
-// resolveExecutor -> chooseExecutor admits it against the selector
-// inheritExecutorGrant copied from the parent. A claude child honours the
-// grant exactly when this daemon is executor-routed (claudeExecutorRouted):
-// its daraja — and the claude process the daraja hosts — launch on the pool's
-// machine via chooseLaunchExecutor, which runs the same
-// admission/lineage/workspace-mode pipeline against that inherited selector,
-// so no live executor admitting the parent's grant refuses the spawn there
-// (the safe direction). Without a pool connection claudeRunner falls back to
-// a local subprocess on the daemon's own host, which IS the widening this
-// guard refuses: a confined parent could otherwise spawn a child running
-// outside every executor it is restricted to simply by naming a kind — and
-// agent_spawn exposes `kind` to the model, so the escape is one prompt
-// injection away.
+// Kinds split by how they host. A fundi child honours the set directly:
+// resolveExecutor -> chooseExecutor admits it against the set the child
+// inherits from its parent. A claude child honours the set exactly when this
+// daemon is executor-routed (claudeExecutorRouted): its daraja, and the claude
+// process the daraja hosts, launch on the pool's machine via
+// chooseLaunchExecutor, which runs the same admission pipeline against that
+// inherited set, so no live executor outside the parent's set can host it.
+// Without a pool connection claudeRunner falls back to a local subprocess on
+// the daemon's own host, which IS the widening this guard refuses: a parent
+// confined to an executor set could otherwise spawn a child running outside
+// every executor it is restricted to simply by naming a kind, and agent_spawn
+// exposes `kind` to the model, so the escape is one prompt injection away.
 //
-// This is the same monotonicity effectiveExecutorSet enforces for selectors: a
-// descendant may narrow, never widen. It reads only the parent row the daemon
-// stamped and daemon-local pool state — nothing from the caller, nothing from
-// the model — so Spawn, Resume and agent_spawn are all covered by
-// the one check, with no route left to enumerate.
+// A parent is confined when its set is not "all" (childstore.ResolveSetSpec;
+// a nil stored set is a legacy row and resolves through its selector). A
+// descendant may narrow, never widen. This reads only the parent row the
+// daemon stamped and daemon-local pool state: nothing from the caller, nothing
+// from the model, so Spawn, Resume and agent_spawn are all covered by the one
+// check, with no route left to enumerate.
 func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executorPoolConnected, scriptExecutorRouted bool) error {
 	// An omitted kind is fundi (spawnKindLabel), so normalize it the same way
 	// resolveSpawnPlan and spawnKindLabel do before testing against the kinds
-	// that honour an executor grant.
+	// that honour an executor set.
 	kind := req.Kind
 	if kind == "" {
 		kind = protocol.KindFundi
@@ -471,20 +469,19 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 		// message; not finding one here is not this check's business.
 		return nil
 	}
-	if parent.ExecutorSelector == "" {
-		return nil // parent is already unconfined on this host
+	if all, _, _ := childstore.ResolveSetSpec(parent.ExecutorSet, parent.ExecutorSelector); all {
+		return nil // parent addresses every executor of its owner: nothing to widen
 	}
 
-	// claude honours the grant whenever the daemon is executor-routed: the
+	// claude honours the set whenever the daemon is executor-routed: the
 	// launch executor is picked by chooseLaunchExecutor against the inherited
-	// selector, so no executor admitting the parent's grant refuses the spawn
-	// there — never widens it. Only the local-subprocess fallback forks on
+	// set, so the spawn never widens it. Only the local-subprocess fallback forks on
 	// the daemon's own host.
 	if kind == protocol.KindClaude && executorPoolConnected {
 		return nil
 	}
 
-	// script honours the grant when a live executor actually advertises the
+	// script honours the set when a live executor actually advertises the
 	// script launch kind (scriptExecutorRouted — the same predicate the
 	// runner routes on): the child's daraja launches on the pool's machine
 	// through chooseLaunchExecutor, the same admission pipeline. When no
@@ -498,7 +495,7 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 	if kind == protocol.KindClaude {
 		return &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
-			Message: "spawn refused: the parent runs under an executor grant, and kind claude has " +
+			Message: "spawn refused: the parent is confined to an executor set, and kind claude has " +
 				"no executor pool connection — its local-subprocess fallback would fork on the " +
 				"daemon's own host with the daemon's filesystem. Configure an executor pool " +
 				"(RAFIKI_EXECUTORS_ENABLED) or run this spawn top-level.",
@@ -508,7 +505,7 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 		if executorPoolConnected {
 			return &connectapi.ControllerError{
 				Code: protocol.ErrInvalidArgs,
-				Message: "spawn refused: the parent runs under an executor grant, and no live executor " +
+				Message: "spawn refused: the parent is confined to an executor set, and no live executor " +
 					"advertises the script launch kind (start one with --launch script) — the local " +
 					"fallback would fork on the daemon's own host with the daemon's filesystem. " +
 					"Run this spawn top-level, or host a script-capable executor.",
@@ -516,7 +513,7 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 		}
 		return &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
-			Message: "spawn refused: the parent runs under an executor grant, and kind script has " +
+			Message: "spawn refused: the parent is confined to an executor set, and kind script has " +
 				"no executor pool connection — its local-subprocess fallback would fork on the " +
 				"daemon's own host with the daemon's filesystem. Configure an executor pool " +
 				"(RAFIKI_EXECUTORS_ENABLED) with --launch script, or run this spawn top-level.",
@@ -524,10 +521,10 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 	}
 	return &connectapi.ControllerError{
 		Code: protocol.ErrInvalidArgs,
-		Message: "spawn refused: the parent runs under an executor grant, and kind " + kind +
+		Message: "spawn refused: the parent is confined to an executor set, and kind " + kind +
 			" ignores executors entirely — it would fork on the daemon's own host with the " +
 			"daemon's filesystem. Only kind \"fundi\" (and kind \"claude\" with an executor " +
-			"pool configured) can honour an executor grant.",
+			"pool configured) can honour an executor set.",
 	}
 }
 
@@ -544,20 +541,21 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 //
 // It reads stored state only, never the request:
 //
-//   - the child's OWN stored selector when its row exists (a resume/recovery):
-//     inheritExecutorGrant copied the parent's grant onto it at spawn and never
-//     lets it narrow away, so its own selector is the whole grant. Reading it
-//     directly — rather than walking its ancestry — also avoids a lineage whose
-//     ancestor rows Close has since deleted. Only when the child's own row is
-//     absent (a fresh spawn, whose row does not exist yet and whose grant
-//     inheritExecutorGrant is about to copy) is the parent's chain walked; and
+//   - the child's OWN executor set when its row exists (a resume/recovery):
+//     a child's set is always a subset of its parent's at spawn and never
+//     widens afterwards, so its own set is the whole confinement. Reading it
+//     directly also avoids depending on an ancestor row Close has since
+//     deleted. Only when the child's own row is absent (a fresh spawn) is the
+//     PARENT's set read; the subset relation at spawn makes the parent
+//     sufficient, so no lineage walk is needed; and
 //   - sandbox ownership, read exactly as controllerBinder.ChooseFor reads it
 //     (ownedSandbox): the child's own spawn-block sandbox, or a subtree one an
-//     ancestor holds. A sandboxed child's stored selector is always
-//     `machine=sbx-…`, so the grant arm normally covers this too; the lookup is
-//     belt-and-braces for a row whose selector was never persisted.
+//     ancestor holds. A sandboxed child's stored set normally covers this too;
+//     the lookup is belt-and-braces for a row whose set was never persisted.
 //
-// A store or lineage error fails CLOSED (returns it), never open.
+// A child is confined when its set is not "all"; a nil stored set is a legacy
+// row and resolves through its selector. A parent that is named but absent
+// from the store fails CLOSED (returns an error), never open.
 func (c *Controller) localForkRefused(ctx context.Context, kind, childID, parentChildID, ownerUserID string) error {
 	if ctx == nil {
 		// A hand-built Controller in a test may have no base context; the lookup
@@ -565,24 +563,16 @@ func (c *Controller) localForkRefused(ctx context.Context, kind, childID, parent
 		ctx = context.Background()
 	}
 	if snap, ok := c.st.Get(childID); ok {
-		// The child's own row exists. Its own stored selector is the whole
-		// confinement: inheritExecutorGrant gave it at least its parent's grant
-		// and it may only ever narrow from there, so walking the ancestry adds
-		// nothing and can fail on an ancestor row Close has deleted.
-		if strings.TrimSpace(snap.ExecutorSelector) != "" {
-			return localForkConfinedErr(kind, "an executor grant")
+		if all, _, _ := childstore.ResolveSetSpec(snap.ExecutorSet, snap.ExecutorSelector); !all {
+			return localForkConfinedErr(kind, "an executor set")
 		}
 	} else if parentChildID != "" {
-		// A fresh spawn has no row of its own yet; its confinement is the one it
-		// will inherit, so read the parent's lineage instead.
-		chain, err := c.lineageChain(parentChildID)
-		if err != nil {
-			return err
+		parent, ok := c.st.Get(parentChildID)
+		if !ok {
+			return fmt.Errorf("cannot confirm the executor set of parent %s: its row is not in the store", parentChildID)
 		}
-		for _, sel := range chain {
-			if strings.TrimSpace(sel) != "" {
-				return localForkConfinedErr(kind, "an executor grant")
-			}
+		if all, _, _ := childstore.ResolveSetSpec(parent.ExecutorSet, parent.ExecutorSelector); !all {
+			return localForkConfinedErr(kind, "an executor set")
 		}
 	}
 	if c.sandboxStore != nil {

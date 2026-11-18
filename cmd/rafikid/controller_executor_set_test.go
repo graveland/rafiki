@@ -55,7 +55,15 @@ func TestActivateLiveChildKeepsExecutorSet(t *testing.T) {
 			ck.Require().NoError(err, "kill")
 			waitForExited(t, ctrl.st, res.ChildID, 5*time.Second)
 			_, err = ctrl.Resume(t.Context(), res.ChildID, "")
-			ck.Require().NoError(err, "resume")
+			if all, _, _ := childstore.ResolveSetSpec(set, ""); !all {
+				// With no executor pool a confined claude child cannot be hosted:
+				// the local-fork guard refuses the resume, and the refusal must
+				// leave the stored set exactly as it was.
+				ck.Require().Error(err, "a confined claude child must not resume as a local fork")
+				ck.StrContains(err.Error(), "confined to the executor plane", "refusal text")
+			} else {
+				ck.Require().NoError(err, "resume")
+			}
 
 			got := mustSnapshot(t, ctrl, res.ChildID).ExecutorSet
 			ck.EqDeep(set, got, "set")

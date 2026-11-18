@@ -30,34 +30,37 @@ import (
 func TestKindNarrowing(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
-		parentSel     string
+		parentSet     []string
+		parentSel     string // legacy selector, read only when parentSet is nil
 		kind          string
 		poolConnected bool
 		scriptRouted  bool // a live executor advertises the script launch kind
 		wantRefused   bool
 		wantLocalNote bool // refusal must name the local-subprocess fallback
 	}{
-		{name: "confined parent, claude child, pool connected", parentSel: "env=ci", kind: protocol.KindClaude, poolConnected: true, wantRefused: false},
-		{name: "confined parent, claude child, no pool", parentSel: "env=ci", kind: protocol.KindClaude, wantRefused: true, wantLocalNote: true},
-		{name: "confined parent, omitted kind means fundi", parentSel: "env=ci", kind: "", poolConnected: true, wantRefused: false},
-		{name: "confined parent, fundi child", parentSel: "env=ci", kind: protocol.KindFundi, wantRefused: false},
+		{name: "confined parent, claude child, pool connected", parentSet: []string{"A"}, kind: protocol.KindClaude, poolConnected: true, wantRefused: false},
+		{name: "confined parent, claude child, no pool", parentSet: []string{"A"}, kind: protocol.KindClaude, wantRefused: true, wantLocalNote: true},
+		{name: "confined parent, omitted kind means fundi", parentSet: []string{"A"}, kind: "", poolConnected: true, wantRefused: false},
+		{name: "confined parent, fundi child", parentSet: []string{"A"}, kind: protocol.KindFundi, wantRefused: false},
 		{name: "unconfined parent, claude child, no pool", kind: protocol.KindClaude, wantRefused: false},
 		{name: "unconfined parent, omitted kind", kind: "", wantRefused: false},
+		{name: "legacy selector parent, claude child, no pool", parentSel: "machine=A", kind: protocol.KindClaude, wantRefused: true, wantLocalNote: true},
+		{name: "legacy empty selector parent, claude child, no pool", kind: protocol.KindClaude, wantRefused: false},
 		// Script honours the grant only through the launch path: admitted
 		// exactly when a live executor advertises --launch script, refused
 		// whenever the local fallback (with or without a pool connection)
 		// would fork on the daemon's own host.
-		{name: "confined parent, script child, script executor live", parentSel: "env=ci", kind: protocol.KindScript, poolConnected: true, scriptRouted: true, wantRefused: false},
-		{name: "confined parent, script child, pool without a script executor", parentSel: "env=ci", kind: protocol.KindScript, poolConnected: true, wantRefused: true},
-		{name: "confined parent, script child, no pool", parentSel: "env=ci", kind: protocol.KindScript, wantRefused: true, wantLocalNote: true},
+		{name: "confined parent, script child, script executor live", parentSet: []string{"A"}, kind: protocol.KindScript, poolConnected: true, scriptRouted: true, wantRefused: false},
+		{name: "confined parent, script child, pool without a script executor", parentSet: []string{"A"}, kind: protocol.KindScript, poolConnected: true, wantRefused: true},
+		{name: "confined parent, script child, no pool", parentSet: []string{"A"}, kind: protocol.KindScript, wantRefused: true, wantLocalNote: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := assert.NewCollecting(t)
 			st := childstore.New()
-			st.Insert(&childstore.Session{
-				ChildID:          "c_parent",
-				ExecutorSelector: tc.parentSel,
-			})
+			st.Insert(&childstore.Session{ChildID: "c_parent", ExecutorSelector: tc.parentSel})
+			if tc.parentSet != nil {
+				c.Require().NoError(st.SetExecutorSet("c_parent", tc.parentSet), "set the parent's executor set")
+			}
 
 			err := checkKindNarrowing(st, protocol.SpawnRequest{
 				Kind:          tc.kind,
@@ -74,6 +77,33 @@ func TestKindNarrowing(t *testing.T) {
 				return
 			}
 			c.Require().NoError(err, "spawn was refused")
+		})
+	}
+}
+
+// The parent's executor set decides: ids confine, "all" does not, and an empty
+// set (a parent that addresses nothing) is confined too.
+func TestKindNarrowingReadsTheParentsSet(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		set         []string
+		wantRefused bool
+	}{
+		{"one id", []string{"A"}, true},
+		{"all", []string{childstore.ExecutorSetAll}, false},
+		{"empty set", []string{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			st := childstore.New()
+			st.Insert(&childstore.Session{ChildID: "c_parent"})
+			c.NoError(st.SetExecutorSet("c_parent", tc.set), "set the parent's executor set")
+			err := checkKindNarrowing(st, protocol.SpawnRequest{Kind: protocol.KindClaude, ParentChildID: "c_parent"}, false, false)
+			if tc.wantRefused {
+				c.Error(err, "a parent confined to %v must refuse a local-fork kind", tc.set)
+			} else {
+				c.NoError(err, "a parent on all must not refuse")
+			}
 		})
 	}
 }
