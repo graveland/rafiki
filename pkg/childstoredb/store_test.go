@@ -321,28 +321,33 @@ func TestAdoptOwnershipSkipsATombstonedRow(t *testing.T) {
 	c.False(ok, "adopting a tombstoned row resurrected it")
 }
 
+// One row is re-upserted through every shape, so dropping
+// executor_set = EXCLUDED.executor_set from the conflict clause leaves the
+// previous shape in place and fails the next read.
 func TestExecutorSetRoundTrip(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	s := New(pool)
 	ctx := context.Background()
 
-	cases := []struct {
+	id := fmt.Sprintf("c_%s", time.Now().Format("20060102150405.000000"))
+	t.Cleanup(func() { _ = s.Delete(ctx, id) })
+
+	steps := []struct {
 		name string
 		set  []string
 	}{
 		{"nil", nil},
+		{"ids", []string{"a", "b"}},
 		{"empty", []string{}},
 		{"all", []string{childstore.ExecutorSetAll}},
-		{"ids", []string{"a", "b"}},
+		{"nil again", nil},
 	}
-	for i, tc := range cases {
-		id := fmt.Sprintf("c_%s_%d", time.Now().Format("20060102150405.000000"), i)
-		t.Cleanup(func() { _ = s.Delete(ctx, id) })
+	for _, tc := range steps {
 		rec := childstore.ChildRecord{
 			ChildID:     id,
 			Kind:        protocol.KindFundi,
-			Name:        "set-" + tc.name + "-" + id,
+			Name:        "set-" + id,
 			Status:      string(protocol.StatusIdle),
 			SpawnedAt:   time.Now(),
 			DaemonID:    "daemon-a",

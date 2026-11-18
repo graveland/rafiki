@@ -54,3 +54,52 @@ func TestSetExecutorSetKeepsNilAndEmptyDistinct(t *testing.T) {
 	snap, _ = s.Get("c_1")
 	c.True(snap.ExecutorSet != nil && len(snap.ExecutorSet) == 0, "empty set must stay empty non-nil, got %#v", snap.ExecutorSet)
 }
+
+// The set survives every hop a child's state takes (live session, snapshot,
+// persisted record, rebuilt session), nil and empty staying distinct, and no
+// hop aliases the caller's slice: a later edit to the caller's backing array
+// must not rewrite a stored set.
+func TestExecutorSetSurvivesSessionSnapshotRecordHops(t *testing.T) {
+	shapes := []struct {
+		name string
+		set  []string
+	}{
+		{"nil", nil},
+		{"empty", []string{}},
+		{"all", []string{childstore.ExecutorSetAll}},
+		{"ids", []string{"x_1", "x_2"}},
+	}
+	for _, tc := range shapes {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			caller := append([]string(nil), tc.set...)
+			if tc.set == nil {
+				caller = nil
+			} else if len(tc.set) == 0 {
+				caller = []string{}
+			}
+			sess := newSess("c_1", "foo", "/x")
+			sess.ExecutorSet = caller
+
+			snap := sess.Snapshot()
+			rec := childstore.RecordFromSnapshot(snap)
+			back := childstore.SessionFromRecord(rec)
+			final := back.Snapshot()
+
+			for hop, got := range map[string][]string{"snapshot": snap.ExecutorSet, "record": rec.ExecutorSet, "rebuilt": final.ExecutorSet} {
+				c.EqDeep(tc.set, got, hop)
+				c.Eq(tc.set == nil, got == nil, "%s: nil-ness changed", hop)
+			}
+
+			if len(caller) == 0 {
+				return
+			}
+			caller[0] = "mutated"
+			c.EqDeep(tc.set, snap.ExecutorSet, "snapshot aliases the caller's slice")
+			snap.ExecutorSet[0] = "mutated-snap"
+			c.EqDeep(tc.set, rec.ExecutorSet, "record aliases the snapshot's slice")
+			rec.ExecutorSet[0] = "mutated-rec"
+			c.EqDeep(tc.set, final.ExecutorSet, "rebuilt session aliases the record's slice")
+		})
+	}
+}
