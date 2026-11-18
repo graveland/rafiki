@@ -36,6 +36,17 @@ type executorBinder interface {
 	// call, and an executor that is gone is not usable on this one.
 	Reachable(childID string) ([]executors.Executor, error)
 
+	// DeclaredMulti reports whether the child's stored executor set names more
+	// than one executor: `all`, or two or more ids. It reads the DECLARED set,
+	// never the live reach, so a member that disconnects or is disabled never
+	// turns an ambiguous child into one with an implicit target.
+	DeclaredMulti(childID string) bool
+
+	// CanBeHome reports whether executorID may become a child's home. An
+	// executor installed over ssh may not: its lifecycle belongs to the
+	// installer, and a relaunch replaces every workspace on that machine.
+	CanBeHome(executorID string) bool
+
 	// Home returns the executor id recorded in the child's
 	// rafiki/home-executor label, or "" when the child has none. The durable
 	// label is what makes a resumed child agree with the daemon that wrote it.
@@ -403,10 +414,13 @@ func (b *boundExecutor) withHomeTransition(ctx context.Context, wait homeWaitPol
 	}
 }
 
-// Multi reports whether the child can reach 2+ executors right now, i.e.
-// whether a tool call must name one. An error reads as single: the caller uses
-// this only to decide whether to mention an executor in a notice.
+// Multi reports whether a tool call must name an executor: the child's declared
+// set names several, or it can reach 2+ right now. An error reads as single: the
+// caller uses this only to decide whether to mention an executor in a notice.
 func (b *boundExecutor) Multi() bool {
+	if b.binder.DeclaredMulti(b.childID) {
+		return true
+	}
 	reach, err := b.binder.Reachable(b.childID)
 	if err != nil {
 		return false
@@ -460,16 +474,33 @@ func (b *boundExecutor) homeExecutor() string {
 // calls) and fills in Resolved/Multi on the way out, so the tool wrapper can
 // tell the model which machine served the call.
 //
-// An empty ExecutorRef in the binding's spawn request means "any executor my
-// grant admits", so an implicit call is ambiguous the moment the child can
-// reach more than one: home is NOT a default for tool calls, home included.
+// An implicit call is ambiguous whenever the child's DECLARED set names more
+// than one executor (`all`, or two or more ids), however many of them are
+// connected right now: a member that drops must not turn a call that omitted the
+// target into one that lands on the survivor. Only a child whose set names
+// exactly one executor, or a legacy row resolved through its selector, decides
+// by what it can reach. Home is NOT a default for tool calls, home included.
 func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool, err error) {
 	reach, err := b.binder.Reachable(b.childID)
 	if err != nil {
 		return "", false, err
 	}
-	multi = len(reach) >= 2
 	t := tools.ExecutorTargetFrom(ctx)
+	// The daemon's own internal calls (a prefill read, a skill sync) carry no
+	// target and nobody to ask for one, so only a call that came through the tool
+	// wrapper is held to the declared set.
+	declaredMulti := t != nil && b.binder.DeclaredMulti(b.childID)
+	multi = declaredMulti || len(reach) >= 2
+	if declaredMulti && t.Requested == "" && t.HomeDefault {
+		// A daemon-initiated read of the child's own cwd (the spawn's pre-fill) has
+		// nobody to ask for a target, and the cwd lives on the home executor.
+		if home := b.homeExecutor(); home != "" {
+			if e, ok := matchExecutorRef(home, reach); ok {
+				setTarget(t, b.binder.DisplayName(e.ID), multi)
+				return e.ID, multi, nil
+			}
+		}
+	}
 
 	if t != nil && t.Requested != "" {
 		if e, ok := matchExecutorRef(t.Requested, reach); ok {
@@ -478,6 +509,13 @@ func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool,
 		}
 		t.Multi = multi
 		return "", multi, b.unreachableName(t.Requested, reach)
+	}
+
+	if declaredMulti {
+		if t != nil {
+			t.Multi = true
+		}
+		return "", true, ambiguousTargetError(b.binder, reach)
 	}
 
 	switch {
@@ -495,7 +533,7 @@ func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool,
 		// The only executor this child can use becomes home: it is where the
 		// child's cwd and project tier live. Adopted only once its workspace
 		// exists (see adoptHome).
-		if b.homeExecutor() == "" {
+		if b.homeExecutor() == "" && b.binder.CanBeHome(id) {
 			if aerr := b.adoptHome(ctx, id); aerr != nil {
 				return "", false, aerr
 			}
@@ -506,13 +544,19 @@ func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool,
 	case len(reach) == 1:
 		e := reach[0]
 		home := b.homeExecutor()
+		// An executor installed over ssh is never a home, the same exclusion
+		// spawn-time resolution applies: adoption and migration skip it, and the
+		// call proceeds on it as an ordinary workspace.
+		canHome := b.binder.CanBeHome(e.ID)
 		switch {
 		case home == "":
 			// Adopted only once its workspace exists: a failed first provision
 			// must leave NO home, not a home with nothing behind it that the
 			// next call reports as "pinned there".
-			if aerr := b.adoptHome(ctx, e.ID); aerr != nil {
-				return "", false, aerr
+			if canHome {
+				if aerr := b.adoptHome(ctx, e.ID); aerr != nil {
+					return "", false, aerr
+				}
 			}
 		case home != e.ID:
 			if !mayMigrate(b.binder.WorkspaceMode(home)) {
@@ -521,8 +565,10 @@ func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool,
 			// Ephemeral: the call migrates the child's home to the machine that
 			// is actually there, rather than failing work the operator already
 			// declared movable.
-			if merr := b.migrateHome(ctx, home, e.ID); merr != nil {
-				return "", false, merr
+			if canHome {
+				if merr := b.migrateHome(ctx, home, e.ID); merr != nil {
+					return "", false, merr
+				}
 			}
 		}
 		setTarget(t, b.binder.DisplayName(e.ID), false)
@@ -532,7 +578,18 @@ func (b *boundExecutor) resolve(ctx context.Context) (execID string, multi bool,
 	if t != nil {
 		t.Multi = true
 	}
-	return "", true, fmt.Errorf("this agent can reach %d executors (%s); pass executor: \"<name>\"", len(reach), reachNames(b.binder, reach))
+	return "", true, ambiguousTargetError(b.binder, reach)
+}
+
+// ambiguousTargetError is the refusal of an implicit call by a child that must
+// name its target. It lists what is reachable right now, which may be fewer
+// than the declared set.
+func ambiguousTargetError(binder executorBinder, reach []executors.Executor) error {
+	noun := "executors"
+	if len(reach) == 1 {
+		noun = "executor"
+	}
+	return fmt.Errorf("this agent can reach %d %s (%s); pass executor: \"<name>\"", len(reach), noun, reachNames(binder, reach))
 }
 
 // setTarget fills the tool wrapper's view of a successful resolution. Nil when

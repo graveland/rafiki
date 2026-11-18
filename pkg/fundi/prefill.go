@@ -254,7 +254,7 @@ func (e *Engine) runPrefill(ctx context.Context, history []*conv.Node, st prefil
 			if !ok {
 				continue // classifyPrefill guarantees all tool_use
 			}
-			result, execErr := e.prefillReader().Execute(ctx, "read", tu.Input)
+			result, execErr := e.prefillReader().Execute(tools.WithHomeDefault(ctx), "read", tu.Input)
 			call := prefillCall{id: tu.ID, input: tu.Input, path: prefillInputPath(tu.Input), result: result.Text}
 			if execErr != nil {
 				call.isError = true
@@ -412,7 +412,7 @@ func (e *Engine) readPrefillPath(ctx context.Context, path string, start, end in
 			return nil, fmt.Errorf("prefill: marshal read input for %q: %w", path, err)
 		}
 		call := prefillCall{input: input, path: path, lineStart: offset}
-		result, execErr := reader.Execute(ctx, "read", input)
+		result, execErr := reader.Execute(tools.WithHomeDefault(ctx), "read", input)
 		call.result = result.Text
 		if execErr != nil {
 			call.isError = true
@@ -455,7 +455,7 @@ func (e *Engine) executePrefillGlob(ctx context.Context, entry string) ([]string
 	if err != nil {
 		return nil, fmt.Errorf("prefill: marshal glob input for %q: %w", entry, err)
 	}
-	result, err := e.prefillReader().Execute(ctx, "glob", input)
+	result, err := e.prefillReader().Execute(tools.WithHomeDefault(ctx), "glob", input)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: glob %q: %w", entry, err)
 	}

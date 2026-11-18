@@ -141,6 +141,14 @@ type fakeBinder struct {
 	// ProvisionOn call, so a test can pin which workspaces get the child's cwd.
 	useCwdByExec map[string][]bool
 
+	// declaredMulti backs DeclaredMulti: whether the child's stored set names
+	// several executors, independent of how many are reachable now.
+	declaredMulti bool
+
+	// installed backs CanBeHome: ids of executors installed over ssh, which are
+	// never a home.
+	installed map[string]bool
+
 	// mode/live back WorkspaceMode/IsLive for tests that care about the
 	// pinned/ephemeral policy rather than about wiring up fakeExecs by hand.
 	// live defaults true (see newFakeBinder) so the pre-existing per-id
@@ -348,6 +356,18 @@ func (f *fakeBinder) DisplayName(id string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return shortID(f.machineLocked(id))
+}
+
+func (f *fakeBinder) DeclaredMulti(string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.declaredMulti
+}
+
+func (f *fakeBinder) CanBeHome(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.installed[id]
 }
 
 func (f *fakeBinder) Home(string) string {

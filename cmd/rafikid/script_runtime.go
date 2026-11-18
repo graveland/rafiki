@@ -186,7 +186,7 @@ func (c *Controller) darajaScriptRunner(req protocol.SpawnRequest, childID, owne
 	if req.Script == nil {
 		return nil, errors.New("script kind requires a script spec (repo + script)")
 	}
-	exec, err := c.chooseLaunchExecutor(req, executorOwner{Name: ownerName, UserID: ownerUserID}, protocol.KindScript)
+	exec, err := c.chooseLaunchExecutorFor(req, executorOwner{Name: ownerName, UserID: ownerUserID}, protocol.KindScript, childID)
 	if err != nil {
 		return nil, err
 	}

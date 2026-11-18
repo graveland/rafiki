@@ -126,7 +126,7 @@ func (b *controllerBinder) ownedSandboxExecutor(childID string) (*executors.Exec
 }
 
 // Reachable is every executor childID may call RIGHT NOW, freshly computed from
-// the live pool and the child's stored set — never a cached set. It is the
+// the live pool and the child's stored set, never a cached set. It is the
 // child's OWN executor set intersected with the executors that admit it (owner
 // plus Admits), plus the offline installed members of that set, child-owned
 // sandboxes dropped and sorted. A set changed since the child started takes
@@ -169,6 +169,21 @@ func (b *controllerBinder) Reachable(childID string) ([]executors.Executor, erro
 	}
 	sortCandidates(candidates)
 	return candidates, nil
+}
+
+// DeclaredMulti reports whether the child's stored set names more than one
+// executor. A legacy row (nil set) with a selector reports false: the selector
+// cannot say how many executors it will resolve to, so such a row keeps deciding
+// by what is reachable. A legacy row with no selector meant every executor, which
+// is the set all.
+func (b *controllerBinder) DeclaredMulti(childID string) bool {
+	all, ids, _ := b.c.boundSetSpec(b.req, childID)
+	return all || len(ids) >= 2
+}
+
+// CanBeHome reports whether executorID may become the child's home.
+func (b *controllerBinder) CanBeHome(executorID string) bool {
+	return !b.c.isInstalledExecutor(executorID)
 }
 
 // EnsureConnected makes executorID usable for a call that is about to need it.

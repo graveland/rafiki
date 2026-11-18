@@ -30,6 +30,20 @@ type ExecutorTarget struct {
 	Resolved  string // display name of the executor that served the call
 	Multi     bool   // the agent could reach 2+ executors at resolution time
 	Note      string // one-time note for the first call on a fresh binding, already prefixed
+
+	// HomeDefault is set by the wrapper when the daemon, not the model, made the
+	// call and wants the child's home executor as the default target (a pre-fill
+	// read of the spawn's cwd). Only an omitted `executor` ever reads it.
+	HomeDefault bool
+}
+
+type homeDefaultKey struct{}
+
+// WithHomeDefault marks calls made under ctx as daemon-initiated reads of the
+// child's own working directory: when the child's set names several executors and
+// the call names none, they go to the child's home rather than being refused.
+func WithHomeDefault(ctx context.Context) context.Context {
+	return context.WithValue(ctx, homeDefaultKey{}, true)
 }
 
 type executorTargetKey struct{}
@@ -85,7 +99,8 @@ func (p *executorTargeted) Execute(ctx context.Context, input ToolInput) (ToolRe
 		return ToolResult{}, err
 	}
 
-	t := &ExecutorTarget{Requested: requested}
+	homeDefault, _ := ctx.Value(homeDefaultKey{}).(bool)
+	t := &ExecutorTarget{Requested: requested, HomeDefault: homeDefault}
 	res, err := p.tool.Execute(WithExecutorTarget(ctx, t), ToolInput(rest))
 	if err != nil {
 		// A call that could have gone to several machines must say which one

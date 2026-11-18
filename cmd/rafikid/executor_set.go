@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strings"
@@ -137,6 +139,13 @@ func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner ex
 		yours = childstore.ExecutorSetAll
 	}
 
+	// A selector or an ephemeral spawn PLACES the child on whatever can host it, so
+	// it freezes only executors that are connected or installed over ssh (the
+	// daemon can bring those back). An enrolled executor that is merely offline
+	// is a valid name and a valid default member, but a selector must not freeze
+	// every stale row of the owner that happens to match it.
+	placementRows := c.placementCandidates(parentRows)
+
 	var named []string
 	for _, entry := range req.Executors {
 		if entry = strings.TrimSpace(entry); entry != "" {
@@ -191,7 +200,7 @@ func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner ex
 		if perr != nil {
 			return protocol.SpawnRequest{}, setRefusal("invalid executor selector %q: %s", req.ExecutorSelector, perr)
 		}
-		matched := narrowByWorkspaceMode(executors.Narrow(parentRows, sel), req.WorkspaceMode)
+		matched := narrowByWorkspaceMode(executors.Narrow(placementRows, sel), req.WorkspaceMode)
 		if parentAll {
 			matched = dropSandboxCandidates(matched)
 		}
@@ -201,11 +210,30 @@ func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner ex
 		}
 		sortCandidates(matched)
 		result = idsOf(matched)
+		// A session executor (the transient one `rafiki create` stands up for the
+		// operator's terminal) is placement, never membership: it is evicted when
+		// the terminal closes, so freezing its id would leave the child and its
+		// workers addressing nothing. The child instead keeps the spawner's whole
+		// reach and starts out working on the session executor.
+		if transient := transientRows(matched); len(transient) > 0 {
+			stable := idsOf(dropTransientRows(matched))
+			switch {
+			case parentAll:
+				result = []string{childstore.ExecutorSetAll}
+			case len(stable) > 0:
+				result = stable
+			default:
+				return protocol.SpawnRequest{}, setRefusal("executor selector %q matches only a session executor, which ends with its terminal and cannot be the whole of a set; name a durable executor", req.ExecutorSelector)
+			}
+			if req.HomeExecutor == "" {
+				req.HomeExecutor = transient[0].ID
+			}
+		}
 
 	case req.WorkspaceMode == "ephemeral":
 		// An ephemeral child must keep somewhere to be re-placed when its executor
 		// is lost, so it never gets a single home.
-		eligible := dropSandboxCandidates(narrowByWorkspaceMode(parentRows, "ephemeral"))
+		eligible := dropSandboxCandidates(narrowByWorkspaceMode(placementRows, "ephemeral"))
 		if len(eligible) == 0 {
 			return protocol.SpawnRequest{}, setRefusal("%s",
 				c.explainNoMatch(req, executors.Selector{}, parentRows, childLabels, owner.UserID).Error())
@@ -221,6 +249,45 @@ func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner ex
 
 	req.Executors = result
 	return req, nil
+}
+
+// placementCandidates keeps the rows a selector or an ephemeral spawn may
+// freeze: connected ones and ones installed over ssh.
+func (c *Controller) placementCandidates(rows []executors.Executor) []executors.Executor {
+	live := make(map[string]bool)
+	for _, le := range c.execPool.Live() {
+		live[le.Executor.ID] = true
+	}
+	var out []executors.Executor
+	for _, e := range rows {
+		if live[e.ID] || c.isInstalledExecutor(e.ID) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// transientRows are the session executors in rows: the ones that end with the
+// terminal that started them.
+func transientRows(rows []executors.Executor) []executors.Executor {
+	var out []executors.Executor
+	for _, e := range rows {
+		if e.Labels["kind"] == "session" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// dropTransientRows is rows without the session executors.
+func dropTransientRows(rows []executors.Executor) []executors.Executor {
+	var out []executors.Executor
+	for _, e := range rows {
+		if e.Labels["kind"] != "session" {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // resolvePoolessExecutorSet fixes the set of a spawn on a daemon with no
@@ -293,8 +360,10 @@ func (c *Controller) defaultChildSet(req protocol.SpawnRequest, parentRows []exe
 }
 
 // spawnerCandidateRows is every row the spawner could address before its own
-// set narrows them: the live pool plus the owner's offline installed
-// executors.
+// set narrows them: the live pool plus every other enrolled executor of the
+// owner. A set member that is offline is still a valid name and must survive
+// into a child's set, so reading only live rows would store [] for a spawner
+// whose members are all down.
 func (c *Controller) spawnerCandidateRows(owner executorOwner) []executors.Executor {
 	live := c.execPool.Live()
 	rows := make([]executors.Executor, 0, len(live))
@@ -303,10 +372,34 @@ func (c *Controller) spawnerCandidateRows(owner executorOwner) []executors.Execu
 		rows = append(rows, le.Executor)
 		have[le.Executor.ID] = true
 	}
-	for _, e := range c.offlineInstalledRows(owner) {
+	for _, e := range c.offlineEnrolledRows(owner) {
 		if !have[e.ID] {
 			rows = append(rows, e)
 		}
 	}
 	return rows
+}
+
+// offlineEnrolledRows is the owner's enrolled executors, read from their
+// durable rows. A read failure adds nothing and is logged: a member that cannot
+// be read is simply not offered, and the spawn then refuses it by name.
+func (c *Controller) offlineEnrolledRows(owner executorOwner) []executors.Executor {
+	if c.execStore == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), installLookupTimeout)
+	defer cancel()
+	rows, err := c.execStore.List(ctx)
+	if err != nil {
+		slog.Warn("could not list enrolled executors; only live ones are offered to a new child",
+			"owner", owner.Name, "error", err)
+		return nil
+	}
+	var mine []executors.Executor
+	for _, e := range rows {
+		if e.OwnerUserID == owner.UserID {
+			mine = append(mine, e)
+		}
+	}
+	return mine
 }

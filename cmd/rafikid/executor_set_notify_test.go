@@ -1461,3 +1461,29 @@ func TestOrderingWaitsAreBounded(t *testing.T) {
 	})
 	c.EqDeep([]string{}, setOf(f, "c_kid"), "the removal still took the id out of the set")
 }
+
+// Disable and enable notices honour Admits on the child's labels exactly as the
+// announce does: a child the executor never admitted is not told it was
+// switched off or on.
+func TestDisableAndEnableNoticesHonourAdmitsAgainstTheChildsLabels(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := newInstallFixture(t)
+	log := attachSteerLog(f.ctrl)
+	seedSetExecutor(f, "exec-A", "alpha", installTestOwner)
+	row := f.execs.execs["exec-A"]
+	row.Admits = "owner=" + installTestOwnerName
+	f.execs.execs["exec-A"] = row
+	f.ctrl.seedAnnouncedExecutors(context.Background())
+	seedSetChild(t, f, "c_in", installTestOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
+	seedSetChild(t, f, "c_out", installTestOwner, protocol.StatusIdle, []string{childstore.ExecutorSetAll})
+	c.Require().NoError(f.ctrl.st.Update("c_out", func(s *childstore.Session) { s.Labels["owner"] = "someone-else" }), "relabel")
+
+	c.Require().NoError(f.ctrl.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: "exec-A"}), "disable")
+	row = f.execs.execs["exec-A"]
+	row.Enabled = false
+	f.execs.execs["exec-A"] = row
+	c.Require().NoError(f.ctrl.ExecutorEnable(protocol.ExecutorEnableRequest{ExecutorID: "exec-A"}), "enable")
+
+	c.EqDeep([]string{executorDisabledNotice("alpha"), executorEnabledNotice("alpha")}, log.of("c_in"), "the admitted child hears both")
+	c.Empty(log.of("c_out"), "a child the executor does not admit hears neither")
+}

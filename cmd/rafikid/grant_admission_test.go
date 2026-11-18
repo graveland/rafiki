@@ -79,7 +79,7 @@ func TestNoMatchingExecutorFailsImmediately(t *testing.T) {
 	ck.Error(err, "a selector that matches nothing must refuse the spawn")
 	ck.StrContains(err.Error(), "no executor satisfies", "refusal text")
 	ck.Eq("", got.ChildID, "no child may be created")
-	// The refusal is fast — it neither waits for an executor to appear nor
+	// The refusal is fast: it neither waits for an executor to appear nor
 	// blocks on selection failure. This fixture wires a fake pool and no
 	// executor store, so the waits a regression would have to introduce are
 	// ones it adds itself; the bound is set well below the waits the real

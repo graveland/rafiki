@@ -258,7 +258,16 @@ func dropChildOwnedSandboxes(candidates []executors.Executor) []executors.Execut
 // executor will accept, so a lying executor can only be chosen from a set its
 // admission selector already admitted — never a way to widen it.
 func (c *Controller) chooseLaunchExecutor(req protocol.SpawnRequest, owner executorOwner, launchKind string) (executors.Executor, error) {
-	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, owner)
+	return c.chooseLaunchExecutorFor(req, owner, launchKind, "")
+}
+
+// chooseLaunchExecutorFor is chooseLaunchExecutor for a child that may already
+// have a row: childID names it, so its stored set, its legacy selector and its
+// row labels are read. A relaunch (resume, respawn) that passed no id would see
+// only the request, which carries no set for a row written before sets existed,
+// and so address nothing.
+func (c *Controller) chooseLaunchExecutorFor(req protocol.SpawnRequest, owner executorOwner, launchKind, childID string) (executors.Executor, error) {
+	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidatesFor(req, owner, childID)
 	if err != nil {
 		return executors.Executor{}, err
 	}
@@ -457,6 +466,14 @@ func executorAdmitsChild(e executors.Executor, childLabels map[string]string, ow
 	if e.OwnerUserID != ownerUserID {
 		return false
 	}
+	return executorAdmitsLabels(e, childLabels)
+}
+
+// executorAdmitsLabels is the executor's own Admits selector read against a
+// child's labels, without the Enabled and owner checks. A notice about an
+// executor that was just switched off still has to ask whether the child was
+// ever meant to use it.
+func executorAdmitsLabels(e executors.Executor, childLabels map[string]string) bool {
 	admits, err := executors.ParseSelector(e.Admits)
 	if err != nil {
 		// A malformed admission selector must EXCLUDE, never admit. An operator

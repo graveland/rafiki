@@ -187,3 +187,27 @@ func TestEnsureThreadChildInheritsExecutorSet(t *testing.T) {
 		})
 	}
 }
+
+// A legacy parent (nil set) is read through its selector, so its native
+// subagent must carry the selector too: with the set alone it would resolve to
+// "every executor of the owner" and escape the parent's placement.
+func TestEnsureThreadChildOfALegacyParentResolvesLikeTheParent(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_legacy", Kind: protocol.KindClaude, Status: protocol.StatusIdle,
+		ExecutorSelector: "machine=a",
+	})
+	ck.Require().NoError(c.EnsureThreadChild("c_legacy", "thread-a", ""), "EnsureThreadChild")
+	parent, _ := c.st.Get("c_legacy")
+	thread, ok := c.st.Get(threadChildID("c_legacy", "thread-a"))
+	ck.Require().True(ok, "row")
+
+	pAll, pIDs, pSel := childstore.ResolveSetSpec(parent.ExecutorSet, parent.ExecutorSelector)
+	tAll, tIDs, tSel := childstore.ResolveSetSpec(thread.ExecutorSet, thread.ExecutorSelector)
+	ck.Eq(pAll, tAll, "all")
+	ck.EqDeep(pIDs, tIDs, "ids")
+	ck.Eq("machine=a", tSel, "the subagent resolves through the parent's selector")
+	ck.Eq(pSel, tSel, "selector")
+	ck.False(tAll, "a legacy parent with a selector never becomes all for its subagent")
+}

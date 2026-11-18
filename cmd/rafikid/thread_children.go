@@ -100,8 +100,11 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 		SkipDerivedIndex: parent.SkipDerivedIndex,
 		// Copied, never left nil: nil is a legacy row, which resolves to every
 		// executor of the owner, so a subagent of a restricted parent would escape.
-		ExecutorSet: slices.Clone(parent.ExecutorSet),
-		Labels:      labels,
+		// A legacy parent's nil set is read through its selector, so the selector
+		// travels with it and the subagent resolves exactly as the parent does.
+		ExecutorSet:      slices.Clone(parent.ExecutorSet),
+		ExecutorSelector: parent.ExecutorSelector,
+		Labels:           labels,
 	})
 
 	// The native twin of a real Spawn's child_spawned (controller.go). Without

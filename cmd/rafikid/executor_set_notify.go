@@ -616,7 +616,8 @@ func (c *Controller) announceIfNew(executorID string) {
 // noticeExecutorEnabledLocked tells every live `all` agent of the executor's
 // owner that the owner switched it off or on. The caller holds the executor's
 // ordering lock, which is what keeps two transitions from duplicating or
-// reordering their notices. No set changes: admission already excludes a
+// reordering their notices. A child the executor does not admit is not told,
+// as in announceIfNew. No set changes: admission already excludes a
 // disabled executor, and enabling restores it.
 func (c *Controller) noticeExecutorEnabledLocked(e executors.Executor, enabled bool) {
 	if c.st == nil || isSandboxRow(e) {
@@ -628,6 +629,9 @@ func (c *Controller) noticeExecutorEnabledLocked(e executors.Executor, enabled b
 		msg = executorEnabledNotice(name)
 	}
 	for _, snap := range c.allSetRecipients(e.OwnerUserID) {
+		if !executorAdmitsLabels(e, snap.Labels) {
+			continue
+		}
 		c.sendSteer(snap.ChildID, msg)
 	}
 }
