@@ -6741,7 +6741,13 @@ func (c *Controller) ExecutorDisable(req protocol.ExecutorDisableRequest) error 
 	if err != nil {
 		return err
 	}
-	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, false))
+	if err := translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, false)); err != nil {
+		return err
+	}
+	if e.Enabled {
+		c.noticeExecutorEnabled(e, false)
+	}
+	return nil
 }
 
 // ExecutorEnable re-enables a disabled executor.
@@ -6753,7 +6759,13 @@ func (c *Controller) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
 	if err != nil {
 		return err
 	}
-	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, true))
+	if err := translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, true)); err != nil {
+		return err
+	}
+	if !e.Enabled {
+		c.noticeExecutorEnabled(e, true)
+	}
+	return nil
 }
 
 // ExecutorDelete permanently removes an executor row. Unlike disable, this
@@ -6795,7 +6807,13 @@ func (c *Controller) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
 			}
 		}
 	}
-	return translateExecutorErr(c.execStore.Delete(context.Background(), e.ID))
+	if err := translateExecutorErr(c.execStore.Delete(context.Background(), e.ID)); err != nil {
+		return err
+	}
+	// The row is gone, so what decides whose set shrinks and who is told (owner,
+	// name, labels) comes from the row read above.
+	c.removeFromExecutorSets(e.ID, e.OwnerUserID, installNameOf(e), e.Labels)
+	return nil
 }
 
 // executorRefMinLen is the shortest trailing fragment resolveExecutorRef will

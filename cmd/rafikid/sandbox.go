@@ -861,6 +861,9 @@ func (c *Controller) removeSandboxRow(ctx context.Context, row sandbox.Row) erro
 				return err
 			}
 		}
+		// A spawn-block sandbox is a member of its child's set, so its removal
+		// takes it out of that set and tells the child.
+		c.removeSandboxFromExecutorSets(row)
 	}
 	return c.sandboxStore.MarkRemoved(ctx, row.ID, time.Now())
 }
