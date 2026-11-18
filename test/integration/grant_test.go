@@ -292,23 +292,22 @@ func (g *grantDaemon) enrollExecutorExtra(t *testing.T, labels map[string]string
 // waitForLiveExecutors polls until the daemon's pool reports n live executors.
 //
 // The live set is only observable through selection, so this drives a throwaway
-// spawn whose selector matches nothing and reads the count out of that spawn's
-// warnings. Such a spawn no longer FAILS — a child that cannot bind starts
-// unbound — so the same authored text selection has always produced
-// ("N live executor(s), …") now rides SpawnResponse.warnings instead of a
-// Connect error, and it is the warning (never "any spawn succeeded") that ends
-// the wait: a spawn that reports no count keeps polling until the deadline.
+// spawn whose selector matches nothing and reads the count out of the
+// refusal: a selector that matches no executor in the spawner's set is refused
+// at spawn, and the refusal carries selection's own authored text ("N live
+// executor(s), …"). It is that count (never "the spawn failed") that ends the
+// wait: a spawn that reports no count keeps polling until the deadline.
 func (g *grantDaemon) waitForLiveExecutors(t *testing.T, want int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		resp, err := g.grantSpawnResp(t, "", "env=definitely-not-a-match", "anthropic/claude-x")
+		if spawnReportsLiveCount(resp.GetWarnings(), err, want) {
+			return
+		}
 		if err == nil {
-			if warningsMentionLiveCount(resp.GetWarnings(), want) {
-				return
-			}
-			// The probe child has served its purpose and is unbound anyway;
-			// stop it so a long wait does not accumulate children.
+			// A probe that was not refused matched something; it has served its
+			// purpose, so stop it rather than accumulate children.
 			killChildren(t, g.control(t), resp.GetChildId())
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -316,13 +315,17 @@ func (g *grantDaemon) waitForLiveExecutors(t *testing.T, want int) {
 	t.Fatalf("executors never became live (%d expected)", want)
 }
 
-// warningsMentionLiveCount reports whether any spawn warning carries selection's
-// live-executor count for want. explainNoMatch's authored text is
+// spawnReportsLiveCount reports whether a probe spawn's refusal (or, for a spawn
+// that started unbound, any warning) carries selection's live-executor count for
+// want. explainNoMatch's authored text is
 // "N live executor(s), M in your parent's set: …", so an off-by-one in the pool
-// still fails a wait that wanted exactly N — the count is asserted, not
-// "some warning exists".
-func warningsMentionLiveCount(warnings []string, want int) bool {
+// still fails a wait that wanted exactly N: the count is asserted, not "some
+// error or warning exists".
+func spawnReportsLiveCount(warnings []string, err error, want int) bool {
 	needle := fmt.Sprintf("%d live executor(s)", want)
+	if err != nil {
+		return strings.Contains(err.Error(), needle)
+	}
 	for _, w := range warnings {
 		if strings.Contains(w, needle) {
 			return true
@@ -385,17 +388,13 @@ func TestGrant_NativeNarrowing(t *testing.T) {
 	coordID, err := g.grantSpawn(t, "", "env=home", "anthropic/claude-x")
 	c.NoError(err, "coordinator spawn failed")
 
-	// A worker under the coordinator naming env=work starts UNBOUND: a
-	// parented child whose selector matches no live executor in its
-	// effective set may wait for one to connect, because an executor
-	// restart parks its connection for a full health tick and surviving
-	// that window is what lazy binding exists for.
-	unboundID, err := g.grantSpawn(t, coordID, "env=work", "anthropic/claude-x")
-	c.NoError(err, "a parented worker with no matching executor must "+
-		"start unbound, not be refused: %v", err)
-	unboundSummary := getChild(t, g.control(t), unboundID)
-	c.Eq("unbound", unboundSummary.GetLabels()["rafiki/executor-state"], "the worker outside its parent's set must carry "+
-		"rafiki/executor-state=unbound, got labels=%v", unboundSummary.GetLabels())
+	// A worker under the coordinator naming env=work is REFUSED: the selector is
+	// resolved once, at spawn, against the coordinator's set, and nothing in
+	// that set matches, so the worker would hold an empty set. The refusal
+	// names the spawner's set as the reason.
+	_, err = g.grantSpawn(t, coordID, "env=work", "anthropic/claude-x")
+	c.Require().Error(err, "a worker outside its parent's set must be refused")
+	c.StrContains(err.Error(), "executor set", "the refusal must name the executor set: %v", err)
 
 	// A worker naming env=home — inside the set — lands, and the child's
 	// store record carries the executor it landed on (the same label phase 09

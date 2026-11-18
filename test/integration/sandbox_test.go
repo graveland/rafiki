@@ -148,20 +148,19 @@ func (h *sandboxHarness) startLauncher(t *testing.T) {
 }
 
 // waitLiveExecutors polls until the pool reports want live executors, read from
-// a throwaway empty-selector spawn's warnings: the pool's live set is only
-// observable through selection, and a spawn that cannot bind (this one has no
-// selector and, at 2+, no home) starts unbound, carrying selection's
-// "N live executor(s)" text in SpawnResponse.warnings instead of an error.
-// Only that count ends the wait; any other successful spawn keeps polling.
+// a throwaway spawn whose selector matches nothing: the pool's live set is only
+// observable through selection, and the refusal carries selection's
+// "N live executor(s)" text. Only that count ends the wait; any other result
+// keeps polling.
 func (h *sandboxHarness) waitLiveExecutors(t *testing.T, want int) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		resp, err := h.spawnResp(t, spawnOpts{selector: "env=definitely-not-a-match"})
+		if spawnReportsLiveCount(resp.GetWarnings(), err, want) {
+			return
+		}
 		if err == nil {
-			if warningsMentionLiveCount(resp.GetWarnings(), want) {
-				return
-			}
 			// Probe children are throwaway; do not accumulate them.
 			h.killChild(resp.GetChildId())
 		}
@@ -754,8 +753,8 @@ func TestSandboxSpawnBlockScopes(t *testing.T) {
 	c.Error(err, "an unrelated child must not reach a child-owned sandbox by machine name")
 	c.StrContains(err.Error(), h.executorMachine(t, row.GetExecutorId()),
 		"the refusal names the machine it refused")
-	c.StrContains(err.Error(), "exists but is not usable",
-		"the refusal is the not-usable one, meaning the sandbox was found but excluded")
+	c.StrContains(err.Error(), "is not in your executor set",
+		"the refusal says the sandbox is outside the spawner's set: a spawner's reach never includes another child's sandbox")
 	control := h.mustSpawn(t, spawnOpts{ref: "launcher"})
 	c.NotEq("", h.labelsOf(t, control)["rafiki/executor"],
 		"a ref naming the launcher succeeds — the control for the refusal above")

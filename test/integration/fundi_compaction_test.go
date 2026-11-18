@@ -858,8 +858,8 @@ func startLocalExecutor(t *testing.T, d *daemon, dsn, root string) {
 	})
 
 	// The live set is only observable through selection: a throwaway spawn
-	// naming a selector nothing matches starts UNBOUND (it is not refused) and
-	// carries the pool's live count in its warnings, which is what this reads.
+	// naming a selector nothing matches is refused, and the refusal carries the
+	// pool's live count, which is what this reads.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -870,10 +870,14 @@ func startLocalExecutor(t *testing.T, d *daemon, dsn, root string) {
 			ExecutorSelector: "env=definitely-not-a-match",
 		}))
 		cancel()
+		var warnings []string
 		if err == nil {
-			if warningsMentionLiveCount(resp.Msg.GetWarnings(), 1) {
-				return
-			}
+			warnings = resp.Msg.GetWarnings()
+		}
+		if spawnReportsLiveCount(warnings, err, 1) {
+			return
+		}
+		if err == nil {
 			// The probe child is throwaway; do not accumulate them.
 			killChildren(t, d.control(t), resp.Msg.GetChildId())
 		}
