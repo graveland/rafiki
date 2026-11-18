@@ -109,8 +109,8 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"operator declared, and what happens if that executor is lost. " +
 					"\"ephemeral\": only executors marked ephemeral (operator-declared " +
 					"reconstructible, e.g. disposable containers each carrying their own " +
-					"checkout); if its executor is lost the daemon re-binds the agent onto " +
-					"another member of its set. \"pinned\": only executors marked pinned (the default); if " +
+					"checkout); if its executor is lost the agent keeps running, and its home " +
+					"moves to the surviving member of its set that a later call names (the daemon never picks one). \"pinned\": only executors marked pinned (the default); if " +
 					"its executor is lost the agent KEEPS RUNNING — calls to that machine fail " +
 					"until it reconnects, and the workspace there is re-provisioned when it " +
 					"does, so anything uncommitted on that machine may be gone. Neither mode " +

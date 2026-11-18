@@ -134,10 +134,19 @@ the executors in it.
   (or a copy of the spawner's set when that home cannot launch the child's
   kind). A top-level spawn (CLI, cockpit, MCP client) defaults to `all`, and
   the session executor default (`rafiki create` without flags) only picks where
-  the child is placed: the child's set is still `all`. Installed executors are
+  the child is placed: the child's set is still `all`. That is a limit, not
+  an oversight: a selector that matches a session executor under an `all`
+  spawner stores `all`, so a user who wants a finite set names it with
+  `executors`. A session executor ends with its terminal, so its id is never
+  stored in any set: a worker spawned with no executor from a child homed on it
+  gets `all` (or its spawner's set without the session executor, and a refusal
+  when nothing durable is left). Under a spawner whose set is finite, a
+  selector that matches a session executor stores only the durable matches and
+  the child's home is chosen within them. Installed executors are
   never a lazy home. Spawn resolution counts enrolled executors that are
-  offline, so naming one that is not connected still succeeds. Disable and
-  enable notices reach only the agents whose set admits the executor.
+  offline, so naming one that is not connected still succeeds. Enroll,
+  disable, enable and removal notices to `all` agents reach only the agents
+  whose labels the executor's own `Admits` selector accepts.
   `rafiki create --executors a,b` (comma-separated or repeated; exclusive with
   `--executor-selector` and with `-i`) names a set, and the Python SDK's
   `spawn(executors=[...])` does the same.
@@ -154,7 +163,9 @@ the executors in it.
   because an argument was forgotten.
 - **A selector picks placement.** `executor` given a label selector
   (`os=linux`) is matched at spawn against the spawner's set, and every
-  matching member is frozen into the child's set. A selector that matches
+  matching member that is connected or installed over ssh is frozen into the
+  child's set (an enrolled executor that is merely offline is not, so a selector
+  never freezes stale rows). A selector that matches
   nothing in the spawner's set refuses the spawn. The frozen set is what the
   child may address, and the selector never grants an executor the spawner
   could not address. A selector still places within the set: it is matched
@@ -529,10 +540,14 @@ Each child gets a workspace provisioned before it starts and released when it
 exits, at the child's cwd.
 
 - **ephemeral** — the operator declares these machines interchangeable; if
-  the executor is lost, the child's home moves to another member of its own
-  set. Re-placement never makes an ambiguous set implicit: a child whose set
-  is `all` or names two or more executors still has to name one on every
-  call, and only a set with exactly one member needs no argument.
+  the executor is lost, the child keeps running and the set is untouched. The
+  child's home (where its cwd and project tier live) moves the next time a
+  call names a surviving member of its set: that member becomes the new home.
+  Nothing moves it implicitly. A child whose set is `all` or names two or more
+  executors still has to name one on every call, and only a set with exactly
+  one member needs no argument. Until a call names a surviving member, the
+  daemon's own reads of the home (project context, skills, the spawn pre-fill)
+  fail because the home is gone.
 - **pinned** — the executor exposes an existing tree. Losing it never ends the
   child: calls to that executor fail until it reconnects, and the workspace is
   re-provisioned only on that same executor when it returns.
