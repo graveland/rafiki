@@ -67,7 +67,6 @@ ON CONFLICT (child_id) DO UPDATE SET
     exit_signal       = EXCLUDED.exit_signal,
     executor_selector = EXCLUDED.executor_selector,
     workspace_mode    = EXCLUDED.workspace_mode,
-    executor_set      = EXCLUDED.executor_set,
     max_depth         = EXCLUDED.max_depth,
     max_cost          = EXCLUDED.max_cost,
     max_children      = EXCLUDED.max_children,
@@ -89,6 +88,10 @@ ON CONFLICT (child_id) DO UPDATE SET
 // leave a row that exists, updates, and is never returned by List — invisible
 // to recovery and to rafiki list, with nothing to observe. Child ids are ULIDs
 // and are never reused, so this is defensive rather than a path anything takes.
+//
+// executor_set is deliberately absent from the conflict update: a fresh row
+// gets it from the INSERT and every later change goes through SetExecutorSet,
+// so a full-row write built from a stale snapshot can never undo a set update.
 //
 // The two COALESCEs are load-bearing. last_status is written once, by the exit
 // path, and an ordinary status write must not blank it or the recovery

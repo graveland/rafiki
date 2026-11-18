@@ -65,3 +65,30 @@ func TestSetExecutorSetNeverReopensAClosedRow(t *testing.T) {
 
 	c.NoError(s.SetExecutorSet(ctx, "c_missing_"+id, []string{"A"}), "a missing row is a no-op")
 }
+
+// TestFullRowUpsertNeverUndoesASetUpdate is the stale-snapshot regression: a
+// full-row write built before a set update must leave the updated set alone,
+// because the column is written by the INSERT of a fresh row and by
+// SetExecutorSet afterwards, never by the conflict branch of the upsert.
+func TestFullRowUpsertNeverUndoesASetUpdate(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := New(testPool(t))
+	ctx := context.Background()
+
+	id := "c_setstale_" + time.Now().Format("150405.000000")
+	t.Cleanup(func() { _ = s.Delete(ctx, id) })
+	stale := childstore.ChildRecord{
+		ChildID: id, Kind: protocol.KindFundi, Status: string(protocol.StatusIdle),
+		SpawnedAt: time.Now(), ExecutorSet: []string{"A", "B"},
+	}
+	c.Require().NoError(s.Upsert(ctx, stale), "fresh row")
+	c.EqDeep([]string{"A", "B"}, findRecord(t, s, id).ExecutorSet, "the INSERT writes the set")
+
+	c.Require().NoError(s.SetExecutorSet(ctx, id, []string{"A"}), "set update")
+	stale.Status = string(protocol.StatusStreaming)
+	c.Require().NoError(s.Upsert(ctx, stale), "stale full-row write")
+
+	got := findRecord(t, s, id)
+	c.EqDeep([]string{"A"}, got.ExecutorSet, "the stale snapshot must not undo the set update")
+	c.Eq(string(protocol.StatusStreaming), got.Status, "the rest of the row is still written")
+}
