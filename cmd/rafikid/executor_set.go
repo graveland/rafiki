@@ -115,15 +115,22 @@ func executorDisplayNames(rows []executors.Executor) string {
 // daemon chooses", so re-resolving it would widen a stored empty or legacy set.
 func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner executorOwner) (protocol.SpawnRequest, error) {
 	if c.execPool == nil {
-		return req, nil
+		return c.resolvePoolessExecutorSet(req)
 	}
 
+	// Admits is read against the CHILD's labels, the same ones Reachable and
+	// ChooseFor read, so the set stored here is one reach will not then refuse.
 	childLabels := c.admissionLabels(req, owner)
 	rows := c.spawnerCandidateRows(owner)
 	parentRows, err := c.effectiveExecutorSetOver(rows, req.ParentChildID, childLabels, owner.UserID)
 	if err != nil {
 		return protocol.SpawnRequest{}, err
 	}
+	// Only what the spawner's reach covers can be handed on, and its reach never
+	// includes another child's sandbox. An operator's own sandbox stays
+	// nameable: a spawner may name it explicitly, but a selector or a default
+	// never lands a child on one when the spawner holds "all".
+	parentRows = dropChildOwnedSandboxes(parentRows)
 	parentAll, _, _ := c.executorSetSpec(req.ParentChildID)
 	yours := executorDisplayNames(parentRows)
 	if parentAll {
@@ -176,18 +183,24 @@ func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner ex
 		}
 
 	case strings.TrimSpace(req.ExecutorSelector) != "":
-		// req.Executors is not resolved yet, so this narrows the spawner's set by
-		// the selector alone; every match is frozen into the child's set.
-		probe := req
-		probe.Executors = nil
-		candidates, parentSet, labels, sel, nerr := c.narrowedExecutorCandidates(probe, owner)
-		if nerr != nil {
-			return protocol.SpawnRequest{}, setRefusal("%s", nerr.Error())
+		// Every spawner-set member that matches, offline installed ones included,
+		// is frozen into the child's set: an offline member is still a name the
+		// child can call, so it must not be dropped or turn the spawn into a
+		// refusal. Only a selector that matches nothing anywhere refuses.
+		sel, perr := executors.ParseSelector(req.ExecutorSelector)
+		if perr != nil {
+			return protocol.SpawnRequest{}, setRefusal("invalid executor selector %q: %s", req.ExecutorSelector, perr)
 		}
-		if len(candidates) == 0 {
-			return protocol.SpawnRequest{}, setRefusal("%s", c.explainNoMatch(probe, sel, parentSet, labels, owner.UserID).Error())
+		matched := narrowByWorkspaceMode(executors.Narrow(parentRows, sel), req.WorkspaceMode)
+		if parentAll {
+			matched = dropSandboxCandidates(matched)
 		}
-		result = idsOf(candidates)
+		if len(matched) == 0 {
+			return protocol.SpawnRequest{}, setRefusal("%s",
+				c.explainNoMatch(req, sel, parentRows, childLabels, owner.UserID).Error())
+		}
+		sortCandidates(matched)
+		result = idsOf(matched)
 
 	case req.WorkspaceMode == "ephemeral":
 		// An ephemeral child must keep somewhere to be re-placed when its executor
@@ -207,6 +220,50 @@ func (c *Controller) resolveSpawnExecutorSet(req protocol.SpawnRequest, owner ex
 	}
 
 	req.Executors = result
+	return req, nil
+}
+
+// resolvePoolessExecutorSet fixes the set of a spawn on a daemon with no
+// executor pool. Nothing can be verified against a live or installed executor
+// there, so the child inherits its spawner's STORED set (every set is
+// ["all"] at the top level) and any request to name one is refused. A fresh
+// spawn never stores nil: a nil set reads as a legacy row that addresses
+// every executor its owner has, which a pool enabled later would honour.
+func (c *Controller) resolvePoolessExecutorSet(req protocol.SpawnRequest) (protocol.SpawnRequest, error) {
+	all, ids, selector := c.executorSetSpec(req.ParentChildID)
+	if req.ParentChildID != "" {
+		if _, ok := c.st.Get(req.ParentChildID); !ok {
+			return protocol.SpawnRequest{}, setRefusal("cannot read the executor set of parent %s: its row is not in the store", req.ParentChildID)
+		}
+	}
+
+	var named []string
+	for _, entry := range req.Executors {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			named = append(named, entry)
+		}
+	}
+	switch {
+	case len(named) == 1 && named[0] == childstore.ExecutorSetAll:
+		if !all {
+			return protocol.SpawnRequest{}, setRefusal(`"all" is available only to an agent whose own executor set is all`)
+		}
+	case len(named) > 0 || req.ExecutorRef != "" || strings.TrimSpace(req.ExecutorSelector) != "":
+		return protocol.SpawnRequest{}, setRefusal("this daemon has no executor pool, so a named executor cannot be verified; omit the executor to inherit the spawner's set")
+	}
+
+	switch {
+	case all:
+		req.Executors = []string{childstore.ExecutorSetAll}
+	case strings.TrimSpace(selector) != "":
+		// A legacy selector cannot be written as ids without a pool to resolve it.
+		req.Executors = []string{}
+	default:
+		req.Executors = slices.Clone(ids)
+		if req.Executors == nil {
+			req.Executors = []string{}
+		}
+	}
 	return req, nil
 }
 

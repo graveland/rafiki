@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi"
@@ -68,7 +69,7 @@ func TestWorkspaceModeNarrowsSelection(t *testing.T) {
 	ephemeral.Executor.WorkspaceMode = "ephemeral"
 
 	c := selectFixture(t, "env=home", pinned, ephemeral)
-	req := protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=home"}
+	req := protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent", ExecutorSelector: "env=home"}
 
 	req.WorkspaceMode = "ephemeral"
 	chosen, err := c.chooseExecutor(req, executorOwner{})
@@ -89,7 +90,7 @@ func TestSelectionIgnoresTheSelfReportedWorkspaceMode(t *testing.T) {
 	liar.Describe = describeClaiming("ephemeral")
 
 	c := selectFixture(t, "env=home", liar)
-	_, err := c.chooseExecutor(protocol.SpawnRequest{
+	_, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: "env=home", WorkspaceMode: "ephemeral",
 	}, executorOwner{})
 	assert.NewAborting(t).Error(err, "an executor whose ROW says pinned attracted an ephemeral child by claiming ephemeral in Describe")

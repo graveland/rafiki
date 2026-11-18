@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/sandbox"
@@ -41,7 +42,7 @@ func TestSandboxSelectionEmptySelectorNeverPicksASandbox(t *testing.T) {
 	// The sandbox is the ONLY row, so absent the rule it would be candidates[0]
 	// and be picked.
 	only := selectFixture(t, "", sandboxEx("aaa-sbx", "", map[string]string{"env": "home"}))
-	_, err := only.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	_, err := only.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{})
 	ck.Error(err, "an empty selector must never implicitly pick a sandbox")
 
 	// With an ordinary executor also present, the ordinary one wins.
@@ -49,7 +50,7 @@ func TestSandboxSelectionEmptySelectorNeverPicksASandbox(t *testing.T) {
 		sandboxEx("aaa-sbx", "", map[string]string{"env": "home"}),
 		ex("zzz-ordinary", map[string]string{"env": "home"}, ""),
 	)
-	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{})
 	ck.Require().NoError(err, "an ordinary executor is present and must be chosen")
 	ck.Eq("zzz-ordinary", chosen.ID, "empty selector must pick the ordinary executor")
 }
@@ -62,26 +63,33 @@ func TestSandboxSelectionBroadSelectorPrefersOrdinaryExecutors(t *testing.T) {
 		sandboxEx("aaa-sbx", "", map[string]string{"owner": "brent", "env": "home"}),
 		ex("zzz-ordinary", map[string]string{"owner": "brent", "env": "home"}, ""),
 	)
-	chosen, err := c.chooseExecutor(protocol.SpawnRequest{
+	chosen, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: "owner=brent",
 	}, executorOwner{Name: "brent"})
 	ck.Require().NoError(err, "both rows match owner=brent")
 	ck.Eq("zzz-ordinary", chosen.ID, "a broad selector must prefer an ordinary executor over a sandbox")
 }
 
-// A selector that NAMES a sandbox's machine still reaches it: the prohibition is
-// on IMPLICIT choice, not on explicitly asking for one.
+// A set that NAMES a sandbox reaches it by selector: the prohibition is on
+// IMPLICIT choice and on "all", not on a set that explicitly holds one. The
+// same selector under an "all" set never reaches it (R5: all never reaches a
+// sandbox, the selector only places the child among what all can reach).
 func TestSandboxSelectionExplicitMachineSelectorReachesANamedSandbox(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "",
 		sandboxEx("aaa-sbx", "", map[string]string{"machine": "greyshift"}),
 		ex("zzz-ordinary", map[string]string{"machine": "silvershift"}, ""),
 	)
-	chosen, err := c.chooseExecutor(protocol.SpawnRequest{
+	chosen, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{"aaa-sbx"},
 		ParentChildID: "c_parent", ExecutorSelector: "machine=greyshift",
 	}, executorOwner{})
 	ck.Require().NoError(err, "machine=greyshift names the sandbox explicitly")
-	ck.Eq("aaa-sbx", chosen.ID, "an explicit machine selector must reach a named sandbox")
+	ck.Eq("aaa-sbx", chosen.ID, "a set naming the sandbox and a selector for it must reach it")
+
+	_, err = c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
+		ParentChildID: "c_parent", ExecutorSelector: "machine=greyshift",
+	}, executorOwner{})
+	ck.Error(err, "an all set must never reach a sandbox, whatever the selector says")
 }
 
 // A child-owned sandbox is never an ordinary candidate: not by implicit choice,
@@ -91,12 +99,12 @@ func TestSandboxSelectionChildOwnedNeverACandidate(t *testing.T) {
 
 	// Alone: an empty selector is refused (the child-owned row is dropped).
 	only := selectFixture(t, "", childOwnedSandboxEx("aaa-sbx", "c_parent", map[string]string{"env": "home"}))
-	_, err := only.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	_, err := only.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{})
 	ck.Error(err, "a child-owned sandbox must never be an implicit candidate")
 
 	// Alone: a broad selector that matches it is still refused.
 	only2 := selectFixture(t, "", childOwnedSandboxEx("aaa-sbx", "c_parent", map[string]string{"owner": "brent"}))
-	_, err = only2.chooseExecutor(protocol.SpawnRequest{
+	_, err = only2.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: "owner=brent",
 	}, executorOwner{Name: "brent"})
 	ck.Error(err, "a child-owned sandbox must never be reached by a selector")
@@ -106,7 +114,7 @@ func TestSandboxSelectionChildOwnedNeverACandidate(t *testing.T) {
 		childOwnedSandboxEx("aaa-sbx", "c_parent", map[string]string{"owner": "brent"}),
 		ex("zzz-ordinary", map[string]string{"owner": "brent"}, ""),
 	)
-	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{
+	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: "owner=brent",
 	}, executorOwner{Name: "brent"})
 	ck.Require().NoError(err, "the ordinary row must serve the spawn")
@@ -120,7 +128,7 @@ func TestSandboxSelectionChildOwnedNeverReachedByExplicitRef(t *testing.T) {
 	c := selectFixture(t, "",
 		childOwnedSandboxEx("sbx", "c_parent", map[string]string{"machine": "greyshift"}),
 	)
-	_, err := c.chooseExecutor(protocol.SpawnRequest{
+	_, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorRef: "greyshift",
 	}, executorOwner{})
 	ck.Error(err, "an explicit ref naming a child-owned sandbox's machine must be refused")
@@ -134,7 +142,7 @@ func TestSandboxSelectionNeverPicksASandboxWhitespaceOrEmptyKey(t *testing.T) {
 	// promoteBareExecutorRef it would match everything — including a sandbox-only
 	// set. The implicit-sandbox drop must treat it as unnamed.
 	ws := selectFixture(t, "", sandboxEx("aaa-sbx", "", map[string]string{"env": "home"}))
-	_, err := ws.chooseExecutor(protocol.SpawnRequest{
+	_, err := ws.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: " ",
 	}, executorOwner{})
 	ck.Error(err, "a whitespace-only selector must not implicitly pick a sandbox")
@@ -143,14 +151,14 @@ func TestSandboxSelectionNeverPicksASandboxWhitespaceOrEmptyKey(t *testing.T) {
 	// (fail closed): alone it is refused, and with an ordinary row it does not
 	// shadow it.
 	only := selectFixture(t, "", ex("aaa-sbx", map[string]string{sandbox.RowLabelSandbox: ""}, ""))
-	_, err = only.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	_, err = only.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{})
 	ck.Error(err, "a present-but-empty sandbox label must still exclude the row")
 
 	mixed := selectFixture(t, "",
 		ex("aaa-sbx", map[string]string{sandbox.RowLabelSandbox: "", "env": "home"}, ""),
 		ex("zzz-ordinary", map[string]string{"env": "home"}, ""),
 	)
-	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{})
 	ck.Require().NoError(err, "the ordinary row must serve the spawn")
 	ck.Eq("zzz-ordinary", chosen.ID, "an empty sandbox value must still be treated as a sandbox")
 }
@@ -162,7 +170,7 @@ func TestSandboxSelectionChildOwnedNeverReachedByIDRef(t *testing.T) {
 	c := selectFixture(t, "",
 		childOwnedSandboxEx("sbx-id", "c_parent", map[string]string{"env": "home"}),
 	)
-	_, err := c.chooseExecutor(protocol.SpawnRequest{
+	_, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorRef: "sbx-id",
 	}, executorOwner{})
 	ck.Error(err, "an explicit ref by row id naming a child-owned sandbox must be refused")
@@ -179,7 +187,7 @@ func TestSandboxSelectionEmptySelectorNeverPicksASandboxOnLaunch(t *testing.T) {
 	only := selectFixture(t, "", exWithLaunch("aaa-sbx", map[string]string{
 		sandbox.RowLabelSandbox: "1", "env": "home",
 	}, "", "claude"))
-	_, err := only.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
+	_, err := only.chooseLaunchExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{}, "claude")
 	ck.Error(err, "an empty selector must never implicitly pick a sandbox for launch")
 
 	// With an ordinary launch-capable executor present, the ordinary one wins.
@@ -187,7 +195,7 @@ func TestSandboxSelectionEmptySelectorNeverPicksASandboxOnLaunch(t *testing.T) {
 		exWithLaunch("aaa-sbx", map[string]string{sandbox.RowLabelSandbox: "1", "env": "home"}, "", "claude"),
 		exWithLaunch("zzz-ordinary", map[string]string{"env": "home"}, "", "claude"),
 	)
-	chosen, err := mixed.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
+	chosen, err := mixed.chooseLaunchExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{}, "claude")
 	ck.Require().NoError(err, "an ordinary launch-capable executor is present")
 	ck.Eq("zzz-ordinary", chosen.ID, "empty selector must pick the ordinary launch executor")
 }
@@ -201,7 +209,7 @@ func TestSandboxSelectionChildOwnedNeverReachedByLaunchSelection(t *testing.T) {
 		"env":                      "home",
 	}, "", "claude")
 	c := selectFixture(t, "", le)
-	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
+	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{}, "claude")
 	assert.NewAborting(t).Error(err, "launch selection must never reach a child-owned sandbox")
 }
 
@@ -214,7 +222,7 @@ func TestSandboxSelectionNoSandboxRowsIsANoOp(t *testing.T) {
 		ex("bbb-session", map[string]string{"env": "home", "kind": "session"}, ""),
 		ex("ccc-durable", map[string]string{"env": "home"}, ""),
 	)
-	candidates, _, _, _, err := c.narrowedExecutorCandidates(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	candidates, _, _, _, err := c.narrowedExecutorCandidates(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{})
 	ck.Require().NoError(err)
 	// Pre-change ordering: durable before session, then by ID.
 	ck.EqDiff([]string{"aaa-durable", "ccc-durable", "bbb-session"},
@@ -230,7 +238,7 @@ func TestSandboxSelectionEmptyOwnerChildValueStillExcluded(t *testing.T) {
 		childOwnedSandboxEx("aaa-sbx", "", map[string]string{"owner": "brent"}),
 		ex("zzz-ordinary", map[string]string{"owner": "brent"}, ""),
 	)
-	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{
+	chosen, err := mixed.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: "owner=brent",
 	}, executorOwner{Name: "brent"})
 	ck.Require().NoError(err, "the ordinary row must serve the spawn")
@@ -238,6 +246,6 @@ func TestSandboxSelectionEmptyOwnerChildValueStillExcluded(t *testing.T) {
 
 	// Alone: refused even with an empty selector.
 	only := selectFixture(t, "", childOwnedSandboxEx("aaa-sbx", "", map[string]string{"env": "home"}))
-	_, err = only.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{})
+	_, err = only.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{})
 	ck.Error(err, "a present-but-empty owner-child label must still exclude the row")
 }

@@ -69,7 +69,7 @@ func TestExplicitSelectorIsNotOverwrittenByInheritance(t *testing.T) {
 	c2 := selectFixture(t, "env=home",
 		ex("exec-other", map[string]string{"env": "work", "gpu": "yes"}, ""),
 	)
-	_, err := c2.chooseExecutor(protocol.SpawnRequest{
+	_, err := c2.resolveSpawnExecutorSet(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "gpu=yes",
 	}, executorOwner{})
 	ck.Error(err, "naming a selector must not escape the parent's set")

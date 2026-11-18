@@ -539,24 +539,23 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 // the daemon host. The two must agree: a parent the guard refuses is exactly a
 // child this refuses.
 //
-// It reads stored state only, never the request:
+// It reads the child's set from the one place it lives at that moment:
 //
-//   - the child's OWN executor set when its row exists (a resume/recovery):
-//     a child's set is always a subset of its parent's at spawn and never
-//     widens afterwards, so its own set is the whole confinement. Reading it
-//     directly also avoids depending on an ancestor row Close has since
-//     deleted. Only when the child's own row is absent (a fresh spawn) is the
-//     PARENT's set read; the subset relation at spawn makes the parent
-//     sufficient, so no lineage walk is needed; and
+//   - the child's OWN stored set when its row exists (a resume/recovery); and
+//   - freshSet, the set resolveSpawnExecutorSet fixed on the request, when it
+//     does not (a fresh spawn: the row is written only after the runner is
+//     built). A fresh child's set is a subset of its parent's but need not be
+//     "all" when the parent's is, so the parent's set proves nothing about it.
+//     A fresh child whose set was never resolved (nil) fails CLOSED: it cannot
+//     be shown to be unconfined, and a fresh spawn always carries one; and
 //   - sandbox ownership, read exactly as controllerBinder.ChooseFor reads it
 //     (ownedSandbox): the child's own spawn-block sandbox, or a subtree one an
 //     ancestor holds. A sandboxed child's stored set normally covers this too;
 //     the lookup is belt-and-braces for a row whose set was never persisted.
 //
 // A child is confined when its set is not "all"; a nil stored set is a legacy
-// row and resolves through its selector. A parent that is named but absent
-// from the store fails CLOSED (returns an error), never open.
-func (c *Controller) localForkRefused(ctx context.Context, kind, childID, parentChildID, ownerUserID string) error {
+// row and resolves through its selector.
+func (c *Controller) localForkRefused(ctx context.Context, kind, childID, parentChildID, ownerUserID string, freshSet []string) error {
 	if ctx == nil {
 		// A hand-built Controller in a test may have no base context; the lookup
 		// below must never run on a nil parent (context.WithTimeout panics).
@@ -566,12 +565,11 @@ func (c *Controller) localForkRefused(ctx context.Context, kind, childID, parent
 		if all, _, _ := childstore.ResolveSetSpec(snap.ExecutorSet, snap.ExecutorSelector); !all {
 			return localForkConfinedErr(kind, "an executor set")
 		}
-	} else if parentChildID != "" {
-		parent, ok := c.st.Get(parentChildID)
-		if !ok {
-			return fmt.Errorf("cannot confirm the executor set of parent %s: its row is not in the store", parentChildID)
+	} else {
+		if freshSet == nil {
+			return fmt.Errorf("cannot confirm the executor set of new child %s: none was resolved", childID)
 		}
-		if all, _, _ := childstore.ResolveSetSpec(parent.ExecutorSet, parent.ExecutorSelector); !all {
+		if all, _, _ := childstore.ResolveSetSpec(freshSet, ""); !all {
 			return localForkConfinedErr(kind, "an executor set")
 		}
 	}

@@ -154,7 +154,7 @@ func (c *Controller) scriptRunner(req protocol.SpawnRequest, childID, ownerName,
 	// user, the exact escape checkKindNarrowing refuses at Spawn. The guard lives
 	// HERE, at the fork, so a caller that reaches this runner without Spawn's
 	// check (a resume, recovery, a future caller) is refused too.
-	if err := c.localForkRefused(c.baseCtx, protocol.KindScript, childID, req.ParentChildID, ownerUserID); err != nil {
+	if err := c.localForkRefused(c.baseCtx, protocol.KindScript, childID, req.ParentChildID, ownerUserID, req.Executors); err != nil {
 		return nil, err
 	}
 	return c.localScriptRunner(req, childID, ownerUserID)

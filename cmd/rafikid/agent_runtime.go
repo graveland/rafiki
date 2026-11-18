@@ -183,7 +183,7 @@ func (c *Controller) claudeExecutorRouted() bool {
 // future caller is covered too.
 func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName, ownerUserID string, snap *childstore.Snapshot) (child.Runner, error) {
 	if !c.claudeExecutorRouted() {
-		if err := c.localForkRefused(c.baseCtx, protocol.KindClaude, childID, req.ParentChildID, ownerUserID); err != nil {
+		if err := c.localForkRefused(c.baseCtx, protocol.KindClaude, childID, req.ParentChildID, ownerUserID, req.Executors); err != nil {
 			return nil, err
 		}
 		return nil, nil
@@ -319,6 +319,17 @@ func (c *Controller) darajaLaunchExecutor(req protocol.SpawnRequest, owner execu
 		if le.Describe == nil || !slices.Contains(le.Describe.LaunchKinds, "claude") {
 			return executors.Executor{}, fmt.Errorf(
 				"executor %s (pinned for this child's session) no longer advertises claude launch support", pinnedID)
+		}
+		// The pin is a place to resume, never a grant: the executor must still be
+		// reachable by this child under the rules Reachable applies (enabled,
+		// owner, Admits against the child's own labels, member of its stored
+		// set). A pinned executor the child can no longer reach fails closed.
+		all, ids, selector := childstore.ResolveSetSpec(snap.ExecutorSet, snap.ExecutorSelector)
+		if len(admittedBySet([]executors.Executor{le.Executor}, snap.Labels, owner.UserID, all, ids, selector)) == 0 ||
+			(all && isSandboxRow(le.Executor)) || isChildOwnedSandboxRow(le.Executor) {
+			return executors.Executor{}, fmt.Errorf(
+				"cannot resume claude child %s: executor %s (pinned for its session) is no longer in its executor set, "+
+					"is disabled, or no longer admits it", snap.ChildID, pinnedID)
 		}
 		return le.Executor, nil
 	}

@@ -63,17 +63,11 @@ func (b *controllerBinder) ChooseFor(childID string) (string, error) {
 		return sandboxExec.ID, nil
 	}
 
-	// The stored row is the authority for the set once it exists, so a set
-	// changed after this binder was built applies here as it does in Reachable.
-	// Before the row exists (the eager bind of a fresh spawn) the request carries
-	// the set resolveSpawnExecutorSet fixed.
-	req := b.req
-	if b.c.st != nil {
-		if snap, ok := b.c.st.Get(childID); ok {
-			req.Executors = snap.ExecutorSet
-		}
-	}
-	chosen, err := b.c.chooseExecutor(req, b.owner)
+	// The stored row is the authority for the set and the labels once it exists
+	// (boundSetSpec, childAdmissionLabels), as in Reachable; before it exists
+	// (the eager bind of a fresh spawn) the request carries the set
+	// resolveSpawnExecutorSet fixed. The spawner is never consulted.
+	chosen, err := b.c.chooseExecutorFor(b.req, b.owner, childID)
 	if err != nil {
 		return "", err
 	}
@@ -151,15 +145,10 @@ func (b *controllerBinder) Reachable(childID string) ([]executors.Executor, erro
 		return []executors.Executor{*sandboxExec}, nil
 	}
 	if b.c.execPool == nil {
-		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
+		return nil, errNoExecutorPool
 	}
 
-	childLabels := b.c.admissionLabels(b.req, b.owner)
-	if b.c.st != nil {
-		if snap, ok := b.c.st.Get(childID); ok {
-			childLabels = snap.Labels
-		}
-	}
+	childLabels := b.c.childAdmissionLabels(b.req, b.owner, childID)
 	live := b.c.execPool.Live()
 	rows := make([]executors.Executor, 0, len(live))
 	for _, le := range live {

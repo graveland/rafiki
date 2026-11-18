@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorinstall"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -103,7 +102,15 @@ type executorOwner struct{ Name, UserID string }
 // is made, so selectExecutor (client) and selectExecutorID (provisioning,
 // prompt visibility) can never disagree about which executor won.
 func (c *Controller) chooseExecutor(req protocol.SpawnRequest, owner executorOwner) (executors.Executor, error) {
-	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, owner)
+	return c.chooseExecutorFor(req, owner, "")
+}
+
+// chooseExecutorFor is chooseExecutor for a child that may already have a row:
+// childID names it, so its stored set and labels are the ones read (see
+// narrowedExecutorCandidatesFor). An empty childID is a fresh spawn whose row
+// does not exist yet and whose set the request carries.
+func (c *Controller) chooseExecutorFor(req protocol.SpawnRequest, owner executorOwner, childID string) (executors.Executor, error) {
+	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidatesFor(req, owner, childID)
 	if err != nil {
 		return executors.Executor{}, err
 	}
@@ -124,44 +131,66 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest, owner executorOwn
 	return candidates[0], nil
 }
 
-// narrowedExecutorCandidates computes chooseExecutor's candidate list without
-// picking a winner or explaining a failure — chooseLaunchExecutor narrows
-// this further by launch kind before doing either, so a change to admission
-// or executor-set narrowing can never happen in only one of the two callers.
+// narrowedExecutorCandidates is narrowedExecutorCandidatesFor for a child with
+// no row yet.
 func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, owner executorOwner) (
-	candidates []executors.Executor, parentSet []executors.Executor, childLabels map[string]string, sel executors.Selector, err error,
+	candidates []executors.Executor, set []executors.Executor, childLabels map[string]string, sel executors.Selector, err error,
+) {
+	return c.narrowedExecutorCandidatesFor(req, owner, "")
+}
+
+// narrowedExecutorCandidatesFor computes chooseExecutor's candidate list without
+// picking a winner or explaining a failure; chooseLaunchExecutor narrows this
+// further by launch kind before doing either, so a change to admission or
+// set narrowing can never happen in only one of the two callers.
+//
+// It reads the CHILD's own set and the CHILD's own labels, exactly as
+// controllerBinder.Reachable does (boundSetSpec, childAdmissionLabels), and
+// never the spawner's current state: a parent that shrank or was closed must not
+// change a live descendant's reach, and a restart (which rebuilds the request
+// without a parent) must not change it either. Every row it returns is therefore
+// also in Reachable's live part, which matters because boundExecutor.resolve
+// honours ChooseFor when Reachable is empty. set is the child's admitted set
+// before the selector, workspace mode and sandbox rules narrow it.
+func (c *Controller) narrowedExecutorCandidatesFor(req protocol.SpawnRequest, owner executorOwner, childID string) (
+	candidates []executors.Executor, set []executors.Executor, childLabels map[string]string, sel executors.Selector, err error,
 ) {
 	sel, err = executors.ParseSelector(req.ExecutorSelector)
 	if err != nil {
 		return nil, nil, nil, executors.Selector{}, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
 	}
-
-	// The child does not exist yet, so evaluate the PARENT's set and narrow
-	// with the request's selector — which is exactly what
-	// effectiveExecutorSet will compute for the child once it is stored.
-	childLabels = c.admissionLabels(req, owner)
-	parentSet, err = c.effectiveExecutorSetFor(req.ParentChildID, childLabels, owner.UserID)
-	if err != nil {
-		return nil, nil, nil, executors.Selector{}, err
+	if c.execPool == nil {
+		return nil, nil, nil, executors.Selector{}, errNoExecutorPool
 	}
 
-	// A resolved request carries the child's own set (see
-	// resolveSpawnExecutorSet, and the stored row on a resume); nil means not
-	// resolved yet and restricts nothing. An empty non-nil set admits nothing.
-	if all, ids, _ := childstore.ResolveSetSpec(req.Executors, ""); req.Executors != nil && !all {
-		parentSet = filterBySet(parentSet, false, ids, "")
+	childLabels = c.childAdmissionLabels(req, owner, childID)
+	live := c.execPool.Live()
+	rows := make([]executors.Executor, 0, len(live))
+	for _, le := range live {
+		rows = append(rows, le.Executor)
 	}
+	all, ids, selector := c.boundSetSpec(req, childID)
+	set = admittedBySet(rows, childLabels, owner.UserID, all, ids, selector)
 
-	candidates = executors.Narrow(parentSet, sel)
+	candidates = executors.Narrow(set, sel)
 	candidates = narrowByWorkspaceMode(candidates, req.WorkspaceMode)
 	// A child-owned sandbox is never an ordinary candidate: it is reached only
 	// through the ownership lookup (controllerBinder.ChooseFor), never by
 	// selector, ref or implicit choice. Dropping it HERE covers both choose
 	// functions (and launch selection), since both narrow through this method.
 	candidates = dropChildOwnedSandboxes(candidates)
+	// An "all" set never reaches a sandbox, whatever a selector says: the
+	// selector only places the child among what "all" can reach.
+	if all {
+		candidates = dropSandboxCandidates(candidates)
+	}
 	sortCandidates(candidates)
-	return candidates, parentSet, childLabels, sel, nil
+	return candidates, set, childLabels, sel, nil
 }
+
+// errNoExecutorPool is the error every path that needs the pool returns when
+// the daemon has none.
+var errNoExecutorPool = errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
 
 // hasExplicitSelector reports whether req NAMES an executor via a selector that
 // says anything at all. The comparison is against the TrimSpace'd value, not
@@ -283,25 +312,17 @@ func (c *Controller) explainNoLaunchMatch(req protocol.SpawnRequest, childSel ex
 	return errors.New(sb.String())
 }
 
-// admissionLabels returns the labels an executor's Admits selector should be
-// evaluated against for req. For a non-top-level spawn this is the PARENT's
-// already-stored labels — a live session already carries its own daemon-
-// attested owner (see Spawn), so reading it back from the childstore is
-// exactly right there. A top-level spawn has no parent AND no childstore
-// entry of its own yet — Spawn mints childID and inserts the session only
-// after this selection succeeds — so its labels are built the same way Spawn
-// is about to build them: the request's own labels plus the owner the daemon
-// is attesting for it. Getting this wrong is not cosmetic: an executor
-// enrolled with Admits "owner=<name>" (every session executor — see
-// ExecutorSession) would refuse EVERY top-level spawn, since the fallback of
-// an empty label map can never match a non-empty Admits selector.
+// admissionLabels returns the labels an executor's Admits selector is
+// evaluated against for a child that has no row yet: the labels Spawn is about
+// to give it, the request's own plus the owner the daemon attests for it. It is
+// the CHILD's labels, never its parent's: an Admits selector decides whether
+// this executor serves this child, so a parent that carries a label the child
+// lacks (or the reverse) must not change the answer.
+//
+// Getting the owner wrong is not cosmetic: an executor enrolled with Admits
+// "owner=<name>" (every session executor, see ExecutorSession) would refuse
+// EVERY spawn if the owner label were missing.
 func (c *Controller) admissionLabels(req protocol.SpawnRequest, owner executorOwner) map[string]string {
-	if req.ParentChildID != "" {
-		if snap, ok := c.st.Get(req.ParentChildID); ok {
-			return snap.Labels
-		}
-		return map[string]string{}
-	}
 	labels := copyLabels(req.Labels)
 	if labels == nil {
 		labels = map[string]string{}
@@ -310,6 +331,20 @@ func (c *Controller) admissionLabels(req protocol.SpawnRequest, owner executorOw
 		labels["owner"] = owner.Name
 	}
 	return labels
+}
+
+// childAdmissionLabels is the one source of the labels admission reads for a
+// child: its stored row's labels once the row exists, else the labels its row
+// will carry (admissionLabels). Reachable, ChooseFor and the spawn-time
+// resolution all go through it, so no path can admit a child another path
+// refuses.
+func (c *Controller) childAdmissionLabels(req protocol.SpawnRequest, owner executorOwner, childID string) map[string]string {
+	if c.st != nil && childID != "" {
+		if snap, ok := c.st.Get(childID); ok {
+			return snap.Labels
+		}
+	}
+	return c.admissionLabels(req, owner)
 }
 
 // narrowByWorkspaceMode drops executors whose ROW does not offer the requested
@@ -417,7 +452,7 @@ func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor,
 // installed rows) can never drift from this one.
 func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[string]string, ownerUserID string) ([]executors.Executor, error) {
 	if c.execPool == nil {
-		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
+		return nil, errNoExecutorPool
 	}
 	live := c.execPool.Live()
 	rows := make([]executors.Executor, 0, len(live))
@@ -613,35 +648,6 @@ func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.Sp
 	}
 	return req
 }
-
-// lineageChain returns the stored executor selectors from the root down to
-// childID inclusive.
-func (c *Controller) lineageChain(childID string) ([]string, error) {
-	if childID == "" {
-		return nil, nil // top-level: no selector inherited
-	}
-	var reversed []string
-	cur := childID
-	for range maxLineageWalk {
-		snap, ok := c.st.Get(cur)
-		if !ok {
-			break
-		}
-		reversed = append(reversed, snap.ExecutorSelector)
-		parent, ok := c.st.ParentOf(cur)
-		if !ok {
-			slices.Reverse(reversed)
-			return reversed, nil
-		}
-		cur = parent
-	}
-	return nil, fmt.Errorf("lineage chain for %s exceeds %d links", childID, maxLineageWalk)
-}
-
-// maxLineageWalk mirrors childstore's maxChainDepth: lineage labels are
-// daemon-written and cannot legitimately cycle, but a corrupt record must not
-// wedge the spawn path.
-const maxLineageWalk = 64
 
 // executorReason explains, for one live executor, why chooseExecutor (when
 // launchKind == "") or chooseLaunchExecutor (when launchKind names the

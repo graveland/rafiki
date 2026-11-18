@@ -162,13 +162,15 @@ func TestValidateScriptSpawnRequiresSpec(t *testing.T) {
 	c := assert.NewAborting(t)
 	c.Error(validateScriptSpawn(protocol.SpawnRequest{Kind: protocol.KindScript}), "a script spawn without a spec must be refused")
 	err := validateScriptSpawn(protocol.SpawnRequest{
-		Kind:   protocol.KindScript,
-		Script: &protocol.ScriptSpec{Repo: "../escape", Script: "driver"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Script:    &protocol.ScriptSpec{Repo: "../escape", Script: "driver"},
 	})
 	c.Error(err, "a script spawn with a path-shaped repo must be refused")
 	err = validateScriptSpawn(protocol.SpawnRequest{
-		Kind:   protocol.KindScript,
-		Script: &protocol.ScriptSpec{Repo: "local", Script: "not-a-name!"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Script:    &protocol.ScriptSpec{Repo: "local", Script: "not-a-name!"},
 	})
 	c.Error(err, "a script spawn with a non-identifier script name must be refused")
 }
@@ -335,9 +337,10 @@ print("cwd-ok=" + str(os.getcwd() == os.environ.get("PROBE_CWD")), flush=True)
 		cwd = resolved
 	}
 	req := protocol.SpawnRequest{
-		Kind: protocol.KindScript,
-		Cwd:  cwd,
-		Env:  map[string]string{"PROBE_CWD": cwd, "ANTHROPIC_API_KEY": "smuggled"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Cwd:       cwd,
+		Env:       map[string]string{"PROBE_CWD": cwd, "ANTHROPIC_API_KEY": "smuggled"},
 		Script: &protocol.ScriptSpec{
 			Repo:    "local",
 			Script:  "env_probe",
@@ -401,9 +404,10 @@ func TestScriptRunnerDialThroughSocket(t *testing.T) {
 	c := scriptRunnerTestController(t, face.URL, store)
 
 	runner, err := c.scriptRunner(protocol.SpawnRequest{
-		Kind:   protocol.KindScript,
-		Cwd:    t.TempDir(),
-		Script: &protocol.ScriptSpec{Repo: "local", Script: "sleeper"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Cwd:       t.TempDir(),
+		Script:    &protocol.ScriptSpec{Repo: "local", Script: "sleeper"},
 	}, "c_script_dial", "", "owner-1")
 	ck.NoError(err, "scriptRunner")
 	_, stdout, _, err := runner.Start()
@@ -458,9 +462,10 @@ func TestScriptRunnerProcessGroupKillsTheSubtree(t *testing.T) {
 	})
 	c := scriptRunnerTestController(t, "http://127.0.0.1:1", store)
 	runner, err := c.scriptRunner(protocol.SpawnRequest{
-		Kind:   protocol.KindScript,
-		Cwd:    t.TempDir(),
-		Script: &protocol.ScriptSpec{Repo: "local", Script: "forker"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Cwd:       t.TempDir(),
+		Script:    &protocol.ScriptSpec{Repo: "local", Script: "forker"},
 	}, "c_script_group", "", "owner-1")
 	ck.NoError(err, "scriptRunner")
 	_, stdout, _, err := runner.Start()
@@ -515,9 +520,10 @@ func unixGet(t *testing.T, sockPath, urlPath string, headers map[string]string) 
 func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 	c := &Controller{st: childstore.New(), cm: newChildManager(), native: nativebus.New()}
 	if _, err := c.scriptRunner(protocol.SpawnRequest{
-		Kind:   protocol.KindScript,
-		Cwd:    "/tmp",
-		Script: &protocol.ScriptSpec{Repo: "local", Script: "s"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Cwd:       "/tmp",
+		Script:    &protocol.ScriptSpec{Repo: "local", Script: "s"},
 	}, "c_x", "", "owner"); err == nil || !strings.Contains(err.Error(), "proxy face") {
 		t.Fatalf("want a proxy-face refusal, got %v", err)
 	}
@@ -526,9 +532,10 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 	c2 := scriptRunnerTestController(t, "http://127.0.0.1:1", runnerPyModules(t, nil))
 	c2.proxyURL = ""
 	if _, err := c2.scriptRunner(protocol.SpawnRequest{
-		Kind:   protocol.KindScript,
-		Cwd:    "/tmp",
-		Script: &protocol.ScriptSpec{Repo: "local", Script: "s"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Cwd:       "/tmp",
+		Script:    &protocol.ScriptSpec{Repo: "local", Script: "s"},
 	}, "c_x", "", "owner"); err == nil || !strings.Contains(err.Error(), "proxy face") {
 		t.Fatalf("want a proxy-face refusal, got %v", err)
 	}
@@ -538,9 +545,10 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 	// a checkout it cannot have.
 	c3 := scriptRunnerTestController(t, "http://127.0.0.1:1", runnerPyModules(t, nil))
 	_, err := c3.scriptRunner(protocol.SpawnRequest{
-		Kind:   protocol.KindScript,
-		Cwd:    "/tmp",
-		Script: &protocol.ScriptSpec{Repo: "somegit", Script: "s"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Cwd:       "/tmp",
+		Script:    &protocol.ScriptSpec{Repo: "somegit", Script: "s"},
 	}, "c_x", "", "owner")
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "repo"), "want the repo refusal, got %v", err)
 	assert.NewAborting(t).True(errors.Is(err, errScriptHosting) && strings.Contains(err.Error(), "--launch script"), "refusal must be a hosting precondition naming the remedy, got %v", err)

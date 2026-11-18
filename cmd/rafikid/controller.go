@@ -6673,9 +6673,11 @@ func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors
 // executor list` remains the place to see the full management-table view.
 func (c *Controller) ListExecutorRows(ctx context.Context, kind, ownerName, ownerUserID string) ([]connectapi.ExecutorRow, error) {
 	if c.execPool == nil {
-		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
+		return nil, errNoExecutorPool
 	}
-	req := protocol.SpawnRequest{}
+	// A top-level spawn addresses every executor of its owner, so the preview
+	// reads the same set a real one would resolve to.
+	req := protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}}
 	launchKind := kind
 	if kind == "" || kind == protocol.KindFundi {
 		launchKind = ""

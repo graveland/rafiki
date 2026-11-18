@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -451,7 +452,7 @@ func TestResumeRebuildsTheSetFromTheRow(t *testing.T) {
 				return
 			}
 			ck.NoError(cerr)
-			ck.True(chosen == tc.wantReach[0] || len(tc.wantReach) > 1, "ChooseFor stays inside the stored set; got %s", chosen)
+			ck.True(slices.Contains(tc.wantReach, chosen), "ChooseFor stays inside the stored set %v; got %s", tc.wantReach, chosen)
 		})
 	}
 }

@@ -15,7 +15,7 @@ import (
 
 func TestClaudeRunnerFallsBackToNilWhenNoExecutorPool(t *testing.T) {
 	c := &Controller{st: childstore.New(), cm: newChildManager(), native: nativebus.New()}
-	runner, err := c.claudeRunner(protocol.SpawnRequest{Kind: protocol.KindClaude, Cwd: t.TempDir()}, "c_x", "", "", nil)
+	runner, err := c.claudeRunner(protocol.SpawnRequest{Kind: protocol.KindClaude, Cwd: t.TempDir(), Executors: []string{childstore.ExecutorSetAll}}, "c_x", "", "", nil)
 	assert.NewAborting(t).False(err != nil || runner != nil, "want (nil, nil) for the local-subprocess fallback, got (%v, %v)", runner, err)
 }
 
@@ -28,7 +28,7 @@ func TestClaudeRunnerRefusesWhenNoLaunchCapableExecutor(t *testing.T) {
 		execPoolConn: execpool.New(nil),
 		darajaPool:   darajapool.New(darajapool.NewRegistry()),
 	}
-	_, err := c.claudeRunner(protocol.SpawnRequest{Kind: protocol.KindClaude, Cwd: t.TempDir()}, "c_x", "", "", nil)
+	_, err := c.claudeRunner(protocol.SpawnRequest{Kind: protocol.KindClaude, Cwd: t.TempDir(), Executors: []string{childstore.ExecutorSetAll}}, "c_x", "", "", nil)
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "does not support launching"), "want a launch-kind refusal, got %v", err)
 }
 

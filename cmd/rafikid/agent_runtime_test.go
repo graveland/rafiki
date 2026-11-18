@@ -134,7 +134,7 @@ func TestAgentRunnerKind(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	for _, kind := range []string{protocol.KindClaude} {
-		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir()}
+		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir(), Executors: []string{childstore.ExecutorSetAll}}
 		runner, err := c.agentRunner(req, "c_"+kind, false, "", "", nil)
 		ck.Require().NoError(err, "agentRunner(kind=%s)", kind)
 		ck.Nil(runner, "agentRunner(kind=%s) returned a non-nil Runner, want nil", kind)

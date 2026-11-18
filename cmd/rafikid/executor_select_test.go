@@ -219,11 +219,13 @@ func TestChildCannotReachAnExecutorItsParentCouldNot(t *testing.T) {
 		ex("exec-work", map[string]string{"env": "work"}, ""),
 		ex("exec-home", map[string]string{"env": "home"}, ""),
 	)
-	_, err := c.chooseExecutor(protocol.SpawnRequest{
+	// The spawner's set is consulted once, at spawn, when the child's own set is
+	// resolved; nothing after that reads it.
+	_, err := c.resolveSpawnExecutorSet(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work",
 	}, executorOwner{})
 	ck.Require().Error(err, "a child reached outside its parent's effective set")
-	ck.False(!strings.Contains(err.Error(), "parent") && !strings.Contains(err.Error(), "PARENT"), "the refusal must say the parent's set is why: %v", err)
+	ck.StrContains(err.Error(), "your executor set", "the refusal must say the spawner's set is why: %v", err)
 }
 
 // A child's reach is its OWN stored set; its ancestors' selectors narrow
@@ -272,7 +274,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 		ex("exec-mac", map[string]string{"env": "work", "os": "darwin"}, ""),
 		ex("exec-picky", map[string]string{"env": "work", "os": "linux"}, "rafiki/kind=claude"),
 	)
-	_, err := c.chooseExecutor(protocol.SpawnRequest{
+	_, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: "env=work,os=linux",
 	}, executorOwner{})
 	ck.Require().Error(err, "want a refusal")
@@ -293,7 +295,7 @@ func TestNoMatchFailsImmediatelyRatherThanQueueing(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "")
 	start := time.Now()
-	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, executorOwner{})
+	_, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, executorOwner{})
 	ck.Error(err, "want a refusal")
 	ck.LessOrEqual(time.Second, time.Since(start), "selection took")
 }
@@ -361,7 +363,7 @@ func TestAdmissionMatchesDaemonAttestedOwner(t *testing.T) {
 func TestTopLevelSpawnIsAdmittedByItsAttestedOwner(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "", ex("laptop", map[string]string{"kind": "client", "owner": "brent"}, "owner=brent"))
-	req := protocol.SpawnRequest{ExecutorSelector: "owner=brent,kind=client"}
+	req := protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ExecutorSelector: "owner=brent,kind=client"}
 
 	chosen, err := c.chooseExecutor(req, executorOwner{Name: "brent"})
 	ck.NoError(err, "a top-level spawn with its owner attested must reach the laptop executor")
@@ -386,7 +388,7 @@ func TestTopLevelSpawnIsAdmittedByItsAttestedOwner(t *testing.T) {
 func TestSelectRefusesOtherUsersExecutor(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "", exOwned("a-exec", map[string]string{"env": "home"}, "", "u_A"))
-	_, err := c.chooseExecutor(protocol.SpawnRequest{ExecutorSelector: "env=home"}, executorOwner{UserID: "u_B", Name: "bob"})
+	_, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ExecutorSelector: "env=home"}, executorOwner{UserID: "u_B", Name: "bob"})
 	ck.Error(err, "B must not reach A's executor even though Admits is empty")
 	// The refusal must name the ownership rule, so the reason is legible —
 	// and must never name the other user.
@@ -402,11 +404,11 @@ func TestSelectUnownedServesOnlyUnowned(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := selectFixture(t, "", exOwned("unowned-exec", map[string]string{"env": "home"}, "", ""))
 
-	chosen, err := c.chooseExecutor(protocol.SpawnRequest{ExecutorSelector: "env=home"}, executorOwner{})
+	chosen, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ExecutorSelector: "env=home"}, executorOwner{})
 	ck.Require().NoError(err, "an unowned executor must serve an unowned child")
 	ck.Eq("unowned-exec", chosen.ID, "chose")
 
-	_, err = c.chooseExecutor(protocol.SpawnRequest{ExecutorSelector: "env=home"}, executorOwner{UserID: "u_admin", Name: "admin"})
+	_, err = c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ExecutorSelector: "env=home"}, executorOwner{UserID: "u_admin", Name: "admin"})
 	ck.Error(err, "an admin user's child must not reach an unowned executor — no admin exception")
 }
 
@@ -430,13 +432,13 @@ func TestSelectChildInheritsParentOwner(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := selectFixture(t, "", exOwned("a-exec", map[string]string{"env": "home"}, "", "u_A"))
 
-	chosen, err := c.chooseExecutor(protocol.SpawnRequest{
+	chosen, err := c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: "env=home",
 	}, executorOwner{UserID: "u_A"})
 	ck.Require().NoError(err, "a sub-agent of A's child must reach A's executor")
 	ck.Eq("a-exec", chosen.ID, "chose")
 
-	_, err = c.chooseExecutor(protocol.SpawnRequest{
+	_, err = c.chooseExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll},
 		ParentChildID: "c_parent", ExecutorSelector: "env=home",
 	}, executorOwner{UserID: "u_B"})
 	ck.Error(err, "B's sub-agent must not reach A's executor")

@@ -39,27 +39,27 @@ func TestLocalForkRefusedReadsStoredConfinement(t *testing.T) {
 	ctx := context.Background()
 
 	// Unconfined: no row, no parent, no sandbox.
-	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "", owner.UserID),
+	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "", owner.UserID, []string{childstore.ExecutorSetAll}),
 		"an unconfined child may fork locally")
 
 	insertWithSet(t, env.ctrl, "c_set", "", []string{"A"})
-	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_set", "", owner.UserID),
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_set", "", owner.UserID, nil),
 		"a resumed child confined to a set must be refused")
 
 	insertWithSet(t, env.ctrl, "c_empty", "", []string{})
-	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_empty", "", owner.UserID),
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_empty", "", owner.UserID, nil),
 		"a child whose set is empty addresses nothing and must be refused")
 
 	insertWithSet(t, env.ctrl, "c_all", "", []string{childstore.ExecutorSetAll})
-	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_all", "", owner.UserID),
+	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_all", "", owner.UserID, nil),
 		"a child on all executors may fork locally")
 
 	insertWithSet(t, env.ctrl, "c_legacy", "machine=sbx-1", nil)
-	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_legacy", "", owner.UserID),
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_legacy", "", owner.UserID, nil),
 		"a legacy row with a selector must be refused")
 
 	insertWithSet(t, env.ctrl, "c_legacy_open", "", nil)
-	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_legacy_open", "", owner.UserID),
+	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_legacy_open", "", owner.UserID, nil),
 		"a legacy row with no selector addressed every executor")
 
 	// The child's own row wins over its parent's: an unconfined own row is not
@@ -67,7 +67,7 @@ func TestLocalForkRefusedReadsStoredConfinement(t *testing.T) {
 	// child's set the whole answer once it exists).
 	insertWithSet(t, env.ctrl, "p_conf", "", []string{"A"})
 	insertWithSet(t, env.ctrl, "c_own_all", "", []string{childstore.ExecutorSetAll})
-	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_own_all", "p_conf", owner.UserID),
+	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_own_all", "p_conf", owner.UserID, nil),
 		"the child's own row decides when it exists")
 
 	// Sandbox ownership with NO stored set: the belt-and-braces arm, on both
@@ -77,7 +77,7 @@ func TestLocalForkRefusedReadsStoredConfinement(t *testing.T) {
 		ID: "sbx-1", OwnerUserID: owner.UserID, OwnerChild: "c_sbx", Scope: protocol.ScopeSelf,
 		ExecutorID: "exec-sbx", State: sandboxStateReady,
 	})
-	err := env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_sbx", "", owner.UserID)
+	err := env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_sbx", "", owner.UserID, nil)
 	ck.Error(err, "sandbox ownership must confine a local fork even with no stored set")
 	ck.StrContains(err.Error(), "confined to the executor plane", "refusal text")
 	ck.StrContains(err.Error(), "sandbox", "refusal names the sandbox")
@@ -87,38 +87,32 @@ func TestLocalForkRefusedReadsStoredConfinement(t *testing.T) {
 		ID: "sbx-2", OwnerUserID: owner.UserID, OwnerChild: "c_sbx_all", Scope: protocol.ScopeSelf,
 		ExecutorID: "exec-sbx", State: sandboxStateReady,
 	})
-	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_sbx_all", "", owner.UserID),
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_sbx_all", "", owner.UserID, nil),
 		"sandbox ownership confines a child whose set is all")
 }
 
-// TestLocalForkRefusedReadsTheParentsSetForAFreshSpawn: with no row for the
-// child yet, the parent's set is the confinement the child will inherit.
-func TestLocalForkRefusedReadsTheParentsSetForAFreshSpawn(t *testing.T) {
+// TestLocalForkRefusedReadsTheResolvedSetForAFreshSpawn: with no row for the
+// child yet, the set resolveSpawnExecutorSet fixed on the request is the
+// confinement, whatever the parent's set is: a finite child set under an all
+// (or absent) parent is still confined.
+func TestLocalForkRefusedReadsTheResolvedSetForAFreshSpawn(t *testing.T) {
 	t.Parallel()
 	ck := assert.NewAborting(t)
 	env := newSandboxEnv(t)
 	owner := sandboxOwner()
 	ctx := context.Background()
-
-	insertWithSet(t, env.ctrl, "p_set", "", []string{"A"})
-	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_set", owner.UserID),
-		"a parent confined to a set must confine its fresh child")
-
 	insertWithSet(t, env.ctrl, "p_all", "", []string{childstore.ExecutorSetAll})
-	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_all", owner.UserID),
-		"a parent on all executors does not confine its fresh child")
 
-	insertWithSet(t, env.ctrl, "p_legacy", "env=ci", nil)
-	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_legacy", owner.UserID),
-		"a legacy parent with a selector confines its fresh child")
-
-	insertWithSet(t, env.ctrl, "p_legacy_open", "", nil)
-	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_legacy_open", owner.UserID),
-		"a legacy parent with no selector does not")
-
-	// A named parent that is not in the store cannot be shown unconfined: fail closed.
-	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_missing", owner.UserID),
-		"an absent parent with no child row must fail closed")
+	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_all", owner.UserID, []string{childstore.ExecutorSetAll}),
+		"an all child may fork locally")
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_all", owner.UserID, []string{"A"}),
+		"a finite child set under an all parent confines the fresh child")
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "", owner.UserID, []string{"A"}),
+		"a finite child set at the top level confines the fresh child")
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "", owner.UserID, []string{}),
+		"an empty child set addresses nothing")
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_all", owner.UserID, nil),
+		"a fresh child whose set was never resolved fails closed")
 
 	// A sandbox owner under an unconfined parent is still refused.
 	insertWithSet(t, env.ctrl, "p_sbx", "", []string{childstore.ExecutorSetAll})
@@ -126,7 +120,7 @@ func TestLocalForkRefusedReadsTheParentsSetForAFreshSpawn(t *testing.T) {
 		ID: "sbx-p", OwnerUserID: owner.UserID, OwnerChild: "p_sbx", Scope: protocol.ScopeSubtree,
 		ExecutorID: "exec-sbx", State: sandboxStateReady,
 	})
-	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_sbx", owner.UserID),
+	ck.Error(env.ctrl.localForkRefused(ctx, protocol.KindScript, "c_new", "p_sbx", owner.UserID, []string{childstore.ExecutorSetAll}),
 		"a subtree sandbox the parent holds confines a fresh child")
 }
 
@@ -147,6 +141,7 @@ func TestScriptRunnerRefusesLocalForkForAConfinedChild(t *testing.T) {
 	_, err := env.ctrl.scriptRunner(protocol.SpawnRequest{
 		Kind:          protocol.KindScript,
 		ParentChildID: "parent",
+		Executors:     []string{"A"},
 		Script:        &protocol.ScriptSpec{Repo: "local", Script: "driver"},
 	}, "c_new", "", owner.UserID)
 	ck.Error(err, "a confined child's script spawn must not fork locally")
@@ -163,8 +158,9 @@ func TestScriptRunnerLocalForkUnconfinedUnchanged(t *testing.T) {
 	owner := sandboxOwner()
 
 	_, err := env.ctrl.scriptRunner(protocol.SpawnRequest{
-		Kind:   protocol.KindScript,
-		Script: &protocol.ScriptSpec{Repo: "local", Script: "driver"},
+		Kind:      protocol.KindScript,
+		Executors: []string{childstore.ExecutorSetAll},
+		Script:    &protocol.ScriptSpec{Repo: "local", Script: "driver"},
 	}, "c_new", "", owner.UserID)
 	ck.Error(err, "with no proxy face the local runner still refuses — for the proxy, not confinement")
 	ck.StrContains(err.Error(), "proxy face", "the unconfined child reaches the local runner")
@@ -187,12 +183,13 @@ func TestClaudeRunnerRefusesLocalForkForAConfinedChild(t *testing.T) {
 	_, err := env.ctrl.claudeRunner(protocol.SpawnRequest{
 		Kind:          protocol.KindClaude,
 		ParentChildID: "parent",
+		Executors:     []string{"A"},
 	}, "c_new", "", owner.UserID, nil)
 	ck.Error(err, "a confined child's claude spawn must not fork locally")
 	ck.StrContains(err.Error(), "confined to the executor plane", "refusal text: %v", err)
 
 	// The unconfined child is unchanged: (nil, nil) means "take the local path".
-	runner, err := env.ctrl.claudeRunner(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_new2", "", owner.UserID, nil)
+	runner, err := env.ctrl.claudeRunner(protocol.SpawnRequest{Kind: protocol.KindClaude, Executors: []string{childstore.ExecutorSetAll}}, "c_new2", "", owner.UserID, nil)
 	ck.NoError(err, "an unconfined claude child keeps its local fallback")
 	ck.True(runner == nil, "the local path is signalled by a nil runner")
 }
@@ -218,7 +215,7 @@ func TestLocalForkRefusedWithAbsentParentAllowsResume(t *testing.T) {
 
 	// The guard: the child's own row is present, so it reads its own set
 	// (legacy, empty) and does not walk the absent parent. Allowed.
-	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_exit", "p_gone", owner.UserID),
+	ck.NoError(env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_exit", "p_gone", owner.UserID, nil),
 		"a live, unconfined child with an absent parent may fork locally")
 
 	// A child with a live row and a confining own set is still refused,
@@ -228,7 +225,7 @@ func TestLocalForkRefusedWithAbsentParentAllowsResume(t *testing.T) {
 		Labels: map[string]string{childstore.LabelParent: "p_gone"},
 	})
 	ck.NoError(env.ctrl.st.SetExecutorSet("c_conf_exit", []string{"A"}), "confine the child")
-	err := env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_conf_exit", "p_gone", owner.UserID)
+	err := env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_conf_exit", "p_gone", owner.UserID, nil)
 	ck.Error(err, "a confined child with an absent parent must still be refused")
 	ck.StrContains(err.Error(), "confined to the executor plane", "refusal text: %v", err)
 
@@ -242,7 +239,7 @@ func TestLocalForkRefusedWithAbsentParentAllowsResume(t *testing.T) {
 		ID: "sbx-own", OwnerUserID: owner.UserID, OwnerChild: "c_sbx_exit", Scope: protocol.ScopeSelf,
 		ExecutorID: "exec-sbx", State: sandboxStateReady,
 	})
-	err = env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_sbx_exit", "p_gone", owner.UserID)
+	err = env.ctrl.localForkRefused(ctx, protocol.KindClaude, "c_sbx_exit", "p_gone", owner.UserID, nil)
 	ck.Error(err, "a child owning a sandbox must still be refused")
 	ck.StrContains(err.Error(), "sandbox", "refusal names the sandbox")
 }

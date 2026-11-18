@@ -1537,9 +1537,12 @@ each one at WARN as well. The texts, and what triggers each:
 - `no home executor: project instructions (CLAUDE.md) were not loaded; pass
   home_executor` — a multi-executor spawn with no `cwd` to probe, or a spawn
   with no reachable executor and no selection diagnostic to quote.
-- `no executor available yet; the child starts unbound: <diagnostic>` — the
-  selector matched no live executor (or the reachable set could not be read);
-  the suffix is selection's `explainNoMatch` text, the same error the child's
+- `no executor available yet; the child starts unbound: <diagnostic>` — none of
+  the executors in the child's own set is reachable right now (or the reachable
+  set could not be read). A spawn selector that matches no member of the
+  SPAWNER's set, live or an offline installed one, is refused at spawn instead
+  (`executor set: spawn refused: …`), because the child's set is frozen from
+  what the selector matches. The suffix is selection's `explainNoMatch` text, the same error the child's
   workspace tools report until one connects.
 - `could not check cwd on: <reports>` — rule 5's probe found no home and at
   least one candidate failed for a reason other than a missing workdir (a
@@ -1611,9 +1614,9 @@ the child it was spawned for (`owner_child`); its lifecycle follows the child.
   stored parent label on a rebind/recovery. A `subtree` row is therefore
   eligible when its owner is the child, the parent, or an ancestor of either
   (`childstore.IsDescendant`). The hint is fail-closed: a wrong or empty one can
-  only fail to find an owned sandbox, never admit an unrelated one. An
-  ancestor's stored selector must still match a sandbox's labels for the
-  sandbox to be handed down. Every `ChooseFor` — for every child, sandboxed or
+  only fail to find an owned sandbox, never admit an unrelated one. A
+  descendant binds through this lookup, never through its stored executor set,
+  which holds no other child's sandbox. Every `ChooseFor` — for every child, sandboxed or
   not — runs this lookup, so a bind now depends on the sandbox table; a store
   error fails the bind closed rather than reading as "not owned". The lookup is
   a single indexed read of the owner's live rows (`ListLive`, partial index

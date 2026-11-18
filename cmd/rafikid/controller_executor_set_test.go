@@ -71,3 +71,30 @@ func TestActivateLiveChildKeepsExecutorSet(t *testing.T) {
 		})
 	}
 }
+
+// A fundi child is hosted in-process, so no local-fork guard ever refuses its
+// resume: this is the path that reaches activateLiveChild with a finite or empty
+// set, which the claude case above never does. An activation that collapsed an
+// empty set to nil, or rewrote ids to all, fails here.
+func TestActivateLiveChildKeepsExecutorSetOnAnUnrefusedResume(t *testing.T) {
+	for name, set := range executorSetShapes {
+		t.Run(name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			ctrl := newTestController(t)
+			childID := "c_fundi_" + name
+			seedExitedFundiChild(t, ctrl, childID, "", nil)
+			if set != nil {
+				ck.Require().NoError(ctrl.st.SetExecutorSet(childID, set), "set")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			_, err := ctrl.Resume(ctx, childID, "")
+			ck.Require().NoError(err, "a fundi resume is hosted in-process and is never refused for its set")
+
+			got := mustSnapshot(t, ctrl, childID).ExecutorSet
+			ck.EqDeep(set, got, "set")
+			ck.Eq(set == nil, got == nil, "nil-ness changed")
+		})
+	}
+}

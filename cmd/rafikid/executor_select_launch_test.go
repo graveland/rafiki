@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -26,14 +27,14 @@ func TestChooseLaunchExecutorRequiresTheLaunchKind(t *testing.T) {
 		ex("no-launch", map[string]string{"env": "home"}, ""),
 		exWithLaunch("has-launch", map[string]string{"env": "home"}, "", "claude"),
 	)
-	exec, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
+	exec, err := c.chooseLaunchExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{}, "claude")
 	ck.NoError(err)
 	ck.Eq("has-launch", exec.ID, "want has-launch, got")
 }
 
 func TestChooseLaunchExecutorRefusesWhenNoneAdvertiseTheKind(t *testing.T) {
 	c := selectFixture(t, "", ex("no-launch", map[string]string{"env": "home"}, ""))
-	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
+	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{}, "claude")
 	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "does not support launching"), "want a launch-kind refusal, got %v", err)
 }
 
@@ -42,7 +43,7 @@ func TestChooseLaunchExecutorRespectsAdmission(t *testing.T) {
 	c := selectFixture(t, "",
 		exWithLaunch("picky", map[string]string{"env": "home"}, "owner=someone-else", "claude"),
 	)
-	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{Name: "brent"}, "claude")
+	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{Name: "brent"}, "claude")
 	ck.Error(err, "want a refusal — the executor's own admission selector excludes this owner")
 	ck.StrContains(err.Error(), "admission selector", "want the refusal to name the admission selector, got: %v", err)
 }
@@ -51,6 +52,6 @@ func TestChooseLaunchExecutorIgnoresANonMatchingKind(t *testing.T) {
 	c := selectFixture(t, "",
 		exWithLaunch("fundi-only", map[string]string{"env": "home"}, "", "somethingelse"),
 	)
-	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent"}, executorOwner{}, "claude")
+	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{Executors: []string{childstore.ExecutorSetAll}, ParentChildID: "c_parent"}, executorOwner{}, "claude")
 	assert.NewAborting(t).Error(err, "want a refusal — the executor advertises a different launch kind, not claude")
 }
