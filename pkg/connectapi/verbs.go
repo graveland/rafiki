@@ -342,7 +342,7 @@ func (s *Server) GetChild(
 }
 
 // childAllowedSpawnFields is the set of SpawnRequest field numbers a caller
-// with child provenance may set (fields 1-14, 30-36: the child-reachable
+// with child provenance may set (fields 1-14, 30-37: the child-reachable
 // shape of SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any
 // other set field — including one added in the future — is refused to a child
 // credential by default: firstOperatorOnlySet fails CLOSED on everything not
@@ -372,6 +372,8 @@ var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
 	// 36 (workspace_tools) is child-allowed: it only narrows the child's own
 	// tool set.
 	36: true,
+	// 37 (executors) is child-allowed: Controller.Spawn refuses any entry outside the spawner's own set.
+	37: true,
 }
 
 // firstOperatorOnlySet returns the wire name of the lowest-numbered field req

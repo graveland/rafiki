@@ -439,6 +439,11 @@ type SpawnRequest struct {
 	// Child-allowed on the Connect wire (SpawnRequest.home_executor = 35).
 	HomeExecutor string `json:"homeExecutor,omitempty"`
 
+	// Executors is the child's executor set as requested: machine labels or
+	// ids, or the single entry "all". Controller.Spawn resolves it to ids (or
+	// ["all"]) before anything reads it. Empty means the daemon chooses.
+	Executors []string `json:"executors,omitempty"`
+
 	// WorkspaceTools, for a claude child: "" or "native" keeps Claude Code's
 	// built-in file and shell tools on the launch host; "rafiki" disallows them
 	// and serves rafiki's executor-routed tools over MCP instead. Refused for

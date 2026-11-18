@@ -1203,6 +1203,13 @@ pub struct SpawnRequest {
     /// Child-allowed: it only narrows the child's own tool set.
     #[prost(string, tag = "36")]
     pub workspace_tools: ::prost::alloc::string::String,
+    /// executors names the executors this child may address: machine labels or
+    /// ids from the spawner's own executor set, or the single entry "all" (only
+    /// when the spawner's own set is all). Empty: the daemon chooses (the
+    /// spawner's home, else the spawner's set; a top-level spawn gets "all").
+    /// Child-allowed: a child can only hand on what it can already address.
+    #[prost(string, repeated, tag = "37")]
+    pub executors: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// The three budgets are optional because zero and unset differ, in OPPOSITE
     /// directions per field: unset max_depth means 1 and zero means "may not
     /// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";

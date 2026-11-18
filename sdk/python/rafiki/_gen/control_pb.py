@@ -1004,6 +1004,7 @@ class SpawnRequest:
     notify: str = ""
     home_executor: str = ""
     workspace_tools: str = ""
+    executors: list[str] = dataclasses.field(default_factory=list)
     max_depth: Optional[int] = None
     max_cost: Optional[float] = None
     max_children: Optional[int] = None
@@ -1076,6 +1077,8 @@ class SpawnRequest:
             out["homeExecutor"] = self.home_executor
         if self.workspace_tools != "":
             out["workspaceTools"] = self.workspace_tools
+        if self.executors:
+            out["executors"] = [x for x in self.executors]
         if self.max_depth is not None:
             out["maxDepth"] = self.max_depth
         if self.max_cost is not None:
@@ -1185,6 +1188,9 @@ class SpawnRequest:
         _v = _d.get("workspaceTools")
         if _v is not None:
             obj.workspace_tools = _v
+        _v = _d.get("executors")
+        if _v is not None:
+            obj.executors = [x for x in _v]
         _v = _d.get("maxDepth")
         if _v is not None:
             obj.max_depth = _int_in(_v)

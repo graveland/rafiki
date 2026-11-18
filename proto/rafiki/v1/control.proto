@@ -556,6 +556,13 @@ message SpawnRequest {
   // Child-allowed: it only narrows the child's own tool set.
   string workspace_tools = 36;
 
+  // executors names the executors this child may address: machine labels or
+  // ids from the spawner's own executor set, or the single entry "all" (only
+  // when the spawner's own set is all). Empty: the daemon chooses (the
+  // spawner's home, else the spawner's set; a top-level spawn gets "all").
+  // Child-allowed: a child can only hand on what it can already address.
+  repeated string executors = 37;
+
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
   // spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
