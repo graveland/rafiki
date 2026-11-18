@@ -101,16 +101,16 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 			{Name: "max_children", Type: "integer",
 				Description: "How many agents may be alive beneath it at once. Default 10."},
 			{Name: "executor", Type: "string",
-				Description: "Where to place this agent: a machine name or id from your own executor set, or a label selector over your set (e.g. \"os=linux\"), which gives the agent every matching executor. Use executors to name several. Omit to give it your home executor."},
+				Description: "Where to place this agent: a machine name or id from your own executor set, or a label selector over your set (e.g. \"os=linux\"), which gives the agent every matching executor. Use executors to name several. Omit to give it your home executor (or a copy of your set when that executor cannot launch it); a top-level caller's default is all."},
 			{Name: "executors", Type: "array", Items: &Schema{Type: "string"},
-				Description: "Executors this agent may address, by machine name or id, chosen from your own set (see executor_list). With one, its tools need no executor argument; with more than one, every workspace tool call must name one. [\"all\"] is available only when your own set is all. Omit to give it your home executor."},
+				Description: "Executors this agent may address, by machine name or id, chosen from your own set (see executor_list). With one, its tools need no executor argument; with more than one, every workspace tool call must name one. [\"all\"] is available only when your own set is all. Omit to give it your home executor (a top-level caller's default is all)."},
 			{Name: "workspace", Type: "string",
 				Description: "Which executors may serve this agent, by the workspace_mode their " +
 					"operator declared, and what happens if that executor is lost. " +
 					"\"ephemeral\": only executors marked ephemeral (operator-declared " +
 					"reconstructible, e.g. disposable containers each carrying their own " +
 					"checkout); if its executor is lost the daemon re-binds the agent onto " +
-					"another one. \"pinned\": only executors marked pinned (the default); if " +
+					"another member of its set. \"pinned\": only executors marked pinned (the default); if " +
 					"its executor is lost the agent KEEPS RUNNING — calls to that machine fail " +
 					"until it reconnects, and the workspace there is re-provisioned when it " +
 					"does, so anything uncommitted on that machine may be gone. Neither mode " +
