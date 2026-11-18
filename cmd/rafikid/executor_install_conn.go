@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,8 @@ type remoteServeConn struct {
 	// blocked Read and a blocked pump both unblock when the session ends.
 	chunks chan remoteServeChunk
 	closed chan struct{}
+	// readDeadline is what lets net/http's Hijack interrupt a pending Read.
+	readDeadline *deadline
 	// ended is closed when the pump has finished delivering — the exit frame or
 	// the stream ending. It is launchInstalled's "it died early" arm.
 	ended    chan struct{}
@@ -80,6 +83,8 @@ func newRemoteServeConn(stream remoteServeStream, executorID, target, launcher s
 		chunks:     make(chan remoteServeChunk, remoteServeChunks),
 		closed:     make(chan struct{}),
 		ended:      make(chan struct{}),
+
+		readDeadline: newDeadline(),
 	}
 	go c.pump()
 	return c
@@ -166,7 +171,15 @@ func (c *remoteServeConn) Read(p []byte) (int, error) {
 		c.queue = c.queue[n:]
 		return n, nil
 	}
+	expired := c.readDeadline.wait()
 	select {
+	case <-expired:
+		return 0, os.ErrDeadlineExceeded
+	default:
+	}
+	select {
+	case <-expired:
+		return 0, os.ErrDeadlineExceeded
 	case ch := <-c.chunks:
 		if ch.err != nil {
 			c.terminal = ch.err
@@ -245,12 +258,67 @@ func (c *remoteServeConn) RemoteAddr() net.Addr {
 	return installAddr("ssh:" + c.target + " via " + c.launcher)
 }
 
-// Deadlines are inert. The session's bounds are its process and the daemon's
-// lifetime, not an I/O deadline: a remote executor is legitimately idle for
-// hours between calls.
-func (c *remoteServeConn) SetDeadline(time.Time) error      { return nil }
-func (c *remoteServeConn) SetReadDeadline(time.Time) error  { return nil }
+// SetReadDeadline is honoured because net/http depends on it: Hijack aborts the
+// server's background one-byte read by setting a deadline in the past and then
+// waits for that Read to return. The remote sends nothing more until it has
+// the 101, and the 101 is written only after Hijack returns, so an inert read
+// deadline deadlocks every accepted upgrade.
+//
+// Nothing else sets one on this connection: http.Server clears its header
+// deadline before the handler runs, and the upgraded session sets none, so a
+// remote executor stays free to idle for hours between calls.
+func (c *remoteServeConn) SetReadDeadline(t time.Time) error {
+	c.readDeadline.set(t)
+	return nil
+}
+
+// SetDeadline sets only the read deadline; see SetWriteDeadline.
+func (c *remoteServeConn) SetDeadline(t time.Time) error { return c.SetReadDeadline(t) }
+
+// SetWriteDeadline is inert: Write is one stream Send, which the stream's own
+// context bounds, and no caller of this connection relies on interrupting it.
 func (c *remoteServeConn) SetWriteDeadline(time.Time) error { return nil }
+
+// deadline is a read deadline a blocked Read can select on: wait returns a
+// channel that is closed once the deadline has passed. A zero time means none.
+type deadline struct {
+	mu     sync.Mutex
+	timer  *time.Timer
+	expire chan struct{}
+}
+
+func newDeadline() *deadline { return &deadline{expire: make(chan struct{})} }
+
+func (d *deadline) set(t time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer != nil && !d.timer.Stop() {
+		// The previous timer already fired and closed expire; a new deadline
+		// needs a fresh, open channel.
+		<-d.expire
+	}
+	d.timer = nil
+	select {
+	case <-d.expire:
+		d.expire = make(chan struct{})
+	default:
+	}
+	if t.IsZero() {
+		return
+	}
+	if dur := time.Until(t); dur > 0 {
+		expire := d.expire
+		d.timer = time.AfterFunc(dur, func() { close(expire) })
+		return
+	}
+	close(d.expire)
+}
+
+func (d *deadline) wait() <-chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.expire
+}
 
 // installAddr is a net.Addr whose Network is the transport's name and whose
 // String is what an operator reads.
