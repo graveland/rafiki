@@ -282,6 +282,22 @@ func (s *Store) MarkExited(id string, exitedAt time.Time, exitCode int, exitSign
 	return true
 }
 
+// ReleaseExitedRings drops the exit-time ring snapshots MarkExited stored, for
+// a caller that has made them durable elsewhere. A store of every exited
+// child's output would otherwise grow with the number of children the daemon
+// has ever run. It reports whether the child exists.
+func (s *Store) ReleaseExitedRings(id string) bool {
+	sess, found := s.sessions.Load(id)
+	if !found {
+		return false
+	}
+	sess.mu.Lock()
+	sess.ExitedRing = nil
+	sess.ExitedRenderRing = nil
+	sess.mu.Unlock()
+	return true
+}
+
 // ─── generic bucket helpers ──────────────────────────────────────────────────
 
 // addToBucket inserts id into the set stored under key in idx, creating the

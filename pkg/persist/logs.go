@@ -61,6 +61,21 @@ func NewLogDumper(dir string, mode Mode) *LogDumper {
 	return &LogDumper{dir: dir, mode: mode}
 }
 
+// Writes reports whether Dump writes files for a child that ended with exit.
+// A nil error from Dump alone does not mean files exist: the modes that skip
+// a child return nil too, so a caller that drops its in-memory copy of the
+// output once it is on disk must ask this first.
+func (d *LogDumper) Writes(exit ExitInfo) bool {
+	switch d.mode {
+	case ModeNever:
+		return false
+	case ModeOnFailure:
+		return exit.ExitCode != 0 || exit.Signal != "" || exit.LastStatus == "error"
+	default:
+		return true
+	}
+}
+
 // Dump writes in.jsonl.gz, out.jsonl.gz, err.log.gz, meta.json, and (when
 // render is non-empty) render.jsonl.gz for childID under the configured
 // directory, subject to the emission mode.
@@ -76,13 +91,7 @@ func (d *LogDumper) Dump(
 	meta Meta,
 	exit ExitInfo,
 ) error {
-	if d.mode == ModeNever {
-		return nil
-	}
-	if d.mode == ModeOnFailure &&
-		exit.ExitCode == 0 &&
-		exit.Signal == "" &&
-		exit.LastStatus != "error" {
+	if !d.Writes(exit) {
 		return nil
 	}
 

@@ -13,6 +13,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -86,4 +87,60 @@ func TestCleanChildExitIsLoggedAtInfoWithoutStderr(t *testing.T) {
 	ck.StrContains(got, `level=INFO msg="child exited"`, "a clean exit is INFO: %s", got)
 	ck.False(strings.Contains(got, "stderr="),
 		"a clean exit carries no stderr tail: %s", got)
+}
+
+// exitedRingAfterExit runs a child that prints one frame through
+// handleChildExit with a dumper in the given mode and returns the controller.
+func exitedRingAfterExit(t *testing.T, childID string, mode persist.Mode, script string) *Controller {
+	t.Helper()
+	c, _, _ := settleFixture(t)
+	c.logsDir = t.TempDir()
+	c.dumper = persist.NewLogDumper(c.logsDir, mode)
+	c.st.Insert(&childstore.Session{
+		ChildID: childID, Name: childID, Kind: protocol.KindClaude,
+		Status: protocol.StatusStreaming, StartedAt: time.Now(),
+	})
+	ch := spawnExitingChild(t, childID, script)
+	c.cm.Add(childID, ch)
+	c.handleChildExit(childID, ch)
+	return c
+}
+
+// Once an exit's output is on disk the daemon stops holding it in memory:
+// keeping every exited child's ring grew the heap with the number of children
+// ever run. Reads then come from the dump, as they do after a restart.
+func TestExitedRingIsReleasedOnceDumped(t *testing.T) {
+	ck := assert.NewAborting(t)
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available: this test needs a real process")
+	}
+	c := exitedRingAfterExit(t, "c_dumped", persist.ModeOnExit, `echo '{"type":"system"}'; exit 0`)
+
+	snap, _ := c.st.Get("c_dumped")
+	ck.Eq(protocol.StatusExited, snap.Status, "child is exited")
+	ck.Eq(0, len(snap.ExitedRing), "the in-memory ring must be released after a successful dump")
+
+	res, err := c.GetRecent("c_dumped", recentQuery{})
+	ck.Require().NoError(err, "GetRecent")
+	ck.Require().Eq(1, len(res.Events), "GetRecent serves the dumped frame")
+	ck.StrContains(string(res.Events[0]), `"type":"system"`, "dumped frame")
+}
+
+// When nothing was written to disk the in-memory ring is the only copy, so it
+// stays: ModeNever and a clean exit under ModeOnFailure both write nothing yet
+// return no error from Dump.
+func TestExitedRingIsKeptWhenNothingWasDumped(t *testing.T) {
+	ck := assert.NewAborting(t)
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available: this test needs a real process")
+	}
+	for _, mode := range []persist.Mode{persist.ModeNever, persist.ModeOnFailure} {
+		id := "c_kept_" + string(mode)
+		c := exitedRingAfterExit(t, id, mode, `echo '{"type":"system"}'; exit 0`)
+		snap, _ := c.st.Get(id)
+		ck.Eq(1, len(snap.ExitedRing), "mode %s: the ring is the only copy and must be kept", mode)
+		res, err := c.GetRecent(id, recentQuery{})
+		ck.Require().NoError(err, "GetRecent %s", mode)
+		ck.Eq(1, len(res.Events), "mode %s: GetRecent serves the in-memory frame", mode)
+	}
 }

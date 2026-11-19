@@ -5450,6 +5450,12 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		}
 		if err := c.dumper.Dump(childID, ch.InSnapshot(), ch.RingSnapshot(), renderBytes, ch.StderrSnapshot(), meta, exitInfo); err != nil {
 			slog.Warn("log dump failed", "child", childID, "error", err)
+		} else if c.dumper.Writes(exitInfo) {
+			// The output is on disk, and GetRecent reads it from there once
+			// the in-memory copy is gone (as it always does after a restart).
+			// Keeping every exited child's ring in memory made the daemon's
+			// heap grow with the number of children it had ever run.
+			c.st.ReleaseExitedRings(childID)
 		}
 	}
 

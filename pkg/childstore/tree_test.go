@@ -256,3 +256,18 @@ func TestSnapshotSharesExitedRings(t *testing.T) {
 	c.True(&first.ExitedRing[0] == &second.ExitedRing[0], "ExitedRing is shared, not copied")
 	c.True(&first.ExitedRenderRing[0] == &second.ExitedRenderRing[0], "ExitedRenderRing is shared, not copied")
 }
+
+func TestReleaseExitedRingsDropsTheSnapshots(t *testing.T) {
+	c := assert.NewAborting(t)
+	s := childstore.New()
+	insert(t, s, "a", "", "")
+	events := []ring.Event{{Bytes: []byte(`{"type":"system"}`), Timestamp: 1}}
+	c.True(s.MarkExited("a", time.Now(), 0, "", events, events), "MarkExited")
+
+	c.True(s.ReleaseExitedRings("a"), "ReleaseExitedRings on a known child")
+	snap, _ := s.Get("a")
+	c.Eq(0, len(snap.ExitedRing), "ExitedRing released")
+	c.Eq(0, len(snap.ExitedRenderRing), "ExitedRenderRing released")
+	c.Eq(protocol.StatusExited, snap.Status, "release leaves the exit state alone")
+	c.False(s.ReleaseExitedRings("nope"), "unknown child")
+}

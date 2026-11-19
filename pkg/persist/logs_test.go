@@ -141,3 +141,27 @@ func TestLogDump_MetaJsonRoundTrip(t *testing.T) {
 		got.ExitCode != in.ExitCode || got.ExitSignal != in.ExitSignal, "meta round-trip mismatch:\n got %+v\n want %+v", got, in)
 	c.False(len(got.Argv) != len(in.Argv) || got.Argv[0] != in.Argv[0], "argv mismatch: got %v, want %v", got.Argv, in.Argv)
 }
+
+func TestWritesFollowsMode(t *testing.T) {
+	clean := persist.ExitInfo{}
+	for _, tc := range []struct {
+		name string
+		mode persist.Mode
+		exit persist.ExitInfo
+		want bool
+	}{
+		{"on_exit clean", persist.ModeOnExit, clean, true},
+		{"default mode clean", "", clean, true},
+		{"never clean", persist.ModeNever, clean, false},
+		{"never failed", persist.ModeNever, persist.ExitInfo{ExitCode: 1}, false},
+		{"on_failure clean", persist.ModeOnFailure, clean, false},
+		{"on_failure exit code", persist.ModeOnFailure, persist.ExitInfo{ExitCode: 2}, true},
+		{"on_failure signal", persist.ModeOnFailure, persist.ExitInfo{Signal: "SIGKILL"}, true},
+		{"on_failure error status", persist.ModeOnFailure, persist.ExitInfo{LastStatus: "error"}, true},
+	} {
+		got := persist.NewLogDumper(t.TempDir(), tc.mode).Writes(tc.exit)
+		if got != tc.want {
+			t.Errorf("%s: Writes = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
