@@ -3,6 +3,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -771,4 +773,37 @@ func TestResponsesSenderResendsOnlyOwnDialect(t *testing.T) {
 	c.StrContains(body, "blob-api", "this sender's own encrypted content must be resent")
 	c.NotStrContains(body, "rs_gpt", "the other dialect's reasoning item must be dropped")
 	c.NotStrContains(body, "blob-gpt", "the other dialect's blob must be dropped")
+}
+
+// TestEncodeBodyRetainsOneEncoderHistory pins that the shared zstd encoder is
+// built with a single internal encoder. EncodeAll rotates through its pool and
+// every encoder keeps its own history buffer for good, so a pool sized to
+// GOMAXPROCS holds that many buffers after enough calls.
+func TestEncodeBodyRetainsOneEncoderHistory(t *testing.T) {
+	ck := assert.NewAborting(t)
+	s := &responsesSender{chatGPT: true}
+	body := bytes.Repeat([]byte(`{"input":"some repeated request text"}`), 64*1024)
+
+	heap := func() uint64 {
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return m.HeapAlloc
+	}
+	before := heap()
+	for i := 0; i < 4*runtime.GOMAXPROCS(0); i++ {
+		out, err := s.encodeBody(body)
+		ck.NoError(err, "encodeBody")
+		dec, derr := zstd.NewReader(nil)
+		ck.NoError(derr, "zstd reader")
+		got, derr := dec.DecodeAll(out, nil)
+		ck.NoError(derr, "decode")
+		ck.Eq(len(body), len(got), "round trip length")
+		dec.Close()
+	}
+	retained := int64(heap()) - int64(before)
+	runtime.KeepAlive(s)
+	// One history buffer is tens of MB at most; a pool of GOMAXPROCS of them
+	// is several times that.
+	ck.True(retained < 48<<20, "encoder retained %d MB after sequential calls", retained>>20)
 }

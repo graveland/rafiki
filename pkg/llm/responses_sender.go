@@ -128,7 +128,11 @@ type responsesSender struct {
 	// zstdEnc is created once per sender and reused: a fresh encoder per request
 	// allocates its window per turn, and the window is the expensive part. The
 	// mutex is what makes reuse safe (an encoder is not reentrant), and it is the
-	// same mutex as the turn-state map's only for convenience.
+	// same mutex as the turn-state map's only for convenience. It is built with
+	// one internal encoder: EncodeAll hands out encoders from a pool in rotation
+	// and each keeps its own history buffer for good, so under the mutex (which
+	// already forbids parallel use) a pool of GOMAXPROCS would only multiply
+	// the retained memory.
 	zstdEnc *zstd.Encoder
 }
 
@@ -315,7 +319,7 @@ func (s *responsesSender) encodeBody(body []byte) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.zstdEnc == nil {
-		enc, err := zstd.NewWriter(nil)
+		enc, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
 		if err != nil {
 			return nil, fmt.Errorf("llm: openai-responses: zstd encoder: %w", err)
 		}
