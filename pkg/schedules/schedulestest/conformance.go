@@ -46,6 +46,7 @@ func RunConformance(t *testing.T, newStore newStoreFunc) {
 	t.Run("TombstoneIsIdempotent", func(t *testing.T) { testTombstoneIsIdempotent(t, newStore) })
 	t.Run("CloseForChildClosesOnlyThatChild", func(t *testing.T) { testCloseForChildClosesOnlyThatChild(t, newStore) })
 	t.Run("ListHeldFiltersByChildAndCount", func(t *testing.T) { testListHeldFiltersByChildAndCount(t, newStore) })
+	t.Run("CountOpenGroupsByChild", func(t *testing.T) { testCountOpenGroupsByChild(t, newStore) })
 	t.Run("GetReturnsClosedRows", func(t *testing.T) { testGetReturnsClosedRows(t, newStore) })
 }
 
@@ -381,6 +382,33 @@ func testCloseForChildClosesOnlyThatChild(t *testing.T, newStore newStoreFunc) {
 	c.NoError(err, "ListOpen(b)")
 	c.Len(openB, 1, "b's job is untouched")
 	c.Eq(prefix+"b1", openB[0].ID, "b's surviving job")
+}
+
+func testCountOpenGroupsByChild(t *testing.T, newStore newStoreFunc) {
+	c := assert.NewAborting(t)
+	s, prefix := newStore(t)
+	a, b, none := prefix+"a", prefix+"b", prefix+"none"
+	ctx := context.Background()
+
+	create(t, s, newCronJob(prefix, a, "a1", base))
+	create(t, s, newCronJob(prefix, a, "a2", base.Add(time.Minute)))
+	create(t, s, newCronJob(prefix, b, "b1", base))
+	c.NoError(s.Tombstone(ctx, prefix+"a2", nil), "Tombstone(a2)")
+	create(t, s, newCronJob(prefix, a, "a3", base.Add(2*time.Minute)))
+
+	got, err := s.CountOpen(ctx, []string{a, b, none})
+	c.NoError(err, "CountOpen")
+	c.Eq(2, got[a], "a has a1 and a3 open; a2 is closed")
+	c.Eq(1, got[b], "b has one open job")
+	c.Eq(0, got[none], "a child with no jobs reads 0")
+
+	got, err = s.CountOpen(ctx, []string{b})
+	c.NoError(err, "CountOpen([b])")
+	c.Eq(0, got[a], "children outside the request are not counted")
+
+	got, err = s.CountOpen(ctx, nil)
+	c.NoError(err, "CountOpen(nil)")
+	c.Empty(got, "CountOpen(nil)")
 }
 
 func testListHeldFiltersByChildAndCount(t *testing.T, newStore newStoreFunc) {

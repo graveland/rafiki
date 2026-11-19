@@ -92,9 +92,17 @@ func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSu
 	// The script children price one subtree query each, under the same batch
 	// bound as the rollup — the SAME ctx, not a second window: both are
 	// display numbers that must not hold up the list they decorate.
+	ids := make([]string, len(kept))
+	for i, s := range kept {
+		ids[i] = s.ChildID
+	}
+	batch := c.newDisplayBatch(ids)
+	displayState := func(id string) (protocol.DisplayState, protocol.WaitingOn, string) {
+		return c.displayStateWith(id, batch)
+	}
 	out := make([]protocol.ChildSummary, 0, len(kept))
 	for _, s := range kept {
-		sum := snapshotToSummary(s, c.ContextWindow, c.displayStateFor)
+		sum := snapshotToSummary(s, c.ContextWindow, displayState)
 		if s.Kind == protocol.KindScript {
 			sum.CostUSD = c.scriptSpend(ctx, s.ChildID)
 		} else if cost, ok := costs[s.ChildID]; ok {

@@ -217,3 +217,23 @@ func TestLiveDescendantCount(t *testing.T) {
 	})
 	assert.NewAborting(t).Eq(3, s.LiveDescendantCount("root"), "LiveDescendantCount(root)")
 }
+
+// TestDescendantCountsMatchesCountDescendants pins that the one-pass count a
+// list uses agrees with the per-child count for every node, including a
+// status filter, an unrelated tree and a cyclic chain.
+func TestDescendantCountsMatchesCountDescendants(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := tree(t)
+	insert(t, s, "e", "d", "a")
+	insert(t, s, "x", "y", "x")
+	insert(t, s, "y", "x", "x")
+	keep := func(st protocol.Status) bool { return st == protocol.StatusIdle }
+	counts := s.DescendantCounts(keep)
+	for _, id := range []string{"a", "b", "c", "d", "e", "z", "x", "y"} {
+		c.Eq(s.CountDescendants(id, keep), counts[id], "count for %s", id)
+	}
+	c.Eq(4, counts["a"], "a has b, c, d, e beneath it")
+
+	none := s.DescendantCounts(func(protocol.Status) bool { return false })
+	c.Eq(0, len(none), "no matching status yields no entries")
+}

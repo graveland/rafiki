@@ -162,6 +162,23 @@ func (m *Memory) ListOpen(ctx context.Context, childID string) ([]Job, error) {
 	return out, nil
 }
 
+// CountOpen returns how many open jobs each of childIDs has.
+func (m *Memory) CountOpen(ctx context.Context, childIDs []string) (map[string]int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := make(map[string]bool, len(childIDs))
+	for _, id := range childIDs {
+		want[id] = true
+	}
+	out := make(map[string]int)
+	for _, row := range m.jobs {
+		if want[row.ChildID] && row.ClosedAt == nil {
+			out[row.ChildID]++
+		}
+	}
+	return out, nil
+}
+
 // ListHeld returns the open jobs of any of childIDs with HeldCount > 0,
 // ordered like ListOpen.
 func (m *Memory) ListHeld(ctx context.Context, childIDs []string) ([]Job, error) {

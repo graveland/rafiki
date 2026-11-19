@@ -106,6 +106,11 @@ type Store interface {
 	Get(ctx context.Context, id string) (FireRow, error)
 	// ListOpen returns childID's open jobs ordered by NextFireAt, then ID.
 	ListOpen(ctx context.Context, childID string) ([]Job, error)
+	// CountOpen returns how many open jobs each of childIDs has, from one
+	// query. A child with none is absent from the map. It is ListOpen's
+	// count for a whole list, so a listing does one round trip, not one per
+	// child.
+	CountOpen(ctx context.Context, childIDs []string) (map[string]int, error)
 	// ListHeld returns the open jobs of any of childIDs with HeldCount > 0.
 	ListHeld(ctx context.Context, childIDs []string) ([]Job, error)
 	// Delete tombstones job id IF it is an open job of childID; otherwise

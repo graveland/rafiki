@@ -36,6 +36,39 @@ const displayStateScheduleTimeout = 2 * time.Second
 // worker, never on the status path: handleStatusChange enqueues, it does not
 // compute.
 func (c *Controller) displayFacts(childID string) (displayFacts, bool) {
+	return c.displayFactsWith(childID, nil)
+}
+
+// displayBatch holds per-list answers computed once for a whole listing, so
+// each child's display state is a map lookup instead of its own tree scan and
+// database round trip. A nil batch (or a nil field) makes displayFactsWith
+// compute that fact for the single child.
+type displayBatch struct {
+	liveCounts    map[string]int
+	openSchedules map[string]int
+}
+
+// newDisplayBatch computes the list-wide facts for ids. A failed schedule
+// count is logged and leaves openSchedules nil, which falls back to the
+// per-child lookup rather than reading as "no schedules".
+func (c *Controller) newDisplayBatch(ids []string) *displayBatch {
+	b := &displayBatch{liveCounts: c.st.DescendantCounts(isLiveDescendantStatus)}
+	if c.schedules != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), displayStateScheduleTimeout)
+		defer cancel()
+		counts, err := c.schedules.CountOpen(ctx, ids)
+		if err != nil {
+			slog.Warn("display state: count open schedules", "children", len(ids), "error", err)
+		} else {
+			b.openSchedules = counts
+		}
+	}
+	return b
+}
+
+// displayFactsWith is displayFacts with the list-wide facts supplied by the
+// caller (see displayBatch).
+func (c *Controller) displayFactsWith(childID string, batch *displayBatch) (displayFacts, bool) {
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return displayFacts{}, false
@@ -61,7 +94,10 @@ func (c *Controller) displayFacts(childID string) (displayFacts, bool) {
 	if f.TopLevel {
 		_, f.BudgetHalted = c.budgetHalted(childID)
 	}
-	if c.schedules != nil {
+	switch {
+	case batch != nil && batch.openSchedules != nil:
+		f.OpenSchedules = batch.openSchedules[childID]
+	case c.schedules != nil:
 		ctx, cancel := context.WithTimeout(context.Background(), displayStateScheduleTimeout)
 		jobs, err := c.schedules.ListOpen(ctx, childID)
 		cancel()
@@ -78,10 +114,10 @@ func (c *Controller) displayFacts(childID string) (displayFacts, bool) {
 	// worker sits at idle until it is closed, and its own schedule or job is
 	// its own wait, not its coordinator's. Counting "not exited" would hold the
 	// coordinator in waiting forever.
-	for _, d := range c.st.Descendants(childID) {
-		if d.Status != protocol.StatusIdle && d.Status != protocol.StatusExited {
-			f.LiveDescendants++
-		}
+	if batch != nil && batch.liveCounts != nil {
+		f.LiveDescendants = batch.liveCounts[childID]
+	} else {
+		f.LiveDescendants = c.st.CountDescendants(childID, isLiveDescendantStatus)
 	}
 	f.PendingEvents = c.evbuf != nil && c.evbuf.Pending(childID)
 	return f, true
@@ -104,10 +140,20 @@ func (c *Controller) runningJobsFor(childID string) int {
 	return n
 }
 
+// isLiveDescendantStatus is the status test that holds an ancestor in
+// waiting: only a descendant's own machine status counts.
+func isLiveDescendantStatus(st protocol.Status) bool {
+	return st != protocol.StatusIdle && st != protocol.StatusExited
+}
+
 // displayStateFor computes one child's display tuple. An unknown child reads
 // as exited: the process is gone and nothing can answer for it.
 func (c *Controller) displayStateFor(snapID string) (protocol.DisplayState, protocol.WaitingOn, string) {
-	f, ok := c.displayFacts(snapID)
+	return c.displayStateWith(snapID, nil)
+}
+
+func (c *Controller) displayStateWith(snapID string, batch *displayBatch) (protocol.DisplayState, protocol.WaitingOn, string) {
+	f, ok := c.displayFactsWith(snapID, batch)
 	if !ok {
 		return protocol.DisplayExited, "", ""
 	}

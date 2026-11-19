@@ -1,6 +1,10 @@
 package childstore
 
-import "go.graveland.dev/rafiki/pkg/protocol"
+import (
+	"sort"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
+)
 
 // Pre-rename spellings. Records persisted before the fundi -> rafiki
 // identity consolidation still carry these, so readers tolerate them.
@@ -29,11 +33,32 @@ func labelLookup(labels map[string]string, key, legacy string) (string, bool) {
 
 // ParentOf returns the direct parent's child id, with legacy spelling fallback.
 func (s *Store) ParentOf(childID string) (string, bool) {
-	snap, ok := s.Get(childID)
+	var parent string
+	var has bool
+	s.readLabels(childID, func(labels map[string]string) {
+		parent, has = ParentLabel(labels)
+	})
+	return parent, has
+}
+
+// readLabels calls fn with childID's live label map under the session lock
+// and reports whether the child exists. The tree predicates run on every
+// list and steering call, so they read the one label they need in place
+// instead of paying for a Snapshot's deep copy; fn must not retain the map.
+func (s *Store) readLabels(childID string, fn func(labels map[string]string)) bool {
+	sess, ok := s.sessions.Load(childID)
 	if !ok {
-		return "", false
+		return false
 	}
-	return ParentLabel(snap.Labels)
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	fn(sess.Labels)
+	return true
+}
+
+func (s *Store) exists(childID string) bool {
+	_, ok := s.sessions.Load(childID)
+	return ok
 }
 
 // ParentLabel reads the parent child id from a label map, honouring the
@@ -45,11 +70,14 @@ func ParentLabel(labels map[string]string) (string, bool) {
 // RootOf returns the top-level ancestor's child id. A top-level child is its
 // own root. Returns "" when childID is unknown.
 func (s *Store) RootOf(childID string) string {
-	snap, ok := s.Get(childID)
-	if !ok {
+	var root string
+	var has bool
+	if !s.readLabels(childID, func(labels map[string]string) {
+		root, has = labelLookup(labels, LabelRoot, legacyLabelRoot)
+	}) {
 		return ""
 	}
-	if root, ok := labelLookup(snap.Labels, LabelRoot, legacyLabelRoot); ok {
+	if has {
 		return root
 	}
 	return childID
@@ -66,7 +94,7 @@ func (s *Store) IsDescendant(ancestorID, candidateID string) bool {
 	if ancestorID == "" || candidateID == "" || ancestorID == candidateID {
 		return false
 	}
-	if _, ok := s.Get(ancestorID); !ok {
+	if !s.exists(ancestorID) {
 		return false
 	}
 	cur := candidateID
@@ -97,10 +125,10 @@ func (s *Store) DescendantDepth(ancestorID, candidateID string) int {
 	if ancestorID == "" || candidateID == "" || ancestorID == candidateID {
 		return -1
 	}
-	if _, ok := s.Get(ancestorID); !ok {
+	if !s.exists(ancestorID) {
 		return -1
 	}
-	if _, ok := s.Get(candidateID); !ok {
+	if !s.exists(candidateID) {
 		return -1
 	}
 	cur := candidateID
@@ -135,7 +163,7 @@ func (s *Store) AbsoluteDepth(childID string) int {
 	if childID == "" {
 		return -1
 	}
-	if _, ok := s.Get(childID); !ok {
+	if !s.exists(childID) {
 		return -1
 	}
 	depth := 0
@@ -202,16 +230,98 @@ func (s *Store) Descendants(ancestorID string) []Snapshot {
 		return nil
 	}
 	var out []Snapshot
-	for _, snap := range s.List() {
-		if snap.ChildID == ancestorID {
+	s.sessions.Range(func(id string, sess *Session) bool {
+		if id == ancestorID {
+			return true
+		}
+		inTree := false
+		s.readLabels(id, func(labels map[string]string) {
+			r, ok := labelLookup(labels, LabelRoot, legacyLabelRoot)
+			inTree = ok && r == root
+		})
+		if inTree && s.IsDescendant(ancestorID, id) {
+			out = append(out, sess.Snapshot())
+		}
+		return true
+	})
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].StartedAt.After(out[j].StartedAt)
+	})
+	return out
+}
+
+// CountDescendants counts the descendants of ancestorID whose status satisfies
+// keep, without snapshotting them. The display state asks this once per listed
+// child, so copying every descendant just to count it made a list quadratic in
+// allocation.
+func (s *Store) CountDescendants(ancestorID string, keep func(protocol.Status) bool) int {
+	if ancestorID == "" {
+		return 0
+	}
+	root := s.RootOf(ancestorID)
+	if root == "" {
+		return 0
+	}
+	n := 0
+	s.sessions.Range(func(id string, sess *Session) bool {
+		if id == ancestorID {
+			return true
+		}
+		inTree := false
+		s.readLabels(id, func(labels map[string]string) {
+			r, ok := labelLookup(labels, LabelRoot, legacyLabelRoot)
+			inTree = ok && r == root
+		})
+		if !inTree || !s.IsDescendant(ancestorID, id) {
+			return true
+		}
+		sess.mu.Lock()
+		st := sess.Status
+		sess.mu.Unlock()
+		if keep(st) {
+			n++
+		}
+		return true
+	})
+	return n
+}
+
+// DescendantCounts returns, for every child that has at least one, how many
+// descendants satisfy keep, from one pass over the store. Listing N children
+// with a CountDescendants call each is O(N^2) scans; this walks each child's
+// parent chain once (bounded by maxChainDepth, like IsDescendant), so a list
+// costs O(N * depth). A child with no matching descendant is absent (reads 0).
+func (s *Store) DescendantCounts(keep func(protocol.Status) bool) map[string]int {
+	type node struct {
+		parent string
+		live   bool
+	}
+	nodes := make(map[string]node)
+	s.sessions.Range(func(id string, sess *Session) bool {
+		var parent string
+		sess.mu.Lock()
+		parent, _ = ParentLabel(sess.Labels)
+		live := keep(sess.Status)
+		sess.mu.Unlock()
+		nodes[id] = node{parent: parent, live: live}
+		return true
+	})
+	counts := make(map[string]int)
+	for id, n := range nodes {
+		if !n.live {
 			continue
 		}
-		if r, ok := labelLookup(snap.Labels, LabelRoot, legacyLabelRoot); !ok || r != root {
-			continue
-		}
-		if s.IsDescendant(ancestorID, snap.ChildID) {
-			out = append(out, snap)
+		cur := n.parent
+		for range maxChainDepth {
+			if cur == "" || cur == id {
+				break
+			}
+			if _, ok := nodes[cur]; !ok {
+				break
+			}
+			counts[cur]++
+			cur = nodes[cur].parent
 		}
 	}
-	return out
+	return counts
 }

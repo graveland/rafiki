@@ -167,6 +167,32 @@ func (s *Store) ListOpen(ctx context.Context, childID string) ([]schedules.Job, 
 	return collectJobs(rows)
 }
 
+// CountOpen returns how many open jobs each of childIDs has, in one query.
+func (s *Store) CountOpen(ctx context.Context, childIDs []string) (map[string]int, error) {
+	out := make(map[string]int)
+	if len(childIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT child_id, count(*)
+		   FROM conversations.schedule
+		  WHERE child_id = ANY($1) AND closed_at IS NULL
+		  GROUP BY child_id`, childIDs)
+	if err != nil {
+		return nil, fmt.Errorf("count open schedules: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("scan open schedule count: %w", err)
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // ListHeld returns the open jobs of any of childIDs with HeldCount > 0,
 // ordered like ListOpen.
 func (s *Store) ListHeld(ctx context.Context, childIDs []string) ([]schedules.Job, error) {
