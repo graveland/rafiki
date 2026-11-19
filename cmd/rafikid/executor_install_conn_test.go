@@ -158,3 +158,79 @@ func TestServeConnAnswersAnAcceptedTunnelUpgrade(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func stderrFrame(b string) *executorpb.RemoteServeResponse {
+	return &executorpb.RemoteServeResponse{
+		Msg: &executorpb.RemoteServeResponse_Stderr{Stderr: []byte(b)},
+	}
+}
+
+func waitExited(t *testing.T, conn *remoteServeConn) {
+	t.Helper()
+	select {
+	case <-conn.exited():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session never ended")
+	}
+}
+
+// A session that dies without a clean exit must put the remote's own stderr in
+// the daemon log at Warn, because Debug is off by default and the install
+// ring is read only by a launch that is still waiting.
+func TestRemoteServeConnLogsAbnormalEndAtWarn(t *testing.T) {
+	cases := []struct {
+		name  string
+		end   func(s *fakeServeStream)
+		wants []string
+	}{
+		{"nonzero exit", func(s *fakeServeStream) { s.exit(3, "") }, []string{"exited abnormally", "exitCode=3"}},
+		{"stream closed without an exit frame", func(s *fakeServeStream) { close(s.frames) }, []string{"without an exit frame"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			logs := captureLogs(t)
+			stream := newFakeServeStream()
+			conn := newRemoteServeConn(stream, "row-1", "target", "launcher")
+			t.Cleanup(func() { _ = conn.Close() })
+
+			stream.frames <- stderrFrame("fatal: out of disk")
+			tc.end(stream)
+			waitExited(t, conn)
+
+			var warn string
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, "level=WARN") {
+					warn = line
+				}
+			}
+			c.Require().True(warn != "", "no Warn line; logs:\n%s", logs.String())
+			c.True(strings.Contains(warn, "fatal: out of disk"), "the Warn line must carry the remote's stderr: %s", warn)
+			for _, w := range tc.wants {
+				c.True(strings.Contains(warn, w), "Warn line missing %q: %s", w, warn)
+			}
+		})
+	}
+}
+
+// A clean exit, and a session this side closed itself, are not faults.
+func TestRemoteServeConnCleanOrOwnEndIsNotAWarning(t *testing.T) {
+	t.Run("clean exit", func(t *testing.T) {
+		logs := captureLogs(t)
+		stream := newFakeServeStream()
+		conn := newRemoteServeConn(stream, "row-1", "target", "launcher")
+		t.Cleanup(func() { _ = conn.Close() })
+		stream.exit(0, "")
+		waitExited(t, conn)
+		assert.NewCollecting(t).False(strings.Contains(logs.String(), "level=WARN"), "logs:\n%s", logs.String())
+	})
+	t.Run("closed by us", func(t *testing.T) {
+		logs := captureLogs(t)
+		stream := newFakeServeStream()
+		conn := newRemoteServeConn(stream, "row-1", "target", "launcher")
+		_ = conn.Close()
+		close(stream.frames)
+		waitExited(t, conn)
+		assert.NewCollecting(t).False(strings.Contains(logs.String(), "level=WARN"), "logs:\n%s", logs.String())
+	})
+}

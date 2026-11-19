@@ -13,6 +13,7 @@ package main
 // stderr is exactly what a failed install has to hand its caller.
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -98,9 +99,12 @@ func (c *remoteServeConn) pump() {
 	for {
 		msg, err := c.stream.Receive()
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				slog.Debug("installed executor stream ended",
-					"executor", c.executorID, "target", c.target, "error", err)
+			// Either way the remote never reported how it ended, so its stderr
+			// is the only account of why.
+			if errors.Is(err, io.EOF) {
+				c.logAbnormalEnd("installed executor stream ended without an exit frame")
+			} else {
+				c.logAbnormalEnd("installed executor stream broke", "error", err)
 			}
 			// A stream that ends without an exit frame still ends the READ side:
 			// the http.Server must see the connection go, not hang on it.
@@ -119,6 +123,10 @@ func (c *remoteServeConn) pump() {
 			c.noteStderr(m.Stderr)
 		case *executorpb.RemoteServeResponse_Exit:
 			c.noteExit(m.Exit)
+			if m.Exit.GetCode() != 0 || m.Exit.GetSignal() != "" {
+				c.logAbnormalEnd("installed executor exited abnormally",
+					"exitCode", m.Exit.GetCode(), "signal", m.Exit.GetSignal())
+			}
 			c.push(remoteServeChunk{err: io.EOF})
 			return
 		}
@@ -150,6 +158,22 @@ func (c *remoteServeConn) noteStderr(b []byte) {
 	c.mu.Unlock()
 	slog.Debug("installed executor stderr",
 		"executor", c.executorID, "target", c.target, "stderr", string(b))
+}
+
+// logAbnormalEnd logs a session that ended without a clean exit, with the
+// remote's own stderr, at Warn: a default-level daemon log must carry the
+// reason an installed executor died. A session this side closed on purpose
+// (uninstall, cancelled launch) ends the same way and is not a fault, so it
+// stays at Debug.
+func (c *remoteServeConn) logAbnormalEnd(msg string, attrs ...any) {
+	level := slog.LevelWarn
+	select {
+	case <-c.closed:
+		level = slog.LevelDebug
+	default:
+	}
+	args := append([]any{"executor", c.executorID, "target", c.target, "stderr", c.stderrTail()}, attrs...)
+	slog.Log(context.Background(), level, msg, args...)
 }
 
 func (c *remoteServeConn) noteExit(exit *executorpb.RemoteServeExit) {
