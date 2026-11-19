@@ -127,6 +127,17 @@ unaffected — it still stops the turn.
 | `⏎` | Open the selected agent and return to the input box |
 | `esc` | Back to the input box, leaving focus where it was |
 
+Siblings under one parent are ordered by state, then by name: working agents
+first, then one waiting on you, then one whose last turn failed, then one parked
+on something rafiki handles (a job, a schedule, its children, queued events),
+then idle ones — and exited/killed rows last. A busy coordinator's rail
+therefore shows what is live at the top instead of scattering it alphabetically
+among the dead. A child row moves the moment its state changes; the cursor
+follows the agent, not the row number.
+
+The **top level** is the exception: it is always sorted by name, so an agent
+starting or finishing a turn never moves the row your cursor is resting on.
+
 The rail mirrors `rafiki list`, so it also follows changes made elsewhere: a
 child closed by another cockpit, by `rafiki forget`, or by the daemon's own
 grace reaper disappears from it. The daemon publishes a `ChildClosed` event for

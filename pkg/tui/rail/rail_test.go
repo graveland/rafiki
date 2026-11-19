@@ -281,7 +281,8 @@ func TestDisplayOrderIsParentThenChildren(t *testing.T) {
 	for _, n := range r.Nodes() {
 		got = append(got, n.ChildID)
 	}
-	// Siblings sort by NAME: builder before scout.
+	// Both children are idle, so the state key ties and NAME breaks it:
+	// builder before scout.
 	want := []string{"c_root", "c_b", "c_a"}
 	c.Len(got, len(want), "order = %v, want %v", got, want)
 	for i := range want {
@@ -290,6 +291,79 @@ func TestDisplayOrderIsParentThenChildren(t *testing.T) {
 	if d, _ := r.Get("c_a"); d.Depth != 1 {
 		t.Errorf("c_a depth = %d, want 1", d.Depth)
 	}
+}
+
+// Siblings BELOW the top level sort by STATE before name: a busy family is
+// read to find the live agents, so a killed row sits below every live one
+// however it is named, and the live rows follow the daemon's own display
+// precedence (working, waiting on a human, failed, waiting on rafiki, idle).
+func TestDisplayOrderSortsByStateThenName(t *testing.T) {
+	c := assert.NewAborting(t)
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		summary("c_root", "coordinator", "", "idle", 0),
+		// Named alphabetically, so a pure name sort would put the killed row
+		// first and the busy one fourth.
+		summary("c_dead", "alpha", "c_root", "exited", 0),
+		displaySummary("c_idle", "bravo", "c_root", "idle", "idle", "", "", 0),
+		displaySummary("c_job", "charlie", "c_root", "idle", "waiting", "job", "running a job", 0),
+		displaySummary("c_work", "delta", "c_root", "streaming", "working", "", "", 0),
+		displaySummary("c_op", "echo", "c_root", "idle", "waiting", "operator", "need a decision", 0),
+		displaySummary("c_fail", "foxtrot", "c_root", "idle", "failed", "", "turn failed", 0),
+	})
+	var got []string
+	for _, n := range r.Nodes() {
+		got = append(got, n.ChildID)
+	}
+	want := []string{"c_root", "c_work", "c_op", "c_fail", "c_job", "c_idle", "c_dead"}
+	c.EqDeep(want, got, "order")
+}
+
+// The TOP level sorts by name and only by name: an agent starting or finishing
+// a turn must never move the row the operator's cursor is resting on.
+func TestDisplayOrderTopLevelSortsByNameWhateverTheState(t *testing.T) {
+	c := assert.NewAborting(t)
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		displaySummary("c_a", "alpha", "", "idle", "idle", "", "", 0),
+		displaySummary("c_b", "bravo", "", "streaming", "working", "", "", 0),
+		displaySummary("c_c", "charlie", "", "idle", "failed", "", "boom", 0),
+		summary("c_d", "delta", "", "exited", 0),
+	})
+	order := func() []string {
+		var got []string
+		for _, n := range r.Nodes() {
+			got = append(got, n.ChildID)
+		}
+		return got
+	}
+	want := []string{"c_a", "c_b", "c_c", "c_d"}
+	c.EqDeep(want, order(), "order by name, whatever the states")
+
+	// bravo stops working and charlie starts: the states swap buckets, the
+	// rows do not move.
+	r.Apply(opState("c_b", "idle", "", "", 1))
+	r.Apply(opState("c_c", "working", "", "", 1))
+	c.EqDeep(want, order(), "order after one agent started a turn and another stopped")
+}
+
+// A row introduced by child_spawned carries no display state until the daemon
+// publishes one, so its machine status decides the bucket: "spawning" is work
+// in progress and sorts above an idle sibling.
+func TestDisplayOrderFallsBackToStatusWithoutADisplayState(t *testing.T) {
+	c := assert.NewAborting(t)
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{summary("c_root", "coordinator", "", "idle", 0)})
+	r.Apply(spawned("c_quiet", "c_root", "alpha", 0))
+	r.Apply(spawned("c_starting", "c_root", "bravo", 0))
+	r.Apply(&rafikiv1.Event{ChildId: "c_quiet", Ordinal: ptr(int32(1)),
+		Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: "idle"}}})
+
+	var got []string
+	for _, n := range r.Nodes() {
+		got = append(got, n.ChildID)
+	}
+	c.EqDeep([]string{"c_root", "c_starting", "c_quiet"}, got, "order")
 }
 
 func TestEventForAnUnknownChildIsIgnored(t *testing.T) {

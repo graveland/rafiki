@@ -146,13 +146,17 @@ func TestRailDisplayTopLevelDisplays(t *testing.T) {
 	})
 	got := r.TopLevelDisplays()
 	c.Require().Len(got, 2, "only the two parentless rows are top-level: %v", got)
-	// Display order is siblings by name (alpha before bravo).
+	// The top level sorts by NAME, never by state: bravo is working and alpha
+	// is only waiting on a human, and alpha still comes first. A top-level row
+	// must not move under the cursor every time an agent starts or stops.
 	c.Eq("c_a", got[0].ChildID, "first top-level in display order")
-	c.Eq("c_b", got[1].ChildID, "second top-level in display order")
 	c.Eq("alpha", got[0].Name, "Name")
 	c.Eq("waiting", got[0].DisplayState, "DisplayState")
 	c.Eq("operator", got[0].WaitingOn, "WaitingOn")
 	c.Eq("q", got[0].DisplayMsg, "DisplayMsg")
+	c.Eq("c_b", got[1].ChildID, "second top-level in display order")
+	c.Eq("bravo", got[1].Name, "Name")
+	c.Eq("working", got[1].DisplayState, "DisplayState")
 	for _, d := range got {
 		c.NotEq("c_a_kid", d.ChildID, "a child of c_a must not be top-level")
 	}

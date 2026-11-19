@@ -565,8 +565,18 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 	r.countAttention(n, ev)
 }
 
-// Nodes returns every row in display order: depth-first from each root,
-// siblings by name then id so the order is stable across renders.
+// Nodes returns every row in display order: depth-first from each root.
+//
+// The TOP level sorts by name then id -- it is the operator's own set of
+// agents, and reordering it by state would move rows under the cursor every
+// time one started or stopped a turn. Siblings BELOW the top level sort by
+// display state, then name, then id: a subagent family is read to find the
+// live ones, and name alone buries them among the killed ones. Exited rows
+// sort last within a family.
+//
+// The sort is recomputed on every read, so a child row moves the moment its
+// state does -- the selection is tracked by child id, never by index, which is
+// what keeps the cursor on its agent while the rows around it reorder.
 func (r *Rail) Nodes() []Node {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -701,6 +711,61 @@ func (r *Rail) SubtreeCost(childID string) float64 {
 	return walk(childID)
 }
 
+// The state buckets a family's siblings sort into, most-wanted first. A
+// subagent family is read top-down to find what is running, so the LIVE buckets
+// come before the dead one and a killed row can never sit between two live
+// ones. (The TOP level does not use these at all -- it sorts by name; see
+// nodesLocked.) Within the live buckets the order is the daemon's own display
+// precedence (see computeDisplayState in cmd/rafikid/display_state.go): a child
+// doing something, then one blocked on a human, then one whose last turn
+// failed, then one parked on something rafiki handles itself, then a quiet one.
+const (
+	rankWorking = iota
+	rankWaitingOperator
+	rankFailed
+	rankWaiting
+	rankIdle
+	rankExited
+)
+
+// displayRank is the state bucket a row sorts into among its siblings below
+// the top level: its position in that family's order.
+//
+// DisplayState is the authority when it is known. A row introduced by
+// child_spawned has none until the daemon publishes one, so the fallback is
+// the machine status under computeDisplayState's own rule: anything but idle
+// means the child is doing something, and a new status can never silently
+// read as idle. Exited wins over everything, whichever field says so, and an
+// unrecognised display state falls back to the quiet bucket so a newer
+// daemon's state can never jump the queue.
+func displayRank(n *Node) int {
+	if n.Exited || n.Status == "exited" {
+		return rankExited
+	}
+	state := n.DisplayState
+	if state == "" {
+		if n.Status == "" || n.Status == "idle" {
+			state = "idle"
+		} else {
+			state = "working"
+		}
+	}
+	switch state {
+	case "working":
+		return rankWorking
+	case "waiting":
+		if n.WaitingOn == "operator" {
+			return rankWaitingOperator
+		}
+		return rankWaiting
+	case "failed":
+		return rankFailed
+	case "exited":
+		return rankExited
+	}
+	return rankIdle
+}
+
 // nodesLocked is Nodes without the lock, for callers that already hold it.
 // sync.Mutex is NOT reentrant: NextAttention calling the exported Nodes would
 // deadlock the render loop on the first keypress.
@@ -714,6 +779,12 @@ func (r *Rail) nodesLocked() []Node {
 		}
 		children[n.ParentID] = append(children[n.ParentID], n)
 	}
+	// The TOP level is by NAME, never by state: it is the operator's own set of
+	// agents, and a top-level row that jumped to the top of the rail the moment
+	// it started a turn (and back down when it stopped) would move under the
+	// cursor all day. A row's state is already on its glyph, so the order has
+	// nothing to add there. Below it, a subagent family IS read to find the live
+	// ones, so those siblings sort by state first and an exited row sits last.
 	byName := func(s []*Node) {
 		sort.Slice(s, func(i, j int) bool {
 			if s[i].Name != s[j].Name {
@@ -722,9 +793,20 @@ func (r *Rail) nodesLocked() []Node {
 			return s[i].ChildID < s[j].ChildID
 		})
 	}
+	byState := func(s []*Node) {
+		sort.Slice(s, func(i, j int) bool {
+			if ri, rj := displayRank(s[i]), displayRank(s[j]); ri != rj {
+				return ri < rj
+			}
+			if s[i].Name != s[j].Name {
+				return s[i].Name < s[j].Name
+			}
+			return s[i].ChildID < s[j].ChildID
+		})
+	}
 	byName(roots)
 	for k := range children {
-		byName(children[k])
+		byState(children[k])
 	}
 
 	out := make([]Node, 0, len(r.nodes))
