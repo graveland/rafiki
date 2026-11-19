@@ -186,6 +186,7 @@ func bootDaemon(t *testing.T) *daemon {
 		// the proxy face comes up. Port 0 lets the kernel pick, and the face
 		// resolves the real port for its children's URLs.
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
+		"RAFIKI_PPROF_LISTEN=off",
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
 	// No real provider credentials, whatever the developer's .env exports: a

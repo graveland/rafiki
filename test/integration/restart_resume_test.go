@@ -132,6 +132,7 @@ func restartResumeDaemon(t *testing.T, d1 *daemon, id, providersPath string, ext
 		"RAFIKI_EXECUTORS_ENABLED=0",
 		"RAFIKI_PROVIDERS="+providersPath,
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
+		"RAFIKI_PPROF_LISTEN=off",
 		"RAFIKI_DAEMON_ID="+id,
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)

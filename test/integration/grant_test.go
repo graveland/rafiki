@@ -160,6 +160,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 		"RAFIKI_CONTROL_TLS_CERT="+certPath,
 		"RAFIKI_CONTROL_TLS_KEY="+keyPath,
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
+		"RAFIKI_PPROF_LISTEN=off",
 	)
 
 	if err := cmd.Start(); err != nil {

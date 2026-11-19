@@ -141,6 +141,7 @@ func bootEmbeddedDaemon(t *testing.T, d embeddedDirs, extraEnv ...string) *daemo
 		// Ephemeral loopback port: a developer's own `rafiki serve` on :8035
 		// must not be able to degrade this daemon.
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
+		"RAFIKI_PPROF_LISTEN=off",
 		"RAFIKI_DAEMON_ID=embedded-pg-test",
 	)
 	cmd.Env = append(cmd.Env, noRealProviderEnv()...)

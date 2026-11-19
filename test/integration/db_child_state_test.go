@@ -159,6 +159,7 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 		// fixed one. The real port is read back from the startup log below;
 		// an extraEnv entry still overrides it.
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
+		"RAFIKI_PPROF_LISTEN=off",
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
 	// No real provider credentials by default (see bootDaemon); a test that

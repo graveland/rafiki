@@ -151,6 +151,7 @@ func startAutoBgDaemon(t *testing.T, p autoBgParams) *daemon {
 		"RAFIKI_CONTROL_TLS_CERT="+p.certPath,
 		"RAFIKI_CONTROL_TLS_KEY="+p.keyPath,
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
+		"RAFIKI_PPROF_LISTEN=off",
 		// A short debounce so the job-exit fragment reaches the child in well
 		// under the tests' waits instead of the 5s production default.
 		"RAFIKI_EVENTBUF_DEBOUNCE_MS=250",

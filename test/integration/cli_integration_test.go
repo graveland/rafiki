@@ -110,11 +110,13 @@ func cliCmdIn(t *testing.T, d *daemon, configDir string, args ...string) *exec.C
 // shell is not hermetic. In particular RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC is a
 // retired spelling that serve now REFUSES at startup, so a subprocess
 // inheriting it would exit before enrolling and every executor test would fail
-// with "never enrolled".
+// with "never enrolled". An ambient RAFIKI_PROFILE is blanked for the same
+// reason: a developer's own profile name must not reach a test's subprocess.
 func subprocessEnv(extra ...string) []string {
 	return append(append(os.Environ(),
 		"RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC=",
 		"RAFIKI_EXECUTOR_REPO_SYNC=",
+		"RAFIKI_PROFILE=",
 	), extra...)
 }
 

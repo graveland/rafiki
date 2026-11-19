@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -75,6 +76,7 @@ func (f *fakeExecStore) List(_ context.Context) ([]executors.Executor, error) {
 	for _, e := range f.execs {
 		out = append(out, e)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 func (f *fakeExecStore) SetLabels(_ context.Context, id string, set map[string]string, remove []string) (executors.Executor, error) {

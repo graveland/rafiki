@@ -898,6 +898,7 @@ func restartDaemon(t *testing.T, old *daemon, daemonID string, extraEnv ...strin
 		"RAFIKI_DB="+os.Getenv("RAFIKI_TEST_DSN"),
 		"RAFIKI_DAEMON_ID="+daemonID,
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
+		"RAFIKI_PPROF_LISTEN=off",
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	stderr := &stderrBuf{}
