@@ -255,6 +255,9 @@ func (s *Store) SetLabels(id string, set map[string]string, remove []string) (ma
 // single sess.mu hold so a concurrent Snapshot() cannot observe Status=Exited
 // with ExitedRing still nil — the race that occurs if SetStatus and Update are
 // called as separate operations.
+//
+// The store takes ownership of exitedRing and exitedRenderRing: Snapshot hands
+// them out without copying, so the caller must not modify them afterwards.
 func (s *Store) MarkExited(id string, exitedAt time.Time, exitCode int, exitSignal string, exitedRing []ring.Event, exitedRenderRing []ring.Event) bool {
 	sess, found := s.sessions.Load(id)
 	if !found {

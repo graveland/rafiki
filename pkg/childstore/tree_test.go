@@ -7,6 +7,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/ring"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -236,4 +237,22 @@ func TestDescendantCountsMatchesCountDescendants(t *testing.T) {
 
 	none := s.DescendantCounts(func(protocol.Status) bool { return false })
 	c.Eq(0, len(none), "no matching status yields no entries")
+}
+
+// TestSnapshotSharesExitedRings pins that a Snapshot does not deep-copy the
+// exit-time rings: a list takes one Snapshot per child per call, and copying
+// every exited child's event bytes there dominated the daemon's allocations.
+func TestSnapshotSharesExitedRings(t *testing.T) {
+	c := assert.NewAborting(t)
+	s := childstore.New()
+	insert(t, s, "a", "", "")
+	events := []ring.Event{{Bytes: []byte(`{"type":"system"}`), Timestamp: 1}}
+	c.True(s.MarkExited("a", time.Now(), 0, "", events, events), "MarkExited")
+
+	first, ok := s.Get("a")
+	c.True(ok, "Get")
+	second, _ := s.Get("a")
+	c.Eq(1, len(first.ExitedRing), "ExitedRing length")
+	c.True(&first.ExitedRing[0] == &second.ExitedRing[0], "ExitedRing is shared, not copied")
+	c.True(&first.ExitedRenderRing[0] == &second.ExitedRenderRing[0], "ExitedRenderRing is shared, not copied")
 }

@@ -305,11 +305,13 @@ type Snapshot struct {
 	LastRetryFinal  string
 
 	// ExitedRing is a snapshot of the ring buffer taken at exit time.
-	// Populated for exited sessions; nil for live sessions.
+	// Populated for exited sessions; nil for live sessions. Shared with the
+	// Session: read-only.
 	ExitedRing []ring.Event
 
 	// ExitedRenderRing is a snapshot of the render-ring taken at exit time.
-	// Populated for exited normalizing sessions; nil otherwise.
+	// Populated for exited normalizing sessions; nil otherwise. Shared with
+	// the Session: read-only.
 	ExitedRenderRing []ring.Event
 
 	// Labels holds arbitrary user-defined and auto-derived key=value metadata.
@@ -330,8 +332,12 @@ type Snapshot struct {
 	LastTurnError string
 }
 
-// Snapshot returns a deep copy of the session's fields. The caller may freely
-// mutate the returned value; it shares no backing storage with the Session.
+// Snapshot returns a copy of the session's fields. The caller may freely
+// mutate the returned value, with one exception: ExitedRing and
+// ExitedRenderRing are shared with the Session and must be treated as
+// read-only. They are written once, by MarkExited, and never modified in
+// place, and a list copies a Snapshot per child on every call, so deep-copying
+// every exited child's event bytes there cost more than the rest of the list.
 func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -390,28 +396,14 @@ func (s *Session) Snapshot() Snapshot {
 		AutoRetries:      s.AutoRetries,
 		LastRetryError:   s.LastRetryError,
 		LastRetryFinal:   s.LastRetryFinal,
-		ExitedRing:       copyRingEvents(s.ExitedRing),
-		ExitedRenderRing: copyRingEvents(s.ExitedRenderRing),
+		ExitedRing:       s.ExitedRing,
+		ExitedRenderRing: s.ExitedRenderRing,
 		Labels:           copyLabels(s.Labels),
 		SlashCommands:    copyStrings(s.SlashCommands),
 		Result:           s.Result,
 		PendingQuestion:  s.PendingQuestion,
 		LastTurnError:    s.LastTurnError,
 	}
-}
-
-// copyRingEvents returns a defensive copy of a ring event slice.
-func copyRingEvents(events []ring.Event) []ring.Event {
-	if len(events) == 0 {
-		return nil
-	}
-	out := make([]ring.Event, len(events))
-	for i, e := range events {
-		cp := make([]byte, len(e.Bytes))
-		copy(cp, e.Bytes)
-		out[i] = ring.Event{Bytes: cp, Timestamp: e.Timestamp}
-	}
-	return out
 }
 
 // copyLabels returns a defensive copy of a label map. Both nil and empty
