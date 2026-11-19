@@ -559,7 +559,7 @@ func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
 	c.NoError(err)
 	t.Cleanup(func() { _ = ss.Close() })
 
-	hooks := settlementHooksFor(users.Identity{UserID: "u-op", Username: "u-op"})
+	hooks := settlementHooksFor(users.Identity{UserID: "u-op", Username: "u-op"}, nil)
 	hooks.InitializedHandler(context.Background(), &mcp.InitializedRequest{Session: ss})
 
 	reg.mu.Lock()
@@ -570,7 +570,7 @@ func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
 	// A second registration — the bridge's tool-call hook also fires for a
 	// legacy client — must not double-book it or spawn a second Wait
 	// goroutine. The registry's report is what dedupes; assert the set.
-	settlementRegistrationFor(users.Identity{UserID: "u-op", Username: "u-op"})(ss)
+	settlementRegistrationFor(users.Identity{UserID: "u-op", Username: "u-op"}, nil)(ss)
 	reg.mu.Lock()
 	registered = len(reg.byUID["u-op"])
 	reg.mu.Unlock()

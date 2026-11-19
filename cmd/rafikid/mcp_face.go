@@ -58,6 +58,15 @@ type mcpFace struct {
 	// clears the SDK's own session table).
 	sessionsMu sync.Mutex
 	sessions   map[string]principal
+
+	// childSessions holds each child caller's live SDK sessions so a child's
+	// exit can close them. The SDK keeps an initialized session until its
+	// client disconnects or an idle timeout fires, and this mount sets no
+	// timeout: a child that dies without sending DELETE would otherwise leave
+	// its session (two goroutines and a tool server) for the daemon's
+	// lifetime. An entry removes itself when its session's connection closes.
+	childSessionsMu sync.Mutex
+	childSessions   map[string]map[*mcp.ServerSession]struct{}
 }
 
 // principal identifies the caller a session is bound to. UserID alone is not
@@ -76,6 +85,8 @@ func newMCPFace(logger *slog.Logger, capture *capture.CaptureStore, quotaStore *
 		quota:    quotaStore,
 		version:  ver,
 		sessions: make(map[string]principal),
+
+		childSessions: make(map[string]map[*mcp.ServerSession]struct{}),
 	}
 }
 
@@ -163,6 +174,51 @@ func (f *mcpFace) bindSession(sid string, p principal) {
 	f.sessionsMu.Lock()
 	defer f.sessionsMu.Unlock()
 	f.sessions[sid] = p
+}
+
+// trackChildSession records ss as one of childID's sessions. A session
+// reachable from both registration hooks is added once and watched by one
+// goroutine, which drops it when the connection closes.
+func (f *mcpFace) trackChildSession(childID string, ss *mcp.ServerSession) {
+	if childID == "" || ss == nil {
+		return
+	}
+	f.childSessionsMu.Lock()
+	set := f.childSessions[childID]
+	if set == nil {
+		set = make(map[*mcp.ServerSession]struct{})
+		f.childSessions[childID] = set
+	}
+	_, dup := set[ss]
+	set[ss] = struct{}{}
+	f.childSessionsMu.Unlock()
+	if dup {
+		return
+	}
+	go func() {
+		_ = ss.Wait()
+		f.childSessionsMu.Lock()
+		defer f.childSessionsMu.Unlock()
+		if set := f.childSessions[childID]; set != nil {
+			delete(set, ss)
+			if len(set) == 0 {
+				delete(f.childSessions, childID)
+			}
+		}
+	}()
+}
+
+// closeChildSessions closes every session childID holds, called when the child
+// exits. Each Close runs on its own goroutine because it waits for the
+// session's connection, which can be mid-request, and the exit path must not.
+func (f *mcpFace) closeChildSessions(childID string) {
+	f.childSessionsMu.Lock()
+	set := f.childSessions[childID]
+	delete(f.childSessions, childID)
+	f.childSessionsMu.Unlock()
+	for ss := range set {
+		go func() { _ = ss.Close() }()
+	}
 }
 
 func (f *mcpFace) forgetSession(sid string) {
@@ -431,12 +487,20 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		toolset = gateToolsOnBudget(toolset, func() (string, bool) { return ctrl.budgetHalted(childID) })
 	}
 
+	// Only a child caller's sessions end with the child; a user's outlive any
+	// one agent.
+	var track func(*mcp.ServerSession)
+	if isChild {
+		childID := id.ChildID
+		track = func(ss *mcp.ServerSession) { f.trackChildSession(childID, ss) }
+	}
+
 	return mcpserver.New(mcpserver.Options{
 		Tools:                 toolset,
 		Descriptions:          mcpToolDescriptions,
 		ResolveConversationID: resolveConversation,
-		ServerOptions:         settlementHooksFor(owner),
-		RegisterSession:       settlementRegistrationFor(owner),
+		ServerOptions:         settlementHooksFor(owner, track),
+		RegisterSession:       settlementRegistrationFor(owner, track),
 		Version:               f.version,
 	})
 }
@@ -887,9 +951,12 @@ func registerSettlementSession(userID string, ss *mcp.ServerSession) {
 // sessions that can produce a settlement — ones that spawn agents — call
 // tools, so registration on first tool call strictly precedes any settlement
 // this session could receive.
-func settlementRegistrationFor(owner users.Identity) func(*mcp.ServerSession) {
+func settlementRegistrationFor(owner users.Identity, track func(*mcp.ServerSession)) func(*mcp.ServerSession) {
 	return func(ss *mcp.ServerSession) {
 		registerSettlementSession(owner.UserID, ss)
+		if track != nil {
+			track(ss)
+		}
 	}
 }
 
@@ -922,13 +989,16 @@ func settlementRegistrationFor(owner users.Identity) func(*mcp.ServerSession) {
 // that is one-directional — a DELETE unbinds the sid immediately while this
 // pointer lingers until Wait returns — and harmless: a Log to a closed
 // session fails at debug and is skipped.
-func settlementHooksFor(owner users.Identity) *mcp.ServerOptions {
+func settlementHooksFor(owner users.Identity, track func(*mcp.ServerSession)) *mcp.ServerOptions {
 	return &mcp.ServerOptions{
 		InitializedHandler: func(_ context.Context, req *mcp.InitializedRequest) {
 			if req == nil || req.Session == nil {
 				return
 			}
 			registerSettlementSession(owner.UserID, req.Session)
+			if track != nil {
+				track(req.Session)
+			}
 		},
 	}
 }

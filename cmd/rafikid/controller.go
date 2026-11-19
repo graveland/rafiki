@@ -243,6 +243,7 @@ type Controller struct {
 	// lazy sweep fires; zero means "not armed", which sweepMCPTokensIfDue
 	// treats as mcpTokenSweepThreshold.
 	mcpTokensMu      sync.RWMutex
+	mcpSessionCloser atomic.Pointer[func(childID string)]
 	mcpTokens        map[string]string // secret -> childID
 	mcpTokensByChild map[string]string // childID -> secret
 	mcpSweepAt       int
@@ -1402,13 +1403,29 @@ func (c *Controller) ChildForMCPToken(token string) (childID, ownerUserID string
 // child->secret half would make the next mint for a respawned child return a
 // credential whose secret->child half no longer exists, i.e. one that can
 // never authenticate.
+//
+// The child's live MCP sessions end here too: the secret only gates new
+// requests, and an initialized session otherwise outlives a client that died
+// without disconnecting.
 func (c *Controller) forgetMCPToken(childID string) {
 	c.mcpTokensMu.Lock()
-	defer c.mcpTokensMu.Unlock()
 	if tok, ok := c.mcpTokensByChild[childID]; ok {
 		delete(c.mcpTokensByChild, childID)
 		delete(c.mcpTokens, tok)
 	}
+	c.mcpTokensMu.Unlock()
+	if closer := c.mcpSessionCloser.Load(); closer != nil {
+		(*closer)(childID)
+	}
+}
+
+// SetMCPSessionCloser installs the function forgetMCPToken calls to close a
+// dead child's MCP sessions. Called once from main.go.
+func (c *Controller) SetMCPSessionCloser(closeSessions func(childID string)) {
+	if closeSessions == nil {
+		return
+	}
+	c.mcpSessionCloser.Store(&closeSessions)
 }
 
 // ConversationID satisfies connectapi.ConversationResolver: it maps a child

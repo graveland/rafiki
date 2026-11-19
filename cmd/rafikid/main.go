@@ -1127,6 +1127,7 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 		if face.MCP != nil {
 			face.MCP.SetController(ctrl)
+			ctrl.SetMCPSessionCloser(face.MCP.closeChildSessions)
 		}
 		// The proxy face's thread observer: a captured request on a non-root
 		// Claude Code thread materializes a child record so lineage, the rail
