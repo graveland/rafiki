@@ -1459,3 +1459,31 @@ func TestMarkDerivedSkipMatchesWriteWindowsMark(t *testing.T) {
 		ck.Eq(tc.want, derivedSkipOf(t, pool, tc.mark), "%s: marked column", tc.label)
 	}
 }
+
+// TestStoreMessagesFromKeepsEachRowsContent pins that every returned message
+// owns its content: scanMessage no longer copies after pgx, so rows read in one
+// query must not share or overwrite each other's bytes.
+func TestStoreMessagesFromKeepsEachRowsContent(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	owner := insertUser(t, pool, "messages-from-owner")
+	conv := insertConversation(t, pool, convFixture{Owner: owner, Name: "rows"})
+	want := map[int]string{}
+	for i := 0; i < 20; i++ {
+		text := fmt.Sprintf("message-%02d-%s", i, strings.Repeat("x", i*7))
+		want[i] = text
+		insertMessage(t, pool, conv, i, "user", text, ago(time.Hour))
+	}
+
+	msgs, err := st.MessagesFrom(context.Background(), conv, 0)
+	ck.Require().NoError(err, "MessagesFrom")
+	ck.Require().Eq(len(want), len(msgs), "message count")
+	for _, m := range msgs {
+		var blocks []struct {
+			Text string `json:"text"`
+		}
+		ck.Require().NoError(json.Unmarshal(m.Content, &blocks), "decode content of ordinal %d", m.Ordinal)
+		ck.Require().Eq(1, len(blocks), "blocks of ordinal %d", m.Ordinal)
+		ck.Eq(want[m.Ordinal], blocks[0].Text, "text of ordinal %d", m.Ordinal)
+	}
+}

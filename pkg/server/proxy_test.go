@@ -988,6 +988,30 @@ func TestProxyResolveModel(t *testing.T) {
 	c.False(err != nil || resolved != "" || string(body) != string(garbage), "malformed body = (%q,%q,%v), want passthrough+empty+nil", body, resolved, err)
 }
 
+// A rewritten body keeps every field it did not touch byte-exact in value:
+// the rewrite decodes only the top-level keys, so an integer past 2^53 is not
+// rounded through float64 and nested content comes back unchanged.
+func TestProxyResolveModelPreservesUntouchedFields(t *testing.T) {
+	c := assert.NewCollecting(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	cat := routing.NewModelCatalog(nil, time.Minute, logger)
+	p := &MessagesProxy{logger: logger, catalog: cat, defaultModel: "anthropic/haiku-latest"}
+	cat.SeedForTest([]routing.CatalogEntry{{ID: "anthropic/claude-sonnet-5", Created: 2}})
+
+	in := `{"model":"anthropic/sonnet-latest","seed":9007199254740993,"metadata":{"user_id":"u"},` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"a < b & \"c\""}]}]}`
+	body, resolved, _, err := p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(in))
+	c.Require().NoError(err, "resolveAndAdapt")
+	c.Eq("claude-sonnet-5", resolved, "resolved")
+	c.StrContains(string(body), `"seed":9007199254740993`, "an integer past 2^53 must survive")
+
+	var got, want map[string]any
+	c.Require().NoError(json.Unmarshal(body, &got), "decode rewritten body")
+	c.Require().NoError(json.Unmarshal([]byte(in), &want), "decode input")
+	want["model"] = "claude-sonnet-5"
+	c.EqDeep(want, got, "only the model changes")
+}
+
 // End-to-end: a real proxied turn decomposes into conversation_message rows
 // (user + assistant) and records one turn row beside them, instead of a turn
 // carrying the bulky full-request JSONB.

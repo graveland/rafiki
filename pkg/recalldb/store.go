@@ -442,7 +442,8 @@ func scanMessage(row pgxRow) (recall.Message, error) {
 	if err := row.Scan(&m.Ordinal, &m.Role, &m.Kind, &content, &m.CreatedAt); err != nil {
 		return recall.Message{}, err
 	}
-	m.Content = append([]byte(nil), content...)
+	// pgx clones into a *[]byte target, so content is already this row's own.
+	m.Content = content
 	return m, nil
 }
 

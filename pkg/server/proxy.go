@@ -704,12 +704,17 @@ func callerCarriesOnly(v any) bool {
 // not aliases and must keep resolving exactly as they do without this face.
 // A slashed id is never an alias, so it never reaches the store.
 func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte, string, routing.Spec, error) {
-	var body map[string]any
+	// Only the top-level keys are decoded: a request carries the whole
+	// conversation, and the rewrite touches just model and output_config.
+	// Raw values also keep numbers byte-exact, which map[string]any would
+	// round through float64.
+	var body map[string]json.RawMessage
 	if err := json.Unmarshal(reqBody, &body); err != nil {
 		p.logger.Warn("proxy: request rewrite decode failed", "error", err)
 		return reqBody, "", routing.Spec{}, nil
 	}
-	requested, _ := body["model"].(string)
+	var requested string
+	_ = json.Unmarshal(body["model"], &requested)
 	model := requested
 	var aliasSpec routing.Spec
 	aliasHit := false
@@ -745,7 +750,11 @@ func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte
 	}
 	changed := false
 	if aliasHit || resolved != requested {
-		body["model"] = resolved
+		model, err := json.Marshal(resolved)
+		if err != nil {
+			return reqBody, "", routing.Spec{}, fmt.Errorf("encode resolved model %q: %w", resolved, err)
+		}
+		body["model"] = model
 		changed = true
 	}
 	if p.adaptEffortMap(body, resolved) {
@@ -776,16 +785,20 @@ func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte
 // changed anything. No-op (false) when the cache has nothing for the model
 // (unconstrained), output_config.effort is absent, or the value is already
 // allowed.
-func (p *MessagesProxy) adaptEffortMap(body map[string]any, model string) bool {
+func (p *MessagesProxy) adaptEffortMap(body map[string]json.RawMessage, model string) bool {
 	if p.effortCache == nil {
 		return false
 	}
-	oc, ok := body["output_config"].(map[string]any)
+	rawOC, ok := body["output_config"]
 	if !ok {
 		return false
 	}
-	eff, ok := oc["effort"].(string)
-	if !ok {
+	var oc map[string]json.RawMessage
+	if err := json.Unmarshal(rawOC, &oc); err != nil {
+		return false
+	}
+	var eff string
+	if err := json.Unmarshal(oc["effort"], &eff); err != nil {
 		return false
 	}
 	newEff, action := p.effortCache.Clamp(model, eff)
@@ -794,16 +807,35 @@ func (p *MessagesProxy) adaptEffortMap(body map[string]any, model string) bool {
 		delete(oc, "effort")
 		if len(oc) == 0 {
 			delete(body, "output_config")
+		} else if !storeRaw(body, "output_config", oc) {
+			return false
 		}
 		p.logger.Info("proxy: stripped unsupported effort", "model", model, "effort", eff)
 		return true
 	case "clamp":
-		oc["effort"] = newEff
+		v, err := json.Marshal(newEff)
+		if err != nil {
+			return false
+		}
+		oc["effort"] = v
+		if !storeRaw(body, "output_config", oc) {
+			return false
+		}
 		p.logger.Info("proxy: clamped effort to allowed value", "model", model, "from", eff, "to", newEff)
 		return true
 	default: // "keep"
 		return false
 	}
+}
+
+// storeRaw marshals v into body[key], reporting whether it succeeded.
+func storeRaw(body map[string]json.RawMessage, key string, v any) bool {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return false
+	}
+	body[key] = raw
+	return true
 }
 
 // captureRef bundles the identifiers for a begun capture turn so the failTurn /
@@ -955,7 +987,7 @@ func mentionsEffortParam(body []byte) bool {
 // stripped per the cache's current knowledge of the model. Best-effort: a
 // decode/marshal failure or a no-op clamp returns reqBody unchanged.
 func (p *MessagesProxy) clampEffortBody(reqBody []byte, model string) []byte {
-	var body map[string]any
+	var body map[string]json.RawMessage
 	if err := json.Unmarshal(reqBody, &body); err != nil {
 		return reqBody
 	}
