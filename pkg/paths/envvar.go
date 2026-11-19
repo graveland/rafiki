@@ -84,6 +84,11 @@ const (
 	// where the binding is visible to anyone reading the service definition.
 	ProxyListen = "RAFIKI_PROXY_LISTEN"
 
+	// PprofListen is the loopback address rafikid serves net/http/pprof on.
+	// Defaults to 127.0.0.1:6060; "off" disables it. Must be a loopback IP:
+	// the listener is unauthenticated.
+	PprofListen = "RAFIKI_PPROF_LISTEN"
+
 	// Instructions is the user-global instruction file. rafiki's own config, so
 	// it is NOT ~/.claude/CLAUDE.md — see this package's doc comment for why
 	// rafiki does not read its configuration out of another tool's directory.

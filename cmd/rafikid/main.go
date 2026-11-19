@@ -776,6 +776,10 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 	obs := ctrl.EnableTracing(tp, rcfg.Telemetry.Policy(), metrics)
 
+	if err := startPprof(baseCtx, slog.Default()); err != nil {
+		return err
+	}
+
 	// The daemon's own proxy face. pi and claude children are separate
 	// processes and can only speak HTTP, so they need an address — and making
 	// that a second daemon someone must remember to start is how a child ends
