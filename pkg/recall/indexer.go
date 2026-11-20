@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -17,27 +18,47 @@ type SummaryPass interface {
 const (
 	extractCursorLimit  = 50
 	embedBatchesPerTick = 10
+	// maxDirty bounds the marked-conversation set. Past it the ids are
+	// dropped and the next pass is a full one, which finds the same work.
+	maxDirty = 10000
 )
 
 // Indexer keeps the recall index current in the background: it windows new
-// conversation messages, embeds pending rows, and runs the summary pass on a
-// ticker, coordinating across daemons through the store's index lock.
+// conversation messages, embeds pending rows, and runs the summary pass.
+//
+// Work is event-driven. A message commit calls Mark, and once commits have
+// paused for the debounce the indexer extracts exactly the marked
+// conversations. A slow sweep runs the full pass for everything no event
+// announces, and Nudge forces a full pass now. Passes take the store's index
+// lock.
 type Indexer struct {
-	store     Store
-	embedder  Embedder // nil disables the embed pass
-	summaries SummaryPass
-	logger    *slog.Logger
-	tick      time.Duration
-	nudge     chan struct{}
+	store       Store
+	embedder    Embedder // nil disables the embed pass
+	summaries   SummaryPass
+	logger      *slog.Logger
+	sweep       time.Duration
+	debounce    time.Duration
+	maxDebounce time.Duration
+	nudge       chan struct{}
+	marked      chan struct{}
+
+	dirtyMu       sync.Mutex
+	dirty         map[string]struct{}
+	dirtyOverflow bool
 }
 
 // IndexerOptions configures an Indexer.
 type IndexerOptions struct {
 	Store     Store
-	Embedder  Embedder      // nil = no embed pass
-	Summaries SummaryPass   // nil = no summary pass
-	Logger    *slog.Logger  // nil = slog.Default
-	Tick      time.Duration // 0 = IndexerTick
+	Embedder  Embedder     // nil = no embed pass
+	Summaries SummaryPass  // nil = no summary pass
+	Logger    *slog.Logger // nil = slog.Default
+	// Sweep is the full-pass interval; 0 = IndexerSweep.
+	Sweep time.Duration
+	// Debounce is the commit pause before a marked pass; 0 = IndexerDebounce.
+	Debounce time.Duration
+	// MaxDebounce caps that wait under continuous commits; 0 = IndexerMaxDebounce.
+	MaxDebounce time.Duration
 }
 
 // NewIndexer builds an indexer.
@@ -46,18 +67,60 @@ func NewIndexer(o IndexerOptions) *Indexer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	tick := o.Tick
-	if tick <= 0 {
-		tick = IndexerTick
+	sweep, debounce, maxDebounce := o.Sweep, o.Debounce, o.MaxDebounce
+	if sweep <= 0 {
+		sweep = IndexerSweep
+	}
+	if debounce <= 0 {
+		debounce = IndexerDebounce
+	}
+	if maxDebounce <= 0 {
+		maxDebounce = IndexerMaxDebounce
 	}
 	return &Indexer{
-		store:     o.Store,
-		embedder:  o.Embedder,
-		summaries: o.Summaries,
-		logger:    logger,
-		tick:      tick,
-		nudge:     make(chan struct{}, 1),
+		store:       o.Store,
+		embedder:    o.Embedder,
+		summaries:   o.Summaries,
+		logger:      logger,
+		sweep:       sweep,
+		debounce:    debounce,
+		maxDebounce: maxDebounce,
+		nudge:       make(chan struct{}, 1),
+		marked:      make(chan struct{}, 1),
+		dirty:       make(map[string]struct{}),
 	}
+}
+
+// Mark records that conversationID has new messages and schedules a pass over
+// it after the debounce. It is safe from any goroutine and never blocks, so a
+// message commit can call it directly.
+func (ix *Indexer) Mark(conversationID string) {
+	ix.dirtyMu.Lock()
+	if len(ix.dirty) < maxDirty {
+		ix.dirty[conversationID] = struct{}{}
+	} else {
+		ix.dirtyOverflow = true
+	}
+	ix.dirtyMu.Unlock()
+	select {
+	case ix.marked <- struct{}{}:
+	default:
+	}
+}
+
+// takeDirty returns the marked ids and clears the set; full reports that ids
+// overflowed and a full pass is needed instead.
+func (ix *Indexer) takeDirty() (ids []string, full bool) {
+	ix.dirtyMu.Lock()
+	defer ix.dirtyMu.Unlock()
+	ids = make([]string, 0, len(ix.dirty))
+	for id := range ix.dirty {
+		ids = append(ids, id)
+	}
+	clear(ix.dirty)
+	full = ix.dirtyOverflow
+	ix.dirtyOverflow = false
+	return ids, full
 }
 
 // Nudge requests one extra pass soon. It is safe from any goroutine, never
@@ -69,23 +132,94 @@ func (ix *Indexer) Nudge() {
 	}
 }
 
-// Run drives the indexer until ctx is done: one pass per tick or nudge,
-// skipped when another daemon holds the index lock. Errors are logged and
-// never stop the loop.
+// Run drives the indexer until ctx is done. A full pass runs on every sweep
+// and nudge; marked conversations get a targeted pass once commits have paused
+// for the debounce (or the max wait has passed). A pass is skipped when
+// another holder has the index lock. Errors are logged and never stop the loop.
 func (ix *Indexer) Run(ctx context.Context) {
-	ticker := time.NewTicker(ix.tick)
-	defer ticker.Stop()
+	sweep := time.NewTicker(ix.sweep)
+	defer sweep.Stop()
+	var quiet, ceiling *time.Timer
+	var quietC, ceilingC <-chan time.Time
+	disarm := func() {
+		if quiet != nil {
+			quiet.Stop()
+		}
+		if ceiling != nil {
+			ceiling.Stop()
+		}
+		quiet, ceiling, quietC, ceilingC = nil, nil, nil, nil
+	}
+	defer disarm()
 	for {
+		full := false
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-sweep.C:
+			full = true
 		case <-ix.nudge:
+			full = true
+		case <-ix.marked:
+			// Each commit pushes the quiet deadline out; the ceiling is set
+			// once, by the first commit of a burst.
+			if quiet != nil {
+				quiet.Stop()
+			}
+			quiet = time.NewTimer(ix.debounce)
+			quietC = quiet.C
+			if ceiling == nil {
+				ceiling = time.NewTimer(ix.maxDebounce)
+				ceilingC = ceiling.C
+			}
+			continue
+		case <-quietC:
+		case <-ceilingC:
 		}
+		disarm()
 		if ctx.Err() != nil {
 			return
 		}
-		ix.tickOnce(ctx)
+		ids, overflow := ix.takeDirty()
+		if full || overflow {
+			ix.tickOnce(ctx)
+		} else {
+			ix.tickMarked(ctx, ids)
+		}
+	}
+}
+
+// tickMarked runs one pass over the marked conversations alone: extract them,
+// then embed and summarize. It does nothing when none of them has work, which
+// is the case for the indexer's own machine conversations (their commits mark
+// them too), so a pass cannot trigger itself.
+func (ix *Indexer) tickMarked(ctx context.Context, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	release, ok, err := ix.store.TryLock(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			ix.logger.Warn("recall indexer", "error", err)
+		}
+		return
+	}
+	if !ok {
+		return
+	}
+	defer release()
+	cursors, err := ix.store.ExtractCursorsFor(ctx, ExcludedEntrypoints, ids)
+	if err != nil {
+		if ctx.Err() == nil {
+			ix.logger.Warn("recall indexer", "error", err)
+		}
+		return
+	}
+	if len(cursors) == 0 {
+		return
+	}
+	if err := ix.runPasses(ctx, cursors, nil); err != nil && ctx.Err() == nil {
+		ix.logger.Warn("recall indexer", "error", err)
 	}
 }
 
@@ -118,10 +252,15 @@ func (ix *Indexer) tickOnce(ctx context.Context) {
 // daemon's caller is that Run loop, started once at startup and held for the
 // daemon's life; the tests call Tick directly, single-threaded.
 func (ix *Indexer) Tick(ctx context.Context) error {
-	var err error
-	if e := ix.extractPass(ctx); e != nil {
-		err = errors.Join(err, e)
-	}
+	cursors, err := ix.store.ExtractCursors(ctx, ExcludedEntrypoints, extractCursorLimit)
+	return ix.runPasses(ctx, cursors, err)
+}
+
+// runPasses extracts cursors, then embeds and summarizes. cursorErr is the
+// failure to list them, joined into the result: the later passes still run.
+func (ix *Indexer) runPasses(ctx context.Context, cursors []ExtractCursor, cursorErr error) error {
+	err := cursorErr
+	ix.extractCursors(ctx, cursors)
 	if ix.embedder != nil {
 		if e := ix.embedPass(ctx); e != nil {
 			err = errors.Join(err, e)
@@ -135,25 +274,20 @@ func (ix *Indexer) Tick(ctx context.Context) error {
 	return err
 }
 
-// extractPass windows new messages for up to extractCursorLimit
-// conversations, skipping one whose extract or write fails.
-func (ix *Indexer) extractPass(ctx context.Context) error {
-	cursors, err := ix.store.ExtractCursors(ctx, ExcludedEntrypoints, extractCursorLimit)
-	if err != nil {
-		return err
-	}
+// extractCursors windows each conversation, skipping one whose extract or
+// write fails.
+func (ix *Indexer) extractCursors(ctx context.Context, cursors []ExtractCursor) {
 	for _, c := range cursors {
 		if ctx.Err() != nil {
-			return nil
+			return
 		}
 		if err := ix.extractConversation(ctx, c); err != nil {
 			if ctx.Err() != nil {
-				return nil
+				return
 			}
 			ix.logger.Warn("recall indexer", "error", err)
 		}
 	}
-	return nil
 }
 
 // extractConversation windows one conversation from its cursor position: a
@@ -176,10 +310,17 @@ func (ix *Indexer) extractConversation(ctx context.Context, c ExtractCursor) err
 		return err
 	}
 	ws := BuildWindows(c.Conversation.ID, c.Conversation.OwnerUserID, c.Tail, ExtractAll(msgs))
+	// through is the highest ordinal actually read: the conversation is
+	// pending again only when something lands past it, even if every message
+	// read here extracted to no text and built no window.
+	through := -1
+	if len(msgs) > 0 {
+		through = msgs[len(msgs)-1].Ordinal
+	}
 	// Route the empty case through WriteWindows too: it writes no rows but
 	// still stamps derived_skip, so a flagged conversation whose messages
 	// build no windows is never summarised.
-	return ix.store.WriteWindows(ctx, c.Conversation.ID, ws)
+	return ix.store.WriteWindows(ctx, c.Conversation.ID, ws, through)
 }
 
 // embedPass embeds pending rows in EmbedBatchSize chunks, at most

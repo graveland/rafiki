@@ -20,6 +20,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/recalldb"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -467,6 +468,9 @@ func startRecall(ctx context.Context, c *Controller, pool *pgxpool.Pool, prov *p
 	c.recallWg.Add(1)
 	go func() {
 		defer c.recallWg.Done()
+		// New messages schedule their own indexing: every conversation write
+		// commits through store.ConvBackend, which reports the conversation.
+		defer store.ObserveMessageCommits(rt.indexer.Mark)()
 		rt.indexer.Run(ctx)
 	}()
 	logger.Info("recall index started",

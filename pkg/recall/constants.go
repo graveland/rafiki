@@ -20,9 +20,19 @@ const (
 	RecallMaxOutputChars        = 6000
 	ContextDefaultMaxChars      = 8000
 	TreeMaxChars                = 20000
-	IndexerTick                 = 5 * time.Second
-	EmbedBatchSize              = 64
-	SummaryEntrypoint           = "recall-summary"
+	// IndexerSweep is how often the indexer runs a full pass with no event to
+	// prompt it. New messages prompt a pass themselves (see Indexer.Mark), so
+	// the sweep only catches what no event announces: time-gated summaries and
+	// embeddings, rows written outside the daemon's commit path, backfill and
+	// extractor upgrades.
+	IndexerSweep = time.Minute
+	// IndexerDebounce is how long message commits must pause before the
+	// indexer extracts them, and IndexerMaxDebounce bounds the wait under a
+	// steady stream of commits.
+	IndexerDebounce    = 3 * time.Second
+	IndexerMaxDebounce = 30 * time.Second
+	EmbedBatchSize     = 64
+	SummaryEntrypoint  = "recall-summary"
 )
 
 // ExcludedEntrypoints are conversation.origin_entrypoint values the indexer

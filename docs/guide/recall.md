@@ -12,6 +12,15 @@ or summarised. On top of the derived index sits the **memory tree**:
 dot-separated paths of small notes each user (or their agents) save
 explicitly, always private to the saver.
 
+Indexing is driven by message commits. Every stored message marks its
+conversation, and once commits have paused for 3 seconds (30 at most under a
+steady stream) the daemon windows exactly the marked conversations, then embeds
+and summarises what became pending. A full pass over everything runs once a
+minute for work no commit announces: time-gated summaries and embeddings,
+backfill, and rebuilds after an extractor upgrade. Which conversations are
+pending is decided by `conversation.extracted_ordinal`, the highest message
+ordinal the indexer has read, not by where the last window ends.
+
 Agents use six tools: `recall` (hybrid BM25 + vector search, RRF-fused over
 memory/summary/window), `recall_context` (expand one hit id), and the memory
 CRUD four — `memory_put`, `memory_get`, `memory_tree`, `memory_delete`. The

@@ -38,6 +38,13 @@ type indexerFakeStore struct {
 	writes    []indexerWriteCall
 	writesErr error
 
+	cursorsForCalls int
+	cursorsForIDs   [][]string
+	// forSeen and fullSeen, when set, receive one value per targeted and per
+	// full cursor listing, so a test can wait for a pass without sleeping.
+	forSeen  chan struct{}
+	fullSeen chan struct{}
+
 	pending       []EmbedItem
 	pendingErr    error
 	pendingCalls  int
@@ -54,6 +61,7 @@ type indexerFakeStore struct {
 type indexerWriteCall struct {
 	conversationID string
 	ws             []Window
+	through        int
 }
 
 func (f *indexerFakeStore) TryLock(ctx context.Context) (release func(), ok bool, err error) {
@@ -68,6 +76,9 @@ func (f *indexerFakeStore) ExtractCursors(ctx context.Context, excluded []string
 	f.cursorsCalls++
 	f.cursorsExcluded = append(f.cursorsExcluded, excluded)
 	f.cursorsLimits = append(f.cursorsLimits, limit)
+	if f.fullSeen != nil {
+		f.fullSeen <- struct{}{}
+	}
 	return f.cursors, f.cursorsErr
 }
 
@@ -77,9 +88,26 @@ func (f *indexerFakeStore) MessagesFrom(ctx context.Context, conversationID stri
 	return f.messages[conversationID], f.messagesErr
 }
 
-func (f *indexerFakeStore) WriteWindows(ctx context.Context, conversationID string, ws []Window) error {
-	f.writes = append(f.writes, indexerWriteCall{conversationID: conversationID, ws: ws})
+func (f *indexerFakeStore) WriteWindows(ctx context.Context, conversationID string, ws []Window, through int) error {
+	f.writes = append(f.writes, indexerWriteCall{conversationID: conversationID, ws: ws, through: through})
 	return f.writesErr
+}
+
+func (f *indexerFakeStore) ExtractCursorsFor(ctx context.Context, excluded []string, ids []string) ([]ExtractCursor, error) {
+	f.cursorsForCalls++
+	f.cursorsForIDs = append(f.cursorsForIDs, ids)
+	if f.forSeen != nil {
+		defer func() { f.forSeen <- struct{}{} }()
+	}
+	var out []ExtractCursor
+	for _, c := range f.cursors {
+		for _, id := range ids {
+			if c.Conversation.ID == id {
+				out = append(out, c)
+			}
+		}
+	}
+	return out, f.cursorsErr
 }
 
 func (f *indexerFakeStore) PendingEmbeds(ctx context.Context, model string, limit int) ([]EmbedItem, error) {
@@ -332,7 +360,7 @@ func TestIndexerSummaryPassRuns(t *testing.T) {
 func TestIndexerRunSkipsTickWhenLockHeld(t *testing.T) {
 	c := assert.NewCollecting(t)
 	store := &indexerFakeStore{} // tryLockOK false: another daemon holds the lock
-	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger(), Tick: 5 * time.Millisecond})
+	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger(), Sweep: 5 * time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -357,7 +385,7 @@ func TestIndexerRunStopsOnCancel(t *testing.T) {
 		},
 	}
 	emb := &indexerFakeEmbedder{model: "embed-model"}
-	ix := NewIndexer(IndexerOptions{Store: store, Embedder: emb, Logger: indexerTestLogger(), Tick: 5 * time.Millisecond})
+	ix := NewIndexer(IndexerOptions{Store: store, Embedder: emb, Logger: indexerTestLogger(), Sweep: 5 * time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -388,4 +416,186 @@ func TestIndexerNudgeNonBlocking(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Nudge blocked")
 	}
+}
+
+// runIndexer starts ix.Run and returns a stop that cancels it and waits, after
+// which the fake store's fields are safe to read.
+func runIndexer(t *testing.T, ix *Indexer) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ix.Run(ctx)
+		close(done)
+	}()
+	return func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run did not return after cancel")
+		}
+	}
+}
+
+func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func markedStore() *indexerFakeStore {
+	return &indexerFakeStore{
+		tryLockOK: true,
+		forSeen:   make(chan struct{}, 64),
+		fullSeen:  make(chan struct{}, 64),
+		cursors: []ExtractCursor{
+			{Conversation: indexerConv("c1")},
+			{Conversation: indexerConv("c2")},
+			{Conversation: indexerConv("c3")},
+		},
+		messages: map[string][]Message{
+			"c1": {indexerMsg("c1", 0, "first"), indexerMsg("c1", 1, "second")},
+			"c2": {indexerMsg("c2", 0, "other")},
+			"c3": {indexerMsg("c3", 0, "never marked")},
+		},
+	}
+}
+
+// A burst of commits becomes one targeted pass over just the marked
+// conversations, not a full pass over everything pending.
+func TestIndexerMarkedConversationsExtractOnceAfterTheDebounce(t *testing.T) {
+	c := assert.NewCollecting(t)
+	store := markedStore()
+	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger(),
+		Sweep: time.Hour, Debounce: 40 * time.Millisecond, MaxDebounce: time.Second})
+	stop := runIndexer(t, ix)
+	for i := 0; i < 20; i++ {
+		ix.Mark("c1")
+		ix.Mark("c2")
+		time.Sleep(5 * time.Millisecond)
+	}
+	awaitSignal(t, store.forSeen, "the targeted pass")
+	time.Sleep(120 * time.Millisecond) // a second pass, if one were wrongly scheduled, would show here
+	stop()
+
+	c.Eq(1, store.cursorsForCalls, "one targeted pass for the whole burst")
+	c.Eq(0, store.cursorsCalls, "no full pass")
+	c.Require().Eq(1, len(store.cursorsForIDs), "ids of the pass")
+	c.ElementsMatch([]string{"c1", "c2"}, store.cursorsForIDs[0], "only the marked conversations")
+	var written []string
+	for _, w := range store.writes {
+		written = append(written, w.conversationID)
+	}
+	c.ElementsMatch([]string{"c1", "c2"}, written, "c3 was never marked and stays untouched")
+}
+
+// Under a continuous stream of commits the pass is not postponed forever: the
+// max wait forces it.
+func TestIndexerMaxDebounceForcesAPassUnderSteadyCommits(t *testing.T) {
+	store := markedStore()
+	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger(),
+		Sweep: time.Hour, Debounce: 200 * time.Millisecond, MaxDebounce: 80 * time.Millisecond})
+	stop := runIndexer(t, ix)
+	defer stop()
+	deadline := time.After(3 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-store.forSeen:
+			return
+		case <-tick.C:
+			ix.Mark("c1") // never quiet for the 200ms debounce
+		case <-deadline:
+			t.Fatal("no pass ran under continuous commits; the max wait did not fire")
+		}
+	}
+}
+
+// Marks for conversations with no work (the indexer's own machine
+// conversations among them) cost one cursor lookup: no embed or summary pass
+// runs, so a pass cannot cause itself.
+func TestIndexerMarkWithNothingPendingRunsNoLaterPass(t *testing.T) {
+	c := assert.NewCollecting(t)
+	store := markedStore()
+	store.cursors = nil
+	emb := &indexerFakeEmbedder{model: "embed-model"}
+	sum := &indexerFakeSummaries{}
+	ix := NewIndexer(IndexerOptions{Store: store, Embedder: emb, Summaries: sum, Logger: indexerTestLogger(),
+		Sweep: time.Hour, Debounce: 20 * time.Millisecond})
+	stop := runIndexer(t, ix)
+	ix.Mark("machine-conversation")
+	awaitSignal(t, store.forSeen, "the targeted lookup")
+	time.Sleep(50 * time.Millisecond)
+	stop()
+
+	c.Eq(1, store.cursorsForCalls, "the lookup ran")
+	c.Eq(0, store.pendingCalls, "no embed pass")
+	c.Eq(0, sum.calls, "no summary pass")
+}
+
+// The sweep runs the full pass with no event at all.
+func TestIndexerSweepRunsAFullPass(t *testing.T) {
+	c := assert.NewCollecting(t)
+	store := markedStore()
+	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger(), Sweep: 20 * time.Millisecond})
+	stop := runIndexer(t, ix)
+	awaitSignal(t, store.fullSeen, "the sweep")
+	stop()
+	c.NotEq(0, store.cursorsCalls, "the sweep ran ExtractCursors")
+	c.Eq(0, store.cursorsForCalls, "and no targeted pass")
+}
+
+// More marks than the dirty set holds fall back to a full pass, which finds
+// the same work.
+func TestIndexerDirtyOverflowFallsBackToAFullPass(t *testing.T) {
+	c := assert.NewCollecting(t)
+	store := markedStore()
+	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger(),
+		Sweep: time.Hour, Debounce: 20 * time.Millisecond})
+	for i := 0; i <= maxDirty; i++ {
+		ix.Mark(fmt.Sprintf("conv-%d", i))
+	}
+	stop := runIndexer(t, ix)
+	awaitSignal(t, store.fullSeen, "the full pass")
+	stop()
+	c.Eq(0, store.cursorsForCalls, "overflow skips the targeted lookup")
+}
+
+// A marked pass honours the index lock like any other.
+func TestIndexerMarkedPassSkipsWhenLockHeld(t *testing.T) {
+	c := assert.NewCollecting(t)
+	store := markedStore()
+	store.tryLockOK = false
+	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger(),
+		Sweep: time.Hour, Debounce: 10 * time.Millisecond})
+	stop := runIndexer(t, ix)
+	ix.Mark("c1")
+	time.Sleep(80 * time.Millisecond)
+	stop()
+	c.NotEq(0, store.tryLockCalls, "the lock was probed")
+	c.Eq(0, store.cursorsForCalls, "nothing ran without the lock")
+}
+
+// A conversation whose messages all extract to no text still records how far
+// it was read, so it is not pending again until something lands past it.
+func TestIndexerStampsHowFarItReadEvenWhenNothingExtracts(t *testing.T) {
+	c := assert.NewCollecting(t)
+	store := &indexerFakeStore{
+		tryLockOK: true,
+		cursors:   []ExtractCursor{{Conversation: indexerConv("c1")}, {Conversation: indexerConv("c2")}},
+		messages: map[string][]Message{
+			"c1": {indexerMsg("c1", 0, "hello"), indexerToolMsg("c1", 1), indexerToolMsg("c1", 2)},
+			"c2": {},
+		},
+	}
+	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
+	c.Require().NoError(ix.Tick(context.Background()), "Tick")
+	c.Require().Eq(2, len(store.writes), "both conversations were written")
+	c.Eq(2, store.writes[0].through, "read through the trailing tool-result messages")
+	c.Eq(-1, store.writes[1].through, "nothing read stamps nothing")
 }

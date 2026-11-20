@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -380,7 +381,29 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 	if err := tx.Commit(ctx); err != nil {
 		return time.Time{}, fmt.Errorf("conv commit: commit: %w", err)
 	}
+	if len(inserted) > 0 {
+		if fn := messageCommitObserver.Load(); fn != nil {
+			(*fn)(c.ConversationID)
+		}
+	}
 	return created, nil
+}
+
+// messageCommitObserver is told, after every commit that stored at least one
+// message, which conversation received it. The daemon's recall indexer
+// registers here so new messages schedule their own indexing. It is process
+// wide because conversations are written through several stores that share no
+// owner (the daemon's, the capture path's, the LLM client's), and all of them
+// commit through ConvBackend.
+var messageCommitObserver atomic.Pointer[func(conversationID string)]
+
+// ObserveMessageCommits registers fn as the message-commit observer, replacing
+// any earlier one, and returns a function that unregisters it if it is still
+// the current one. fn runs on the committing goroutine after the commit, so it
+// must not block.
+func ObserveMessageCommits(fn func(conversationID string)) (stop func()) {
+	messageCommitObserver.Store(&fn)
+	return func() { messageCommitObserver.CompareAndSwap(&fn, nil) }
 }
 
 // checkCommitParents refuses a commit whose rows hang off nodes the

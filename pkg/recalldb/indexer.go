@@ -11,23 +11,44 @@ import (
 )
 
 // ExtractCursors lists the conversations the extractor must (re)visit:
-// messages beyond the last window's ordinal_to, conversations with messages
-// but no windows, or any window still on an older extractor version. The
-// stale-version windows are deleted here (derived data, rebuilt wholesale),
-// so those cursors come back with Tail=nil and extract from scratch.
+// messages beyond the highest ordinal already read (extracted_ordinal),
+// conversations with messages never read, or any window still on an older
+// extractor version. The stale-version windows are deleted here (derived data,
+// rebuilt wholesale) and their conversations' extracted_ordinal cleared, so
+// those cursors come back with Tail=nil and extract from scratch.
 func (s *Store) ExtractCursors(ctx context.Context, excluded []string, limit int) ([]recall.ExtractCursor, error) {
 	// Delete every window of a conversation that carries any window with an
-	// older extractor version. Excluded conversations are never touched.
-	if _, err := s.pool.Exec(ctx, `DELETE FROM conversations.conversation_window w
-		USING conversations.conversation c
-		WHERE w.conversation_id = c.id
-		  AND c.origin_entrypoint <> ALL($1)
-		  AND EXISTS (SELECT 1 FROM conversations.conversation_window v
-		              WHERE v.conversation_id = w.conversation_id AND v.extractor_version < $2)`,
+	// older extractor version, and clear what those conversations had read: a
+	// conversation with no windows and a stale extracted_ordinal would look
+	// caught up. Excluded conversations are never touched.
+	if _, err := s.pool.Exec(ctx, `WITH stale AS (
+			DELETE FROM conversations.conversation_window w
+			USING conversations.conversation c
+			WHERE w.conversation_id = c.id
+			  AND c.origin_entrypoint <> ALL($1)
+			  AND EXISTS (SELECT 1 FROM conversations.conversation_window v
+			              WHERE v.conversation_id = w.conversation_id AND v.extractor_version < $2)
+			RETURNING w.conversation_id)
+		UPDATE conversations.conversation SET extracted_ordinal = NULL
+		 WHERE id IN (SELECT conversation_id FROM stale)`,
 		excludedArg(excluded), recall.ExtractorVersion); err != nil {
 		return nil, err
 	}
+	return s.extractCursors(ctx, excluded, nil, limit)
+}
 
+// ExtractCursorsFor is ExtractCursors restricted to ids, without the
+// stale-version cleanup (the full pass owns that). A conversation of an
+// excluded entrypoint is never returned.
+func (s *Store) ExtractCursorsFor(ctx context.Context, excluded []string, ids []string) ([]recall.ExtractCursor, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return s.extractCursors(ctx, excluded, ids, len(ids))
+}
+
+// extractCursors runs the pending-conversation query, over ids when non-nil.
+func (s *Store) extractCursors(ctx context.Context, excluded []string, ids []string, limit int) ([]recall.ExtractCursor, error) {
 	var b sqlb
 	b.WriteString(`SELECT c.id::text, coalesce(c.owner_user_id::text, ''), coalesce(c.name, ''), ` + repoBaseSQL + `, c.origin_entrypoint,
 			c.created_at, c.updated_at,
@@ -40,13 +61,17 @@ func (s *Store) ExtractCursors(ctx context.Context, excluded []string, limit int
 		                   WHERE w.conversation_id = c.id ORDER BY w.seq DESC LIMIT 1) lw ON TRUE
 		WHERE c.origin_entrypoint <> ALL(` + b.arg(excludedArg(excluded)) + `)
 		  AND (
-		      (lw.id IS NULL AND EXISTS (SELECT 1 FROM conversations.conversation_message m2
-		                                 WHERE m2.conversation_id = c.id))
-		      OR lw.ordinal_to < (SELECT max(m3.ordinal) FROM conversations.conversation_message m3
-		                          WHERE m3.conversation_id = c.id)
+		      (c.extracted_ordinal IS NULL AND EXISTS (SELECT 1 FROM conversations.conversation_message m2
+		                                               WHERE m2.conversation_id = c.id))
+		      OR c.extracted_ordinal < (SELECT max(m3.ordinal) FROM conversations.conversation_message m3
+		                                WHERE m3.conversation_id = c.id)
 		      OR EXISTS (SELECT 1 FROM conversations.conversation_window w2
 		                 WHERE w2.conversation_id = c.id AND w2.extractor_version < ` + b.arg(recall.ExtractorVersion) + `)
-		  )
+		  )`)
+	if ids != nil {
+		b.WriteString(` AND c.id = ANY(` + b.arg(ids) + `::uuid[])`)
+	}
+	b.WriteString(`
 		ORDER BY c.updated_at DESC
 		LIMIT ` + strconv.Itoa(limit))
 	rows, err := s.pool.Query(ctx, b.String(), b.args...)
@@ -155,8 +180,11 @@ func (s *Store) MessagesFrom(ctx context.Context, conversationID string, fromOrd
 // WriteWindows upserts one conversation's windows in one transaction, keyed
 // on (conversation_id, seq). On update the embedding columns clear only when
 // the text changed; sealed, ordinals and updated_at are always stamped. It also
-// stamps conversation.derived_skip, even when ws is empty.
-func (s *Store) WriteWindows(ctx context.Context, conversationID string, ws []recall.Window) error {
+// stamps conversation.derived_skip, even when ws is empty, and raises
+// conversation.extracted_ordinal to through (the highest ordinal the caller
+// read; negative leaves it alone), which is what stops a conversation whose
+// last messages carry no text from looking unread on every pass.
+func (s *Store) WriteWindows(ctx context.Context, conversationID string, ws []recall.Window, through int) error {
 	uid, ok := parseID(conversationID)
 	if !ok {
 		return recall.ErrNotFound
@@ -190,6 +218,13 @@ func (s *Store) WriteWindows(ctx context.Context, conversationID string, ws []re
 	// so the mark cannot go stale.
 	if _, err := tx.Exec(ctx, markDerivedSkipSQL, uid); err != nil {
 		return err
+	}
+	if through >= 0 {
+		if _, err := tx.Exec(ctx, `UPDATE conversations.conversation
+				SET extracted_ordinal = greatest(coalesce(extracted_ordinal, -1), $2)
+			 WHERE id = $1::uuid`, uid, through); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

@@ -211,7 +211,12 @@ func (f *summarizerFakeStore) ExtractCursors(context.Context, []string, int) ([]
 	return nil, nil
 }
 
-func (f *summarizerFakeStore) WriteWindows(context.Context, string, []Window) error {
+func (f *summarizerFakeStore) ExtractCursorsFor(context.Context, []string, []string) ([]ExtractCursor, error) {
+	f.unused("ExtractCursorsFor")
+	return nil, nil
+}
+
+func (f *summarizerFakeStore) WriteWindows(context.Context, string, []Window, int) error {
 	f.unused("WriteWindows")
 	return nil
 }

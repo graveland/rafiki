@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,4 +78,40 @@ func TestCommitKeepsUpdatedAt(t *testing.T) {
 		`SELECT updated_at FROM conversations.conversation WHERE id = $1::uuid`, convID).Scan(&after),
 		"read updated_at after the retract")
 	c.Eq(before, after, "a retract writes no message, so last activity stays where it was")
+}
+
+// A commit that stores a message tells the observer which conversation got it;
+// a commit that stores none (a head retract) does not, and a stopped observer
+// is never called again.
+func TestObserveMessageCommitsFiresOnlyForStoredMessages(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	convID := cleanConversation(t, pool)
+
+	var mu sync.Mutex
+	seen := map[string]int{}
+	stop := ObserveMessageCommits(func(id string) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen[id]++
+	})
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen[convID]
+	}
+
+	handle := conv.NewStore(NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner())
+	res, err := handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{convNode(t, "user", "first")}})
+	c.Require().NoError(err, "append")
+	c.Eq(1, count(), "one stored commit, one observation")
+
+	c.Require().NoError(handle.RetractHead(ctx, res.Nodes[0].ID), "retract the head")
+	c.Eq(1, count(), "a retract stores no message and is not observed")
+
+	stop()
+	_, err = handle.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{convNode(t, "user", "second")}})
+	c.Require().NoError(err, "append after stop")
+	c.Eq(1, count(), "a stopped observer is not called")
 }

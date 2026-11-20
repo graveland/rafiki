@@ -136,8 +136,12 @@ type Store interface {
 
 	// indexer (daemon trust level; no Scope)
 	ExtractCursors(ctx context.Context, excluded []string, limit int) ([]ExtractCursor, error)
+	// ExtractCursorsFor is ExtractCursors for the named conversations only.
+	ExtractCursorsFor(ctx context.Context, excluded []string, ids []string) ([]ExtractCursor, error)
 	MessagesFrom(ctx context.Context, conversationID string, fromOrdinal int) ([]Message, error)
-	WriteWindows(ctx context.Context, conversationID string, ws []Window) error
+	// WriteWindows stores ws and records that messages through the ordinal
+	// `through` have been read (negative: none).
+	WriteWindows(ctx context.Context, conversationID string, ws []Window, through int) error
 	MarkDerivedSkip(ctx context.Context, conversationID string) (bool, error)
 	PendingEmbeds(ctx context.Context, model string, limit int) ([]EmbedItem, error)
 	SetEmbeddings(ctx context.Context, model string, items []EmbedItem, vecs [][]float32) error

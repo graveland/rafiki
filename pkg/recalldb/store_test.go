@@ -758,7 +758,7 @@ func TestStoreWriteWindowsClearsEmbeddingOnTextChange(t *testing.T) {
 
 	win := recall.Window{ConversationID: conv, OwnerUserID: owner, Seq: 0, OrdinalFrom: 0, OrdinalTo: 0,
 		Text: "one", ExtractorVersion: recall.ExtractorVersion}
-	c.Require().NoError(st.WriteWindows(ctx, conv, []recall.Window{win}), "write v1")
+	c.Require().NoError(st.WriteWindows(ctx, conv, []recall.Window{win}, -1), "write v1")
 	var winID string
 	c.Require().NoError(pool.QueryRow(ctx, `SELECT id::text FROM conversations.conversation_window
 		WHERE conversation_id = $1::uuid AND seq = 0`, conv).Scan(&winID), "read window id")
@@ -766,7 +766,7 @@ func TestStoreWriteWindowsClearsEmbeddingOnTextChange(t *testing.T) {
 
 	// Text change clears the embedding.
 	win.Text = "two"
-	c.Require().NoError(st.WriteWindows(ctx, conv, []recall.Window{win}), "write v2")
+	c.Require().NoError(st.WriteWindows(ctx, conv, []recall.Window{win}, -1), "write v2")
 	var embeddingNull, modelNull bool
 	c.Require().NoError(pool.QueryRow(ctx, `SELECT embedding IS NULL, embedding_model IS NULL
 		FROM conversations.conversation_window WHERE id = $1::uuid`, winID).
@@ -776,7 +776,7 @@ func TestStoreWriteWindowsClearsEmbeddingOnTextChange(t *testing.T) {
 	// Same text keeps the embedding: the DISTINCT guard must not fire.
 	setEmbedding(t, pool, "conversations.conversation_window", winID, "wm", "[1,2,3]")
 	win.Sealed = true
-	c.Require().NoError(st.WriteWindows(ctx, conv, []recall.Window{win}), "write v3")
+	c.Require().NoError(st.WriteWindows(ctx, conv, []recall.Window{win}, -1), "write v3")
 	c.Require().NoError(pool.QueryRow(ctx, `SELECT embedding IS NULL FROM conversations.conversation_window
 		WHERE id = $1::uuid`, winID).Scan(&embeddingNull), "read after no-op")
 	c.False(embeddingNull, "unchanged text cleared the embedding; the DISTINCT guard is missing")
@@ -903,7 +903,7 @@ func TestStoreTryLockExclusive(t *testing.T) {
 // production mark path, without writing any window rows.
 func markDerivedSkip(t *testing.T, st *Store, convID string) {
 	t.Helper()
-	assert.NewAborting(t).NoError(st.WriteWindows(context.Background(), convID, nil), "mark derived_skip")
+	assert.NewAborting(t).NoError(st.WriteWindows(context.Background(), convID, nil, -1), "mark derived_skip")
 }
 
 func derivedSkipOf(t *testing.T, pool *pgxpool.Pool, convID string) bool {
@@ -1143,7 +1143,7 @@ func TestWriteWindowsMarksFlaggedConversation(t *testing.T) {
 			Text: "mark window", Sealed: true, ExtractorVersion: recall.ExtractorVersion}}
 	}
 	for _, conv := range []string{byConv, byRef, byThread, control} {
-		ck.Require().NoError(st.WriteWindows(ctx, conv, window(conv)), "WriteWindows %s", conv)
+		ck.Require().NoError(st.WriteWindows(ctx, conv, window(conv), -1), "WriteWindows %s", conv)
 	}
 
 	ck.True(derivedSkipOf(t, pool, byConv), "conversation_id link must mark")
@@ -1454,7 +1454,7 @@ func TestMarkDerivedSkipMatchesWriteWindowsMark(t *testing.T) {
 		got, err := st.MarkDerivedSkip(ctx, tc.mark)
 		ck.Require().NoError(err, "%s: MarkDerivedSkip", tc.label)
 		ck.Eq(tc.want, got, "%s: MarkDerivedSkip returned", tc.label)
-		ck.Require().NoError(st.WriteWindows(ctx, tc.write, nil), "%s: WriteWindows", tc.label)
+		ck.Require().NoError(st.WriteWindows(ctx, tc.write, nil, -1), "%s: WriteWindows", tc.label)
 		ck.Eq(derivedSkipOf(t, pool, tc.write), got, "%s: WriteWindows and MarkDerivedSkip must agree", tc.label)
 		ck.Eq(tc.want, derivedSkipOf(t, pool, tc.mark), "%s: marked column", tc.label)
 	}
@@ -1486,4 +1486,125 @@ func TestStoreMessagesFromKeepsEachRowsContent(t *testing.T) {
 		ck.Require().Eq(1, len(blocks), "blocks of ordinal %d", m.Ordinal)
 		ck.Eq(want[m.Ordinal], blocks[0].Text, "text of ordinal %d", m.Ordinal)
 	}
+}
+
+func insertToolResultMessage(t *testing.T, pool *pgxpool.Pool, convID string, ordinal int) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `INSERT INTO conversations.conversation_message
+		(conversation_id, ordinal, role, content, created_at)
+		VALUES ($1::uuid, $2, 'user', '[{"type":"tool_result","tool_use_id":"t","content":"output"}]', now())`,
+		convID, ordinal)
+	assert.NewAborting(t).NoError(err, "insert tool result message %d", ordinal)
+}
+
+func cursorIDs(cursors []recall.ExtractCursor) []string {
+	out := make([]string, 0, len(cursors))
+	for _, c := range cursors {
+		out = append(out, c.Conversation.ID)
+	}
+	return out
+}
+
+func extractedOrdinalOf(t *testing.T, pool *pgxpool.Pool, convID string) *int {
+	t.Helper()
+	var v *int
+	assert.NewAborting(t).NoError(pool.QueryRow(context.Background(),
+		`SELECT extracted_ordinal FROM conversations.conversation WHERE id = $1::uuid`, convID).Scan(&v),
+		"read extracted_ordinal")
+	return v
+}
+
+// A conversation whose last messages carry only tool results has windows that
+// end earlier, so the window tail alone made it look unread on every pass. The
+// ordinal the indexer recorded is what settles it, and a message landing past
+// that ordinal makes it pending again.
+func TestStoreExtractCursorsSettleOnTheOrdinalReadNotTheWindowEnd(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "settle-owner")
+	conv := insertConversation(t, pool, convFixture{Owner: owner, Name: "ends in tool results"})
+	insertMessage(t, pool, conv, 0, "user", "hello", ago(time.Hour))
+	insertMessage(t, pool, conv, 1, "assistant", "hi there", ago(time.Hour))
+	insertToolResultMessage(t, pool, conv, 2)
+	insertToolResultMessage(t, pool, conv, 3)
+
+	cursors, err := st.ExtractCursors(ctx, recall.ExcludedEntrypoints, 50)
+	ck.Require().NoError(err, "cursors before the first read")
+	ck.Contains(cursorIDs(cursors), conv, "an unread conversation is pending")
+
+	win := recall.Window{ConversationID: conv, OwnerUserID: owner, Seq: 0, OrdinalFrom: 0, OrdinalTo: 1,
+		Text: "user: hello\n\nassistant: hi there", ExtractorVersion: recall.ExtractorVersion}
+	ck.Require().NoError(st.WriteWindows(ctx, conv, []recall.Window{win}, 3), "write windows through ordinal 3")
+
+	cursors, err = st.ExtractCursors(ctx, recall.ExcludedEntrypoints, 50)
+	ck.Require().NoError(err, "cursors after the read")
+	ck.NotContains(cursorIDs(cursors), conv, "the window ends at 1 but messages through 3 were read: not pending")
+
+	// A lower stamp never moves the mark back.
+	ck.Require().NoError(st.WriteWindows(ctx, conv, nil, 1), "a lower stamp")
+	got := extractedOrdinalOf(t, pool, conv)
+	ck.Require().True(got != nil, "stamped")
+	ck.Eq(3, *got, "extracted_ordinal only rises")
+
+	insertMessage(t, pool, conv, 4, "user", "one more", ago(time.Minute))
+	cursors, err = st.ExtractCursors(ctx, recall.ExcludedEntrypoints, 50)
+	ck.Require().NoError(err, "cursors after a new message")
+	ck.Contains(cursorIDs(cursors), conv, "a message past the read ordinal is pending again")
+}
+
+// Windows on an older extractor are deleted and the conversation is read from
+// scratch: clearing extracted_ordinal is what keeps a conversation with no
+// windows left from looking caught up.
+func TestStoreExtractCursorsRebuildAfterAnExtractorUpgrade(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "upgrade-owner")
+	conv := insertConversation(t, pool, convFixture{Owner: owner, Name: "old extractor"})
+	insertMessage(t, pool, conv, 0, "user", "hello", ago(time.Hour))
+	insertMessage(t, pool, conv, 1, "assistant", "hi", ago(time.Hour))
+	_, err := pool.Exec(ctx, `INSERT INTO conversations.conversation_window
+		(conversation_id, owner_user_id, seq, ordinal_from, ordinal_to, text, sealed, extractor_version)
+		VALUES ($1::uuid, $2::uuid, 0, 0, 1, 'old', false, $3)`, conv, owner, recall.ExtractorVersion-1)
+	ck.Require().NoError(err, "insert a window on the previous extractor")
+	_, err = pool.Exec(ctx, `UPDATE conversations.conversation SET extracted_ordinal = 1 WHERE id = $1::uuid`, conv)
+	ck.Require().NoError(err, "mark it read through its last message")
+
+	cursors, err := st.ExtractCursors(ctx, recall.ExcludedEntrypoints, 50)
+	ck.Require().NoError(err, "cursors")
+	var mine *recall.ExtractCursor
+	for i := range cursors {
+		if cursors[i].Conversation.ID == conv {
+			mine = &cursors[i]
+		}
+	}
+	ck.Require().True(mine != nil, "the upgraded conversation is pending")
+	ck.True(mine.Tail == nil, "its stale windows are gone, so it extracts from scratch")
+	ck.True(extractedOrdinalOf(t, pool, conv) == nil, "and what it had read is cleared")
+}
+
+// ExtractCursorsFor looks at only the conversations it is given, applies the
+// same pending test, and never returns an excluded entrypoint.
+func TestStoreExtractCursorsForTargetsTheGivenConversations(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "targeted-owner")
+	wanted := insertConversation(t, pool, convFixture{Owner: owner, Name: "wanted"})
+	other := insertConversation(t, pool, convFixture{Owner: owner, Name: "other pending"})
+	caughtUp := insertConversation(t, pool, convFixture{Owner: owner, Name: "caught up"})
+	machine := insertConversation(t, pool, convFixture{Owner: owner, Name: "machine", Entrypoint: "recall-summary"})
+	for _, c := range []string{wanted, other, caughtUp, machine} {
+		insertMessage(t, pool, c, 0, "user", "text", ago(time.Hour))
+	}
+	ck.Require().NoError(st.WriteWindows(ctx, caughtUp, nil, 0), "mark one read")
+
+	cursors, err := st.ExtractCursorsFor(ctx, recall.ExcludedEntrypoints, []string{wanted, caughtUp, machine})
+	ck.Require().NoError(err, "ExtractCursorsFor")
+	ck.ElementsMatch([]string{wanted}, cursorIDs(cursors), "only the pending, non-excluded conversation among those asked for")
+
+	none, err := st.ExtractCursorsFor(ctx, recall.ExcludedEntrypoints, nil)
+	ck.Require().NoError(err, "no ids")
+	ck.Empty(none, "no ids, no cursors")
 }
