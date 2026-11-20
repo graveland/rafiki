@@ -682,10 +682,12 @@ func TestMCPFaceRejectsASessionIDPresentedByAnotherCaller(t *testing.T) {
 	text, isErr := mcpResultText(t, msgs, 3)
 	c.False(isErr, "task_add failed for the session's owner: %s", text)
 
-	// A session id the face never bound is refused too — a map miss must
-	// never become the one path that dispatches unvalidated.
+	// A session id the face never bound (or has since closed) is answered 404,
+	// the status that makes a client start a new session — and never
+	// dispatched: a map miss must never become the one path that runs
+	// unvalidated.
 	code, _, _ = mcpPost(t, mux, "mcp-not-a-real-session", "tok-bob", mcpListToolsBody)
-	c.Eq(http.StatusForbidden, code, "unknown session id: got")
+	c.Eq(http.StatusNotFound, code, "unknown session id: got")
 }
 
 // The overrides compose the blueprints' own text with the surface framing, so

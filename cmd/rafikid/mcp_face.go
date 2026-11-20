@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -68,6 +69,14 @@ type mcpFace struct {
 	childSessionsMu sync.Mutex
 	childSessions   map[string]map[*mcp.ServerSession]struct{}
 
+	// activity records, per child session id, how many requests are in flight
+	// (any method: an open GET stream is one long-running request) and when the
+	// last one finished, so the idle sweep expires only a session with no
+	// connection and no recent use. Guarded by sessionsMu with the id->principal
+	// map it shadows; user sessions are not tracked.
+	activity map[string]*sessionActivity
+	now      func() time.Time
+
 	// versionProbe answers getServer for requests that carry an
 	// Mcp-Session-Id. The SDK asks getServer on every request, but for a
 	// request inside an existing session it reads only the server's
@@ -90,6 +99,25 @@ type principal struct {
 // mcpSessionHeader names the session a streamable-HTTP request belongs to.
 const mcpSessionHeader = "Mcp-Session-Id"
 
+const (
+	// mcpChildSessionIdle is how long a child's MCP session may have no request
+	// in flight and no request finish before the sweep closes it. The SDK keeps
+	// a session until its client sends DELETE, and a client that goes away
+	// without one (or opens a new session and abandons the old) would otherwise
+	// leave it, its goroutines and its tool server for the daemon's lifetime.
+	// A client whose session is closed gets a 404 and re-initializes.
+	mcpChildSessionIdle = 15 * time.Minute
+	// mcpSessionSweepEvery is how often the sweep looks.
+	mcpSessionSweepEvery = time.Minute
+)
+
+// sessionActivity is one child session's use: requests running now and when the
+// last one finished (or the session was created).
+type sessionActivity struct {
+	inflight int
+	last     time.Time
+}
+
 func newMCPFace(logger *slog.Logger, capture *capture.CaptureStore, quotaStore *quota.Store, ver string) *mcpFace {
 	return &mcpFace{
 		logger:   logger,
@@ -99,6 +127,8 @@ func newMCPFace(logger *slog.Logger, capture *capture.CaptureStore, quotaStore *
 		sessions: make(map[string]principal),
 
 		childSessions: make(map[string]map[*mcp.ServerSession]struct{}),
+		activity:      make(map[string]*sessionActivity),
+		now:           time.Now,
 
 		// Built from the same server options as a real server so both
 		// advertise the same protocol versions.
@@ -144,11 +174,21 @@ func (f *mcpFace) Routes() (string, http.Handler) {
 		}
 		p := principal{UserID: id.UserID, ChildID: id.ChildID}
 		sid := r.Header.Get(mcpSessionHeader)
-		if sid != "" && !f.sessionOwnedBy(sid, p) {
-			http.Error(w, "mcp session belongs to another caller or is unknown", http.StatusForbidden)
+		if sid != "" && !f.sessionKnown(sid) {
+			// 404 is what the MCP spec requires for a session the server no
+			// longer holds, and what makes a client start a new one. A closed
+			// session (client DELETE, child exit, idle sweep, daemon restart)
+			// lands here; a 403 would leave the client retrying a dead id.
+			http.Error(w, "mcp session not found", http.StatusNotFound)
 			return
 		}
+		if sid != "" && !f.sessionOwnedBy(sid, p) {
+			http.Error(w, "mcp session belongs to another caller", http.StatusForbidden)
+			return
+		}
+		endRequest := f.beginRequest(sid)
 		sdk.ServeHTTP(w, r)
+		endRequest()
 		if r.Method == http.MethodDelete {
 			// The session is gone either way: closed (204) or never existed.
 			// Only requests that passed the ownership check reach here.
@@ -189,10 +229,44 @@ func (f *mcpFace) sessionOwnedBy(sid string, p principal) bool {
 	return ok && owner == p
 }
 
+// sessionKnown reports whether the face holds a binding for sid.
+func (f *mcpFace) sessionKnown(sid string) bool {
+	f.sessionsMu.Lock()
+	defer f.sessionsMu.Unlock()
+	_, ok := f.sessions[sid]
+	return ok
+}
+
 func (f *mcpFace) bindSession(sid string, p principal) {
 	f.sessionsMu.Lock()
 	defer f.sessionsMu.Unlock()
 	f.sessions[sid] = p
+	if p.ChildID != "" {
+		f.activity[sid] = &sessionActivity{last: f.now()}
+	}
+}
+
+// beginRequest marks a request for sid as running and returns the function that
+// marks it finished. A session with no activity record (a user's, or an unknown
+// id) is not tracked and gets a no-op.
+func (f *mcpFace) beginRequest(sid string) func() {
+	if sid == "" {
+		return func() {}
+	}
+	f.sessionsMu.Lock()
+	a := f.activity[sid]
+	if a == nil {
+		f.sessionsMu.Unlock()
+		return func() {}
+	}
+	a.inflight++
+	f.sessionsMu.Unlock()
+	return func() {
+		f.sessionsMu.Lock()
+		defer f.sessionsMu.Unlock()
+		a.inflight--
+		a.last = f.now()
+	}
 }
 
 // trackChildSession records ss as one of childID's sessions. A session
@@ -210,10 +284,13 @@ func (f *mcpFace) trackChildSession(childID string, ss *mcp.ServerSession) {
 	}
 	_, dup := set[ss]
 	set[ss] = struct{}{}
+	open := len(set)
 	f.childSessionsMu.Unlock()
 	if dup {
 		return
 	}
+	f.logger.Info("mcp child session opened",
+		"child", childID, "session", ss.ID(), "client", clientName(ss), "open", open)
 	go func() {
 		_ = ss.Wait()
 		f.childSessionsMu.Lock()
@@ -236,7 +313,81 @@ func (f *mcpFace) closeChildSessions(childID string) {
 	delete(f.childSessions, childID)
 	f.childSessionsMu.Unlock()
 	for ss := range set {
-		go func() { _ = ss.Close() }()
+		f.closeSession(ss)
+	}
+}
+
+// closeSession closes ss without waiting for its connection to drain, and drops
+// the face's own record of its id: the SDK's table forgets a closed session,
+// but the id->principal and activity maps are the face's and only a DELETE
+// request would otherwise prune them.
+func (f *mcpFace) closeSession(ss *mcp.ServerSession) {
+	if sid := ss.ID(); sid != "" {
+		f.forgetSession(sid)
+	}
+	go func() { _ = ss.Close() }()
+}
+
+// clientName is the connecting client's name and version, for the log: which
+// client opens a session is what tells a leak from a feature.
+func clientName(ss *mcp.ServerSession) string {
+	if p := ss.InitializeParams(); p != nil && p.ClientInfo != nil {
+		return p.ClientInfo.Name + "/" + p.ClientInfo.Version
+	}
+	return "unknown"
+}
+
+// sweepIdleChildSessions closes every tracked child session that has no
+// request in flight and has been quiet for idle. A session holding an open
+// stream always has a request in flight, so a connected client is never
+// swept; a session whose connection dropped is, once it has been quiet long
+// enough. Returns how many it closed.
+func (f *mcpFace) sweepIdleChildSessions(idle time.Duration) int {
+	type tracked struct {
+		child string
+		ss    *mcp.ServerSession
+	}
+	f.childSessionsMu.Lock()
+	var all []tracked
+	for child, set := range f.childSessions {
+		for ss := range set {
+			all = append(all, tracked{child, ss})
+		}
+	}
+	f.childSessionsMu.Unlock()
+
+	now := f.now()
+	closed := 0
+	for _, t := range all {
+		sid := t.ss.ID()
+		if sid == "" {
+			continue
+		}
+		f.sessionsMu.Lock()
+		a := f.activity[sid]
+		expired := a != nil && a.inflight == 0 && now.Sub(a.last) >= idle
+		f.sessionsMu.Unlock()
+		if !expired {
+			continue
+		}
+		f.logger.Info("mcp child session closed idle", "child", t.child, "session", sid, "idle", idle)
+		f.closeSession(t.ss)
+		closed++
+	}
+	return closed
+}
+
+// RunSessionSweep closes idle child sessions until ctx is done.
+func (f *mcpFace) RunSessionSweep(ctx context.Context) {
+	ticker := time.NewTicker(mcpSessionSweepEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			f.sweepIdleChildSessions(mcpChildSessionIdle)
+		}
 	}
 }
 
@@ -244,6 +395,7 @@ func (f *mcpFace) forgetSession(sid string) {
 	f.sessionsMu.Lock()
 	defer f.sessionsMu.Unlock()
 	delete(f.sessions, sid)
+	delete(f.activity, sid)
 }
 
 // getServer builds an MCP server bound to ONE caller, per request.
