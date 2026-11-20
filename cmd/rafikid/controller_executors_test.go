@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,9 @@ import (
 // real enforcement lives in the postgres store and is covered by its own
 // conformance suite.
 type fakeExecStore struct {
+	// mu guards the fields below: a tunnel-launch goroutine reads rows while the
+	// test goroutine deletes them.
+	mu          sync.Mutex
 	minted      []executors.NewToken
 	execs       map[string]executors.Executor
 	seq         int
@@ -41,6 +45,8 @@ func newFakeExecStore() *fakeExecStore {
 }
 
 func (f *fakeExecStore) Create(_ context.Context, t executors.NewToken) (executors.Executor, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.createCalls++
 	f.lastCreate = t
 	f.creates = append(f.creates, t)
@@ -50,10 +56,14 @@ func (f *fakeExecStore) Create(_ context.Context, t executors.NewToken) (executo
 }
 
 func (f *fakeExecStore) MintToken(_ context.Context, t executors.NewToken) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.minted = append(f.minted, t)
 	return "tok-1", nil
 }
 func (f *fakeExecStore) Enroll(_ context.Context, _ string, _ map[string]string) (executors.Executor, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.seq++
 	e := executors.Executor{ID: "exec-" + string(rune('0'+f.seq)), Labels: map[string]string{}}
 	f.execs[e.ID] = e
@@ -63,6 +73,8 @@ func (f *fakeExecStore) Authenticate(_ context.Context, _ string) (executors.Exe
 	return executors.Executor{}, nil
 }
 func (f *fakeExecStore) Get(_ context.Context, id string) (executors.Executor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	e, ok := f.execs[id]
 	if !ok {
 		// The postgres store answers a missing row with ErrNotFound, and
@@ -72,6 +84,8 @@ func (f *fakeExecStore) Get(_ context.Context, id string) (executors.Executor, e
 	return e, nil
 }
 func (f *fakeExecStore) List(_ context.Context) ([]executors.Executor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []executors.Executor
 	for _, e := range f.execs {
 		out = append(out, e)
@@ -80,6 +94,8 @@ func (f *fakeExecStore) List(_ context.Context) ([]executors.Executor, error) {
 	return out, nil
 }
 func (f *fakeExecStore) SetLabels(_ context.Context, id string, set map[string]string, remove []string) (executors.Executor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.setLabelsErr != nil {
 		return executors.Executor{}, f.setLabelsErr
 	}
@@ -97,12 +113,16 @@ func (f *fakeExecStore) SetLabels(_ context.Context, id string, set map[string]s
 	return e, nil
 }
 func (f *fakeExecStore) SetEnabled(_ context.Context, id string, enabled bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !enabled {
 		f.disabled = append(f.disabled, id)
 	}
 	return nil
 }
 func (f *fakeExecStore) Delete(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if _, ok := f.execs[id]; !ok {
 		return executors.ErrNotFound
 	}
@@ -117,6 +137,8 @@ func (f *fakeExecStore) Annotate(_ context.Context, id string, set map[string]st
 func (f *fakeExecStore) TouchSeen(_ context.Context, id string) error { return nil }
 
 func (f *fakeExecStore) RotateCredential(_ context.Context, id string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if _, ok := f.execs[id]; !ok {
 		return "", executors.ErrNotFound
 	}
