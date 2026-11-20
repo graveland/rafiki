@@ -160,6 +160,28 @@ COPY --from=build /out/rafikid /usr/local/bin/rafikid
 COPY --from=build /out/rafiki /usr/local/bin/rafiki
 COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
 
+# Pre-create the $HOME directories the daemon writes into, owned by rafiki.
+#
+# useradd -m makes the home directory but nothing under it, so these appear at
+# runtime — created by the daemon itself, as rafiki, which is fine. The case
+# that is not fine is a container platform mounting INTO $HOME: the kubelet
+# creates the missing parent directories of a nested volume or subPath mount as
+# root:root, so mounting (say) /home/rafiki/.cache/rafiki/executor-binaries
+# leaves $XDG_CACHE_HOME/rafiki itself unwritable to uid 1000 and every cache
+# write fails with EACCES — the model catalog was the first casualty:
+#
+#   level=WARN msg="model catalog: cache save failed"
+#   error="open /home/rafiki/.cache/rafiki/openrouter_catalog.json.tmp…: permission denied"
+#
+# Creating them here keeps them the daemon's however deep a mount lands, and
+# makes the mode explicit rather than inherited from the umask of whichever
+# process happened to create them first.
+RUN install -d -o rafiki -g rafiki -m 0700 \
+      /home/rafiki/.cache \
+      /home/rafiki/.cache/rafiki \
+      /home/rafiki/.config \
+      /home/rafiki/.config/rafiki
+
 EXPOSE 8035 8036
 
 USER rafiki
