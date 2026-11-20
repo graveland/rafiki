@@ -156,12 +156,31 @@ func (s *Store) Open(convID string, opts ...OpenOption) *Handle {
 }
 
 // Page reads one page of the conversation's transcript.
+//
+// It selects the page on the path's refs and fetches only the nodes it returns,
+// so a page of a long conversation costs the page, not the conversation. The
+// selection is the one Snapshot.Page applies.
 func (s *Store) Page(ctx context.Context, convID string, q PageQuery) ([]*Node, error) {
-	sn, err := s.Open(convID).Snapshot(ctx)
+	h := s.Open(convID)
+	head, err := h.headID(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return sn.Page(q)
+	items, err := h.pathItemsFrom(ctx, head, true)
+	if err != nil {
+		return nil, err
+	}
+	transcript := make([]pathItem, 0, len(items))
+	for _, it := range items {
+		if it.ref.Kind != KindCompactionTail {
+			transcript = append(transcript, it)
+		}
+	}
+	kept, err := selectPage(transcript, func(it pathItem) Ref { return it.ref }, q)
+	if err != nil {
+		return nil, err
+	}
+	return s.fillItems(ctx, kept)
 }
 
 // Transcript reads the conversation's whole transcript.
@@ -388,6 +407,25 @@ const maxForkSegments = 64
 // naming the fork-from node is the same segment, which is the head RequestAt is
 // handed on a fork's first turn.
 func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]*Node, error) {
+	items, err := h.pathItemsFrom(ctx, from, crossRoots)
+	if err != nil {
+		return nil, err
+	}
+	return h.store.fillItems(ctx, items)
+}
+
+// pathItem is one node of a path as the walk saw it: always its Ref, and the
+// node itself only where the cache already held it. A reader that wants a
+// subset of a long path selects on the refs and fetches just those nodes.
+type pathItem struct {
+	conv string
+	ref  Ref
+	node *Node
+}
+
+// pathItemsFrom is pathFrom without the content fetch: it returns the path's
+// items, chronological, with a node attached only where the cache supplied one.
+func (h *Handle) pathItemsFrom(ctx context.Context, from string, crossRoots bool) ([]pathItem, error) {
 	edge, err := h.store.edgeOf(ctx, h.convID)
 	if err != nil {
 		return nil, err
@@ -400,7 +438,7 @@ func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]
 		segConv, segFrom = edge.convID, edge.fromID
 	}
 
-	var out []*Node
+	var out []pathItem
 	for segment := 0; ; segment++ {
 		if segment >= maxForkSegments {
 			return nil, fmt.Errorf("conv: walk: more than %d fork segments from conversation %s",
@@ -412,9 +450,12 @@ func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]
 		}
 		stopAt := segEdge.fromID
 
-		var nodes []*Node
+		var items []pathItem
 		if path, ok := h.store.cachedPath(segConv, segFrom, crossRoots, stopAt); ok {
-			nodes = path
+			items = make([]pathItem, len(path))
+			for i, n := range path {
+				items[i] = pathItem{conv: segConv, ref: n.Ref, node: n}
+			}
 		} else {
 			refs, err := h.store.backend.Walk(ctx, segConv, segFrom, crossRoots)
 			if err != nil {
@@ -423,15 +464,13 @@ func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]
 			if len(refs) == 0 {
 				return nil, fmt.Errorf("conv: walk: node %s not in conversation %s", segFrom, segConv)
 			}
-			nodes, err = h.store.nodesFor(ctx, segConv, refs)
-			if err != nil {
-				return nil, err
-			}
-			for i, j := 0, len(nodes)-1; i < j; i, j = i+1, j-1 {
-				nodes[i], nodes[j] = nodes[j], nodes[i]
+			// Walk answers head-first; the path is chronological.
+			items = make([]pathItem, len(refs))
+			for i, r := range refs {
+				items[len(refs)-1-i] = pathItem{conv: segConv, ref: r}
 			}
 		}
-		if len(nodes) == 0 {
+		if len(items) == 0 {
 			// UNREACHABLE under the model, kept as a defensive no-progress step:
 			// an empty segment means segFrom == segEdge.fromID, i.e. a
 			// conversation whose fork_from names one of its OWN nodes. A
@@ -444,9 +483,9 @@ func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]
 			segConv, segFrom = segEdge.convID, segEdge.fromID
 			continue
 		}
-		out = append(nodes, out...)
+		out = append(items, out...)
 
-		first := nodes[0]
+		first := items[0].ref
 		next := first.ParentID
 		if next == "" && crossRoots {
 			next = first.DerivedFromID
@@ -460,6 +499,45 @@ func (h *Handle) pathFrom(ctx context.Context, from string, crossRoots bool) ([]
 		}
 		segConv, segFrom = segEdge.convID, segEdge.fromID
 	}
+}
+
+// fillItems resolves every item to a node, keeping the nodes the walk already
+// had and fetching the rest, one conversation at a time. Each conversation's
+// refs go to nodesFor head-first, which is the order it applies recency in.
+func (s *Store) fillItems(ctx context.Context, items []pathItem) ([]*Node, error) {
+	out := make([]*Node, len(items))
+	type group struct {
+		refs []Ref
+		at   []int
+	}
+	groups := make(map[string]*group)
+	var order []string
+	for i := len(items) - 1; i >= 0; i-- {
+		it := items[i]
+		if it.node != nil {
+			out[i] = it.node
+			continue
+		}
+		g := groups[it.conv]
+		if g == nil {
+			g = &group{}
+			groups[it.conv] = g
+			order = append(order, it.conv)
+		}
+		g.refs = append(g.refs, it.ref)
+		g.at = append(g.at, i)
+	}
+	for _, conv := range order {
+		g := groups[conv]
+		nodes, err := s.nodesFor(ctx, conv, g.refs)
+		if err != nil {
+			return nil, err
+		}
+		for k, n := range nodes {
+			out[g.at[k]] = n
+		}
+	}
+	return out, nil
 }
 
 // nodesFor resolves refs, head-first, to nodes, fetching the ones the cache

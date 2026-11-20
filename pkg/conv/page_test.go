@@ -5,6 +5,7 @@ package conv
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -131,5 +132,105 @@ func TestOptionsZeroValuesAreDefaults(t *testing.T) {
 		c.Eq(int64(defaultCacheBytes), s.cacheBytes, "CacheBytes %d means 256 MiB, never no cache", bytes)
 		c.Eq(defaultIdleTTL, s.ttl, "IdleTTL 0 means five minutes")
 		c.NotNil(s.now, "a nil Now is time.Now")
+	}
+}
+
+// fetchSpy counts the node ids the store asks its backend to fetch.
+type fetchSpy struct {
+	Backend
+	mu  sync.Mutex
+	ids int
+}
+
+func (f *fetchSpy) Fetch(ctx context.Context, convID string, ids []string) ([]*Node, error) {
+	f.mu.Lock()
+	f.ids += len(ids)
+	f.mu.Unlock()
+	return f.Backend.Fetch(ctx, convID, ids)
+}
+
+func (f *fetchSpy) fetched() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ids
+}
+
+// pageSpyFixture writes n distinct-time rows through one store and returns a
+// cold store over the same data, with the spy on its backend.
+func pageSpyFixture(t *testing.T, n int, kinds map[int]string) (*Store, *fetchSpy, string) {
+	t.Helper()
+	b := NewMemBackend()
+	convID := uuid.Must(uuid.NewV7()).String()
+	b.Ensure(convID)
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	clock := base
+	b.now = func() time.Time { return clock }
+	h := NewStore(b, Options{}).Open(convID, AsOwner())
+	for i := 0; i < n; i++ {
+		clock = base.Add(time.Duration(i) * time.Second)
+		node := NewNode{Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: fmt.Sprintf("row %d", i)}}}}
+		if kind, ok := kinds[i]; ok {
+			node.Kind = kind
+		}
+		if _, err := h.Append(context.Background(), Append{FromHead: true, Nodes: []NewNode{node}}); err != nil {
+			t.Fatalf("append row %d: %v", i, err)
+		}
+	}
+	spy := &fetchSpy{Backend: b}
+	return NewStore(spy, Options{}), spy, convID
+}
+
+// A page costs the page: the path is walked as refs and only the nodes the
+// page returns are fetched, not every node of the conversation.
+func TestPageFetchesOnlyTheNodesItReturns(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, spy, convID := pageSpyFixture(t, 300, nil)
+
+	got := pageOrdinals(t, s, convID, PageQuery{Limit: intPtr(5)})
+	c.EqDeep([]int{295, 296, 297, 298, 299}, got, "the newest five")
+	c.Eq(5, spy.fetched(), "five nodes fetched out of three hundred")
+
+	got = pageOrdinals(t, s, convID, PageQuery{AfterOrdinal: intPtr(297)})
+	c.EqDeep([]int{298, 299}, got, "after_ordinal")
+	c.Eq(5, spy.fetched(), "those two were already cached, so nothing more is fetched")
+
+	got = pageOrdinals(t, s, convID, PageQuery{Limit: intPtr(5), AfterOrdinal: intPtr(100), Before: nil})
+	c.Eq(5, len(got), "a limited page after an ordinal")
+	c.Eq(5, spy.fetched(), "the same five nodes again, from the cache")
+}
+
+// Store.Page selects with the same rule as Snapshot.Page, so a path with
+// compaction tails and shared timestamps pages identically either way.
+func TestStorePageMatchesSnapshotPage(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, convID, base := pageFixture(t, []int{0, 0, 1, 1, 1, 2, 3, 3, 4, 5}, map[int]string{2: KindCompactionTail, 7: KindCompactionTail})
+	before := base.Add(4 * time.Second)
+
+	sn, err := s.Open(convID).Snapshot(context.Background())
+	c.NoError(err, "Snapshot")
+	for name, q := range map[string]PageQuery{
+		"none":             {},
+		"limit 1":          {Limit: intPtr(1)},
+		"limit 3":          {Limit: intPtr(3)},
+		"limit 4":          {Limit: intPtr(4)},
+		"limit 100":        {Limit: intPtr(100)},
+		"after 3":          {AfterOrdinal: intPtr(3)},
+		"after 3 limit 2":  {AfterOrdinal: intPtr(3), Limit: intPtr(2)},
+		"before":           {Before: &before},
+		"before limit 2":   {Before: &before, Limit: intPtr(2)},
+		"after 20 (empty)": {AfterOrdinal: intPtr(20)},
+	} {
+		want, err := sn.Page(q)
+		c.NoError(err, "%s: Snapshot.Page", name)
+		got, err := s.Page(context.Background(), convID, q)
+		c.NoError(err, "%s: Store.Page", name)
+		wantIDs, gotIDs := []string{}, []string{}
+		for _, n := range want {
+			wantIDs = append(wantIDs, n.ID)
+		}
+		for _, n := range got {
+			gotIDs = append(gotIDs, n.ID)
+		}
+		c.EqDeep(wantIDs, gotIDs, "%s", name)
 	}
 }
