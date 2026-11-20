@@ -199,7 +199,12 @@ func TestAgentKillOfASignallingChildStillSuppresses(t *testing.T) {
 	defer cancel2()
 	killRes, err := ctrl.Kill(ctx2, workerID, 250*time.Millisecond, 250*time.Millisecond)
 	c.NoError(err, "Kill")
-	c.False(!killRes.Escalated || killRes.Signal == "", "the ladder must have escalated to a signal for this fixture to exercise the rung: %+v", killRes)
+	// Escalated is what this fixture needs: the ladder went past the stdin-close
+	// rung to the SIGTERM rung. How the fake's shell then ends is a race between
+	// the signal and its `sleep` child dying (signalled, exit 143, or exit 0
+	// when bash reaps the sleep first), and the suppression below must hold
+	// whichever it is.
+	c.True(killRes.Escalated, "the ladder must have escalated past the first rung for this fixture to exercise it: %+v", killRes)
 
 	clk.Advance(6 * time.Second)
 	c.Empty(cap.batches(), "a self-initiated kill must suppress the notice even when it had to signal")

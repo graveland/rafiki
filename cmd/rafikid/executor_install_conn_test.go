@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -197,10 +198,16 @@ func TestRemoteServeConnLogsAbnormalEndAtWarn(t *testing.T) {
 			stream.frames <- stderrFrame("fatal: out of disk")
 			tc.end(stream)
 			waitExited(t, conn)
+			// Another test's background goroutine logging a Warn into the shared
+			// capture, after this connection's own line.
+			slog.Warn("execpool: Describe failed on join", "error", "unavailable: io: read")
 
+			// captureLogs swaps the process-wide logger, so a background
+			// goroutine of another test can write a Warn into this buffer; only
+			// this connection's own lines count.
 			var warn string
 			for _, line := range strings.Split(logs.String(), "\n") {
-				if strings.Contains(line, "level=WARN") {
+				if strings.Contains(line, "level=WARN") && strings.Contains(line, "installed executor") {
 					warn = line
 				}
 			}
@@ -213,6 +220,18 @@ func TestRemoteServeConnLogsAbnormalEndAtWarn(t *testing.T) {
 	}
 }
 
+// hasConnWarn reports whether the captured log holds a Warn from an installed
+// executor connection. Warns from other tests' background goroutines also land
+// in a captured buffer and say nothing about this connection.
+func hasConnWarn(logs string) bool {
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "installed executor") {
+			return true
+		}
+	}
+	return false
+}
+
 // A clean exit, and a session this side closed itself, are not faults.
 func TestRemoteServeConnCleanOrOwnEndIsNotAWarning(t *testing.T) {
 	t.Run("clean exit", func(t *testing.T) {
@@ -222,7 +241,7 @@ func TestRemoteServeConnCleanOrOwnEndIsNotAWarning(t *testing.T) {
 		t.Cleanup(func() { _ = conn.Close() })
 		stream.exit(0, "")
 		waitExited(t, conn)
-		assert.NewCollecting(t).False(strings.Contains(logs.String(), "level=WARN"), "logs:\n%s", logs.String())
+		assert.NewCollecting(t).False(hasConnWarn(logs.String()), "logs:\n%s", logs.String())
 	})
 	t.Run("closed by us", func(t *testing.T) {
 		logs := captureLogs(t)
@@ -231,6 +250,6 @@ func TestRemoteServeConnCleanOrOwnEndIsNotAWarning(t *testing.T) {
 		_ = conn.Close()
 		close(stream.frames)
 		waitExited(t, conn)
-		assert.NewCollecting(t).False(strings.Contains(logs.String(), "level=WARN"), "logs:\n%s", logs.String())
+		assert.NewCollecting(t).False(hasConnWarn(logs.String()), "logs:\n%s", logs.String())
 	})
 }

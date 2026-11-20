@@ -595,6 +595,25 @@ func TestMcpOAuthLoginCarriesTheProfileBearer(t *testing.T) {
 	c.Eq(2, len(fake.authorizations()), "both calls must arrive, each with the credential")
 }
 
+// syncBuffer is a bytes.Buffer a test can read while the command under test is
+// still writing to it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 // TestMcpOAuthLoginCancelReturnsPromptly pins the abort path: Ctrl-C (or any
 // caller cancellation) while the callback is still awaited stops the command
 // immediately and says so, rather than sitting on the listener until the 10
@@ -614,17 +633,22 @@ func TestMcpOAuthLoginCancelReturnsPromptly(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	root, _, stderr := mcpCLIRoot(t, ctx, strings.NewReader(""), "mcp", "login", "linear",
+	root, _, _ := mcpCLIRoot(t, ctx, strings.NewReader(""), "mcp", "login", "linear",
 		"--mcp-config", writeClientMCPConfig(t, `{"mcpServers":{}}`), "--no-browser")
+	stderr := &syncBuffer{}
+	root.SetErr(stderr)
 	exec := make(chan error, 1)
 	go func() { exec <- root.Execute() }()
 
-	// Cancel once the daemon has answered Begin: by then the listener is bound
-	// and the flow is waiting for a browser that never comes.
+	// Cancel once the client has printed its paste prompt, the last thing it
+	// does before waiting for the callback: the listener is bound and the flow
+	// is waiting for a browser that never comes. Cancelling when the daemon
+	// merely received Begin could land while the client is still reading the
+	// response, and that cancellation reads as the RPC's, not the login's.
 	deadline := time.Now().Add(10 * time.Second)
-	for fake.lastBegin(t) == nil {
+	for !strings.Contains(stderr.String(), loginPastePrompt) {
 		if time.Now().After(deadline) {
-			t.Fatal("the daemon never saw BeginMcpLogin")
+			t.Fatal("the login never reached its callback wait")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
