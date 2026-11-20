@@ -67,6 +67,15 @@ type mcpFace struct {
 	// lifetime. An entry removes itself when its session's connection closes.
 	childSessionsMu sync.Mutex
 	childSessions   map[string]map[*mcp.ServerSession]struct{}
+
+	// versionProbe answers getServer for requests that carry an
+	// Mcp-Session-Id. The SDK asks getServer on every request, but for a
+	// request inside an existing session it reads only the server's
+	// supported protocol versions to validate the version header and drops
+	// the rest; building the caller's whole tool server for that was most of
+	// the face's allocation. It has no tools and is never connected, so it
+	// holds no caller state.
+	versionProbe *mcp.Server
 }
 
 // principal identifies the caller a session is bound to. UserID alone is not
@@ -78,6 +87,9 @@ type principal struct {
 	ChildID string
 }
 
+// mcpSessionHeader names the session a streamable-HTTP request belongs to.
+const mcpSessionHeader = "Mcp-Session-Id"
+
 func newMCPFace(logger *slog.Logger, capture *capture.CaptureStore, quotaStore *quota.Store, ver string) *mcpFace {
 	return &mcpFace{
 		logger:   logger,
@@ -87,6 +99,13 @@ func newMCPFace(logger *slog.Logger, capture *capture.CaptureStore, quotaStore *
 		sessions: make(map[string]principal),
 
 		childSessions: make(map[string]map[*mcp.ServerSession]struct{}),
+
+		// Built from the same server options as a real server so both
+		// advertise the same protocol versions.
+		versionProbe: mcpserver.New(mcpserver.Options{
+			Version:       ver,
+			ServerOptions: settlementHooksFor(users.Identity{}, nil),
+		}),
 	}
 }
 
@@ -124,7 +143,7 @@ func (f *mcpFace) Routes() (string, http.Handler) {
 			return
 		}
 		p := principal{UserID: id.UserID, ChildID: id.ChildID}
-		sid := r.Header.Get("Mcp-Session-Id")
+		sid := r.Header.Get(mcpSessionHeader)
 		if sid != "" && !f.sessionOwnedBy(sid, p) {
 			http.Error(w, "mcp session belongs to another caller or is unknown", http.StatusForbidden)
 			return
@@ -140,7 +159,7 @@ func (f *mcpFace) Routes() (string, http.Handler) {
 			// getServer runs, so the binding is recorded here, after the
 			// handler has returned. Nobody can present the id before this
 			// response reaches them.
-			if newSID := w.Header().Get("Mcp-Session-Id"); newSID != "" {
+			if newSID := w.Header().Get(mcpSessionHeader); newSID != "" {
 				f.bindSession(newSID, p)
 			}
 		}
@@ -284,6 +303,12 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// agent-control tools are subtree-scoped (newControllerSpawner), because
 	// steering, killing and spawning are bounded by the spawn tree.
 	isChild := id.Via == server.ProvenanceChildToken
+	// A request inside an existing session needs no tool server: the SDK reads
+	// only its protocol versions (see versionProbe). The nil answers stay
+	// ahead of this, so an uncredentialed caller is refused exactly as before.
+	if r.Header.Get(mcpSessionHeader) != "" && (id.IsUserCredential() || isChild) {
+		return f.versionProbe
+	}
 	var spawner tools.AgentSpawner
 	switch {
 	case id.IsUserCredential():

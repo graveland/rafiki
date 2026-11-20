@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -129,4 +131,42 @@ func TestMCPFaceTracksChildSessionsAndExitClosesThem(t *testing.T) {
 	}
 	_, err = userCS.CallTool(context.Background(), &mcp.CallToolParams{Name: "task_list"})
 	c.NoError(err, "the user's session must survive a child's exit")
+}
+
+// A request inside an existing session is answered with the shared version
+// probe, not a freshly built tool server: the SDK asks getServer on every
+// request and reads only the protocol versions from the answer. A request
+// without a session header still gets its own tool-bearing server, and an
+// uncredentialed caller is refused exactly as before.
+func TestGetServerAnswersSessionRequestsWithTheVersionProbe(t *testing.T) {
+	c := assert.NewAborting(t)
+	face, _ := mcpFaceFixture(t)
+
+	withSession := func(r *http.Request) *http.Request {
+		r.Header.Set(mcpSessionHeader, "sid-1")
+		return r
+	}
+	for name, mk := range map[string]func() *http.Request{
+		"user":  func() *http.Request { return mcpRequestFor("u1") },
+		"child": func() *http.Request { return mcpChildRequest("u1", "c_kid", false) },
+	} {
+		first := face.getServer(withSession(mk()))
+		second := face.getServer(withSession(mk()))
+		c.True(first != nil && first == second, "%s: session requests share one server", name)
+		c.True(first == face.versionProbe, "%s: and it is the version probe", name)
+
+		fresh := face.getServer(mk())
+		c.True(fresh != nil && fresh != face.versionProbe, "%s: an initialize request builds a real server", name)
+		c.True(fresh != face.getServer(mk()), "%s: each initialize request gets its own server", name)
+	}
+
+	// The probe carries no tools.
+	probeTools := mcpToolNames(t, mcpConnect(t, face.versionProbe))
+	c.Eq(0, len(probeTools), "the probe has no tools")
+
+	// An identity that is neither a user nor a child credential is refused
+	// whether or not it names a session.
+	stranger := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	stranger.Header.Set(mcpSessionHeader, "sid-1")
+	c.True(face.getServer(stranger) == nil, "a request with no identity gets no server")
 }
