@@ -25,6 +25,8 @@ const (
 	promptBody  = `{"error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}`
 	orNoEnd     = `{"error":{"message":"No endpoints found that can handle the requested parameters","code":404}}`
 	overloaded  = `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
+	orCredits   = `{"error":{"message":"Insufficient credits. Add more using https://openrouter.ai/settings/credits","code":402,"metadata":{"limit_source":"openrouter_credits"}}}`
+	orMaxTokens = `{"type":"error","error":{"type":"billing_error","message":"This request requires more credits, or fewer max_tokens. You requested up to 16384 tokens, but can only afford 1847.","error_type":"payment_required"}}`
 	badBody     = `{"type":"error","error":{"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}}`
 )
 
@@ -37,6 +39,9 @@ func TestFromHTTPClassifiesEveryRealRefusal(t *testing.T) {
 	}{
 		{"credit exhausted is a 400 and must not read as a bad request", 400, creditBody, errclass.UsageLimit},
 		{"openai quota arrives as a 429 and must not read as a rate limit", 429, openAIQuota, errclass.UsageLimit},
+		{"openrouter out of credits is a 402", 402, orCredits, errclass.UsageLimit},
+		{"openrouter billing error body", 400, orMaxTokens, errclass.UsageLimit},
+		{"a bare 402 is still a payment problem", 402, "", errclass.UsageLimit},
 		{"invalid key", 401, authBody, errclass.Auth},
 		{"forbidden with no body", 403, "", errclass.Auth},
 		{"permission error body on a 400", 400, permBody, errclass.Auth},

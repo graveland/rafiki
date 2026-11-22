@@ -74,6 +74,11 @@ var usageMarkers = []string{
 	"usage_limit_reached",
 	"usage_not_included",
 	"exceeded your current quota",
+	// OpenRouter: 402 Payment Required.
+	"insufficient credits",
+	"requires more credits",
+	"billing_error",
+	"payment_required",
 }
 
 // authMarkers are the provider error types and messages for a refused
@@ -101,7 +106,7 @@ func hasAny(lower string, markers []string) bool {
 func FromHTTP(status int, body []byte) Class {
 	lower := strings.ToLower(string(body))
 	switch {
-	case hasAny(lower, usageMarkers):
+	case status == http.StatusPaymentRequired || hasAny(lower, usageMarkers):
 		return UsageLimit
 	case status == http.StatusUnauthorized || status == http.StatusForbidden || hasAny(lower, authMarkers):
 		return Auth

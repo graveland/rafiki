@@ -345,7 +345,7 @@ changes the retry or failover classification:
 
 | Class | Meaning |
 |---|---|
-| `usage_limit` | the account is out of credit or quota (Anthropic's "credit balance is too low", `insufficient_quota`, `usage_limit_reached`) |
+| `usage_limit` | the account is out of credit or quota (Anthropic's "credit balance is too low", OpenRouter's 402 Payment Required and "Insufficient credits", `insufficient_quota`, `usage_limit_reached`) |
 | `auth` | the credential was refused (401, 403, `authentication_error`, `permission_error`) |
 | `rate_limit` | the provider asked for backoff (429) |
 | `overloaded` | the provider is saturated (529, `overloaded_error`) |
