@@ -27,10 +27,11 @@ type CaptureStore struct {
 	pool  *pgxpool.Pool
 	lease store.Lease
 	convs *conv.Store
+	memo  *captureMemo
 }
 
 func NewCaptureStore(pool *pgxpool.Pool) *CaptureStore {
-	return &CaptureStore{pool: pool, convs: conv.NewStore(store.NewConvBackend(pool), conv.Options{})}
+	return &CaptureStore{pool: pool, convs: conv.NewStore(store.NewConvBackend(pool), conv.Options{}), memo: newCaptureMemo()}
 }
 
 // WithLease returns a copy of s whose message writes are guarded by l. A zero
@@ -263,11 +264,13 @@ func (s *CaptureStore) ThreadOfPredecessorInSession(ctx context.Context, session
 		  ORDER BY t.created_at DESC LIMIT 1`,
 		session, like, prevMessageID).Scan(&threadID)
 	if errors.Is(err, pgx.ErrNoRows) {
+		s.memo.putThread(session, prevMessageID, "", false)
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("thread of predecessor in session: %w", err)
 	}
+	s.memo.putThread(session, prevMessageID, threadID, true)
 	return threadID, nil
 }
 
@@ -332,11 +335,24 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 				ref.ExternalRef, ref.DrivenBy).Scan(&id)
 			return id, err
 		}
+		// An existing session is the steady state, so look it up first: one
+		// statement per turn instead of a conflicting INSERT and then the same
+		// SELECT. Only a miss creates the row.
+		var id string
+		err := s.pool.QueryRow(ctx,
+			`SELECT id::text FROM conversations.conversation
+			  WHERE external_ref=$1 AND driven_by=$2 ORDER BY created_at LIMIT 1`,
+			ref.ExternalRef, ref.DrivenBy).Scan(&id)
+		if err == nil {
+			return id, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", err
+		}
 		// Race-safe: the partial unique index on (external_ref, driven_by) makes
 		// concurrent sessions collide on INSERT; the winner gets its id back, the
 		// loser gets no row and falls through to SELECT the existing one.
-		var id string
-		err := s.pool.QueryRow(ctx,
+		err = s.pool.QueryRow(ctx,
 			`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root, parent_conversation_id)
 			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10::uuid) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
 			 RETURNING id::text`,
@@ -427,19 +443,28 @@ func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turn
 	// model changes stay visible per-turn, never rewrite the conversation.
 	// Best-effort: a failed backfill must not fail the turn, and the next
 	// turn retries it (the column is still NULL). It is logged, not swallowed.
-	if t.Model != "" {
+	//
+	// Skipped once the model is known to be set: every later turn of the
+	// session would otherwise send an UPDATE that cannot match a row.
+	if t.Model != "" && !s.memo.modelKnown(t.ConversationID) {
 		if _, merr := s.pool.Exec(ctx, `UPDATE conversations.conversation
 			SET model = $2, updated_at = now()
 			WHERE id = $1::uuid AND model IS NULL`, t.ConversationID, t.Model); merr != nil {
 			slog.Warn("capture: conversation model backfill failed", "conversation", t.ConversationID, "error", merr)
+		} else {
+			s.memo.markModel(t.ConversationID)
 		}
 	}
 	return turnID, createdAt, nil
 }
 
 type TurnResult struct {
-	TurnID              string
-	CreatedAt           time.Time
+	TurnID    string
+	CreatedAt time.Time
+	// ConversationID, when set, lets CompleteTurn skip the conversation model
+	// backfill once the store knows the model is already set. Empty keeps the
+	// backfill on every call.
+	ConversationID      string
 	Model               string // served model from the response; empty keeps the intent model
 	Response            []byte
 	StopReason          string
@@ -478,7 +503,7 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 		// the user intended (e.g. "claude-opus-5", set later via /model or
 		// --model). Using the response model is authoritative. Best-effort: a
 		// failed backfill must not fail the turn.
-		if r.Model != "" {
+		if r.Model != "" && !s.memo.modelKnown(r.ConversationID) {
 			if _, merr := s.pool.Exec(ctx, `UPDATE conversations.conversation
 				SET model = $3, updated_at = now()
 				WHERE id = (
@@ -487,6 +512,8 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 				) AND model IS NULL`,
 				r.TurnID, r.CreatedAt, r.Model); merr != nil {
 				slog.Warn("capture: conversation model backfill failed", "turn", r.TurnID, "error", merr)
+			} else {
+				s.memo.markModel(r.ConversationID)
 			}
 		}
 		return nil
@@ -1179,6 +1206,15 @@ func (s *CaptureStore) predecessorThreadID(ctx context.Context, session, convID,
 			  ORDER BY created_at DESC LIMIT 1`,
 			convID, prevMessageID).Scan(&prevThread)
 		return prevThread, err
+	}
+	// ThreadOfPredecessorInSession answered the identical question at the start
+	// of this turn, and the predecessor turn has not changed since: reuse it.
+	// Consumed once, so a retry of this call asks the database again.
+	if m, ok := s.memo.takeThread(session, prevMessageID); ok {
+		if !m.found {
+			return "", pgx.ErrNoRows
+		}
+		return m.threadID, nil
 	}
 	var prevThread string
 	err := s.pool.QueryRow(ctx,
