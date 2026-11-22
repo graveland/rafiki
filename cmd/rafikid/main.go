@@ -724,6 +724,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// The daemon id resolved above is the tracing resource's instance id; the
 	// Controller resolves its own copy in NewController, before it starts the
 	// goroutines that read it, so nothing is patched onto it after construction.
+	ctrl.llmErrors = llmErrorObserver(metrics)
 	ctrl.fleet = newFleetMetrics(reg)
 	ctrl.metricsReg = reg
 	reg.MustRegister(newFleetCollector(ctrl), newEventBusCollector(ctrl.native))
@@ -767,6 +768,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// FailedPrecondition instead of accepting jobs nothing will ever run.
 	if pool != nil {
 		ctrl.reviewQ = newReviewQueue(pool, prov, catalog, convs)
+		ctrl.reviewQ.llmErrors = ctrl.llmErrors
 		ctrl.reviewQ.start(baseCtx)
 	}
 

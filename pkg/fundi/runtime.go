@@ -180,6 +180,10 @@ type RuntimeOptions struct {
 	// cache daemon-wide, not per-child.
 	ConvStore *conv.Store
 
+	// LLMErrors is told about every failed upstream call the child's llm.Client
+	// makes; the daemon's is the failure counter. nil observes nothing.
+	LLMErrors llm.ErrorObserver
+
 	// Batcher is the daemon's ONE parked-call batcher, passed to the child's
 	// llm.Client via llm.WithBatcher. nil = no batcher: a :batch first call
 	// fails with pkg/llm's "no batcher configured" error (the standalone
@@ -915,6 +919,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		ProviderSenders:        opts.ProviderSenders,
 		Catalog:                opts.Catalog,
 		ConvStore:              opts.ConvStore,
+		LLMErrors:              opts.LLMErrors,
 		Batcher:                opts.Batcher,
 		ProviderGuard:          opts.ProviderGuard,
 		TracerProvider:         opts.TracerProvider,

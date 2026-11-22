@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/errclass"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -88,4 +89,21 @@ func TestScriptChildDeliveryCountsADeferral(t *testing.T) {
 	ck.True(errors.Is(ctrl.inbox.Deliver(ctx, "c_script", subagentEventSource), errInboxDeferred), "deferred to the Receive stream")
 
 	ck.True(mustValue(t, reg, "rafiki_inbox_delivery_deferrals_total", map[string]string{"reason": "script"}) >= 1, "script deferral counted")
+}
+
+// An in-process agent's failed upstream calls must reach the daemon's counter:
+// the observer is the one thing wiring the fundi child's llm.Client to it.
+func TestAgentRuntimeOptionsCarryTheLLMErrorObserver(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	var seen []string
+	c.llmErrors = func(provider string, class errclass.Class) { seen = append(seen, provider+"/"+string(class)) }
+
+	ro, err := c.spawnAgentRuntimeOptions(protocol.SpawnRequest{
+		Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5",
+	}, "c_err_observer", false, "", "")
+	ck.NoError(err, "spawnAgentRuntimeOptions")
+	ck.True(ro.LLMErrors != nil, "the child gets the controller's observer")
+	ro.LLMErrors("anthropic", errclass.UsageLimit)
+	ck.EqDeep([]string{"anthropic/usage_limit"}, seen, "and it is the controller's, not a copy that drops reports")
 }

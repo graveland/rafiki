@@ -4,8 +4,11 @@ package recall
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/errclass"
 )
 
 // stageCounters accumulate one pass stage's runs, failures, wall time and last
@@ -54,7 +57,35 @@ type indexerCounters struct {
 	rowsEmbedded           atomic.Uint64
 	lastFullBacklog        atomic.Int64
 
+	embedErrMu sync.Mutex
+	embedErrs  map[errclass.Class]uint64
+
 	extract, embed, summarize stageCounters
+}
+
+// countEmbedError records one failed embedding call under its class. The map is
+// bounded by the class vocabulary, so it cannot grow with the error text.
+func (c *indexerCounters) countEmbedError(err error) {
+	class := errclass.FromError(err)
+	if class == "" {
+		return
+	}
+	c.embedErrMu.Lock()
+	defer c.embedErrMu.Unlock()
+	if c.embedErrs == nil {
+		c.embedErrs = make(map[errclass.Class]uint64)
+	}
+	c.embedErrs[class]++
+}
+
+func (c *indexerCounters) embedErrorSnapshot() map[string]uint64 {
+	c.embedErrMu.Lock()
+	defer c.embedErrMu.Unlock()
+	out := make(map[string]uint64, len(c.embedErrs))
+	for k, v := range c.embedErrs {
+		out[string(k)] = v
+	}
+	return out
 }
 
 // StageStats is one pass stage's cumulative figures.
@@ -92,6 +123,10 @@ type IndexerStats struct {
 	ConversationsExtracted uint64
 	ExtractErrors          uint64
 	RowsEmbedded           uint64
+	// EmbedErrors counts failed embedding calls by errclass.Class spelling
+	// (usage_limit, auth, rate_limit, ...). A class that has not occurred is
+	// absent.
+	EmbedErrors map[string]uint64
 
 	Extract, Embed, Summarize StageStats
 }
@@ -115,6 +150,7 @@ func (ix *Indexer) Stats() IndexerStats {
 		ConversationsExtracted: c.conversationsExtracted.Load(),
 		ExtractErrors:          c.extractErrors.Load(),
 		RowsEmbedded:           c.rowsEmbedded.Load(),
+		EmbedErrors:            c.embedErrorSnapshot(),
 		Extract:                c.extract.snapshot(),
 		Embed:                  c.embed.snapshot(),
 		Summarize:              c.summarize.snapshot(),

@@ -541,6 +541,9 @@ func (c *Controller) agentRuntimeOptionsFor(req protocol.SpawnRequest, childID s
 	// client's own.
 	ro.ConvStore = c.convs
 
+	// Failed upstream calls of this child's llm.Client, counted by class.
+	ro.LLMErrors = c.llmErrors
+
 	// The daemon's one provider guard, so an operator ban or a cache ejection
 	// reaches this child's OpenRouter requests exactly as it reaches the proxy
 	// face's — and the child's turns feed the guard's ejection evidence.

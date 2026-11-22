@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/errclass"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -202,19 +203,19 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 	case resp.StatusCode >= 400:
 		p.logger.WarnContext(r.Context(), "llm turn failed", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "status", resp.StatusCode, "latency", latency(elapsed))
 		recordSpanError(r.Context(), "upstream status "+strconv.Itoa(resp.StatusCode))
-		p.metrics.ObserveTurn(r.Context(), upstream, "error", "openai", elapsed, routing.CapturedUsage{})
+		p.metrics.ObserveTurnError(r.Context(), upstream, "openai", errclass.FromHTTP(resp.StatusCode, acc.Bytes()), elapsed)
 		p.failTurn(r, cr, "upstream status "+strconv.Itoa(resp.StatusCode))
 		return
 	case streamErr != nil:
 		p.logger.WarnContext(r.Context(), "llm turn truncated", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "error", streamErr)
 		recordSpanError(r.Context(), "mid-stream read error: "+streamErr.Error())
-		p.metrics.ObserveTurn(r.Context(), upstream, "error", "openai", elapsed, routing.CapturedUsage{})
+		p.metrics.ObserveTurnError(r.Context(), upstream, "openai", errclass.StreamError, elapsed)
 		p.failTurn(r, cr, "mid-stream read error: "+streamErr.Error())
 		return
 	case clientGone:
 		p.logger.WarnContext(r.Context(), "llm turn aborted", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "reason", "client disconnected mid-stream")
 		recordSpanError(r.Context(), "client disconnected mid-stream")
-		p.metrics.ObserveTurn(r.Context(), upstream, "error", "openai", elapsed, routing.CapturedUsage{})
+		p.metrics.ObserveTurnError(r.Context(), upstream, "openai", errclass.ClientCanceled, elapsed)
 		p.failTurn(r, cr, "client disconnected mid-stream")
 		return
 	}
@@ -223,7 +224,7 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 	if perr != nil {
 		p.logger.WarnContext(r.Context(), "llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "error", perr)
 		recordSpanError(r.Context(), "capture parse failed: "+perr.Error())
-		p.metrics.ObserveTurn(r.Context(), upstream, "error", "openai", elapsed, routing.CapturedUsage{})
+		p.metrics.ObserveTurnError(r.Context(), upstream, "openai", errclass.CaptureParse, elapsed)
 		p.failTurn(r, cr, "capture parse failed: "+perr.Error())
 		return
 	}

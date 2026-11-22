@@ -397,6 +397,9 @@ type Controller struct {
 	// subsystems started later (the recall indexer) register their collectors.
 	fleet      *fleetMetrics
 	metricsReg prometheus.Registerer
+	// llmErrors counts failed upstream calls of the daemon's own agents and
+	// jobs by class (server.Metrics.ObserveLLMError); nil counts nothing.
+	llmErrors llm.ErrorObserver
 
 	// capturePub dedupes the message events CaptureReported publishes.
 	capturePub capturePublisher

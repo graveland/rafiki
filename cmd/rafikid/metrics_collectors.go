@@ -9,10 +9,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/errclass"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/recall"
+	"go.graveland.dev/rafiki/pkg/server"
 )
 
 // Every collector below reads a subsystem's own Stats() snapshot at scrape
@@ -48,6 +51,19 @@ func unixSeconds(t time.Time) float64 {
 		return 0
 	}
 	return float64(t.UnixNano()) / 1e9
+}
+
+// llmErrorObserver counts a daemon-run agent's or job's failed upstream call as
+// rafiki_llm_errors_total{path="agent"}. A nil Metrics yields a nil observer,
+// which llm.WithErrorObserver callers skip, so a test daemon without metrics
+// wraps nothing.
+func llmErrorObserver(m *server.Metrics) llm.ErrorObserver {
+	if m == nil {
+		return nil
+	}
+	return func(provider string, class errclass.Class) {
+		m.ObserveLLMError("agent", provider, class)
+	}
 }
 
 // ─── conversation node cache ────────────────────────────────────────────────
@@ -285,18 +301,24 @@ func (c *eventBusCollector) Collect(ch chan<- prometheus.Metric) {
 // ─── recall indexer ─────────────────────────────────────────────────────────
 
 type recallCollector struct {
-	ix *recall.Indexer
+	stats func() recall.IndexerStats
 
 	dirty, overflow, backlog                  *prometheus.Desc
 	marks, markOverflows, passes, lockSkips   *prometheus.Desc
 	lockErrors, extracted, extractErrors      *prometheus.Desc
-	embedded                                  *prometheus.Desc
+	embedded, embedErrors                     *prometheus.Desc
 	stageRuns, stageErrors, stageSecs, lastOK *prometheus.Desc
 }
 
 func newRecallCollector(ix *recall.Indexer) *recallCollector {
+	return newRecallCollectorFrom(ix.Stats)
+}
+
+// newRecallCollectorFrom reads its snapshot from stats, which is the indexer's
+// Stats in production and a fixture in a test.
+func newRecallCollectorFrom(stats func() recall.IndexerStats) *recallCollector {
 	return &recallCollector{
-		ix:       ix,
+		stats:    stats,
 		dirty:    newDesc("rafiki_recall_dirty_conversations", "Conversations marked by a commit and awaiting an indexer pass."),
 		overflow: newDesc("rafiki_recall_dirty_overflow", "1 when the marked set overflowed and the next pass is a full one."),
 		backlog: newDesc("rafiki_recall_last_full_pass_backlog",
@@ -309,9 +331,11 @@ func newRecallCollector(ix *recall.Indexer) *recallCollector {
 		extracted:     newDesc("rafiki_recall_conversations_extracted_total", "Conversations windowed."),
 		extractErrors: newDesc("rafiki_recall_extract_errors_total", "Conversations whose extraction failed."),
 		embedded:      newDesc("rafiki_recall_rows_embedded_total", "Window and summary rows embedded."),
-		stageRuns:     newDesc("rafiki_recall_stage_runs_total", "Pass stage runs (extract, embed, summarize).", "stage"),
-		stageErrors:   newDesc("rafiki_recall_stage_errors_total", "Pass stage runs that returned an error.", "stage"),
-		stageSecs:     newDesc("rafiki_recall_stage_seconds_total", "Wall time spent in each pass stage.", "stage"),
+		embedErrors: newDesc("rafiki_recall_embed_errors_total",
+			"Failed embedding calls by class (see pkg/errclass): usage_limit is an exhausted account, auth a refused key.", "class"),
+		stageRuns:   newDesc("rafiki_recall_stage_runs_total", "Pass stage runs (extract, embed, summarize).", "stage"),
+		stageErrors: newDesc("rafiki_recall_stage_errors_total", "Pass stage runs that returned an error.", "stage"),
+		stageSecs:   newDesc("rafiki_recall_stage_seconds_total", "Wall time spent in each pass stage.", "stage"),
 		lastOK: newDesc("rafiki_recall_stage_last_success_timestamp_seconds",
 			"When the stage last finished without error; 0 before the first success.", "stage"),
 	}
@@ -319,13 +343,13 @@ func newRecallCollector(ix *recall.Indexer) *recallCollector {
 
 func (c *recallCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{c.dirty, c.overflow, c.backlog, c.marks, c.markOverflows, c.passes, c.lockSkips,
-		c.lockErrors, c.extracted, c.extractErrors, c.embedded, c.stageRuns, c.stageErrors, c.stageSecs, c.lastOK} {
+		c.lockErrors, c.extracted, c.extractErrors, c.embedded, c.embedErrors, c.stageRuns, c.stageErrors, c.stageSecs, c.lastOK} {
 		ch <- d
 	}
 }
 
 func (c *recallCollector) Collect(ch chan<- prometheus.Metric) {
-	s := c.ix.Stats()
+	s := c.stats()
 	gauge(ch, c.dirty, float64(s.Dirty))
 	gauge(ch, c.overflow, boolFloat(s.DirtyOverflow))
 	gauge(ch, c.backlog, float64(s.LastFullBacklog))
@@ -338,6 +362,9 @@ func (c *recallCollector) Collect(ch chan<- prometheus.Metric) {
 	counter(ch, c.extracted, float64(s.ConversationsExtracted))
 	counter(ch, c.extractErrors, float64(s.ExtractErrors))
 	counter(ch, c.embedded, float64(s.RowsEmbedded))
+	for class, n := range s.EmbedErrors {
+		counter(ch, c.embedErrors, float64(n), class)
+	}
 	for _, st := range []struct {
 		name  string
 		stats recall.StageStats

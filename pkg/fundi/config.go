@@ -186,6 +186,12 @@ type Config struct {
 	// never by passing it to llm.WithConvStore, which refuses nil outright.
 	ConvStore *conv.Store
 
+	// LLMErrors, when non-nil, is told about every failed upstream call the
+	// engine's llm.Client makes (llm.WithErrorObserver). The daemon uses it to
+	// count failures by class; nil (standalone `rafikid fundi`) observes
+	// nothing.
+	LLMErrors llm.ErrorObserver
+
 	// Batcher is the daemon's parked-call batcher, handed to the engine's
 	// llm.Client via llm.WithBatcher. nil (the standalone `rafikid fundi`
 	// process, or a daemon with no OpenRouter provider) means a :batch first
@@ -521,6 +527,9 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	// llm.WithConvStore(nil) is a programming error, not "use the default".
 	if c.ConvStore != nil {
 		opts = append(opts, llm.WithConvStore(c.ConvStore))
+	}
+	if c.LLMErrors != nil {
+		opts = append(opts, llm.WithErrorObserver(c.LLMErrors))
 	}
 
 	// Tracing, before the FakeTurns early-return below — the same placement rule

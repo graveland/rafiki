@@ -151,3 +151,32 @@ func TestIndexerMarkedPassCursorListingFailureIsAnExtractStageError(t *testing.T
 	c.Eq(uint64(1), st.Errors, "the marked listing failure is counted")
 	c.True(st.LastSuccess.IsZero(), "and is not a success")
 }
+
+type httpStatusErr struct {
+	status int
+	body   string
+}
+
+func (e *httpStatusErr) Error() string             { return "embed: refused" }
+func (e *httpStatusErr) HTTPStatus() (int, []byte) { return e.status, []byte(e.body) }
+
+func TestIndexerStatsCountEmbedFailuresByClass(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := &indexerFakeStore{pending: make([]EmbedItem, 2)}
+	emb := &indexerFakeEmbedder{model: "m", err: &httpStatusErr{status: 429, body: `{"error":{"code":"insufficient_quota"}}`}}
+	ix := NewIndexer(IndexerOptions{Store: store, Embedder: emb, Logger: indexerTestLogger()})
+
+	c.Error(ix.embedPass(context.Background()), "the embed pass fails")
+	emb.err = &httpStatusErr{status: 401}
+	c.Error(ix.embedPass(context.Background()), "and fails again")
+	emb.err = &httpStatusErr{status: 401}
+	c.Error(ix.embedPass(context.Background()), "and again")
+
+	st := ix.Stats()
+	c.Eq(uint64(1), st.EmbedErrors["usage_limit"], "an exhausted account is its own class, not a rate limit")
+	c.Eq(uint64(2), st.EmbedErrors["auth"], "a refused key")
+	c.Eq(2, len(st.EmbedErrors), "only classes that occurred are present")
+
+	st.EmbedErrors["auth"] = 99
+	c.Eq(uint64(2), ix.Stats().EmbedErrors["auth"], "Stats hands out a copy")
+}

@@ -25,6 +25,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/claudethread"
 	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/errclass"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
@@ -1126,6 +1127,11 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		}
 		// Failing over to OpenRouter. Log it (mirrors core.go's in-process path) so
 		// an Anthropic outage masked by a successful failover isn't invisible.
+		// The failover answers the turn, so no error ever reaches the sites
+		// that count a failed turn: this is the only place the primary's
+		// failure is seen, and a primary out of credit is exactly the failure
+		// an operator must hear about.
+		p.metrics.ObserveLLMError("proxy", "anthropic", maskedPrimaryClass(status, err, outOfCredit))
 		p.logger.WarnContext(r.Context(), "proxy: primary failed, failing over to openrouter", "status", status, "out_of_credit", outOfCredit, "error", err)
 		if resp != nil {
 			resp.Body.Close()
@@ -1140,6 +1146,19 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 	}
 	resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
 	return resp, "openrouter", err, false
+}
+
+// maskedPrimaryClass classifies the primary failure a failover is about to
+// hide. outOfCredit is the proxy's own peek at the body (a 400 that status
+// alone cannot tell from a bad request).
+func maskedPrimaryClass(status int, err error, outOfCredit bool) errclass.Class {
+	switch {
+	case outOfCredit:
+		return errclass.UsageLimit
+	case err != nil:
+		return errclass.FromError(err)
+	}
+	return errclass.FromHTTP(status, nil)
 }
 
 // requestsStream reports whether the request body asked for a streamed (SSE)
@@ -1188,7 +1207,7 @@ func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Re
 		reason += ": " + bodyPreview
 	}
 	recordSpanError(r.Context(), reason)
-	p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+	p.metrics.ObserveTurnError(r.Context(), upstream, "anthropic", errclass.FromHTTP(resp.StatusCode, []byte(bodyPreview)), elapsed)
 	p.failTurn(r, cr, reason)
 	msg := "upstream returned HTTP " + strconv.Itoa(resp.StatusCode) + " with an unexpected content type (" + resp.Header.Get("Content-Type") + ")"
 	if bodyPreview != "" {
@@ -1354,7 +1373,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 			p.logger.WarnContext(r.Context(), "llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client canceled", "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
 			reason := "client canceled mid-stream (last upstream byte " + stall + " earlier)"
 			recordSpanError(r.Context(), reason)
-			p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+			p.metrics.ObserveTurnError(r.Context(), upstream, "anthropic", errclass.ClientCanceled, elapsed)
 			rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 			p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
 			rawCancel()
@@ -1364,7 +1383,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.logger.WarnContext(r.Context(), "llm turn truncated", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "error", streamErr, "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
 		reason := "mid-stream read error: " + streamErr.Error()
 		recordSpanError(r.Context(), reason)
-		p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+		p.metrics.ObserveTurnError(r.Context(), upstream, "anthropic", errclass.StreamError, elapsed)
 		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
 		rawCancel()
@@ -1377,7 +1396,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// truncated turns don't pollute the capture store as clean completions.
 		p.logger.WarnContext(r.Context(), "llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client disconnected mid-stream", "bytes", acc.Len(), "last_byte_ago", latency(time.Since(lastByte)), "latency", latency(elapsed))
 		recordSpanError(r.Context(), "client disconnected mid-stream")
-		p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+		p.metrics.ObserveTurnError(r.Context(), upstream, "anthropic", errclass.ClientCanceled, elapsed)
 		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), "client disconnected mid-stream", elapsed)
 		rawCancel()
@@ -1394,7 +1413,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.logger.WarnContext(r.Context(), "llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "error", perr, "body_prefix", boundedErrorBody(acc.Bytes()))
 		reason := "capture parse failed: " + perr.Error()
 		recordSpanError(r.Context(), reason)
-		p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
+		p.metrics.ObserveTurnError(r.Context(), upstream, "anthropic", errclass.CaptureParse, time.Since(start))
 		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
 		rawCancel()
@@ -1655,7 +1674,7 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	}
 	p.logger.WarnContext(r.Context(), "llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
 	recordSpanError(r.Context(), reason)
-	p.metrics.ObserveTurn(r.Context(), upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+	p.metrics.ObserveTurnError(r.Context(), upstream, "anthropic", errclass.FromHTTP(resp.StatusCode, []byte(errBody)), elapsed)
 	// A 429 is the one upstream rejection the daemon acts on itself: the
 	// auto-resume watch marks the child rate-limited (with the reset time when
 	// the response names one) so the child's idle transition can schedule a

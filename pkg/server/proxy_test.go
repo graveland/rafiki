@@ -30,6 +30,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 
 	"github.com/multigres/testkit/assert"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 type fakeProxyStore struct {
@@ -753,6 +755,63 @@ func TestMessagesProxyFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
 	p.ServeHTTP(rec2, req2)
 	c.Eq(1, primaryCalls, "primary calls")
 	c.Eq(2, orCalls, "openrouter calls")
+}
+
+// The failover answers the turn, so the primary running out of credit never
+// reaches a failed-turn site: it must still be counted, because it is exactly
+// the failure an operator has to be told about.
+func TestMessagesProxyCountsAMaskedOutOfCreditPrimary(t *testing.T) {
+	c := assert.NewAborting(t)
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`)
+	}))
+	defer primary.Close()
+	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer orSrv.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "", nil, logger)
+	p.store = &fakeProxyStore{}
+	p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
+	m := NewMetrics(prometheus.NewRegistry())
+	p.metrics = m
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`)))
+
+	c.StrContains(rec.Body.String(), "message_stop", "the failover answered the client")
+	c.Eq(1.0, testutil.ToFloat64(m.llmErrors.WithLabelValues("proxy", "anthropic", "usage_limit")), "the masked primary failure is counted")
+	c.Eq(0.0, testutil.ToFloat64(m.turns.WithLabelValues("openrouter", "error", "anthropic")), "and the turn itself succeeded")
+}
+
+// A refused key is surfaced to the client verbatim (it is not failover-worthy)
+// and counted as an auth failure.
+func TestMessagesProxyCountsARefusedKeyAsAuth(t *testing.T) {
+	c := assert.NewAborting(t)
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
+	}))
+	defer primary.Close()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "", nil, logger)
+	p.store = &fakeProxyStore{}
+	m := NewMetrics(prometheus.NewRegistry())
+	p.metrics = m
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`)))
+
+	c.Eq(http.StatusUnauthorized, rec.Code, "surfaced verbatim")
+	c.Eq(1.0, testutil.ToFloat64(m.llmErrors.WithLabelValues("proxy", "anthropic", "auth")), "counted as auth")
 }
 
 // An ordinary 400 is neither retryable nor failover-worthy: it is the caller's

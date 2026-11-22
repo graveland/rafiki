@@ -85,7 +85,7 @@ func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("embed: %s: %s", resp.Status, bodySnippet(b))
+		return nil, &HTTPError{Status: resp.StatusCode, StatusText: resp.Status, Body: b}
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -115,6 +115,21 @@ func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error
 	}
 	return vecs, nil
 }
+
+// HTTPError is the embedding endpoint's refusal. The body it carries is what a
+// classifier reads to tell an exhausted account from a transient failure.
+type HTTPError struct {
+	Status     int
+	StatusText string // the response's status line, e.g. "429 Too Many Requests"
+	Body       []byte // at most the first 512 bytes
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("embed: %s: %s", e.StatusText, bodySnippet(e.Body))
+}
+
+// HTTPStatus reports the refusal's status and body.
+func (e *HTTPError) HTTPStatus() (int, []byte) { return e.Status, e.Body }
 
 // bodySnippet returns at most the first 512 bytes of a body, for inclusion in
 // errors: the "fails loudly" contract — the operator sees what the server

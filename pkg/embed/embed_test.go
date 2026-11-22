@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -193,4 +194,21 @@ func TestEmbedGzipResponse(t *testing.T) {
 	vecs, err := c.Embed(context.Background(), []string{"x"})
 	ck.Require().NoError(err, "Embed with a gzipped body")
 	ck.False(len(vecs) != 1 || vecs[0][0] != 1 || vecs[0][1] != 2, "vecs = %v, want [[1 2]]", vecs)
+}
+
+func TestEmbedRefusalIsATypedErrorCarryingStatusAndBody(t *testing.T) {
+	c := assert.NewAborting(t)
+	srv := startServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"insufficient_quota"}}`))
+	})
+	cl := embed.New(providers.EmbeddingsConfig{URL: srv.URL, Model: "m", Dimensions: 3}, nil)
+
+	_, err := cl.Embed(context.Background(), []string{"x"})
+	var he *embed.HTTPError
+	c.True(errors.As(err, &he), "the refusal is an *HTTPError: %v", err)
+	c.Eq(429, he.Status, "status")
+	c.StrContains(string(he.Body), "insufficient_quota", "body")
+	c.StrContains(err.Error(), "429 Too Many Requests", "the message still names the status line")
+	c.StrContains(err.Error(), "insufficient_quota", "and the body the operator needs")
 }

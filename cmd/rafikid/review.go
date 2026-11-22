@@ -31,6 +31,9 @@ type reviewQueue struct {
 	prov    *providers.Set
 	catalog *routing.ModelCatalog
 	convs   *conv.Store
+	// llmErrors counts the review worker's failed upstream calls; nil counts
+	// nothing. Set before the worker's first call builds the client.
+	llmErrors llm.ErrorObserver
 
 	jobs     chan reviewJob
 	mu       sync.Mutex
@@ -255,6 +258,9 @@ func (q *reviewQueue) client() (*llm.Client, error) {
 		// the same node cache rather than a private one of its own.
 		if q.convs != nil {
 			opts = append(opts, llm.WithConvStore(q.convs))
+		}
+		if q.llmErrors != nil {
+			opts = append(opts, llm.WithErrorObserver(q.llmErrors))
 		}
 		q.llmClient, q.llmErr = llm.NewClient(opts...)
 	})

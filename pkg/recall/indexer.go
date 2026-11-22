@@ -356,6 +356,7 @@ func (ix *Indexer) embedPass(ctx context.Context) error {
 		}
 		vecs, err := ix.embedder.Embed(ctx, texts)
 		if err != nil {
+			ix.stats.countEmbedError(err)
 			return err
 		}
 		if err := ix.store.SetEmbeddings(ctx, model, items, vecs); err != nil {

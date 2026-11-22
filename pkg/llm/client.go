@@ -70,6 +70,10 @@ type Client struct {
 	// spanParent, when non-nil, supplies the parent for a span started from a
 	// context that carries none. See WithSpanParent.
 	spanParent func() trace.SpanContext
+
+	// errObserver, when non-nil, is told about every failed upstream call. See
+	// WithErrorObserver.
+	errObserver ErrorObserver
 }
 
 // rawTraceRecorder is the one method Client needs from *rawtrace.RawTraceStore,
@@ -300,6 +304,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		c.capture = c.capture.WithConv(c.convs)
 	}
 	c.modelGate = NewModelGate(10*time.Second, 300*time.Second)
+	c.observeSenders()
 	return c, nil
 }
 

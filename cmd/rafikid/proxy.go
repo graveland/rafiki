@@ -329,6 +329,9 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	if opts.Tracer != nil {
 		llmOpts = append(llmOpts, llm.WithTracerProvider(opts.Tracer))
 	}
+	if obs := llmErrorObserver(opts.Metrics); obs != nil {
+		llmOpts = append(llmOpts, llm.WithErrorObserver(obs))
+	}
 	client, err := llm.NewClient(llmOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("build llm client: %w", err)

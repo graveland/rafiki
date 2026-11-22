@@ -16,12 +16,14 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/errclass"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/recall"
+	"go.graveland.dev/rafiki/pkg/server"
 )
 
 // metricValue returns the value of the series name{labels...} in reg, and
@@ -256,4 +258,30 @@ func TestFleetMetricsCountLaunchesExitsAndDeferralsAndAreNilSafe(t *testing.T) {
 	c.Eq(1.0, mustValue(t, reg, "rafiki_child_exits_total", map[string]string{"kind": "claude", "outcome": "error"}), "non-zero exit")
 	c.Eq(1.0, mustValue(t, reg, "rafiki_child_exits_total", map[string]string{"kind": "fundi", "outcome": "error"}), "signalled exit is an error even with code 0")
 	c.Eq(1.0, mustValue(t, reg, "rafiki_inbox_delivery_deferrals_total", map[string]string{"reason": "budget"}), "deferred")
+}
+
+func TestRecallCollectorEmitsOneSeriesPerEmbedErrorClass(t *testing.T) {
+	c := assert.NewAborting(t)
+	col := newRecallCollectorFrom(func() recall.IndexerStats {
+		return recall.IndexerStats{EmbedErrors: map[string]uint64{"usage_limit": 3, "auth": 1}}
+	})
+	lintClean(t, col)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(col)
+	c.Eq(3.0, mustValue(t, reg, "rafiki_recall_embed_errors_total", map[string]string{"class": "usage_limit"}), "usage_limit")
+	c.Eq(1.0, mustValue(t, reg, "rafiki_recall_embed_errors_total", map[string]string{"class": "auth"}), "auth")
+	_, rate := metricValue(t, reg, "rafiki_recall_embed_errors_total", map[string]string{"class": "rate_limit"})
+	c.False(rate, "a class that has not occurred has no series")
+}
+
+func TestLLMErrorObserverCountsAgentPathAndIsNilSafe(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.True(llmErrorObserver(nil) == nil, "no metrics, no observer: a client without metrics wraps nothing")
+
+	reg := prometheus.NewRegistry()
+	m := server.NewMetrics(reg)
+	obs := llmErrorObserver(m)
+	obs("anthropic", errclass.UsageLimit)
+	obs("anthropic", errclass.UsageLimit)
+	c.Eq(2.0, mustValue(t, reg, "rafiki_llm_errors_total", map[string]string{"path": "agent", "upstream": "anthropic", "class": "usage_limit"}), "agent path")
 }

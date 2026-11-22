@@ -324,6 +324,45 @@ plus per stage (`extract`, `embed`, `summarize`) `_stage_runs_total`,
 `_stage_errors_total`, `_stage_seconds_total` and the gauge
 `_stage_last_success_timestamp_seconds` (0 before the first success).
 
+### Failure metrics
+
+`rafiki_llm_errors_total{path,upstream,class}` counts failed upstream LLM calls,
+and `rafiki_recall_embed_errors_total{class}` failed embedding calls. They exist
+because `status="error"` on `rafiki_llm_turns_total` cannot tell an exhausted
+account from a provider outage.
+
+- `path="proxy"`: a Claude Code turn through the proxy face. A failure the
+  failover hides (the primary is out of credit and OpenRouter answers) is
+  counted at the failover, so it is visible even though the turn succeeded.
+  `upstream` is the provider that failed.
+- `path="agent"`: a call by a daemon-run agent or job (fundi children, the
+  review worker, recall summaries). It is counted per attempt at the sender, so
+  a failover that masks a failing primary is reported, and each retry of a
+  failing call is its own count.
+
+`class` is a fixed vocabulary (`pkg/errclass`), a read-only view that never
+changes the retry or failover classification:
+
+| Class | Meaning |
+|---|---|
+| `usage_limit` | the account is out of credit or quota (Anthropic's "credit balance is too low", `insufficient_quota`, `usage_limit_reached`) |
+| `auth` | the credential was refused (401, 403, `authentication_error`, `permission_error`) |
+| `rate_limit` | the provider asked for backoff (429) |
+| `overloaded` | the provider is saturated (529, `overloaded_error`) |
+| `transient` | another 5xx |
+| `timeout`, `network` | a deadline or a connection failure |
+| `prompt_too_large` | the request outgrew the model's context |
+| `no_eligible` | routing found no provider that can serve the request |
+| `bad_request` | any other 4xx |
+| `client_canceled` | the caller went away; the provider is not implicated |
+| `stream_error` | the response broke after it started |
+| `capture_parse` | the response arrived but could not be parsed for capture |
+| `other` | none of the above |
+
+`usage_limit` and `auth` mean the agents stop until someone tops up or rotates a
+key; alert on any increase. `client_canceled` is routine (an operator abort) and
+is excluded from error-rate alerts.
+
 ## Logs
 
 Logs are not exported — they go to stdout/stderr and are shipped by whatever

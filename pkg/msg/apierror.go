@@ -59,6 +59,11 @@ type APIError struct {
 	Message    string // the provider's error.message when one was parsed
 }
 
+// HTTPStatus reports the refusal's status and body. Status is 0 for an in-band
+// stream error. It is how a classifier that must not import this package's
+// kind vocabulary reads the raw refusal.
+func (e *APIError) HTTPStatus() (int, []byte) { return e.Status, e.Body }
+
 // Error renders the error for a log line or a wrapped chain. The provider's
 // parsed message wins over the body; an unparsed body is truncated so a huge
 // response cannot dominate the message.

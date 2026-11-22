@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.graveland.dev/rafiki/pkg/errclass"
 	"go.graveland.dev/rafiki/pkg/routing"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -114,4 +115,24 @@ rafiki_cost_usd_total{kind="claude",model="priced-model",provider="anthropic"} 0
 	nilMetrics.ObserveAgentTurn(context.Background(), "claude", "m", "p", "end_turn", time.Second, 1)
 	nilMetrics.ObserveTool(context.Background(), "claude", "Bash", true, time.Second)
 	nilMetrics.ObserveTurn(context.Background(), "p", "error", "anthropic", time.Second, routing.CapturedUsage{})
+}
+
+func TestLLMErrorMetricsCountTheClassAndTheTurnOutcome(t *testing.T) {
+	c := assert.NewAborting(t)
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+
+	m.ObserveTurnError(context.Background(), "anthropic", "anthropic", errclass.UsageLimit, time.Second)
+	m.ObserveTurnError(context.Background(), "anthropic", "anthropic", errclass.UsageLimit, time.Second)
+	m.ObserveLLMError("agent", "openrouter", errclass.RateLimit)
+	m.ObserveLLMError("agent", "openrouter", "")
+
+	c.Eq(2.0, testutil.ToFloat64(m.llmErrors.WithLabelValues("proxy", "anthropic", "usage_limit")), "proxy usage_limit")
+	c.Eq(1.0, testutil.ToFloat64(m.llmErrors.WithLabelValues("agent", "openrouter", "rate_limit")), "agent rate_limit")
+	c.Eq(2.0, testutil.ToFloat64(m.turns.WithLabelValues("anthropic", "error", "anthropic")), "a failed proxy turn is still an error turn")
+	c.Eq(2, testutil.CollectAndCount(m.llmErrors), "an empty class creates no series")
+
+	var nilMetrics *Metrics
+	nilMetrics.ObserveTurnError(context.Background(), "p", "anthropic", errclass.Other, time.Second)
+	nilMetrics.ObserveLLMError("proxy", "p", errclass.Other)
 }

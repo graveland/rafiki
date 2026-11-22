@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.graveland.dev/rafiki/pkg/errclass"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -29,6 +30,7 @@ type Metrics struct {
 	toolCalls    *prometheus.CounterVec
 	toolDur      *prometheus.HistogramVec
 	costUSD      *prometheus.CounterVec
+	llmErrors    *prometheus.CounterVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -84,9 +86,13 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "rafiki_cost_usd_total",
 			Help: "Agent spend in USD.",
 		}, []string{"kind", "model", "provider"}),
+		llmErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "rafiki_llm_errors_total",
+			Help: "Failed upstream LLM calls by path (proxy: a Claude Code turn through the proxy face; agent: a daemon-run agent's call, counted per attempt so a failover that masks a failing primary is still seen), upstream and class (see pkg/errclass).",
+		}, []string{"path", "upstream", "class"}),
 	}
 	reg.MustRegister(m.turns, m.latency, m.tokens, m.breakerState, m.breakerTrans, m.ejections, m.providersEjected,
-		m.agentTurns, m.agentTurnDur, m.toolCalls, m.toolDur, m.costUSD)
+		m.agentTurns, m.agentTurnDur, m.toolCalls, m.toolDur, m.costUSD, m.llmErrors)
 	return m
 }
 
@@ -113,6 +119,26 @@ func (m *Metrics) ObserveTurn(ctx context.Context, upstream, status, protocol st
 	m.tokens.WithLabelValues(upstream, protocol, "output").Add(float64(usage.OutputTokens))
 	m.tokens.WithLabelValues(upstream, protocol, "cache_read").Add(float64(usage.CacheReadTokens))
 	m.tokens.WithLabelValues(upstream, protocol, "cache_creation").Add(float64(usage.CacheCreationTokens))
+}
+
+// ObserveTurnError records one failed proxy turn: the turn outcome as an error
+// and the failure's class.
+func (m *Metrics) ObserveTurnError(ctx context.Context, upstream, protocol string, class errclass.Class, latency time.Duration) {
+	if m == nil {
+		return
+	}
+	m.ObserveTurn(ctx, upstream, "error", protocol, latency, routing.CapturedUsage{})
+	m.ObserveLLMError("proxy", upstream, class)
+}
+
+// ObserveLLMError counts one failed upstream LLM call. path is "proxy" or
+// "agent". The class is the fixed errclass vocabulary, so the label set stays
+// bounded; an empty class (no error) is ignored.
+func (m *Metrics) ObserveLLMError(path, upstream string, class errclass.Class) {
+	if m == nil || class == "" {
+		return
+	}
+	m.llmErrors.WithLabelValues(path, upstream, string(class)).Inc()
 }
 
 // ObserveAgentTurn records one agent turn: its outcome by kind/model/provider/
