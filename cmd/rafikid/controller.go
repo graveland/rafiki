@@ -24,6 +24,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -390,6 +391,12 @@ type Controller struct {
 	// native fans rafiki-native events out per child, for the Connect
 	// control plane's StreamEvents.
 	native *nativebus.Registry
+
+	// fleet counts child launches, exits and held inbox deliveries; nil (and
+	// safe) on a Controller built without metrics. metricsReg is where
+	// subsystems started later (the recall indexer) register their collectors.
+	fleet      *fleetMetrics
+	metricsReg prometheus.Registerer
 
 	// capturePub dedupes the message events CaptureReported publishes.
 	capturePub capturePublisher
@@ -2953,6 +2960,11 @@ func (c *Controller) activateLiveChild(
 ) (protocol.SpawnResponseData, error) {
 	c.sessionIDEnded.Delete(childID)
 	c.clearExpected.Delete(childID)
+	if baseSnap != nil {
+		c.fleet.launch(spawnKindLabel(baseSnap.Kind))
+	} else {
+		c.fleet.launch(spawnKindLabel(req.Kind))
+	}
 	stalled := false
 	select {
 	case <-ch.Idle():
@@ -5360,6 +5372,9 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	res := ch.ExitResult()
 	recCode, exitSignal := recordedExit(res)
 	now := time.Now()
+	if exitSnap, ok := c.st.Get(childID); ok {
+		c.fleet.exit(spawnKindLabel(exitSnap.Kind), recCode, exitSignal)
+	}
 
 	// A spontaneous exit KEEPS its rate-limit watch: the fire path relaunches
 	// an exited child via Resume, which is the whole point of keeping it. The

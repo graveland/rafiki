@@ -45,6 +45,8 @@ type Indexer struct {
 	dirtyMu       sync.Mutex
 	dirty         map[string]struct{}
 	dirtyOverflow bool
+
+	stats indexerCounters
 }
 
 // IndexerOptions configures an Indexer.
@@ -95,11 +97,13 @@ func NewIndexer(o IndexerOptions) *Indexer {
 // it after the debounce. It is safe from any goroutine and never blocks, so a
 // message commit can call it directly.
 func (ix *Indexer) Mark(conversationID string) {
+	ix.stats.marks.Add(1)
 	ix.dirtyMu.Lock()
 	if len(ix.dirty) < maxDirty {
 		ix.dirty[conversationID] = struct{}{}
 	} else {
 		ix.dirtyOverflow = true
+		ix.stats.markOverflows.Add(1)
 	}
 	ix.dirtyMu.Unlock()
 	select {
@@ -197,19 +201,15 @@ func (ix *Indexer) tickMarked(ctx context.Context, ids []string) {
 	if len(ids) == 0 {
 		return
 	}
-	release, ok, err := ix.store.TryLock(ctx)
-	if err != nil {
-		if ctx.Err() == nil {
-			ix.logger.Warn("recall indexer", "error", err)
-		}
-		return
-	}
+	release, ok := ix.takeLock(ctx)
 	if !ok {
 		return
 	}
 	defer release()
+	ix.stats.markedPasses.Add(1)
 	cursors, err := ix.store.ExtractCursorsFor(ctx, ExcludedEntrypoints, ids)
 	if err != nil {
+		_ = ix.stats.extract.observe(time.Now(), func() error { return err })
 		if ctx.Err() == nil {
 			ix.logger.Warn("recall indexer", "error", err)
 		}
@@ -226,17 +226,12 @@ func (ix *Indexer) tickMarked(ctx context.Context, ids []string) {
 // tickOnce runs one tick under the index lock, skipping it when the lock is
 // held elsewhere or cannot be probed.
 func (ix *Indexer) tickOnce(ctx context.Context) {
-	release, ok, err := ix.store.TryLock(ctx)
-	if err != nil {
-		if ctx.Err() == nil {
-			ix.logger.Warn("recall indexer", "error", err)
-		}
-		return
-	}
+	release, ok := ix.takeLock(ctx)
 	if !ok {
 		return
 	}
 	defer release()
+	ix.stats.fullPasses.Add(1)
 	if err := ix.Tick(ctx); err != nil && ctx.Err() == nil {
 		ix.logger.Warn("recall indexer", "error", err)
 	}
@@ -253,6 +248,9 @@ func (ix *Indexer) tickOnce(ctx context.Context) {
 // daemon's life; the tests call Tick directly, single-threaded.
 func (ix *Indexer) Tick(ctx context.Context) error {
 	cursors, err := ix.store.ExtractCursors(ctx, ExcludedEntrypoints, extractCursorLimit)
+	if err == nil {
+		ix.stats.lastFullBacklog.Store(int64(len(cursors)))
+	}
 	return ix.runPasses(ctx, cursors, err)
 }
 
@@ -260,14 +258,21 @@ func (ix *Indexer) Tick(ctx context.Context) error {
 // failure to list them, joined into the result: the later passes still run.
 func (ix *Indexer) runPasses(ctx context.Context, cursors []ExtractCursor, cursorErr error) error {
 	err := cursorErr
-	ix.extractCursors(ctx, cursors)
+	// The stage fails when the cursor listing failed, when any conversation's
+	// extraction failed, or when the pass was cancelled part-way: its
+	// last-success time must not advance through a database outage. Its
+	// failures are not part of the pass's returned error, which has only ever
+	// carried the listing, embed and summary failures.
+	_ = ix.stats.extract.observe(time.Now(), func() error {
+		return errors.Join(cursorErr, ix.extractCursors(ctx, cursors))
+	})
 	if ix.embedder != nil {
-		if e := ix.embedPass(ctx); e != nil {
+		if e := ix.stats.embed.observe(time.Now(), func() error { return ix.embedPass(ctx) }); e != nil {
 			err = errors.Join(err, e)
 		}
 	}
 	if ix.summaries != nil {
-		if e := ix.summaries.Pass(ctx); e != nil {
+		if e := ix.stats.summarize.observe(time.Now(), func() error { return ix.summaries.Pass(ctx) }); e != nil {
 			err = errors.Join(err, e)
 		}
 	}
@@ -276,18 +281,24 @@ func (ix *Indexer) runPasses(ctx context.Context, cursors []ExtractCursor, curso
 
 // extractCursors windows each conversation, skipping one whose extract or
 // write fails.
-func (ix *Indexer) extractCursors(ctx context.Context, cursors []ExtractCursor) {
+func (ix *Indexer) extractCursors(ctx context.Context, cursors []ExtractCursor) error {
+	var failed error
 	for _, c := range cursors {
 		if ctx.Err() != nil {
-			return
+			return errors.Join(failed, ctx.Err())
 		}
 		if err := ix.extractConversation(ctx, c); err != nil {
 			if ctx.Err() != nil {
-				return
+				return errors.Join(failed, ctx.Err())
 			}
+			ix.stats.extractErrors.Add(1)
 			ix.logger.Warn("recall indexer", "error", err)
+			failed = errors.Join(failed, err)
+			continue
 		}
+		ix.stats.conversationsExtracted.Add(1)
 	}
+	return failed
 }
 
 // extractConversation windows one conversation from its cursor position: a
@@ -350,6 +361,7 @@ func (ix *Indexer) embedPass(ctx context.Context) error {
 		if err := ix.store.SetEmbeddings(ctx, model, items, vecs); err != nil {
 			return err
 		}
+		ix.stats.rowsEmbedded.Add(uint64(len(items)))
 	}
 	return nil
 }

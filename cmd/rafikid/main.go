@@ -476,6 +476,10 @@ func runDaemon(opts runDaemonOpts) error {
 	// face takes this instance through faceOptions and the span observer gets
 	// it as its turn/tool Recorder.
 	metrics := server.NewMetrics(reg)
+	reg.MustRegister(newConvCacheCollector(convs))
+	if pool != nil {
+		reg.MustRegister(newPgxPoolCollector(pool))
+	}
 
 	// One catalog shared between the proxy face's llm.Client and the
 	// Controller (ChildSummary's ContextWindow field) — built here,
@@ -720,6 +724,9 @@ func runDaemon(opts runDaemonOpts) error {
 	// The daemon id resolved above is the tracing resource's instance id; the
 	// Controller resolves its own copy in NewController, before it starts the
 	// goroutines that read it, so nothing is patched onto it after construction.
+	ctrl.fleet = newFleetMetrics(reg)
+	ctrl.metricsReg = reg
+	reg.MustRegister(newFleetCollector(ctrl), newEventBusCollector(ctrl.native))
 	ctrl.sandboxCfg = sandboxCfg
 	ctrl.sandboxStore = sandboxStore
 	// The sandbox sweeper's boot pass abandons a `creating` row only when it
@@ -841,6 +848,7 @@ func runDaemon(opts runDaemonOpts) error {
 		execPool = execpool.New(execStore)
 		execPool.SetOnLost(ctrl.HandleExecutorLost)
 		ctrl.execPool = execPool
+		reg.MustRegister(newExecutorCollector(execPool))
 		ctrl.execPoolConn = execPool
 		// The job-lifecycle push wiring: the pool opens ONE WatchJobs stream per
 		// executor connection and delivers its running/exited/replay-complete

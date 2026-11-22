@@ -15,6 +15,12 @@ type Options struct {
 type Stats struct {
 	SubscriberCount int
 	TotalDrops      uint64
+	// MaxBacklog is the deepest subscriber queue right now, in events; a
+	// subscriber whose queue stays near PerSubBuffer is the one about to start
+	// dropping.
+	MaxBacklog int
+	// PerSubBuffer is each subscriber's queue capacity.
+	PerSubBuffer int
 }
 
 // Bus is a generic single-producer fan-out with bounded per-subscriber channels.
@@ -139,10 +145,16 @@ func (b *Bus[T]) Publish(v T) {
 func (b *Bus[T]) Stats() Stats {
 	b.mu.Lock()
 	n := len(b.subs)
+	deepest := 0
+	for _, s := range b.subs {
+		deepest = max(deepest, len(s.ch))
+	}
 	b.mu.Unlock()
 	return Stats{
 		SubscriberCount: n,
 		TotalDrops:      b.totalDrops.Load(),
+		MaxBacklog:      deepest,
+		PerSubBuffer:    b.opts.PerSubBuffer,
 	}
 }
 

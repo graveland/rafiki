@@ -557,6 +557,11 @@ cached for the next.
   `268435456` = 256 MiB), charged by stored content bytes; the coldest nodes are
   evicted, and an evicted node is re-fetched through `Walk` + `Fetch`. A value
   that is not a positive integer refuses daemon startup.
+  The budget counts stored bytes only; each cached node also keeps its decoded
+  message alive, so real heap use is larger. `rafiki_conv_cache_bytes{kind}`
+  reports both, and `rafiki_conv_cache_lookups_total` / `_evictions_total` show
+  whether the budget fits the working set (see `telemetry.md`, "Subsystem
+  metrics").
 - **`clear_pending` is never cached.** It is read from the conversation row when
   a request needs it, so a `/clear` a client just sent is visible to the next
   request on any face.

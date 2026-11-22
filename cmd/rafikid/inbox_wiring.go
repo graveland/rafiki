@@ -317,6 +317,7 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 		// later still sees it. Callers that deliver opportunistically treat
 		// this sentinel as "queued, nothing to see here" (acceptAndDeliver,
 		// flushInboxSource), not as a failure.
+		c.fleet.deferred("script")
 		return false, errInboxDeferred
 	}
 
@@ -348,6 +349,7 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 		if root, halted := c.budgetHalted(b.ChildID); halted {
 			slog.Debug("inbox: holding a wake for a child over budget",
 				"childId", b.ChildID, "budgetRoot", root, "rows", len(b.IDs))
+			c.fleet.deferred("budget")
 			return false, errInboxBudgetHeld
 		}
 	}

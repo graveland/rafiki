@@ -115,10 +115,12 @@ func (p *Pool) AckJobExits(ctx context.Context, executorID string, handles []str
 	if !ok {
 		return fmt.Errorf("executor %s: %w", executorID, ErrExecutorLost)
 	}
+	p.counters.jobAcks.Add(1)
 	_, err := lc.client.inner.AckJobExits(ctx, connect.NewRequest(&executorpb.AckJobExitsRequest{
 		Handles: handles,
 	}))
 	if err != nil {
+		p.counters.jobAckErrors.Add(1)
 		return fmt.Errorf("executor ack job exits: %w", err)
 	}
 	return nil
@@ -170,6 +172,7 @@ func (p *Pool) watchJobs(id string, lc *liveConn) {
 			// progress before ending is not a failing one.
 			backoff = jobWatchBackoffInitial
 		}
+		p.counters.jobStreamEnds.Add(1)
 		slog.Warn("execpool: job event stream ended; resubscribing",
 			"executor", id, "error", err, "backoff", backoff)
 
@@ -222,6 +225,7 @@ func (p *Pool) subscribeJobs(id string, lc *liveConn, handler func(JobEvent)) (b
 			continue
 		}
 		got = true
+		p.counters.countJobEvent(ev.Kind)
 		handler(ev)
 	}
 	return got, stream.Err()

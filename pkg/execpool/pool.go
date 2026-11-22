@@ -96,6 +96,8 @@ type Pool struct {
 	healthTimeout  time.Duration
 	joinTimeout    time.Duration
 	tickets        *TicketRegistry
+
+	counters poolCounters
 }
 
 type liveConn struct {
@@ -211,8 +213,12 @@ func (p *Pool) installLive(id string, lc *liveConn) {
 	displaced := p.live[id]
 	p.live[id] = lc
 	p.mu.Unlock()
+	if displaced != lc {
+		p.counters.connects.Add(1)
+	}
 
 	if displaced != nil && displaced != lc {
+		p.counters.displaced.Add(1)
 		slog.Info("execpool: executor reconnected; tearing down the previous connection", "executorId", id)
 		displaced.shutdown()
 	}
@@ -902,6 +908,7 @@ func (p *Pool) installTransient(id string, lc *liveConn) bool {
 		return false
 	}
 	p.live[id] = lc
+	p.counters.connects.Add(1)
 	return true
 }
 
@@ -1158,6 +1165,7 @@ func (p *Pool) refreshRow(ctx context.Context, id string, lc *liveConn) error {
 // it and no-ops.
 func (p *Pool) onHealthFailure(id string, lc *liveConn) {
 	if p.removeLive(id, lc) {
+		p.counters.healthFailures.Add(1)
 		p.Park(id, parkTimeout)
 	}
 	lc.shutdown()

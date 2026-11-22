@@ -45,6 +45,7 @@ func (p *Pool) Park(executorID string, timeout time.Duration) {
 
 	// Remove previous park entry if re-parking.
 	p.parked[executorID] = entry
+	p.counters.parks.Add(1)
 	slog.Info("execpool: executor parked", "executorId", executorID, "timeout", timeout)
 }
 
@@ -118,6 +119,7 @@ func (p *Pool) sweepParkedOnce(now time.Time) {
 	p.mu.Unlock()
 
 	for _, id := range lost {
+		p.counters.parkExpiries.Add(1)
 		slog.Warn("execpool: parked executor lost (timeout)", "executorId", id)
 		if fn != nil {
 			fn(id)

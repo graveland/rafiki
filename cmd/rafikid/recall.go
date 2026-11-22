@@ -465,6 +465,7 @@ func startRecall(ctx context.Context, c *Controller, pool *pgxpool.Pool, prov *p
 			logger.Warn("recall: could not ensure vector indexes; vector search degraded to BM25", "error", err)
 		}
 	}
+	registerRecallMetrics(c.metricsReg, rt.indexer)
 	c.recallWg.Add(1)
 	go func() {
 		defer c.recallWg.Done()

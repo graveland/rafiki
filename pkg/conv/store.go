@@ -82,7 +82,85 @@ type Store struct {
 	lru     *list.List // front = hottest, back = coldest; values are *Node
 	nodes   map[string]*list.Element
 	charged int64
+	// decoded is the estimated heap of the cached nodes' decoded messages
+	// (msg.Message.ApproxBytes), which charged does not count: the budget
+	// charges the stored JSON only, while each cached node also keeps its
+	// decoded form.
+	decoded int64
 	entries map[string]*entry
+
+	counters cacheCounters
+}
+
+// cacheCounters are the Store's cumulative event counts. They are atomics so a
+// hot-path increment never widens a critical section and a scrape never takes
+// Store.mu for them.
+type cacheCounters struct {
+	nodeHits, nodeMisses atomic.Uint64
+	pathHits, pathMisses atomic.Uint64
+	evictions            atomic.Uint64
+	entrySweeps          atomic.Uint64
+	headServed           atomic.Uint64
+	headInstalls         atomic.Uint64
+	headInstallRetries   atomic.Uint64
+	headNotInstalled     atomic.Uint64
+	headInvalidations    atomic.Uint64
+}
+
+// CacheStats is a point-in-time view of the Store's cache for monitoring.
+// Gauges are read under Store.mu; counters are cumulative since construction.
+type CacheStats struct {
+	// BudgetBytes is the configured node budget; ChargedBytes is what the
+	// budget counts (stored JSON); DecodedBytes estimates the decoded
+	// messages the same nodes keep alive. ChargedBytes + DecodedBytes is the
+	// closer figure for the cache's real heap.
+	BudgetBytes  int64
+	ChargedBytes int64
+	DecodedBytes int64
+	Nodes        int
+	Entries      int
+
+	NodeHits, NodeMisses uint64
+	// PathHits counts walks answered wholly from the cache; PathMisses counts
+	// the walks that fell back to the backend.
+	PathHits, PathMisses uint64
+	Evictions            uint64
+	// EntrySweeps counts per-conversation entries dropped for idleness.
+	EntrySweeps uint64
+	// HeadServed counts owner reads answered from a fresh cached head with no
+	// backend call.
+	HeadServed uint64
+	// HeadInstalls counts refreshes that installed; HeadInstallRetries counts
+	// lost installs that were retried; HeadNotInstalled counts refreshes that
+	// gave up and answered uncached.
+	HeadInstalls       uint64
+	HeadInstallRetries uint64
+	HeadNotInstalled   uint64
+	HeadInvalidations  uint64
+}
+
+// CacheStats returns the cache's current gauges and cumulative counters.
+func (s *Store) CacheStats() CacheStats {
+	s.mu.Lock()
+	st := CacheStats{
+		BudgetBytes:  s.cacheBytes,
+		ChargedBytes: s.charged,
+		DecodedBytes: s.decoded,
+		Nodes:        len(s.nodes),
+		Entries:      len(s.entries),
+	}
+	s.mu.Unlock()
+	c := &s.counters
+	st.NodeHits, st.NodeMisses = c.nodeHits.Load(), c.nodeMisses.Load()
+	st.PathHits, st.PathMisses = c.pathHits.Load(), c.pathMisses.Load()
+	st.Evictions = c.evictions.Load()
+	st.EntrySweeps = c.entrySweeps.Load()
+	st.HeadServed = c.headServed.Load()
+	st.HeadInstalls = c.headInstalls.Load()
+	st.HeadInstallRetries = c.headInstallRetries.Load()
+	st.HeadNotInstalled = c.headNotInstalled.Load()
+	st.HeadInvalidations = c.headInvalidations.Load()
+	return st
 }
 
 // NewStore returns a Store over b. Every zero option is the documented
@@ -245,6 +323,7 @@ func (s *Store) sweepLocked() {
 		if now.Sub(e.lastAccess) > s.ttl {
 			e.dead = true
 			delete(s.entries, id)
+			s.counters.entrySweeps.Add(1)
 		}
 	}
 }
@@ -306,6 +385,7 @@ func (s *Store) putLocked(n *Node) {
 	}
 	s.nodes[n.ID] = s.lru.PushFront(n)
 	s.charged += int64(len(n.Content))
+	s.decoded += n.Msg.ApproxBytes()
 	for s.charged > s.cacheBytes && s.lru.Len() > 0 {
 		s.evictLocked()
 	}
@@ -323,6 +403,8 @@ func (s *Store) evictLocked() {
 	s.lru.Remove(el)
 	delete(s.nodes, n.ID)
 	s.charged -= int64(len(n.Content))
+	s.decoded -= n.Msg.ApproxBytes()
+	s.counters.evictions.Add(1)
 }
 
 // putNodes caches nodes of convID and keeps the entry warm. A node belonging to
@@ -352,6 +434,9 @@ func (s *Store) cachedNode(convID, id string) (*Node, bool) {
 	n, ok := s.lookupLocked(convID, id)
 	if ok {
 		s.touchLocked(id)
+		s.counters.nodeHits.Add(1)
+	} else {
+		s.counters.nodeMisses.Add(1)
 	}
 	return n, ok
 }
@@ -372,6 +457,7 @@ func (s *Store) cachedPath(convID, from string, crossRoots bool, stopAt string) 
 	for id := from; id != "" && id != stopAt; {
 		n, ok := s.lookupLocked(convID, id)
 		if !ok {
+			s.counters.pathMisses.Add(1)
 			return nil, false
 		}
 		rev = append(rev, n)
@@ -390,6 +476,7 @@ func (s *Store) cachedPath(convID, from string, crossRoots bool, stopAt string) 
 	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
 		rev[i], rev[j] = rev[j], rev[i]
 	}
+	s.counters.pathHits.Add(1)
 	return rev, true
 }
 
@@ -549,8 +636,10 @@ func (s *Store) nodesFor(ctx context.Context, convID string, refs []Ref) ([]*Nod
 	for i, r := range refs {
 		if n, ok := s.lookupLocked(convID, r.ID); ok {
 			out[i] = n
+			s.counters.nodeHits.Add(1)
 			continue
 		}
+		s.counters.nodeMisses.Add(1)
 		missing = append(missing, r.ID)
 	}
 	for i := len(refs) - 1; i >= 0; i-- {
@@ -642,6 +731,7 @@ func (h *Handle) State(ctx context.Context) (State, error) {
 func (h *Handle) headID(ctx context.Context) (string, error) {
 	e := h.store.touch(h.convID)
 	if hs := e.head.Load(); h.owner && hs != nil && hs.cached && h.store.now().Sub(hs.at) <= h.store.ttl {
+		h.store.counters.headServed.Add(1)
 		return hs.id, nil
 	}
 	st, _, err := h.store.refresh(ctx, h.convID)
@@ -710,11 +800,14 @@ func (s *Store) refresh(ctx context.Context, convID string) (st State, installed
 		}
 		s.cacheEdge(e, st)
 		if s.install(convID, e, old, st) {
+			s.counters.headInstalls.Add(1)
 			return st, true, nil
 		}
 		if attempt+1 >= maxRefreshAttempts {
+			s.counters.headNotInstalled.Add(1)
 			return st, false, nil
 		}
+		s.counters.headInstallRetries.Add(1)
 	}
 }
 
@@ -748,6 +841,7 @@ func (s *Store) invalidate(convID string) {
 	for {
 		old := e.head.Load()
 		if e.head.CompareAndSwap(old, &headState{version: old.ver() + 1}) {
+			s.counters.headInvalidations.Add(1)
 			return
 		}
 	}

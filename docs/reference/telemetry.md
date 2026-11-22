@@ -256,6 +256,74 @@ latency histograms (these and the pre-existing `rafiki_llm_turn_latency_seconds`
 attach the active `trace_id` as an exemplar so a spike can be opened directly
 as a trace.
 
+### Subsystem metrics
+
+Six subsystems report their own state at scrape time. Each is read from the
+subsystem's `Stats()` snapshot (`cmd/rafikid/metrics_collectors.go`), from memory
+the subsystem already holds: a scrape never queries the database. The one
+exception to "computed when asked" is the fleet lifecycle counters, which count
+events no later snapshot can reconstruct.
+
+**Conversation node cache** (`pkg/conv`). The budget charges stored JSON only;
+each cached node also keeps its decoded message alive, so `charged + decoded` is
+the closer figure for real heap use.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `rafiki_conv_cache_bytes` | gauge | `kind` (`charged`, `decoded`: an estimate from `msg.Message.ApproxBytes`) |
+| `rafiki_conv_cache_budget_bytes`, `_nodes`, `_entries` | gauge | |
+| `rafiki_conv_cache_lookups_total` | counter | `kind` (`node`, `path`: a whole-chain walk), `result` (`hit`, `miss`) |
+| `rafiki_conv_cache_evictions_total`, `_entry_sweeps_total` | counter | |
+| `rafiki_conv_cache_head_served_total`, `_head_installs_total`, `_head_install_retries_total`, `_head_not_installed_total`, `_head_invalidations_total` | counter | |
+
+A low node hit ratio with steady evictions means the budget is too small for the
+working set; a high one with `charged` far below the budget means it is larger
+than needed.
+
+**Postgres pool** (`pgxpool.Stat`): `rafiki_pgx_pool_conns{state}`
+(`acquired`, `idle`, `constructing`), `rafiki_pgx_pool_max_conns`, and the
+counters `rafiki_pgx_pool_acquires_total`, `_acquire_seconds_total`,
+`_empty_acquires_total`, `_empty_acquire_wait_seconds_total`,
+`_canceled_acquires_total`, `_new_conns_total`, `_max_lifetime_destroyed_total`,
+`_max_idle_destroyed_total`. Starvation shows as a rising
+`_empty_acquire_wait_seconds_total` rate with `acquired` at `max_conns`.
+
+**Executors** (`pkg/execpool`): `rafiki_executors_live{kind}` (`enrolled`,
+`transient`), `rafiki_executors_parked`, per-executor
+`rafiki_executor_in_flight_calls`, `_connected_timestamp_seconds` and
+`_draining` (label `executor`, the `machine` label or the id; enrolled executors
+only, because a transient session executor's id is minted per session), and the
+counters `rafiki_executor_connects_total`, `_displaced_total`,
+`_health_failures_total`, `_parks_total`, `_park_expiries_total`,
+`_job_events_total{kind}` (`running`, `exited`, `replay_complete`),
+`_job_stream_ends_total`, `_job_acks_total`, `_job_ack_errors_total`.
+`in_flight_calls` is measured against the HTTP/2 stream limit; the daemon warns
+at 200.
+
+**Fleet**: `rafiki_children{kind,state,waiting_on}` is the display state an
+operator sees in `rafiki ls`, counted from the child store and the display
+worker's last published tuple. `rafiki_child_launches_total{kind}` counts process
+starts (a resume is a launch), `rafiki_child_exits_total{kind,outcome}` counts
+ends (`clean` is exit code 0 with no signal), and `rafiki_inbox_held_total{reason}`
+counts deliveries left pending (`budget`, `script`).
+
+**Event bus** (`pkg/nativebus`): `rafiki_event_buses`, `rafiki_event_subscribers`,
+`rafiki_event_subscriber_max_backlog` against `rafiki_event_subscriber_buffer`,
+and the counters `rafiki_events_published_total` and `rafiki_event_drops_total`
+(an event dropped for a full subscriber queue; the total survives a bus being
+forgotten). A backlog near the buffer is the subscriber about to start dropping.
+
+**Recall indexer** (`pkg/recall`; present only when the indexer runs):
+`rafiki_recall_dirty_conversations`, `_dirty_overflow`,
+`_last_full_pass_backlog` (the conversations with work the last full pass found,
+capped at its cursor limit: the nearest pending count that costs no query), and
+the counters `_marks_total`, `_mark_overflows_total`, `_passes_total{kind}`
+(`full`, `marked`), `_lock_skips_total`, `_lock_errors_total`,
+`_conversations_extracted_total`, `_extract_errors_total`, `_rows_embedded_total`,
+plus per stage (`extract`, `embed`, `summarize`) `_stage_runs_total`,
+`_stage_errors_total`, `_stage_seconds_total` and the gauge
+`_stage_last_success_timestamp_seconds` (0 before the first success).
+
 ## Logs
 
 Logs are not exported — they go to stdout/stderr and are shipped by whatever
