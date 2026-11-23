@@ -38,9 +38,10 @@ type proxyStore interface {
 	ThreadOfPredecessorInSession(ctx context.Context, session, prevMessageID string) (string, error)
 	InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (turnID string, createdAt time.Time, err error)
 	CompleteTurn(ctx context.Context, r capture.TurnResult) error
+	CompleteCapturedTurn(ctx context.Context, c capture.TurnCompletion) error
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
+	FailCompletedTurn(ctx context.Context, r capture.TurnResult, errMsg string) error
 	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (headID string, err error)
-	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, parentID string, canonical []byte, in, out int64, stopReason string) error
 	RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error
 	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
 	MessagesSince(ctx context.Context, convID string, since time.Time) ([]*conv.Node, error)
@@ -1488,44 +1489,8 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	if !cr.on {
 		return
 	}
-	if cerr := p.store.CompleteTurn(capCtx, capture.TurnResult{
-		TurnID: cr.turnID, CreatedAt: cr.createdAt, ConversationID: cr.convID, Model: usage.Model, Response: nil, StopReason: stop, Upstream: upstream,
-		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
-		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
-		LatencyMS: int(elapsed.Milliseconds()),
-	}); cerr != nil {
-		p.logger.WarnContext(r.Context(), "proxy capture: complete-turn failed", "conversation", cr.convID, "error", cerr)
-		// Don't leave the turn stranded 'pending' on a completion write failure;
-		// mark it errored so it isn't a false orphan for the sweep.
-		p.failPersist(r, cr, "complete-turn failed: "+cerr.Error())
-		return
-	}
-	// Attach the request to the conversation's tree (the DB I/O deliberately
-	// deferred from beginCapture — see its comment) before appending the
-	// response: DecomposeRequest returns the request's head node, and the
-	// response is appended as its child. The attach point is resolved from
-	// diagnostics.previous_message_id (cr.prevMessageID, parsed once in
-	// beginCapture), post-stream, where the DB read belongs — not from a
-	// precomputed ordinal. CompleteTurn above already recorded the turn
-	// complete, so a capture-write failure here would otherwise leave a
-	// clean-looking completion with its response captured nowhere (append) or a
-	// response orphaned above missing request nodes (decompose). Re-mark the
-	// turn errored instead, so the gap is visible rather than a silent
-	// complete-without-response.
-	// Thread classification and routing (native-subagent attribution). The
-	// lookup in beginCapture chose the conversation row; this write is what
-	// later turns resolve their own conversation from: prevMessageID chains
-	// backwards, ownMsg is the chain key this turn publishes, and isSubagent
-	// (cc_is_subagent, present only when true) decides whether an absent
-	// predecessor is a new subagent thread root or the main thread. Both ids
-	// were parsed once in beginCapture and ride the captureRef.
-	//
-	// RecordThread runs BEFORE the append-error early returns below, on
-	// purpose: the thread identity must not be a casualty of a capture write
-	// failure. A founding turn whose response is lost (an append or decompose
-	// failure) still gets its thread_id stamped here, so the
-	// thread's next turn resolves to the branch instead of re-founding on the
-	// root row. RecordThread is best-effort and never fails the turn.
+	// The whole call is recorded in one transaction; a failure records nothing
+	// of it and the failure path below keeps what cannot be re-derived.
 	ownMsg := capture.MessageIDFromCanonical(canonical)
 	if cr.hasBilling {
 		p.logger.DebugContext(r.Context(), "claude thread",
@@ -1534,19 +1499,19 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 			"prev_message_id", cr.prevMessageID, "own_message_id", ownMsg,
 			"chained", cr.prevMessageID != "")
 	}
-	if terr := p.store.RecordThread(capCtx, cr.session, cr.convID, cr.turnID, cr.createdAt, cr.prevMessageID, ownMsg, cr.isSubagent); terr != nil {
-		p.logger.WarnContext(r.Context(), "proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
+	result := capture.TurnResult{
+		TurnID: cr.turnID, CreatedAt: cr.createdAt, ConversationID: cr.convID, Model: usage.Model,
+		Response: nil, StopReason: stop, Upstream: upstream,
+		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
+		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
+		LatencyMS: int(elapsed.Milliseconds()),
 	}
-	headID, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash, cr.prevMessageID)
-	if derr != nil {
-		p.logger.WarnContext(r.Context(), "proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
-		p.failPersist(r, cr, "decompose request failed: "+derr.Error())
-		return
-	}
-	if aerr := p.store.AppendResponseMessage(capCtx, cr.convID, cr.turnID, cr.createdAt,
-		headID, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
-		p.logger.WarnContext(r.Context(), "proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
-		p.failPersist(r, cr, "append response failed: "+aerr.Error())
+	if cerr := p.store.CompleteCapturedTurn(capCtx, capture.TurnCompletion{
+		TurnResult: result, Session: cr.session, PrevMessageID: cr.prevMessageID, OwnMessageID: ownMsg,
+		IsSubagent: cr.isSubagent, ReqBody: cr.reqBody, PrefixHash: cr.prefixHash, Canonical: canonical,
+	}); cerr != nil {
+		p.logger.WarnContext(r.Context(), "proxy capture: complete captured turn failed", "conversation", cr.convID, "error", cerr)
+		p.failCompletion(r, cr, result, ownMsg, cerr)
 		return
 	}
 	cr.outcome.responseMessageID = ownMsg
@@ -1564,13 +1529,34 @@ func (p *MessagesProxy) failTurn(r *http.Request, cr captureRef, reason string) 
 	p.failTurnCtx(capCtx, cr, reason)
 }
 
-// failPersist is failTurn for a capture write that failed, so the report
-// carries the reason as a persistence failure rather than a turn failure.
-func (p *MessagesProxy) failPersist(r *http.Request, cr captureRef, reason string) {
-	if cr.on && cr.outcome != nil && cr.outcome.failure == "" {
+// failCompletion records a call whose response arrived but whose capture
+// transaction failed. Best-effort and in this order, on one detached context so
+// the tail stays inside gateStallTimeout: the call's usage (the provider billed
+// it whatever happened to our write), the thread identity (a founding subagent
+// turn must keep it), and the request nodes (the last call of a session has no
+// later call to re-send them).
+func (p *MessagesProxy) failCompletion(r *http.Request, cr captureRef, result capture.TurnResult, ownMsg string, cerr error) {
+	reason := "capture completion failed: " + cerr.Error()
+	if cr.outcome != nil && cr.outcome.failure == "" {
 		cr.outcome.failure = reason
 	}
-	p.failTurn(r, cr, reason)
+	if cr.outcome != nil && cr.outcome.turnFailure == "" {
+		cr.outcome.turnFailure = reason
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
+	defer cancel()
+	if ferr := p.store.FailCompletedTurn(ctx, result, reason); ferr != nil {
+		p.logger.WarnContext(ctx, "proxy capture: fail-completed-turn failed", "conversation", cr.convID, "error", ferr)
+		if ferr2 := p.store.FailTurn(ctx, cr.turnID, cr.createdAt, reason); ferr2 != nil {
+			p.logger.WarnContext(ctx, "proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr2)
+		}
+	}
+	if terr := p.store.RecordThread(ctx, cr.session, cr.convID, cr.turnID, cr.createdAt, cr.prevMessageID, ownMsg, cr.isSubagent); terr != nil {
+		p.logger.WarnContext(ctx, "proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
+	}
+	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash, cr.prevMessageID); derr != nil {
+		p.logger.WarnContext(ctx, "proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
+	}
 }
 
 // failTurnCtx is failTurn against a caller-supplied context, so a fail path that

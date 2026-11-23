@@ -129,7 +129,7 @@ func TestCaptureReportOnAppendFailure(t *testing.T) {
 
 	got := sink.all()
 	c.Require().Len(got, 1, "reports")
-	c.StrContains(got[0].Err, "append response failed")
+	c.StrContains(got[0].Err, "capture completion failed")
 	c.Eq("", got[0].ResponseMessageID)
 }
 

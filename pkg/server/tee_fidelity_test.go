@@ -297,6 +297,14 @@ func (f *recordingChatStore) AppendResponseMessage(_ context.Context, _, _ strin
 	return nil
 }
 
+func (f *recordingChatStore) CompleteCapturedTurn(_ context.Context, _ capture.TurnCompletion) error {
+	return nil
+}
+
+func (f *recordingChatStore) FailCompletedTurn(_ context.Context, _ capture.TurnResult, _ string) error {
+	return nil
+}
+
 func (f *recordingChatStore) RecordThread(_ context.Context, _, _, _ string, _ time.Time, _, _ string, _ bool) error {
 	return nil
 }

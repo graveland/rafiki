@@ -48,7 +48,10 @@ func (s *recordingStore) FailTurn(ctx context.Context, turnID string, createdAt 
 func (s *recordingStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (string, error) {
 	return "head-1", nil
 }
-func (s *recordingStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, parentID string, canonical []byte, in, out int64, stopReason string) error {
+func (s *recordingStore) CompleteCapturedTurn(ctx context.Context, c capture.TurnCompletion) error {
+	return nil
+}
+func (s *recordingStore) FailCompletedTurn(ctx context.Context, r capture.TurnResult, errMsg string) error {
 	return nil
 }
 
