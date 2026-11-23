@@ -378,6 +378,12 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 		return time.Time{}, fmt.Errorf("conv commit: update conversation: %w", err)
 	}
 
+	if c.Finalize != nil {
+		if err := c.Finalize(ctx, pgxTxExec{tx: tx}); err != nil {
+			return time.Time{}, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return time.Time{}, fmt.Errorf("conv commit: commit: %w", err)
 	}
@@ -387,6 +393,17 @@ func (b *ConvBackend) Commit(ctx context.Context, c conv.Commit) (time.Time, err
 		}
 	}
 	return created, nil
+}
+
+// pgxTxExec exposes the commit's transaction to a Finalize hook as a conv.TxExec.
+type pgxTxExec struct{ tx pgx.Tx }
+
+func (e pgxTxExec) Exec(ctx context.Context, sql string, args ...any) (int64, error) {
+	tag, err := e.tx.Exec(ctx, sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 // messageCommitObserver is told, after every commit that stored at least one
