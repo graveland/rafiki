@@ -284,6 +284,21 @@ Pinned by `convtest.RunBackendSuite` (`pkg/conv/convtest`) and
 `TestAppend*`/`TestRetractHead*` (`pkg/conv`), plus `TestConvBackend*`
 (`pkg/store`).
 
+`conv.Append` may carry a `Finalize` hook: a function that runs inside the
+commit's transaction, after the inserts and the conversation counters and
+before the commit, given the chain's ids and ordinals (`CreatedAt` is still
+zero on the nodes this commit inserts, while a node the conversation already
+held keeps the `created_at` it was stored with) and a `TxExec` for plain SQL.
+An error from it rolls the whole commit back and is never retried by
+`Handle.Append`, even when it wraps `ErrConflict`. The hook is a field on
+`conv.Commit`, and a backend that commits without running a non-nil hook is
+reported as `conv.ErrFinalizeNotRun`. The hook may run again against nodes that
+already exist: after an ambiguous commit the retry runs it a second time, and
+so does a caller that re-issues an append whose nodes are already stored, so a
+hook must be a pure function of its inputs: constants only, no increments, no
+`now()`. Capture uses it to write a call's turn row in the same transaction as
+its request and response nodes (`CaptureStore.CompleteCapturedTurn`).
+
 ## Origin: which harness wrote a node
 
 `conversation_message.origin`, decoded as `conv.Node.Origin`, names the writer:
