@@ -505,6 +505,8 @@ func RunBackendSuite(t *testing.T, newBackend func(t *testing.T) (conv.Backend, 
 		c.ErrorIs(err, conv.ErrNotFound, "an unknown conversation is ErrNotFound")
 		c.False(errors.Is(err, conv.ErrConflict), "not a conflict")
 	})
+
+	runFinalize(t, newBackend)
 }
 
 // foreignRow builds a node whose parent, or derived-from, names a node of

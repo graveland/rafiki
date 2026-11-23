@@ -19,6 +19,19 @@ import (
 // corruption.
 const maxAppendAttempts = 5
 
+// ErrFinalizeNotRun reports a backend that committed an Append carrying a
+// Finalize hook without running it. The rows are stored but the hook's writes
+// are not, so the caller must treat the append as failed.
+var ErrFinalizeNotRun = errors.New("conv: backend committed without running Finalize")
+
+// finalizeError wraps an error returned by an Append's Finalize hook so
+// Handle.Append can tell it from a conflict: a hook error is never retried,
+// even when it wraps ErrConflict.
+type finalizeError struct{ err error }
+
+func (e *finalizeError) Error() string { return "conv: finalize: " + e.err.Error() }
+func (e *finalizeError) Unwrap() error { return e.err }
+
 // chainParent is the resolved parent slot a chain hangs from.
 type chainParent struct {
 	// id is the parent ROW, empty for a root.
@@ -55,6 +68,10 @@ func (h *Handle) Append(ctx context.Context, a Append) (Result, error) {
 		if err == nil {
 			h.store.refreshAfterCommit(ctx, h.convID)
 			return res, nil
+		}
+		var fe *finalizeError
+		if errors.As(err, &fe) {
+			return Result{}, err
 		}
 		if errors.Is(err, ErrLeaseLost) || !errors.Is(err, ErrConflict) {
 			return Result{}, err
@@ -211,6 +228,26 @@ func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result,
 	for i, n := range rows {
 		committed[i] = copyNode(n)
 	}
+
+	// The chain the hook is told about is the whole one, held nodes first, with
+	// the identities the commit gives it and no created_at: the backend stamps
+	// that only once the transaction is over.
+	var ran bool
+	var finalize func(ctx context.Context, x TxExec) error
+	if a.Finalize != nil {
+		chain := make([]*Node, 0, len(held)+len(rows))
+		chain = append(chain, held...)
+		chain = append(chain, rows...)
+		res := Result{Nodes: chain, Inserted: len(rows)}
+		finalize = func(ctx context.Context, x TxExec) error {
+			ran = true
+			if err := a.Finalize(ctx, x, res); err != nil {
+				return &finalizeError{err: err}
+			}
+			return nil
+		}
+	}
+
 	created, err := h.store.backend.Commit(ctx, Commit{
 		ConversationID:      h.convID,
 		ExpectHead:          st.HeadID,
@@ -221,9 +258,13 @@ func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result,
 		Fallback:            a.Fallback,
 		ConsumeClearPending: a.ConsumeClearPending,
 		Lease:               h.lease,
+		Finalize:            finalize,
 	})
 	if err != nil {
 		return Result{}, err
+	}
+	if a.Finalize != nil && !ran {
+		return Result{}, ErrFinalizeNotRun
 	}
 	for _, n := range rows {
 		n.CreatedAt = created

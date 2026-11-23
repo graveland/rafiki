@@ -4,6 +4,7 @@ package conv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -11,6 +12,17 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/convtree"
 )
+
+// errMemTx is what a Finalize hook gets when it tries to use SQL on a
+// MemBackend, which has no database.
+var errMemTx = errors.New("conv: MemBackend has no SQL transaction")
+
+// memTx is the transaction a MemBackend offers a Finalize hook: it accepts no
+// statement, because there is nothing to run one against.
+type memTx struct{}
+
+// Exec refuses every statement; a hook that only needs its inputs runs anyway.
+func (memTx) Exec(context.Context, string, ...any) (int64, error) { return 0, errMemTx }
 
 // MemBackend is an in-process Backend: the conformance reference the SQL
 // backend is measured against, and what a test that wants no database uses.
@@ -288,6 +300,13 @@ func (m *MemBackend) Commit(ctx context.Context, commit Commit) (time.Time, erro
 	}
 	if err := checkCommitParents(c.byID, c.forkFrom, commit); err != nil {
 		return time.Time{}, err
+	}
+	// The hook runs before the tree is touched: its error leaves this
+	// conversation exactly as the commit found it.
+	if commit.Finalize != nil {
+		if err := commit.Finalize(ctx, memTx{}); err != nil {
+			return time.Time{}, err
+		}
 	}
 
 	created := m.stamp()
