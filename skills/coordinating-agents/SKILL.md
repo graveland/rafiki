@@ -49,10 +49,12 @@ Every settle and heartbeat of a default child wakes you, and each wake costs
 you a turn. For a coordinator, or any long-running agent you will not
 babysit, pass `notify: "result"` to `agent_spawn`.
 
-- Put this in its prompt: "End your work with `agent_result` (DONE /
-  DONE_WITH_CONCERNS / BLOCKED / NEEDS_CONTEXT, then the key points), or
-  `agent_report kind=question` if you need a decision; an ending without one
-  wakes nobody."
+- Put the closing line in its prompt verbatim, not as a paraphrase: "Your
+  LAST action is `agent_result`: one status line (DONE / DONE_WITH_CONCERNS /
+  NEEDS_CONTEXT / BLOCKED) then one line per finding; a turn that ends in prose
+  is invisible to the dispatcher." Add `agent_report kind=question` only if you
+  need a decision before it continues. A paraphrased reminder is what gets
+  dropped when the prompt's last paragraph is about something else.
 - A `result` agent wakes you for a result, a pending question, a turn error,
   its own budget cap, or exit/failure. Plain turn ends and heartbeats are
   dropped.

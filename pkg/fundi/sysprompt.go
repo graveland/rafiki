@@ -41,6 +41,18 @@ const waitSection = "## Waiting\n\n" +
 	"polling is the one behaviour guaranteed to miss it. If you cannot end your turn, look " +
 	"once and act on what you see."
 
+// outcomeSection tells a child that can report to a parent how a turn ends. The
+// tool description already says it, but a description is consulted when the tool
+// is chosen, and this is the one tool that has to be chosen at the END of a turn
+// the model has mentally finished. Naming the consequence (a silent parent) is
+// the half a model cannot infer.
+const outcomeSection = "## Reporting back\n\n" +
+	"When you have finished the work your parent gave you, END the turn with agent_result: a " +
+	"status line (DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT or BLOCKED) then one line per finding. " +
+	"That call is what wakes your parent and what it reads first; a turn that ends in prose is " +
+	"invisible to it, however complete the answer looked to you. Use agent_report only for a " +
+	"mid-flight note that changes what your parent should do next, never for your final summary."
+
 // WorkspaceInfo describes where a child actually landed. Every field is
 // resolved by the daemon at spawn; none of it is asked of the model.
 type WorkspaceInfo struct {
@@ -65,7 +77,10 @@ type SysPromptConfig struct {
 	Recall bool
 	// Wait, when true, emits the waiting section: the child has at least one
 	// tool that can leave work running (canWait, runtime.go).
-	Wait         bool
+	Wait bool
+	// Outcome, when true, emits the reporting section: the child has agent_result,
+	// so how its turn ends is something its parent is watching (canReport).
+	Outcome      bool
 	Cwd, ModelID string
 	// Workspace, when non-nil and Isolation != "none", appends a per-child
 	// machine block to the environment section. It varies BETWEEN children, so
@@ -79,8 +94,8 @@ type SysPromptConfig struct {
 // files, skills) MUST precede anything that changes turn to turn, and the
 // per-turn environment block (which includes today's date) goes last:
 //
-//	base (Override if set, else Base) -> Append -> Recall -> Wait -> ContextFiles ->
-//	SkillsInventory -> environment block
+//	base (Override if set, else Base) -> Append -> Recall -> Wait -> Outcome ->
+//	ContextFiles -> SkillsInventory -> environment block
 //
 // Empty optional sections are omitted entirely - no stray blank sections or
 // doubled separators.
@@ -96,6 +111,9 @@ func BuildSystemPrompt(c SysPromptConfig) string {
 	}
 	if c.Wait {
 		optional = append(optional, waitSection)
+	}
+	if c.Outcome {
+		optional = append(optional, outcomeSection)
 	}
 	optional = append(optional, c.ContextFiles, c.SkillsInventory)
 

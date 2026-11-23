@@ -51,7 +51,9 @@ const CoordinationPrompt = "You are running under rafiki, which exposes its agen
 	"mcp__rafiki__ (mcp__rafiki__agent_spawn, mcp__rafiki__agent_result), and a bare name is " +
 	"not a tool. Your own outcome verbs are mcp__rafiki__agent_report (a short note to your " +
 	"parent that does not end your turn) and mcp__rafiki__agent_result (the verdict your parent " +
-	"sees when your turn ends; set it before you stop). " +
+	"sees when your turn ends). ALWAYS call mcp__rafiki__agent_result as the last thing you do " +
+	"when you have finished the work you were given, with a status line and one line per " +
+	"finding: a turn that ends in prose is invisible to a parent watching results. " +
 	"When you delegate work to a subagent, use rafiki's agent_spawn " +
 	"rather than your built-in Task tool: a rafiki agent is a separate daemon-managed " +
 	"process, visible in the operator's cockpit, budgetable in dollars, steerable and " +

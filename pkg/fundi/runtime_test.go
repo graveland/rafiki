@@ -837,3 +837,18 @@ func TestCanWaitCoversEveryAsyncTool(t *testing.T) {
 	reg.Register(waitTestTool("edit"))
 	c.False(canWait(reg), "a read/edit-only child must not get the waiting section")
 }
+
+// canReport is the reporting section's gate: the child must actually have the
+// outcome verb, or the prompt is telling it to call a tool it does not have.
+func TestCanReportFollowsTheAgentResultTool(t *testing.T) {
+	c := assert.NewAborting(t)
+	with := tools.NewRegistry()
+	with.Register(waitTestTool((tools.AgentResultBlueprint{}).Name()))
+	c.True(canReport(with), "a child with agent_result gets the reporting section")
+
+	without := tools.NewRegistry()
+	without.Register(waitTestTool("read"))
+	without.Register(waitTestTool((tools.AgentReportBlueprint{}).Name()))
+	c.False(canReport(without),
+		"agent_report alone is a mid-flight note, not the turn-end signal, so it must not open the section")
+}

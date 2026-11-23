@@ -164,3 +164,30 @@ func TestWaitSectionOnlyWhenEnabled(t *testing.T) {
 	c.NotStrContains(on, "agent_list", "the waiting section must name no tools; got")
 	c.NotStrContains(off, "## Waiting", "waiting section present when Wait is unset; got")
 }
+
+// The reporting rule is emitted only for a child that has agent_result: its
+// turn end is what a watching parent wakes on, and a child without the tool
+// must not be told to call it.
+func TestOutcomeSectionOnlyWhenEnabled(t *testing.T) {
+	on := BuildSystemPrompt(SysPromptConfig{Base: "base.", Outcome: true, Cwd: "/w", ModelID: "m"})
+	off := BuildSystemPrompt(SysPromptConfig{Base: "base.", Cwd: "/w", ModelID: "m"})
+
+	c := assert.NewAborting(t)
+	c.StrContains(on, "## Reporting back", "reporting section missing when Outcome is set; got")
+	c.StrContains(on, "END the turn with agent_result", "it must say the call ends the turn; got")
+	c.StrContains(on, "one line per finding", "and what the result should contain; got")
+	c.StrContains(on, "invisible to it", "and the consequence, which is the half a model cannot infer; got")
+	c.NotStrContains(off, "## Reporting back", "reporting section present when Outcome is unset; got")
+}
+
+// The reporting section sits with the other tool-gated sections, ahead of the
+// per-turn environment block, so the cacheable prefix stays stable.
+func TestOutcomeSectionPrecedesTheEnvironmentBlock(t *testing.T) {
+	c := assert.NewAborting(t)
+	got := BuildSystemPrompt(SysPromptConfig{
+		Base: "BASE_MARKER", Outcome: true, ContextFiles: "FILES_MARKER", Cwd: "/work/proj", ModelID: "m"})
+	outcomeIdx := strings.Index(got, "## Reporting back")
+	c.Greater(-1, outcomeIdx, "reporting section missing from %q", got)
+	c.Less(strings.Index(got, "FILES_MARKER"), outcomeIdx, "the reporting section must come before the context files; got %q", got)
+	c.Less(strings.Index(got, "/work/proj"), outcomeIdx, "the environment block must stay last; got %q", got)
+}

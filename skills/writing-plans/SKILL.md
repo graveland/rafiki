@@ -51,6 +51,8 @@ max_cost: 0.15
 verify: go test ./pkg/fundi/tools/ -run TestAgentList -count=1
 
 <body>
+
+<the closing line, verbatim>
 ```
 
 `### Task <wave>.<n> — <title>` is a **machine anchor**. The coordinator
@@ -83,7 +85,25 @@ template.
 - **`verify`** — the exact command that proves this task. Not "run the tests".
   Required for every task, including inline ones, because inline is the mode
   most often tagged wrong.
-- **body** — the work.
+- **body** — the work, ending with the closing line.
+
+### The closing line
+
+Every dispatched task body ends with this paragraph, verbatim:
+
+> Your LAST action is `agent_result`: one status line (DONE, DONE_WITH_CONCERNS,
+> NEEDS_CONTEXT or BLOCKED) then one line per finding or concern. A turn that
+> ends in prose is invisible to the dispatcher: it is not woken, and it reads the
+> silence as work still in progress.
+
+It is written into the plan, not left to the coordinator to remember, because the
+coordinator's prompt is a paraphrase of this file and paraphrases drop it. A
+result is the only signal a `notify: result` dispatch wakes on (see
+`coordinating-agents`), so a task that ends without one leaves the coordinator
+believing the work is still running. Say it in exactly these words rather than
+"remember to report": a literal sentence gets copied, and a reminder gets
+reworded away. Inline tasks carry their `verify` and no closing line: the
+coordinator is the one reporting.
 
 **Inline tasks exist.** A one-line change whose body contains the exact text
 gains nothing from a spawn — mark it for the coordinator to edit itself, run

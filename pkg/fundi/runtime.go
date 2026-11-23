@@ -637,6 +637,13 @@ var waitTools = []string{
 // canWait reports whether the child has any tool that can leave work running.
 // A child with none — a read/edit-only reviewer, say — has nothing to wait on,
 // and the section would be tokens spent conveying nothing.
+// canReport reports whether the child has the outcome verb its parent watches.
+// A child without it (an interactive session's engine, a tool-less worker) is
+// not told to report: naming a tool it does not have is worse than silence.
+func canReport(registry *tools.Registry) bool {
+	return registry.Retains((tools.AgentResultBlueprint{}).Name())
+}
+
 func canWait(registry *tools.Registry) bool {
 	for _, name := range waitTools {
 		if registry.Retains(name) {
@@ -905,6 +912,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		SkillsInventory:        skills.SkillsInventory(discovered),
 		Recall:                 registry.Retains((tools.RecallBlueprint{}).Name()),
 		Wait:                   canWait(registry),
+		Outcome:                canReport(registry),
 		Cwd:                    opts.Cwd,
 		Workspace:              opts.Workspace,
 		Ref:                    opts.Ref,

@@ -93,6 +93,9 @@ type Config struct {
 	// Wait emits the waiting section: the child can start subagents or
 	// background jobs, so tell it to end its turn rather than poll.
 	Wait bool
+	// Outcome emits the reporting section: the child has agent_result, so its
+	// turn end is something a watching parent needs to be told.
+	Outcome bool
 	// Cwd is reported in the system prompt's environment block.
 	Cwd string
 
@@ -372,6 +375,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 			SkillsInventory: c.SkillsInventory,
 			Recall:          c.Recall,
 			Wait:            c.Wait,
+			Outcome:         c.Outcome,
 			Cwd:             c.Cwd,
 			ModelID:         c.Model,
 			Workspace:       c.Workspace,
