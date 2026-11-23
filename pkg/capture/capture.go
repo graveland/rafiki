@@ -656,16 +656,27 @@ func (s *CaptureStore) attachRequest(ctx context.Context, convID, turnID string,
 // lands on the head the request already reached.
 func (s *CaptureStore) planRequest(ctx context.Context, h *conv.Handle, convID string, createdAt time.Time, msgs []convtree.Msg, prevMessageID string) (conv.Append, error) {
 	if len(msgs) == 0 {
-		st, err := h.State(ctx)
+		head, err := requestHead(ctx, h, convID)
 		if err != nil {
-			return conv.Append{}, fmt.Errorf("attach: read head: %w", err)
+			return conv.Append{}, err
 		}
-		if st.HeadID == "" {
-			return conv.Append{}, fmt.Errorf("attach: conversation %s has no messages and no head", convID)
-		}
-		return conv.Append{ParentID: st.HeadID}, nil
+		return conv.Append{ParentID: head}, nil
 	}
 	return s.planAttach(ctx, h, convID, createdAt, msgs, prevMessageID)
+}
+
+// requestHead is the node a request carrying no messages hangs its reply under:
+// the conversation's current head. A caller that retries the append reads this
+// ONCE and reuses it, because an attempt's commit moves the head.
+func requestHead(ctx context.Context, h *conv.Handle, convID string) (string, error) {
+	st, err := h.State(ctx)
+	if err != nil {
+		return "", fmt.Errorf("attach: read head: %w", err)
+	}
+	if st.HeadID == "" {
+		return "", fmt.Errorf("attach: conversation %s has no messages and no head", convID)
+	}
+	return st.HeadID, nil
 }
 
 // planAttach decides where the request hangs and what to append there.

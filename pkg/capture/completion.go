@@ -38,7 +38,15 @@ type TurnCompletion struct {
 // Thread classification is best-effort and runs before the transaction: a
 // lookup failure logs and completes the turn with no thread rather than losing
 // the call's record. The conversation's model is backfilled in the same
-// transaction, and only remembered once that transaction commits.
+// transaction and only remembered once it commits, so a backfill that fails
+// fails the call with the nodes and the turn row (a standalone backfill could
+// only warn), and it writes no updated_at: the commit's own conversation update
+// moves that whenever it stores a message.
+//
+// A call with no request messages appends no request node, so its reply hangs
+// under the conversation's head as it stood before the call. When the reply is
+// already stored, that node's parent is used instead, which keeps a re-issued
+// completion the same node rather than a second copy of one reply.
 func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletion) error {
 	msgs, err := requestMessages(c.ReqBody)
 	if err != nil {
@@ -62,11 +70,42 @@ func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletio
 		threadID = ""
 	}
 
+	// A request carrying no messages appends nothing, so its reply hangs under the
+	// conversation's head, and that head is read ONCE here rather than per attempt
+	// (an attempt's commit moves it). When the reply is already stored, a re-issued
+	// completion hangs it under that node's parent instead, so the replay is the
+	// same node rather than a second copy of one reply.
+	var emptyParent string
+	if len(msgs) == 0 {
+		h := s.handle(c.ConversationID)
+		var stored bool
+		if c.OwnMessageID != "" {
+			n, ok, err := h.NodeByProviderMessageID(ctx, c.OwnMessageID)
+			if err != nil {
+				return fmt.Errorf("attach: resolve the stored reply: %w", err)
+			}
+			if ok {
+				emptyParent, stored = n.ParentID, true
+			}
+		}
+		if !stored {
+			head, err := requestHead(ctx, h, c.ConversationID)
+			if err != nil {
+				return err
+			}
+			emptyParent = head
+		}
+	}
+
 	err = retryDB(ctx, "completeCapturedTurn", func(ctx context.Context) error {
 		h := s.handle(c.ConversationID)
-		plan, err := s.planRequest(ctx, h, c.ConversationID, c.CreatedAt, msgs, c.PrevMessageID)
-		if err != nil {
-			return fmt.Errorf("decompose: %w", err)
+		plan := conv.Append{ParentID: emptyParent}
+		if len(msgs) > 0 {
+			var err error
+			plan, err = s.planRequest(ctx, h, c.ConversationID, c.CreatedAt, msgs, c.PrevMessageID)
+			if err != nil {
+				return fmt.Errorf("decompose: %w", err)
+			}
 		}
 		changed, err := s.prefixChanged(ctx, c.ConversationID, c.CreatedAt, c.PrefixHash)
 		if err != nil {

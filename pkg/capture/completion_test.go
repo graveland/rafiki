@@ -88,6 +88,9 @@ type completedTurn struct {
 	Upstream               string
 	StopReason             string
 	Error                  string
+	Response               string
+	ResponseID             string
+	ServedProvider         string
 	Input, Output          int64
 	CacheRead, CacheCreate int64
 	Latency                int
@@ -104,12 +107,13 @@ func readCompletedTurn(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tu
 	var r completedTurn
 	assert.NewAborting(t).NoError(pool.QueryRow(ctx,
 		`SELECT status, coalesce(model,''), coalesce(upstream,''), coalesce(stop_reason,''), coalesce(error,''),
+		        coalesce(response::text,''), coalesce(response->>'id',''), coalesce(served_provider,''),
 		        coalesce(input_tokens,0), coalesce(output_tokens,0), coalesce(cache_read_tokens,0), coalesce(cache_creation_tokens,0),
 		        coalesce(latency_ms,0),
 		        coalesce(response_message_id,''), coalesce(thread_id::text,''), coalesce(request_head_id::text,''),
 		        coalesce(response_ordinal,-1), coalesce(cache_breakpoints::text,''), coalesce(prefix_content::text,'')
 		   FROM conversations.conversation_turn WHERE id=$1::uuid`, turnID).Scan(
-		&r.Status, &r.Model, &r.Upstream, &r.StopReason, &r.Error,
+		&r.Status, &r.Model, &r.Upstream, &r.StopReason, &r.Error, &r.Response, &r.ResponseID, &r.ServedProvider,
 		&r.Input, &r.Output, &r.CacheRead, &r.CacheCreate, &r.Latency,
 		&r.ResponseMessageID, &r.ThreadID, &r.RequestHeadID, &r.ResponseOrdinal,
 		&r.CacheBreakpoints, &r.PrefixContent), "read the turn row")
@@ -185,6 +189,42 @@ func TestCompleteCapturedTurnStaleKeyRollsBackTheNodes(t *testing.T) {
 	c.Eq("pending", readCompletedTurn(t, ctx, pool, turnID).Status, "the real turn row was never completed")
 }
 
+// The turn row carries the call's whole outcome: the stored response body, the
+// stop reason, the served provider, the response model and the thread the call
+// was classified into.
+func TestCompleteCapturedTurnRecordsTheCallsOutcomeAndThread(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	session := "outcome-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix := routing.PrefixHash(req)
+	turnID, createdAt := insertCompletionTurn(t, s, convID, "", prefix)
+
+	thread := uuid.Must(uuid.NewV7()).String()
+	s.resolveThreadFn = func(context.Context, string, string, string, string, bool) (string, error) {
+		return thread, nil
+	}
+	t.Cleanup(func() { s.resolveThreadFn = nil })
+
+	call := completion(turnID, createdAt, convID, session, "", "msg_out", req, prefix, canonicalReply("msg_out", "ok"))
+	call.IsSubagent = true
+	call.Response = canonicalReply("msg_out", "ok")
+	call.ServedProvider = "anthropic"
+	call.StopReason = "tool_use"
+	c.NoError(s.CompleteCapturedTurn(ctx, call), "CompleteCapturedTurn")
+
+	row := readCompletedTurn(t, ctx, pool, turnID)
+	c.Eq("complete", row.Status, "status")
+	c.Eq(thread, row.ThreadID, "the classified thread is stamped")
+	c.Eq("tool_use", row.StopReason, "stop reason")
+	c.Eq("anthropic", row.ServedProvider, "served provider")
+	c.Eq("m", row.Model, "the response model fills the turn")
+	c.Eq("msg_out", row.ResponseID, "the canonical response body is stored")
+	c.NotEmpty(row.Response, "and its content came with it")
+}
+
 // A re-issued completion (the commit landed, the caller saw an error) writes
 // the same rows and the same turn values: the hook is a constant of the call.
 func TestCompleteCapturedTurnTwiceIsIdempotent(t *testing.T) {
@@ -241,6 +281,11 @@ func TestCompleteCapturedTurnMatchedRequestAttachesTheReplyUnderTheHead(t *testi
 	reply := mustProviderNode(t, ctx, pool, convID, "msg_2")
 	c.Eq(head, mustParent(t, ctx, pool, reply), "the reply hangs under the matched head")
 	c.Eq(3, mustNodeCount(t, ctx, pool, convID), "the re-sent history added no node")
+	// A request that appended nothing is still the turn's request head, so the
+	// head comes from the plan's parent rather than from a node we inserted.
+	row := readCompletedTurn(t, ctx, pool, turn2)
+	c.Eq(head, row.RequestHeadID, "the turn points at the matched head")
+	c.Eq(mustReplyOrdinal(t, ctx, pool, convID, "msg_2"), row.ResponseOrdinal, "and at the reply's ordinal")
 }
 
 // A request carrying no history appends nothing and hangs its reply under the
@@ -270,6 +315,38 @@ func TestCompleteCapturedTurnWithNoHistoryHangsUnderTheHead(t *testing.T) {
 		"the reply hangs under the head the request appended nothing to")
 }
 
+// A re-issued empty-history completion attaches to the head it read the first
+// time: reading the head per attempt would hang the reply under the reply the
+// first attempt stored.
+func TestCompleteCapturedTurnWithNoHistoryTwiceIsIdempotent(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	session := "nohistory-twice-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+
+	req1 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix1 := routing.PrefixHash(req1)
+	turn1, at1 := insertCompletionTurn(t, s, convID, "m", prefix1)
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn1, at1, convID, session, "",
+		"msg_1", req1, prefix1, canonicalReply("msg_1", "ok"))), "turn 1")
+	head := mustHead(t, ctx, pool, convID)
+
+	req2 := []byte(`{"model":"m","messages":[]}`)
+	prefix2 := routing.PrefixHash(req2)
+	turn2, at2 := insertCompletionTurn(t, s, convID, "m", prefix2)
+	call := completion(turn2, at2, convID, session, "", "msg_2", req2, prefix2, canonicalReply("msg_2", "second"))
+	c.NoError(s.CompleteCapturedTurn(ctx, call), "turn 2")
+	after := readCompletedTurn(t, ctx, pool, turn2)
+	nodes := mustNodeCount(t, ctx, pool, convID)
+
+	c.NoError(s.CompleteCapturedTurn(ctx, call), "the same call again")
+	c.Eq(nodes, mustNodeCount(t, ctx, pool, convID), "the replay adds no node")
+	c.Eq(head, mustParent(t, ctx, pool, mustProviderNode(t, ctx, pool, convID, "msg_2")),
+		"the reply still hangs under the head the first attempt read")
+	c.Eq(after, readCompletedTurn(t, ctx, pool, turn2), "and the turn row is unchanged")
+}
+
 // A thread lookup that fails costs the turn its thread, never its record.
 func TestCompleteCapturedTurnThreadFailureDoesNotFailTheCompletion(t *testing.T) {
 	s, pool := newTestStore(t)
@@ -295,7 +372,11 @@ func TestCompleteCapturedTurnThreadFailureDoesNotFailTheCompletion(t *testing.T)
 }
 
 // The conversation's model is remembered only once the transaction that wrote
-// it commits: a failed completion leaves the memo cold for the next attempt.
+// it commits: a failed completion leaves the memo cold for the next attempt. The
+// backfill's own rollback is the hook contract's, pinned by
+// TestConvBackendFinalizeErrorRollsBackTheInsertsAndTheHooksWrites (pkg/store): a
+// hook statement that fails, or is followed by one that does, takes its writes
+// with the commit.
 func TestCompleteCapturedTurnMarksTheModelOnlyAfterCommit(t *testing.T) {
 	s, pool := newTestStore(t)
 	ctx := context.Background()
