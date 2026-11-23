@@ -296,8 +296,11 @@ reported as `conv.ErrFinalizeNotRun`. The hook may run again against nodes that
 already exist: after an ambiguous commit the retry runs it a second time, and
 so does a caller that re-issues an append whose nodes are already stored, so a
 hook must be a pure function of its inputs: constants only, no increments, no
-`now()`. Capture uses it to write a call's turn row in the same transaction as
-its request and response nodes (`CaptureStore.CompleteCapturedTurn`).
+`now()`. A re-run after a commit that landed matches no row, which is how a
+replayed completion stays a no-op; capture relies on that, and refuses a turn
+whose row is already `complete`. Capture uses the hook to write a call's turn row
+in the same transaction as its request and response nodes
+(`CaptureStore.CompleteCapturedTurn`).
 
 ## Origin: which harness wrote a node
 
