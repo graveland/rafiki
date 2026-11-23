@@ -333,6 +333,20 @@ wrong, say so in the plan explicitly with the command or measurement that
 settles it, **and amend the design in the same pass**. A correction recorded in
 both places survives; one that lives only in a plan dies with the scaffold.
 
+## The plan never lands itself
+
+A plan's last wave ends with the coordinator reporting the integration branch,
+its diff and the gate evidence, then **stopping**. Landing that branch on `main`
+is the operator's gate, taken in the moment, and it is not the plan's to grant.
+
+So do not write a step that says "the coordinator merges to main", in any
+phrasing, however natural it feels at the end of a finishing section. A
+coordinator follows the plan; a plan that authorises the land gets one, with no
+human in the loop, and the review cycle the plan spent dollars on is bypassed by
+its own instructions. Write the hand-off instead: what the branch contains, what
+the gate proved, and that it is parked for the operator. If a later fix round
+happens after that hand-off, it lands on the integration branch, not on `main`.
+
 ## The plan is scaffolding
 
 Write it to `docs/plans/YYYY-MM-DD-<topic>-plan.md`. **Do not commit it** —

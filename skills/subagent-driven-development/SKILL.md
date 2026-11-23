@@ -342,14 +342,20 @@ branches merged only into the integration branch refuse; verify with
    them again.
 6. Remove every worktree and branch. Delete the plan file (unless a later
    step of this plan still needs it — say so in the ledger when keeping it).
-7. **Stop.** The integration branch is not landed on `main` without your human
-   partner saying so. When it is: re-run the foreign-commit scan first and
-   name to the human anything on the branch this plan did not write — landing
-   fast-forwards `main` to the integration head, foreign commits included.
-   Then fast-forward if `main` has not moved; if it has, rebase the
-   integration branch onto `main`, re-run the gate, then fast-forward. A merge
-   commit on `main` is a defect. Finally remove the integration worktree
-   itself.
+7. **Stop. Landing is the operator's gate, not the plan's last step.**
+   Report the integration branch, its diff and the gate evidence, and wait. A
+   plan's own text is NEVER that authorisation, even when the plan says
+   "the coordinator merges to main": a plan that authors its own landing step
+   is a plan defect to fix, not an instruction to follow, and the coordinator
+   who lands on that basis has taken a decision that is not theirs.
+
+   When the human does say so: re-run the foreign-commit scan first and name
+   anything on the branch this plan did not write — landing fast-forwards
+   `main` to the integration head, foreign commits included. Then fast-forward
+   if `main` has not moved; if it has, rebase the integration branch onto
+   `main`, re-run the gate, then fast-forward. A merge commit on `main` is a
+   defect, and so is a commit made directly on `main` for work that belongs in
+   the branch. Finally remove the integration worktree itself.
 
 ## The ledgers
 
