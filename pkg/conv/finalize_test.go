@@ -147,6 +147,29 @@ func TestFinalizeErrorWrappingConflictIsNotRetried(t *testing.T) {
 	c.NotErrorIs(err, conv.ErrFinalizeNotRun, "the hook did run")
 }
 
+// A hook error that wraps ErrLeaseLost is returned at once too, with the lost
+// lease still visible to errors.Is: the caller has to stop writing either way,
+// and the hook's write is the reason.
+func TestFinalizeErrorWrappingLeaseLostIsNotRetried(t *testing.T) {
+	c := assert.NewAborting(t)
+	b, convID := newConv(t)
+	ctx := context.Background()
+	h := conv.NewStore(b, conv.Options{}).Open(convID, conv.AsOwner())
+
+	var rec hookRecord
+	_, err := h.Append(ctx, conv.Append{
+		FromHead: true,
+		Nodes:    []conv.NewNode{{Msg: textMsg(msg.User, "lease gone")}},
+		Finalize: rec.hook(fmt.Errorf("x: %w", conv.ErrLeaseLost)),
+	})
+	c.ErrorIs(err, conv.ErrLeaseLost, "the hook's wrapped lease loss is returned")
+	c.Eq(1, rec.runs, "a hook error is never retried")
+
+	st, err := h.State(ctx)
+	c.NoError(err, "State after")
+	c.Eq("", st.HeadID, "the refused append left no head")
+}
+
 // An attempt that loses the head race never reaches a hook: only the attempt
 // whose commit lands runs it.
 func TestFinalizeRunsOnlyOnTheAttemptThatCommits(t *testing.T) {
@@ -173,16 +196,32 @@ func TestFinalizeBackendThatIgnoresTheHookIsReported(t *testing.T) {
 	c := assert.NewAborting(t)
 	m, convID := newConv(t)
 	ctx := context.Background()
-	h := conv.NewStore(dropsFinalize{Backend: m}, conv.Options{}).Open(convID, conv.AsOwner())
+	s := conv.NewStore(dropsFinalize{Backend: m}, conv.Options{})
+	h := s.Open(convID, conv.AsOwner())
+
+	// A warm cache: the first append installs a head the failed one must move.
+	first, err := h.Append(ctx, conv.Append{FromHead: true, Nodes: []conv.NewNode{{Msg: textMsg(msg.User, "first")}}})
+	c.NoError(err, "first append")
 
 	var rec hookRecord
-	_, err := h.Append(ctx, conv.Append{
+	_, err = h.Append(ctx, conv.Append{
 		FromHead: true,
 		Nodes:    []conv.NewNode{{Msg: textMsg(msg.User, "hook skipped")}},
 		Finalize: rec.hook(nil),
 	})
 	c.ErrorIs(err, conv.ErrFinalizeNotRun, "a backend that skipped the hook is reported")
 	c.Eq(0, rec.runs, "the hook never ran")
+
+	// The rows did land, so the report is about the missing companion writes and
+	// not about the tree: the append's rows are readable afterwards, and the owner
+	// read that trusts the cached head sees the committed one rather than the head
+	// the attempt read.
+	st, err := h.State(ctx)
+	c.NoError(err, "State after")
+	c.True(st.HeadID != first.Nodes[0].ID, "the committed head moved past the first append")
+	warm, err := h.Working(ctx)
+	c.NoError(err, "Working after")
+	c.Len(warm, 2, "an owner read serves the committed head, not a stale cached one")
 }
 
 // A replay inserts nothing and still runs the hook: the chain is the same one,
@@ -212,6 +251,7 @@ func TestFinalizeRunsOnAReplayThatInsertsNothing(t *testing.T) {
 	c.Eq(0, rec.res.Inserted, "the replay inserted nothing")
 	c.Len(rec.res.Nodes, len(chain), "the hook sees the whole chain")
 	c.EqDeep(nodeIDs(first.Nodes), nodeIDs(rec.res.Nodes), "the chain's committed ids")
+	c.EqDeep([]bool{false, false}, rec.zeroAt, "a replayed node keeps the created_at its own commit wrote")
 	c.Eq(0, replay.Inserted, "the replay reports no insert")
 }
 

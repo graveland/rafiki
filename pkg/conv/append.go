@@ -229,9 +229,10 @@ func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result,
 		committed[i] = copyNode(n)
 	}
 
-	// The chain the hook is told about is the whole one, held nodes first, with
-	// the identities the commit gives it and no created_at: the backend stamps
-	// that only once the transaction is over.
+	// The chain the hook is told about is the whole one, held nodes first, each
+	// with the id and ordinal its commit gave it. Only the inserted suffix is
+	// unstamped: created_at is stamped once the transaction is over, so a held
+	// node keeps the one its own commit already wrote.
 	var ran bool
 	var finalize func(ctx context.Context, x TxExec) error
 	if a.Finalize != nil {
@@ -264,6 +265,9 @@ func (h *Handle) appendAttempt(ctx context.Context, a Append, st State) (Result,
 		return Result{}, err
 	}
 	if a.Finalize != nil && !ran {
+		// The rows landed even though the hook did not run, so the cache must not
+		// keep the head this attempt read.
+		h.store.refreshAfterCommit(ctx, h.convID)
 		return Result{}, ErrFinalizeNotRun
 	}
 	for _, n := range rows {

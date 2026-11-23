@@ -5,12 +5,14 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multigres/testkit/assert"
 
 	"go.graveland.dev/rafiki/pkg/conv"
+	"go.graveland.dev/rafiki/pkg/msg"
 )
 
 // errBoom is what a Finalize hook fails with when the test wants the commit
@@ -39,7 +41,9 @@ func setConversationName(t *testing.T, pool *pgxpool.Pool, convID, name string) 
 
 // TestConvBackendFinalizeRunsInTheCommitTransaction pins the hook's place: it
 // runs after the inserts and the counter update, inside the same transaction, so
-// its write is durable with the commit that carried it.
+// its write is durable with the commit that carried it. The hook's own predicate
+// reads the counters this commit just moved, so a hook placed ahead of them
+// updates nothing.
 func TestConvBackendFinalizeRunsInTheCommitTransaction(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := leasePool(t)
@@ -57,13 +61,14 @@ func TestConvBackendFinalizeRunsInTheCommitTransaction(t *testing.T) {
 		NewHead:           row.ID,
 		Finalize: func(ctx context.Context, x conv.TxExec) error {
 			n, err := x.Exec(ctx,
-				`UPDATE conversations.conversation SET name = $2 WHERE id = $1::uuid`, convID, "finalized")
+				`UPDATE conversations.conversation SET name = $2
+				  WHERE id = $1::uuid AND next_ordinal = 1 AND node_count = 1`, convID, "finalized")
 			rowsAffected = n
 			return err
 		},
 	})
 	c.NoError(err, "the commit with a Finalize hook")
-	c.Eq(int64(1), rowsAffected, "the hook's Exec reports the one conversation row it wrote")
+	c.Eq(int64(1), rowsAffected, "the hook ran after the inserts and the counters they moved")
 	c.Eq("finalized", conversationName(t, pool, convID), "the hook's write committed with the tree")
 	c.Eq(1, countNodes(t, pool, convID), "and the commit's node committed too")
 }
@@ -97,6 +102,33 @@ func TestConvBackendFinalizeErrorRollsBackTheInsertsAndTheHooksWrites(t *testing
 	c.ErrorIs(err, errBoom, "the hook's error is the commit's error")
 	c.Eq("before", conversationName(t, pool, convID), "the hook's write was rolled back")
 	c.Eq(0, countNodes(t, pool, convID), "the commit's nodes were rolled back")
+}
+
+// TestConvBackendFinalizeConflictIsNotRetriedThroughAppend pins the retry rule
+// on the production backend: a hook error that wraps ErrConflict reaches the
+// caller instead of the append's retry loop, so the hook runs once and no row is
+// stored.
+func TestConvBackendFinalizeConflictIsNotRetriedThroughAppend(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := leasePool(t)
+	ctx := context.Background()
+	convID := cleanConversation(t, pool)
+	h := conv.NewStore(NewConvBackend(pool), conv.Options{}).Open(convID, conv.AsOwner())
+
+	runs := 0
+	_, err := h.Append(ctx, conv.Append{
+		FromHead: true,
+		Nodes: []conv.NewNode{{
+			Msg: msg.Message{Role: msg.User, Content: []msg.Block{msg.Text{Text: "a hook that conflicts"}}},
+		}},
+		Finalize: func(context.Context, conv.TxExec, conv.Result) error {
+			runs++
+			return fmt.Errorf("hook: %w", conv.ErrConflict)
+		},
+	})
+	c.ErrorIs(err, conv.ErrConflict, "the hook's wrapped conflict reaches the caller")
+	c.Eq(1, runs, "a hook error is not retried")
+	c.Eq(0, countNodes(t, pool, convID), "and nothing was stored")
 }
 
 // TestConvBackendFinalizeNotRunOnAHeadConflict pins the hook behind the head

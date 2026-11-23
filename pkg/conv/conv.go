@@ -138,9 +138,10 @@ type Commit struct {
 	Lease               Lease // zero = unfenced
 	// Finalize, when non-nil, runs inside the commit's transaction after every
 	// insert and the conversation counters, and before the transaction commits.
-	// An error rolls the whole commit back. A backend that commits without
-	// running a non-nil Finalize breaks the contract; Handle.Append reports it
-	// as ErrFinalizeNotRun.
+	// An error rolls the whole commit back, and the backend must return that error
+	// unchanged: a backend that swallowed it would commit the rows and lose the
+	// hook's writes. A backend that commits without running a non-nil Finalize
+	// breaks the contract; Handle.Append reports it as ErrFinalizeNotRun.
 	Finalize func(ctx context.Context, x TxExec) error
 }
 
@@ -215,10 +216,17 @@ type Append struct {
 	Fallback            bool
 	ConsumeClearPending bool
 	// Finalize, when non-nil, writes to the database in the same transaction as
-	// the append: it receives the chain's identities as they will stand once the
-	// commit lands (ids and ordinals set, CreatedAt zero). It may run again after
-	// an ambiguous commit, so it must be a pure function of its inputs. An error
-	// from it rolls the append back and is never retried.
+	// the append. res is the whole chain with the identities the commit gives it:
+	// ids and ordinals set, in append order, held nodes included. Only the nodes
+	// this commit inserts have a zero CreatedAt; a node the conversation already
+	// held keeps the one its own commit wrote. The nodes belong to the store, so
+	// the hook reads them and never mutates or retains them.
+	//
+	// A caller may re-issue the append after an ambiguous commit (the server
+	// committed, the client saw a network error) and the hook then runs again
+	// against nodes that already exist, so every statement must be a constant of
+	// the call: no increments, no now(). An error from the hook rolls the append
+	// back and is never retried.
 	Finalize func(ctx context.Context, x TxExec, res Result) error
 }
 
