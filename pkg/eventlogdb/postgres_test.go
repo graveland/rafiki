@@ -7,9 +7,11 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -310,4 +312,95 @@ func TestRetryResumeAtRoundTrips(t *testing.T) {
 	resolved, err := recs[1].Decode()
 	c.NoError(err, "Decode resolution")
 	c.Nil(resolved.GetRetry().GetResumeAt(), "a resolution event must carry no resume_at")
+}
+
+// countingTracer counts the statements a pool sends.
+type countingTracer struct{ n atomic.Int64 }
+
+func (t *countingTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	t.n.Add(1)
+	return ctx
+}
+func (t *countingTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// Every durable event is one append, and a turn has dozens of them: an append is
+// one statement (one round trip, one commit), not begin, lock, insert, commit.
+func TestAppendIsOneStatement(t *testing.T) {
+	c := assert.NewAborting(t)
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	c.NoError(err, "parse")
+	tr := &countingTracer{}
+	cfg.ConnConfig.Tracer = tr
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	c.NoError(err, "connect")
+	t.Cleanup(pool.Close)
+	c.NoError(store.Migrate(ctx, pool), "migrate")
+	child := "c_" + ulid.Make().String()
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM conversations.event_log WHERE child_id = $1`, child) })
+
+	s := eventlogdb.New(pool)
+	_, err = s.Append(ctx, child, statusEvent(child, "idle")) // warm the connection
+	c.NoError(err, "warm")
+	before := tr.n.Load()
+	const n = 10
+	for range n {
+		_, err = s.Append(ctx, child, statusEvent(child, "streaming"))
+		c.NoError(err, "append")
+	}
+	c.Eq(int64(n), tr.n.Load()-before, "statements for %d appends", n)
+}
+
+// Many publishers on one child through a pool wide enough to run them truly in
+// parallel: every append races for the same MAX+1, and the unique index plus the
+// retry must still give each event exactly one ordinal, with none dropped.
+func TestAppendStormOnAWidePool(t *testing.T) {
+	c := assert.NewAborting(t)
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	c.NoError(err, "parse")
+	cfg.MaxConns = 64
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	c.NoError(err, "connect")
+	t.Cleanup(pool.Close)
+	c.NoError(store.Migrate(ctx, pool), "migrate")
+	child := "c_" + ulid.Make().String()
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM conversations.event_log WHERE child_id = $1`, child) })
+
+	s := eventlogdb.New(pool)
+	const publishers = 200
+	const each = 6
+	var wg sync.WaitGroup
+	errs := make(chan error, publishers)
+	for range publishers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range each {
+				if _, err := s.Append(ctx, child, statusEvent(child, "streaming")); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		c.NoError(err, "append")
+	}
+	const total = publishers * each
+	var count, distinct, maxOrd int
+	c.NoError(pool.QueryRow(ctx, `SELECT count(*), count(DISTINCT ordinal), max(ordinal) FROM conversations.event_log WHERE child_id = $1`, child).Scan(&count, &distinct, &maxOrd), "count")
+	c.Eq(total, count, "no event dropped")
+	c.Eq(total, distinct, "no ordinal issued twice")
+	c.Eq(total-1, maxOrd, "gap-free")
 }
