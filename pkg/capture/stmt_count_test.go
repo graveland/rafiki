@@ -107,6 +107,9 @@ func capturedTurn(ctx context.Context, t *testing.T, s *CaptureStore, session st
 
 	ownMsg := fmt.Sprintf("msg_%d_%s", k, uuid.NewString()[:8])
 	canonical := []byte(fmt.Sprintf(`{"id":%q,"role":"assistant","content":[{"type":"text","text":"answer %d"}],"stop_reason":"end_turn"}`, ownMsg, k))
+	// The priced-turn read the proxy takes before the stream.
+	_, err = s.ConversationTokens(ctx, convID)
+	c.NoError(err, "ConversationTokens")
 	c.NoError(s.CompleteCapturedTurn(ctx, TurnCompletion{
 		TurnResult: TurnResult{TurnID: turnID, CreatedAt: createdAt, ConversationID: convID, Model: "claude-test",
 			StopReason: "end_turn", Upstream: "anthropic", InputTokens: 5, OutputTokens: 5, LatencyMS: 10},
@@ -155,7 +158,7 @@ func TestCapturedTurnStatementCount(t *testing.T) {
 	// The ratchet: a warm turn of a long session costs this many round trips,
 	// one of them the commit that carries the whole call. Lower it when a read
 	// is removed; a new read on the capture path fails here.
-	const warmBudget = 18
+	const warmBudget = 19
 	c.True(warm <= warmBudget, "a warm captured turn sent %d statements, budget %d", warm, warmBudget)
 }
 

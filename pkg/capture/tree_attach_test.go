@@ -466,12 +466,17 @@ func replayCorpus(t *testing.T, ctx context.Context, s *CaptureStore, convID, re
 		}
 		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Protocol: "anthropic"})
 		c.NoError(err, "InsertTurnIntent request %d", n)
-		head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, "", body.Diagnostics.PreviousMessageID)
-		c.NoError(err, "DecomposeRequest request %d", n)
-
 		_, _, canonical, _, err := routing.ParseCapturedResponse("text/event-stream", captureFixtureBody(t, dir, fmt.Sprintf("%06d-response.http", n)))
 		c.NoError(err, "ParseCapturedResponse response %d", n)
-		c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, head, canonical, 1, 1, "end_turn"), "AppendResponseMessage response %d", n)
+		// The call is recorded the way the proxy records it: one transaction.
+		c.NoError(s.CompleteCapturedTurn(ctx, TurnCompletion{
+			TurnResult: TurnResult{TurnID: turnID, CreatedAt: createdAt, ConversationID: convID,
+				StopReason: "end_turn", Upstream: "anthropic", InputTokens: 1, OutputTokens: 1},
+			PrevMessageID: body.Diagnostics.PreviousMessageID,
+			OwnMessageID:  MessageIDFromCanonical(canonical),
+			ReqBody:       req,
+			Canonical:     canonical,
+		}), "CompleteCapturedTurn response %d", n)
 	}
 }
 

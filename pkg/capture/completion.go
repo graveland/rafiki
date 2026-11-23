@@ -5,8 +5,12 @@ package capture
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -47,6 +51,10 @@ type TurnCompletion struct {
 // under the conversation's head as it stood before the call. When the reply is
 // already stored, that node's parent is used instead, which keeps a re-issued
 // completion the same node rather than a second copy of one reply.
+//
+// A turn that already holds a final state is left alone: a re-issued completion
+// returns success without appending, so it cannot move the head back onto a
+// reply that later turns have moved past.
 func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletion) error {
 	msgs, err := requestMessages(c.ReqBody)
 	if err != nil {
@@ -63,37 +71,37 @@ func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletio
 		content = json.RawMessage(`null`)
 	}
 
-	threadID, terr := s.threadResolver()(ctx, c.Session, c.ConversationID, c.TurnID, c.PrevMessageID, c.IsSubagent)
-	if terr != nil {
-		slog.Warn("capture: thread classification failed; completing with no thread",
-			"conversation", c.ConversationID, "turn", c.TurnID, "error", terr)
-		threadID = ""
-	}
+	threadID, chainKey := s.classifyThread(ctx, c)
+	// Read once, before the retry: the backfill is skipped when the store already
+	// knows the column is set, which keeps the hook a function of the call.
+	needModel := c.Model != "" && !s.memo.modelKnown(c.ConversationID)
 
 	// A request carrying no messages appends nothing, so its reply hangs under the
-	// conversation's head, and that head is read ONCE here rather than per attempt
-	// (an attempt's commit moves it). When the reply is already stored, a re-issued
-	// completion hangs it under that node's parent instead, so the replay is the
-	// same node rather than a second copy of one reply.
+	// conversation's head, read ONCE (an attempt's commit moves it). When the reply
+	// is already stored, that node's parent anchors the replay instead.
 	var emptyParent string
 	if len(msgs) == 0 {
-		h := s.handle(c.ConversationID)
-		var stored bool
-		if c.OwnMessageID != "" {
-			n, ok, err := h.NodeByProviderMessageID(ctx, c.OwnMessageID)
-			if err != nil {
-				return fmt.Errorf("attach: resolve the stored reply: %w", err)
+		err := retryDB(ctx, "resolveEmptyParent", func(ctx context.Context) error {
+			h := s.handle(c.ConversationID)
+			if c.OwnMessageID != "" {
+				n, ok, err := h.NodeByProviderMessageID(ctx, c.OwnMessageID)
+				if err != nil {
+					return fmt.Errorf("attach: resolve the stored reply: %w", err)
+				}
+				if ok {
+					emptyParent = n.ParentID
+					return nil
+				}
 			}
-			if ok {
-				emptyParent, stored = n.ParentID, true
-			}
-		}
-		if !stored {
 			head, err := requestHead(ctx, h, c.ConversationID)
 			if err != nil {
 				return err
 			}
 			emptyParent = head
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 	}
 
@@ -159,22 +167,25 @@ func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletio
         response_message_id=NULLIF($13,''), thread_id=$14::uuid,
         request_head_id=$15::uuid, response_ordinal=$16,
         prefix_content=CASE WHEN $17 THEN $18::jsonb ELSE prefix_content END, cache_breakpoints=$19
-    WHERE id=$1::uuid AND created_at=$2`,
+    WHERE id=$1::uuid AND created_at=$2 AND status <> 'complete'`,
 				c.TurnID, c.CreatedAt, nullifyBytes(conv.StorableJSON(c.Response)), nullify(c.StopReason), nullify(c.Upstream),
 				c.InputTokens, c.OutputTokens, c.CacheReadTokens, c.CacheCreationTokens, c.LatencyMS, c.Model,
-				nullify(c.ServedProvider), c.OwnMessageID, nullUUID(threadID), head, respOrd, changed,
+				nullify(c.ServedProvider), chainKey, nullUUID(threadID), head, respOrd, changed,
 				conv.StorableJSON(envelope), bps)
 			if err != nil {
 				return err
 			}
 			if n != 1 {
-				return fmt.Errorf("complete-turn: expected 1 row, updated %d (stale/skewed key)", n)
+				// Zero rows is either a key that matches nothing or a turn that already
+				// holds a final state. Refuse the commit either way; the caller reads the
+				// row to tell them apart, so a re-issued completion stores nothing.
+				return errTurnNotPending
 			}
 			// First-seen-wins backfill of the conversation's model, skipped once
 			// the store knows the column is set. No now() and no increment:
 			// an ambiguous commit re-runs this hook, so every statement here
 			// must be a constant of the call.
-			if c.Model != "" && !s.memo.modelKnown(c.ConversationID) {
+			if needModel {
 				if _, err := x.Exec(ctx,
 					`UPDATE conversations.conversation SET model = $2 WHERE id = $1::uuid AND model IS NULL`,
 					c.ConversationID, c.Model); err != nil {
@@ -190,6 +201,21 @@ func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletio
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errTurnNotPending) {
+			done, derr := s.turnCompleted(ctx, c.TurnID, c.CreatedAt)
+			if derr != nil {
+				return derr
+			}
+			if done {
+				// The call is already recorded: a re-issued completion stores nothing
+				// and must not move the head back onto its own reply.
+				if c.Model != "" {
+					s.memo.markModel(c.ConversationID)
+				}
+				return nil
+			}
+			return fmt.Errorf("complete-turn: expected 1 row, updated 0 (stale/skewed key)")
+		}
 		return err
 	}
 	if c.Model != "" {
@@ -198,25 +224,82 @@ func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletio
 	return nil
 }
 
+// errTurnNotPending reports that the turn's own UPDATE matched no pending row:
+// either the key names nothing or the turn is already final. The caller reads
+// the row to tell those apart.
+var errTurnNotPending = errors.New("complete-turn: turn is not pending")
+
+// classifyThread resolves the turn's thread, best-effort: a lookup failure logs
+// and completes the turn with no thread rather than losing the call's record.
+//
+// The second return value is the chain key later turns resolve this one by. It
+// is empty when classification failed, because a NULL thread_id reads as "the
+// main thread" and would silently route a subagent's later turns onto the
+// session's main conversation; with no chain key the failure breaks the chain
+// instead, so the next turn re-founds its thread.
+func (s *CaptureStore) classifyThread(ctx context.Context, c TurnCompletion) (threadID, chainKey string) {
+	resolve := s.threadResolver()
+	var id string
+	err := retryDB(ctx, "resolveThread", func(ctx context.Context) error {
+		var rerr error
+		id, rerr = resolve(ctx, c.Session, c.ConversationID, c.TurnID, c.PrevMessageID, c.IsSubagent)
+		return rerr
+	})
+	if err != nil {
+		slog.Warn("capture: thread classification failed; completing with no thread and no chain key",
+			"conversation", c.ConversationID, "turn", c.TurnID, "error", err)
+		return "", ""
+	}
+	return id, c.OwnMessageID
+}
+
+// turnCompleted reports whether the turn already holds the call's final state.
+// A key that names no row is not an error: the completion's own UPDATE reports
+// that case.
+func (s *CaptureStore) turnCompleted(ctx context.Context, turnID string, createdAt time.Time) (bool, error) {
+	var status string
+	err := s.pool.QueryRow(ctx,
+		`SELECT status FROM conversations.conversation_turn WHERE id=$1::uuid AND created_at=$2`,
+		turnID, createdAt).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("complete-turn: read turn status: %w", err)
+	}
+	return status == "complete", nil
+}
+
 // FailCompletedTurn records a captured call that produced no usable response
 // body: the turn becomes an error carrying whatever the call learned (usage,
 // latency, upstream, model). Nothing is appended to the tree.
+//
+// A turn that already completed is left alone: the commit landed and the caller
+// saw an error on the way back, so the call IS recorded and downgrading it would
+// produce the very disagreement this rewrite exists to prevent.
 func (s *CaptureStore) FailCompletedTurn(ctx context.Context, r TurnResult, errMsg string) error {
 	return retryDB(ctx, "failCompletedTurn", func(ctx context.Context) error {
 		tag, err := s.pool.Exec(ctx, `UPDATE conversations.conversation_turn SET
         status='error', error=$3, stop_reason=$4, upstream=$5,
         input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10,
         model=COALESCE(NULLIF($11,''), model), served_provider=$12
-    WHERE id=$1::uuid AND created_at=$2`,
+    WHERE id=$1::uuid AND created_at=$2 AND status <> 'complete'`,
 			r.TurnID, r.CreatedAt, errMsg, nullify(r.StopReason), nullify(r.Upstream),
 			r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS, r.Model,
 			nullify(r.ServedProvider))
 		if err != nil {
 			return err
 		}
-		if n := tag.RowsAffected(); n != 1 {
-			return fmt.Errorf("fail-completed-turn: expected 1 row, updated %d (stale/skewed key)", n)
+		if tag.RowsAffected() == 1 {
+			return nil
 		}
-		return nil
+		done, derr := s.turnCompleted(ctx, r.TurnID, r.CreatedAt)
+		if derr != nil {
+			return derr
+		}
+		if done {
+			return nil
+		}
+		return fmt.Errorf("fail-completed-turn: expected 1 row, updated 0 (stale/skewed key)")
 	})
 }

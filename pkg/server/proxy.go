@@ -248,8 +248,8 @@ func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).St
 // failure downgrades the line to cost_turn only rather than losing the log.
 //
 // The current turn is added on top of the rollup because this runs BEFORE
-// CompleteTurn writes it — reordering those to avoid the addition would put a
-// DB write between the stream ending and the operator seeing the line.
+// CompleteCapturedTurn writes it; reordering those to avoid the addition would
+// put a DB write between the stream ending and the operator seeing the line.
 func (p *MessagesProxy) costFields(r *http.Request, convID, model string, usage routing.CapturedUsage) []any {
 	price, ok := p.pricingFor(model)
 	if !ok {
@@ -1546,9 +1546,17 @@ func (p *MessagesProxy) failCompletion(r *http.Request, cr captureRef, result ca
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
 	defer cancel()
 	if ferr := p.store.FailCompletedTurn(ctx, result, reason); ferr != nil {
-		p.logger.WarnContext(ctx, "proxy capture: fail-completed-turn failed", "conversation", cr.convID, "error", ferr)
-		if ferr2 := p.store.FailTurn(ctx, cr.turnID, cr.createdAt, reason); ferr2 != nil {
-			p.logger.WarnContext(ctx, "proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr2)
+		// The billed usage must not be lost to a transient failure of the one write
+		// that carries it, so the usage-bearing update gets a second, fresh context
+		// before anything falls back to a status-only write.
+		p.logger.WarnContext(ctx, "proxy capture: fail-completed-turn failed; retrying", "conversation", cr.convID, "error", ferr)
+		rctx, rcancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
+		defer rcancel()
+		if ferr2 := p.store.FailCompletedTurn(rctx, result, reason); ferr2 != nil {
+			p.logger.WarnContext(rctx, "proxy capture: fail-completed-turn retry failed; the turn keeps no usage", "conversation", cr.convID, "error", ferr2)
+			if ferr3 := p.store.FailTurn(rctx, cr.turnID, cr.createdAt, reason); ferr3 != nil {
+				p.logger.WarnContext(rctx, "proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr3)
+			}
 		}
 	}
 	if terr := p.store.RecordThread(ctx, cr.session, cr.convID, cr.turnID, cr.createdAt, cr.prevMessageID, ownMsg, cr.isSubagent); terr != nil {

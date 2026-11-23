@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multigres/testkit/assert"
 
+	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -347,6 +348,105 @@ func TestCompleteCapturedTurnWithNoHistoryTwiceIsIdempotent(t *testing.T) {
 	c.Eq(after, readCompletedTurn(t, ctx, pool, turn2), "and the turn row is unchanged")
 }
 
+// TestCompleteCapturedTurnReplayDoesNotRewindTheHead: a re-issued completion of
+// a turn that already completed is a no-op. Its append would otherwise find the
+// reply held and move the head back onto it, dropping every later turn from the
+// working path.
+func TestCompleteCapturedTurnReplayDoesNotRewindTheHead(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	session := "rewind-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix := routing.PrefixHash(req)
+	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
+	call := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	c.NoError(s.CompleteCapturedTurn(ctx, call), "the call")
+
+	// A later turn advances the conversation past this call's reply.
+	later := mustAppendReply(t, ctx, pool, s, convID, mustHead(t, ctx, pool, convID),
+		canonicalReply("msg_later", "later"), "end_turn")
+	nodes := mustNodeCount(t, ctx, pool, convID)
+	before := readCompletedTurn(t, ctx, pool, turnID)
+
+	c.NoError(s.CompleteCapturedTurn(ctx, call), "the replay is a success")
+	c.Eq(later, mustHead(t, ctx, pool, convID), "the head stays on the later turn's node")
+	c.Eq(nodes, mustNodeCount(t, ctx, pool, convID), "the replay stores no node")
+	c.Eq(before, readCompletedTurn(t, ctx, pool, turnID), "and rewrites no turn value")
+}
+
+// A failed commit after the hook ran leaves the model unwritten and the memo
+// cold, so the next completion backfills it.
+func TestCompleteCapturedTurnModelBackfillRollsBackWithTheCommit(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	session := "backfillrollback-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix := routing.PrefixHash(req)
+	turnID, createdAt := insertCompletionTurn(t, s, convID, "", prefix)
+
+	s = s.WithConv(conv.NewStore(refusesAfterTheHook{Backend: store.NewConvBackend(pool)}, conv.Options{}))
+	call := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	c.Error(s.CompleteCapturedTurn(ctx, call), "a refused commit fails the call")
+
+	c.False(s.memo.modelKnown(convID), "a refused commit leaves the memo cold")
+	var model *string
+	c.NoError(pool.QueryRow(ctx, `SELECT model FROM conversations.conversation WHERE id=$1::uuid`, convID).Scan(&model), "read model")
+	c.True(model == nil, "and the backfill it ran was rolled back")
+}
+
+// refusesAfterTheHook is a backend that runs the commit's Finalize hook and then
+// refuses the commit, so a statement the hook wrote is rolled back after it ran.
+type refusesAfterTheHook struct{ conv.Backend }
+
+func (b refusesAfterTheHook) Commit(ctx context.Context, cm conv.Commit) (time.Time, error) {
+	if cm.Finalize != nil {
+		if err := cm.Finalize(ctx, hookRanTx{}); err != nil {
+			return time.Time{}, err
+		}
+	}
+	return time.Time{}, errors.New("commit refused after the hook")
+}
+
+// hookRanTx is the transaction a refusing commit hands the hook: every statement
+// reports one row, so the hook runs to its end.
+type hookRanTx struct{}
+
+func (hookRanTx) Exec(context.Context, string, ...any) (int64, error) { return 1, nil }
+
+// A re-issued completion of a turn that already completed stores nothing, even
+// when the reply carries no provider id: the turn row's own final state is the
+// record, not an anchor looked up in the tree.
+func TestCompleteCapturedTurnReplayWithoutAReplyIDStoresNothing(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	session := "noid-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+
+	req1 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix1 := routing.PrefixHash(req1)
+	turn1, at1 := insertCompletionTurn(t, s, convID, "m", prefix1)
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn1, at1, convID, session, "",
+		"msg_1", req1, prefix1, canonicalReply("msg_1", "ok"))), "turn 1")
+
+	req2 := []byte(`{"model":"m","messages":[]}`)
+	prefix2 := routing.PrefixHash(req2)
+	turn2, at2 := insertCompletionTurn(t, s, convID, "m", prefix2)
+	call := completion(turn2, at2, convID, session, "", "", req2, prefix2,
+		[]byte(`{"role":"assistant","content":[{"type":"text","text":"no id"}]}`))
+	c.NoError(s.CompleteCapturedTurn(ctx, call), "turn 2")
+	before := readCompletedTurn(t, ctx, pool, turn2)
+	nodes := mustNodeCount(t, ctx, pool, convID)
+
+	c.NoError(s.CompleteCapturedTurn(ctx, call), "the re-issued completion")
+	c.Eq(before, readCompletedTurn(t, ctx, pool, turn2), "the completed turn is unchanged")
+	c.Eq(nodes, mustNodeCount(t, ctx, pool, convID), "and the replay stores no node")
+}
+
 // A thread lookup that fails costs the turn its thread, never its record.
 func TestCompleteCapturedTurnThreadFailureDoesNotFailTheCompletion(t *testing.T) {
 	s, pool := newTestStore(t)
@@ -369,6 +469,10 @@ func TestCompleteCapturedTurnThreadFailureDoesNotFailTheCompletion(t *testing.T)
 	row := readCompletedTurn(t, ctx, pool, turnID)
 	c.Eq("complete", row.Status, "status")
 	c.Eq("", row.ThreadID, "thread id stays NULL")
+	// NULL thread_id reads as "the main thread", so the chain key must be NULL
+	// too: a later turn must re-found its thread rather than inherit a guess.
+	c.Eq("", row.ResponseMessageID, "and nothing chains through the missing thread")
+	c.Eq(2, mustNodeCount(t, ctx, pool, convID), "the call's nodes are stored anyway")
 }
 
 // The conversation's model is remembered only once the transaction that wrote
@@ -470,6 +574,27 @@ func TestFailCompletedTurnKeepsTheCallsUsage(t *testing.T) {
 	c.Eq("max_tokens", row.StopReason, "stop reason")
 	c.Eq("anthropic", row.Upstream, "upstream")
 	c.Eq("served-model", row.Model, "model")
+}
+
+// A turn that already completed is never downgraded: the commit landed and the
+// caller saw an error on the way back, so the call IS recorded and marking it
+// errored would make the row disagree with the tree.
+func TestFailCompletedTurnLeavesACompletedTurnAlone(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	session := "failcomplete-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix := routing.PrefixHash(req)
+	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
+	call := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	c.NoError(s.CompleteCapturedTurn(ctx, call), "the call")
+	before := readCompletedTurn(t, ctx, pool, turnID)
+
+	c.NoError(s.FailCompletedTurn(ctx, call.TurnResult, "capture completion failed: ambiguous commit"),
+		"a completed turn is not an error")
+	c.Eq(before, readCompletedTurn(t, ctx, pool, turnID), "the completed row is untouched")
 }
 
 // A failure keyed to no row is refused rather than silently no-op'd.

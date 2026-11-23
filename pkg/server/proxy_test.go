@@ -65,6 +65,7 @@ type fakeProxyStore struct {
 	decomposeErrOnce     error              // when set, the FIRST DecomposeRequest returns it and then it is cleared
 	failCompleted        int                // FailCompletedTurn call count
 	failCompletedErr     error              // when set, FailCompletedTurn returns it (to exercise the FailTurn fallback)
+	failCompletedErrOnce error              // when set, the FIRST FailCompletedTurn returns it and then it is cleared
 	lastFailCompleted    capture.TurnResult // the TurnResult the last FailCompletedTurn received
 	failMsgs             []string           // every errMsg passed to FailTurn or FailCompletedTurn, in order
 	calls                []string           // store methods the proxy invoked directly, in order
@@ -146,10 +147,10 @@ func (f *fakeProxyStore) CompleteTurn(ctx context.Context, r capture.TurnResult)
 	return f.completeErr
 }
 
-// CompleteCapturedTurn models the real store's one-transaction completion by
-// running the same writes the proxy used to issue one by one, so every
-// assertion written against the separate calls still holds. Thread
-// classification is best-effort there too, so its error is dropped.
+// CompleteCapturedTurn models the real store's one-transaction completion as the
+// writes it replaces, so every assertion written against the store's separate
+// methods still holds. Thread classification is best-effort there too, so its
+// error is dropped.
 func (f *fakeProxyStore) CompleteCapturedTurn(ctx context.Context, c capture.TurnCompletion) error {
 	f.calls = append(f.calls, "CompleteCapturedTurn")
 	if err := f.CompleteTurn(ctx, c.TurnResult); err != nil {
@@ -182,6 +183,11 @@ func (f *fakeProxyStore) FailCompletedTurn(ctx context.Context, r capture.TurnRe
 	f.failCompleted++
 	f.lastFailCompleted = r
 	f.recordFail(errMsg)
+	if f.failCompletedErrOnce != nil {
+		err := f.failCompletedErrOnce
+		f.failCompletedErrOnce = nil
+		return err
+	}
 	return f.failCompletedErr
 }
 
@@ -448,9 +454,43 @@ func TestMessagesProxyCompletionFailureFallsBackToFailTurn(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "sess-cfallback")
 	p.ServeHTTP(rec, req)
 
-	c.Eq(1, fs.failCompleted, "FailCompletedTurn calls")
+	// The usage-bearing write is retried before anything falls back, so a
+	// permanently failing store reaches the status-only write twice over.
+	c.Eq(2, fs.failCompleted, "FailCompletedTurn calls, calls = %v", fs.calls)
 	c.True(indexOf(fs.calls, "FailTurn") > indexOf(fs.calls, "FailCompletedTurn"),
 		"FailTurn must follow FailCompletedTurn, calls = %v", fs.calls)
+}
+
+// A transient failure of the usage-bearing write is retried: usage is the one
+// thing a status-only fallback would silently lose, and the provider billed it.
+func TestMessagesProxyCompletionFailureRetriesTheUsageWrite(t *testing.T) {
+	c := assert.NewCollecting(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{
+		appendErr:            errors.New("append: lease lost"),
+		failCompletedErrOnce: errors.New("fail-completed-turn: transient"),
+	}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+	req.Header.Set("X-Rafiki-Session", "sess-cretry")
+	p.ServeHTTP(rec, req)
+
+	c.Eq(2, fs.failCompleted, "the usage write is retried")
+	c.Eq(int64(5), fs.lastFailCompleted.InputTokens, "and the retry carries the usage")
+	c.Eq(0, countOf(fs.calls, "FailTurn"), "no status-only fallback once the retry lands, calls = %v", fs.calls)
 }
 
 // The success tail writes the whole call once: one completion, no failure
@@ -1606,7 +1646,7 @@ func TestCatalogIDsLeavesCatalogShapedProvidersAlone(t *testing.T) {
 // the wiring: the proxy passing cr.prevMessageID into DecomposeRequest and
 // appending the response under the head DecomposeRequest returns. pkg/capture's
 // own tests cover the attach decision directly; this one covers the end-to-end
-// path ServeHTTP → streamAndCapture → DecomposeRequest → AppendResponseMessage
+// path ServeHTTP → streamAndCapture → CompleteCapturedTurn
 // for a post-compaction request that names the reply it summarised.
 //
 // The pre-fix behaviour being guarded against: the proxy used to append the
@@ -2418,12 +2458,12 @@ func TestToolLessFounderForksWithoutASyntheticChild(t *testing.T) {
 	}
 }
 
-// TestRecordThreadRunsBeforeAFailedResponseAppend pins the insurance: a
-// capture-write failure after a successful stream must not destroy the thread
-// identity. The thread write reaches the store before the response node does
-// and the failure path records it again, so even a founding turn whose
-// response could not be appended is stamped and the thread's next turn
-// resolves to the branch instead of re-founding.
+// TestRecordThreadRunsBeforeAFailedResponseAppend pins the insurance: a capture
+// failure after a successful stream must not destroy the thread identity. The
+// completion transaction carries it, and when that transaction fails the failure
+// path writes it again, so even a founding turn whose response could not be
+// stored is stamped and the thread's next turn resolves to the branch instead of
+// re-founding.
 func TestRecordThreadRunsBeforeAFailedResponseAppend(t *testing.T) {
 	c := assert.NewCollecting(t)
 	upstream := newStreamUpstream("msg_own")
@@ -2442,9 +2482,12 @@ func TestRecordThreadRunsBeforeAFailedResponseAppend(t *testing.T) {
 	p.ServeHTTP(rec, req)
 
 	c.Require().NotEq(0, fs.fails, "FailTurn calls = 0, want the append failure recorded")
-	c.GreaterOrEqual(1, fs.threads, "RecordThread calls")
 	c.Eq("msg_prev", fs.lastPrevMsg, "prevMessageID the surviving thread write carries")
 	c.Eq("msg_own", fs.lastOwnMsg, "ownMessageID the surviving thread write carries")
+	// The failure path, not the rolled-back completion, is what leaves the thread
+	// write standing.
+	c.True(indexOf(fs.calls, "RecordThread") > indexOf(fs.calls, "FailCompletedTurn"),
+		"the failure path writes the thread, calls = %v", fs.calls)
 }
 
 // TestRawTraceCapturesRealHeaders pins the actual bug: upstreamReqHeaders and

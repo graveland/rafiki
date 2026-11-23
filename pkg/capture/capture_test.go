@@ -589,14 +589,20 @@ func runFullTurn(t *testing.T, ctx context.Context, s *CaptureStore, convID stri
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, prevMessageID)
-	c.NoError(err, "DecomposeRequest")
-	c.NoError(s.CompleteTurn(ctx, TurnResult{
-		TurnID: turnID, CreatedAt: createdAt, Response: []byte(`{"content":[]}`),
-		StopReason: "end_turn", Upstream: "anthropic",
-		InputTokens: inTok, OutputTokens: outTok,
-	}), "CompleteTurn")
-	c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, head, reply, inTok, outTok, "end_turn"), "AppendResponseMessage")
+	// The call is recorded the way the proxy records it: one transaction.
+	c.NoError(s.CompleteCapturedTurn(ctx, TurnCompletion{
+		TurnResult: TurnResult{TurnID: turnID, CreatedAt: createdAt, ConversationID: convID,
+			StopReason: "end_turn", Upstream: "anthropic", InputTokens: inTok, OutputTokens: outTok},
+		PrevMessageID: prevMessageID,
+		OwnMessageID:  MessageIDFromCanonical(reply),
+		ReqBody:       req,
+		PrefixHash:    h,
+		Canonical:     reply,
+	}), "CompleteCapturedTurn")
+	var head string
+	c.NoError(s.pool.QueryRow(ctx,
+		`SELECT coalesce(request_head_id::text, '') FROM conversations.conversation_turn WHERE id=$1::uuid`,
+		turnID).Scan(&head), "read the request head")
 	return head
 }
 
