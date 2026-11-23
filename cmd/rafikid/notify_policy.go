@@ -3,6 +3,8 @@
 package main
 
 import (
+	"log/slog"
+
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -34,6 +36,11 @@ func (s *turnOutcomeStore) uncleanPending(childID string) bool {
 func (c *Controller) notifyTurnEnd(childID string) {
 	snap, ok := c.st.Get(childID)
 	if ok && !wakesSpawner(snap, c.turnOutcomes.uncleanPending(childID), c.breaches.has(childID)) {
+		// The spawner watches results, so this turn is invisible to it: to the
+		// operator that looks exactly like work still in progress. Name the child
+		// in the log so the silence has somewhere to show up.
+		slog.Info("agent turn ended without a result; the spawner is not woken",
+			"childId", childID, "name", snap.Name)
 		c.turnOutcomes.take(childID)
 		c.checkTaskResidue(childID)
 		return
