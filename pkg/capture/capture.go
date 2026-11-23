@@ -28,6 +28,8 @@ type CaptureStore struct {
 	lease store.Lease
 	convs *conv.Store
 	memo  *captureMemo
+	// resolveThreadFn is a test seam; nil means resolveThread.
+	resolveThreadFn func(ctx context.Context, session, convID, turnID, prevMessageID string, isSubagent bool) (string, error)
 }
 
 func NewCaptureStore(pool *pgxpool.Pool) *CaptureStore {
@@ -577,25 +579,12 @@ func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt ti
 // for the caller to escalate (the proxy fails the turn), never panics, never
 // alters reqBody.
 func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (string, error) {
-	var req struct {
-		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(reqBody, &req); err != nil {
-		return "", fmt.Errorf("decompose: unmarshal request: %w", err)
-	}
-	msgs := make([]convtree.Msg, len(req.Messages))
-	for i, m := range req.Messages {
-		content := m.Content
-		if len(content) == 0 {
-			content = json.RawMessage(`null`)
-		}
-		msgs[i] = convtree.Msg{Role: m.Role, Content: conv.StorableJSON(content)}
+	msgs, err := requestMessages(reqBody)
+	if err != nil {
+		return "", err
 	}
 	var head string
-	err := retryDB(ctx, "decomposeRequest", func(ctx context.Context) error {
+	err = retryDB(ctx, "decomposeRequest", func(ctx context.Context) error {
 		h, aerr := s.attachRequest(ctx, convID, turnID, createdAt, msgs, prevMessageID)
 		if aerr != nil {
 			return fmt.Errorf("decompose: %w", aerr)
@@ -609,27 +598,43 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 	return head, nil
 }
 
+// requestMessages parses a request body's messages[] into tree messages.
+// Content is stored verbatim (conv.StorableJSON'd; empty content becomes JSON
+// null).
+func requestMessages(reqBody []byte) ([]convtree.Msg, error) {
+	var req struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(reqBody, &req); err != nil {
+		return nil, fmt.Errorf("decompose: unmarshal request: %w", err)
+	}
+	msgs := make([]convtree.Msg, len(req.Messages))
+	for i, m := range req.Messages {
+		content := m.Content
+		if len(content) == 0 {
+			content = json.RawMessage(`null`)
+		}
+		msgs[i] = convtree.Msg{Role: m.Role, Content: conv.StorableJSON(content)}
+	}
+	return msgs, nil
+}
+
 // attachRequest performs the attach decision, appends the chain and records the
 // request's head node on the turn. Both writes are idempotent (a chain is
 // addressed by its hashes), which is what makes the caller's retry safe.
 func (s *CaptureStore) attachRequest(ctx context.Context, convID, turnID string, createdAt time.Time, msgs []convtree.Msg, prevMessageID string) (string, error) {
 	h := s.handle(convID)
+	req, err := s.planRequest(ctx, h, convID, createdAt, msgs, prevMessageID)
+	if err != nil {
+		return "", err
+	}
 	if len(msgs) == 0 {
 		// A request carrying no history appends nothing: the response hangs off
 		// whatever the conversation's head already is.
-		st, err := h.State(ctx)
-		if err != nil {
-			return "", fmt.Errorf("attach: read head: %w", err)
-		}
-		if st.HeadID == "" {
-			return "", fmt.Errorf("attach: conversation %s has no messages and no head", convID)
-		}
-		return st.HeadID, s.setRequestHead(ctx, turnID, createdAt, st.HeadID)
-	}
-
-	req, err := s.planAttach(ctx, h, convID, createdAt, msgs, prevMessageID)
-	if err != nil {
-		return "", err
+		return req.ParentID, s.setRequestHead(ctx, turnID, createdAt, req.ParentID)
 	}
 	res, err := h.Append(ctx, req)
 	if err != nil {
@@ -643,6 +648,24 @@ func (s *CaptureStore) attachRequest(ctx context.Context, convID, turnID string,
 		return "", fmt.Errorf("attach: append produced no head node")
 	}
 	return head, s.setRequestHead(ctx, turnID, createdAt, head)
+}
+
+// planRequest decides where the request hangs and what to append there. A
+// request carrying no history appends nothing: the plan names the
+// conversation's existing head as the parent, so a response appended under it
+// lands on the head the request already reached.
+func (s *CaptureStore) planRequest(ctx context.Context, h *conv.Handle, convID string, createdAt time.Time, msgs []convtree.Msg, prevMessageID string) (conv.Append, error) {
+	if len(msgs) == 0 {
+		st, err := h.State(ctx)
+		if err != nil {
+			return conv.Append{}, fmt.Errorf("attach: read head: %w", err)
+		}
+		if st.HeadID == "" {
+			return conv.Append{}, fmt.Errorf("attach: conversation %s has no messages and no head", convID)
+		}
+		return conv.Append{ParentID: st.HeadID}, nil
+	}
+	return s.planAttach(ctx, h, convID, createdAt, msgs, prevMessageID)
 }
 
 // planAttach decides where the request hangs and what to append there.
@@ -1118,63 +1141,20 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 }
 
 // RecordThread classifies this turn into its thread and stamps the row:
-// response_message_id (the chain key later turns resolve) and thread_id.
-//
-// Classification, from the two signals the request carries:
-//
-//   - A resolvable predecessor (diagnostics.previous_message_id resolves to a
-//     turn anywhere in the session's family, root row or branch) continues
-//     that turn's thread, and its thread_id is copied verbatim: NULL means the
-//     main thread, so this turn keeps NULL and stays on the bare session row;
-//     a set id means a subagent thread and is inherited.
-//   - No resolvable predecessor makes the turn a thread root: thread_id NULL
-//     (main thread) when the billing header does not mark it a subagent, its
-//     own id (a new thread) when it does. The proxy pre-mints that founding
-//     turn's id and routes the founding REQUEST to the branch named after it
-//     (beginCapture), so a new thread never shares the root row's ordinal
-//     space at all; this method still stamps thread_id = turnID on the row so
-//     later turns resolve, and so a founding request whose response was lost
-//     (its append failed) keeps its thread identity.
-//
-// The predecessor lookup is family-scoped (the session's root conversation and
-// every "<session>:<threadID>" branch, same shape as
-// ThreadOfPredecessorInSession), not scoped to the turn's own conversation: a
-// thread's later turns live on a branch while their predecessor's turn lives
-// on the root, and a per-conversation lookup would break every chain at that
-// boundary and fork a fresh thread per request.
+// response_message_id (the chain key later turns resolve) and thread_id. The
+// classification is resolveThread's; the stamp is this method's.
 //
 // isSubagent is the cc_is_subagent flag parsed from the request's billing
 // header (claudethread.BillingFromRequest), decided by the caller so this
-// store method never learns to parse Claude Code request bodies. The flag is
-// present only when true, so absent means the main thread.
-//
-// Unresolvable must never fall back to "the most recent turn": that is exactly
-// the guess that put concurrent subagents on one thread to begin with.
+// store method never learns to parse Claude Code request bodies.
 func (s *CaptureStore) RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error {
+	resolve := s.threadResolver()
 	return retryDB(ctx, "recordThread", func(ctx context.Context) error {
-		// Main thread by default: thread_id NULL is the convention that keeps
-		// the session's root conversation on the bare external_ref.
-		threadID := ""
-		if isSubagent && prevMessageID == "" {
-			// A concurrent subagent's first turn: a new thread root.
-			threadID = turnID
-		}
-		if prevMessageID != "" {
-			prevThread, err := s.predecessorThreadID(ctx, session, convID, prevMessageID)
-			switch {
-			case err == nil:
-				// Continue the predecessor's thread, NULL and all.
-				threadID = prevThread
-			case errors.Is(err, pgx.ErrNoRows):
-				// Root: a first turn, a pre-0030 predecessor, or a chain broken
-				// by a failed turn that never recorded its id. A subagent here
-				// is still a new thread root; the main thread stays NULL.
-				if isSubagent {
-					threadID = turnID
-				}
-			default:
-				return fmt.Errorf("record thread: resolve predecessor: %w", err)
-			}
+		// Classification looks the predecessor up, so it shares the retry: a
+		// transient read failure here is the same blip as one in the update.
+		threadID, err := resolve(ctx, session, convID, turnID, prevMessageID, isSubagent)
+		if err != nil {
+			return err
 		}
 		tag, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn
@@ -1189,6 +1169,69 @@ func (s *CaptureStore) RecordThread(ctx context.Context, session, convID, turnID
 		}
 		return nil
 	})
+}
+
+// resolveThread classifies one turn into its thread, from the two signals the
+// request carries:
+//
+//   - A resolvable predecessor (diagnostics.previous_message_id resolves to a
+//     turn anywhere in the session's family, root row or branch) continues
+//     that turn's thread, and its thread_id is copied verbatim: NULL means the
+//     main thread, so this turn keeps NULL and stays on the bare session row;
+//     a set id means a subagent thread and is inherited.
+//   - No resolvable predecessor makes the turn a thread root: thread_id NULL
+//     (main thread) when the billing header does not mark it a subagent, its
+//     own id (a new thread) when it does. The proxy pre-mints that founding
+//     turn's id and routes the founding REQUEST to the branch named after it
+//     (beginCapture), so a new thread never shares the root row's ordinal
+//     space at all; the returned id still names the turn so later turns
+//     resolve, and so a founding request whose response was lost (its append
+//     failed) keeps its thread identity.
+//
+// The predecessor lookup is family-scoped (the session's root conversation and
+// every "<session>:<threadID>" branch, same shape as
+// ThreadOfPredecessorInSession), not scoped to the turn's own conversation: a
+// thread's later turns live on a branch while their predecessor's turn lives
+// on the root, and a per-conversation lookup would break every chain at that
+// boundary and fork a fresh thread per request.
+//
+// Unresolvable must never fall back to "the most recent turn": that is exactly
+// the guess that put concurrent subagents on one thread to begin with.
+func (s *CaptureStore) resolveThread(ctx context.Context, session, convID, turnID, prevMessageID string, isSubagent bool) (string, error) {
+	// Main thread by default: thread_id NULL is the convention that keeps the
+	// session's root conversation on the bare external_ref.
+	threadID := ""
+	if isSubagent && prevMessageID == "" {
+		// A concurrent subagent's first turn: a new thread root.
+		threadID = turnID
+	}
+	if prevMessageID != "" {
+		prevThread, err := s.predecessorThreadID(ctx, session, convID, prevMessageID)
+		switch {
+		case err == nil:
+			// Continue the predecessor's thread, NULL and all.
+			threadID = prevThread
+		case errors.Is(err, pgx.ErrNoRows):
+			// Root: a first turn, a pre-0030 predecessor, or a chain broken by a
+			// failed turn that never recorded its id. A subagent here is still a
+			// new thread root; the main thread stays NULL.
+			if isSubagent {
+				threadID = turnID
+			}
+		default:
+			return "", fmt.Errorf("record thread: resolve predecessor: %w", err)
+		}
+	}
+	return threadID, nil
+}
+
+// threadResolver returns the function that classifies a turn into its thread:
+// the test seam when one is set, resolveThread otherwise.
+func (s *CaptureStore) threadResolver() func(ctx context.Context, session, convID, turnID, prevMessageID string, isSubagent bool) (string, error) {
+	if s.resolveThreadFn != nil {
+		return s.resolveThreadFn
+	}
+	return s.resolveThread
 }
 
 // predecessorThreadID resolves prevMessageID one hop back to the turn that

@@ -46,6 +46,14 @@ func (t *stmtTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.Tra
 
 func (t *stmtTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
+// countOf returns how many statements carried exactly sql, under the same
+// normalisation the breakdown uses.
+func (t *stmtTracer) countOf(sql string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.counts[wsRE.ReplaceAllString(strings.TrimSpace(sql), " ")]
+}
+
 func (t *stmtTracer) reset() {
 	t.mu.Lock()
 	t.counts, t.total = map[string]int{}, 0
@@ -99,14 +107,16 @@ func capturedTurn(ctx context.Context, t *testing.T, s *CaptureStore, session st
 
 	ownMsg := fmt.Sprintf("msg_%d_%s", k, uuid.NewString()[:8])
 	canonical := []byte(fmt.Sprintf(`{"id":%q,"role":"assistant","content":[{"type":"text","text":"answer %d"}],"stop_reason":"end_turn"}`, ownMsg, k))
-	_, err = s.ConversationTokens(ctx, convID)
-	c.NoError(err, "ConversationTokens")
-	c.NoError(s.CompleteTurn(ctx, TurnResult{TurnID: turnID, CreatedAt: createdAt, ConversationID: convID, Model: "claude-test",
-		Response: canonical, StopReason: "end_turn", Upstream: "anthropic", InputTokens: 5, OutputTokens: 5, LatencyMS: 10}), "CompleteTurn")
-	c.NoError(s.RecordThread(ctx, session, convID, turnID, createdAt, prevMsg, ownMsg, false), "RecordThread")
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, prefix, prevMsg)
-	c.NoError(err, "DecomposeRequest")
-	c.NoError(s.AppendResponseMessage(ctx, convID, turnID, createdAt, head, canonical, 5, 5, "end_turn"), "AppendResponseMessage")
+	c.NoError(s.CompleteCapturedTurn(ctx, TurnCompletion{
+		TurnResult: TurnResult{TurnID: turnID, CreatedAt: createdAt, ConversationID: convID, Model: "claude-test",
+			StopReason: "end_turn", Upstream: "anthropic", InputTokens: 5, OutputTokens: 5, LatencyMS: 10},
+		Session:       session,
+		PrevMessageID: prevMsg,
+		OwnMessageID:  ownMsg,
+		ReqBody:       req,
+		PrefixHash:    prefix,
+		Canonical:     canonical,
+	}), "CompleteCapturedTurn")
 	return ownMsg
 }
 
@@ -142,9 +152,10 @@ func TestCapturedTurnStatementCount(t *testing.T) {
 			cs.Nodes, cs.PathHits, cs.PathMisses, cs.NodeHits, cs.NodeMisses, cs.HeadServed, cs.HeadInstalls, detail)
 		warm = total
 	}
-	// The ratchet: a warm turn of a long session costs this many round trips.
-	// Lower it when a read is removed; a new read on the capture path fails here.
-	const warmBudget = 32
+	// The ratchet: a warm turn of a long session costs this many round trips,
+	// one of them the commit that carries the whole call. Lower it when a read
+	// is removed; a new read on the capture path fails here.
+	const warmBudget = 18
 	c.True(warm <= warmBudget, "a warm captured turn sent %d statements, budget %d", warm, warmBudget)
 }
 
