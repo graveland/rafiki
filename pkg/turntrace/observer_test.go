@@ -4,6 +4,7 @@ package turntrace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -651,4 +652,63 @@ func TestInjectedOnlyUserMessageRecordsThePrompt(t *testing.T) {
 		"an injected-only prompt recorded no bytes")
 	c.Eq(nudge, attrs["rafiki.user_message"].AsString(),
 		"an injected-only prompt was not recorded")
+}
+
+func TestEventAppendNestsUnderTheTurnAndOnlyInsideOne(t *testing.T) {
+	o, rec := newObserver(t, policyAll(), metaFor, nil)
+	c := assert.NewAborting(t)
+
+	// Outside any turn: nothing is traced, and the end function is safe.
+	ctx, end := o.EventAppend("c1", trace.SpanContext{}, "agent_status")
+	c.False(trace.SpanFromContext(ctx).SpanContext().IsValid(), "no span outside a turn")
+	end(0, nil)
+	c.Eq(0, len(rec.Ended()), "a status change between turns never becomes a root trace")
+
+	// The event that STARTS a turn is appended after Observe opened it: the open
+	// turn is found.
+	o.Observe("c1", evTurnStart(tsAt(0), ""))
+	ctx, end = o.EventAppend("c1", trace.SpanContext{}, "tool_execution_start")
+	c.True(trace.SpanFromContext(ctx).SpanContext().IsValid(), "the append span is the context's span")
+	end(7, nil)
+
+	// The event that ENDS a turn closes it before its own append: the span the
+	// caller captured first still parents the append.
+	turnSC := o.TurnSpanContext("c1")
+	c.True(turnSC.IsValid(), "turn is open")
+	o.Observe("c1", evTurnEnd(tsAt(5), rafikiv1.StopReason_STOP_REASON_END_TURN, nil))
+	c.False(o.TurnSpanContext("c1").IsValid(), "and now it is closed")
+	_, end = o.EventAppend("c1", turnSC, "turn_end")
+	end(8, nil)
+	_, end = o.EventAppend("c1", trace.SpanContext{}, "failed_one")
+	end(0, nil)
+
+	spans := rec.Ended()
+	turn := findOne(t, spans, "invoke_agent c1")
+	appends := spansNamed(spans, "event_log.append")
+	c.Eq(2, len(appends), "two appends were inside a turn; the one after it closed had no span")
+	for _, a := range appends {
+		c.Eq(turn.SpanContext().SpanID(), a.Parent().SpanID(), "append parent is the turn")
+	}
+	first := attrsOf(appends[0])
+	c.Eq("tool_execution_start", first["rafiki.event.type"].AsString(), "event type")
+	c.Eq(int64(7), first["rafiki.event.ordinal"].AsInt64(), "ordinal")
+	c.Eq("c1", first["gen_ai.agent.id"].AsString(), "child id")
+}
+
+func TestEventAppendRecordsAFailedAppend(t *testing.T) {
+	o, rec := newObserver(t, policyAll(), metaFor, nil)
+	c := assert.NewAborting(t)
+	o.Observe("c1", evTurnStart(tsAt(0), ""))
+	_, end := o.EventAppend("c1", trace.SpanContext{}, "assistant_message")
+	end(0, errors.New("db down"))
+	app := findOne(t, rec.Ended(), "event_log.append")
+	c.Eq(codes.Error, app.Status().Code, "status")
+	c.True(len(app.Events()) > 0, "the error is recorded on the span")
+	_, has := attrsOf(app)["rafiki.event.ordinal"]
+	c.False(has, "no ordinal for an append that failed")
+
+	var nilObs *Observer
+	ctx, endNil := nilObs.EventAppend("c1", trace.SpanContext{}, "x")
+	endNil(1, nil)
+	c.False(trace.SpanFromContext(ctx).SpanContext().IsValid(), "a nil observer traces nothing")
 }

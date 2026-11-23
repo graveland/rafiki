@@ -1092,19 +1092,26 @@ func (c *Controller) Stop() {
 // Every c.native.Publish call site goes through here. A rule enforced at N
 // call sites is a rule the N+1th will break.
 func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
+	// The turn this event belongs to, captured before the span builder sees it:
+	// the event that ends a turn closes the span, and its own log append is
+	// still part of that turn.
+	turnSC := c.trace.TurnSpanContext(childID)
 	// Spans are built from the same single path every consumer reads.
 	c.observeEvent(childID, ev)
-	// ONE publisher per child across BOTH the append and the publish. Allocation
-	// is serialized by the log's own advisory lock; without this the publish
-	// that follows it is not, and a late publish of a lower ordinal is silently
-	// dropped by every cursor-based consumer as an already-delivered duplicate.
+	// ONE publisher per child across BOTH the append and the publish. Ordinals
+	// are allocated by the log (the unique (child_id, ordinal) arbitrates
+	// concurrent appends); without this the publish that follows is not ordered,
+	// and a late publish of a lower ordinal is silently dropped by every
+	// cursor-based consumer as an already-delivered duplicate.
 	// See publishLocks.
 	unlock := c.publishLocks.lock(childID)
 	defer unlock()
 	if eventlog.TierOf(ev) == eventlog.TierDurable && c.evlog != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		spanCtx, endSpan := c.trace.EventAppend(childID, turnSC, eventlog.TypeName(ev))
+		ctx, cancel := context.WithTimeout(spanCtx, 5*time.Second)
 		ord, err := c.evlog.Append(ctx, childID, ev)
 		cancel()
+		endSpan(ord, err)
 		if err != nil {
 			// Best-effort, and deliberately so: a log write must never stop a
 			// turn. The consequence is a hole in one child's ordinal sequence,

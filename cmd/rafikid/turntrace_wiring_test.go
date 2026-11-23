@@ -87,8 +87,21 @@ func TestTurnTracePublishEventFeedsObserver(t *testing.T) {
 	ctrl.publishEvent("c_turn", traceTurnStart())
 	ctrl.publishEvent("c_turn", traceTurnEnd())
 
+	// The turn, plus the log append of each of its two durable events.
 	spans := rec.Ended()
-	c.Require().Eq(1, len(spans), "ended spans")
+	c.Require().Eq(3, len(spans), "ended spans")
+	var turn sdktrace.ReadOnlySpan
+	appends := 0
+	for _, sp := range spans {
+		if sp.Name() == "event_log.append" {
+			appends++
+			continue
+		}
+		turn = sp
+	}
+	c.Require().True(turn != nil, "the turn span ended")
+	c.Eq(2, appends, "turn_start and turn_end each appended under the turn")
+	spans = []sdktrace.ReadOnlySpan{turn}
 	c.Eq("invoke_agent worker", spans[0].Name(), "span name")
 	c.False(spans[0].Parent().IsValid(), "a turn is a root span")
 	model, ok := traceAttr(spans[0], "gen_ai.request.model")

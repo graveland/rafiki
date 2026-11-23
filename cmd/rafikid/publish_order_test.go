@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,10 @@ import (
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/nativebus"
+	"go.graveland.dev/rafiki/pkg/telemetry"
+	"go.graveland.dev/rafiki/pkg/turntrace"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -149,4 +154,57 @@ func (failingAppendStore) Latest(context.Context, string) (int32, error) {
 
 func (failingAppendStore) ChildrenSince(context.Context, time.Time) (map[string]int32, error) {
 	return nil, nil
+}
+
+// A durable event's log append belongs to the conversation's trace: a span under
+// the turn it is part of. The event that ENDS a turn closes it before its own
+// append, so the turn is captured first; an event between turns is not traced.
+func TestPublishEventTracesTheLogAppendUnderItsTurn(t *testing.T) {
+	ck := assert.NewAborting(t)
+	tp, rec := newTraceObserver(t)
+	c := &Controller{
+		native: nativebus.New(),
+		evlog:  eventlog.NewMemory(),
+		trace:  turntrace.New(tp, telemetry.Config{}.Policy(), nil, nil),
+	}
+	publish := func(p *rafikiv1.Event) {
+		p.ChildId = "c_1"
+		c.publishEvent("c_1", p)
+	}
+	status := func() *rafikiv1.Event {
+		return &rafikiv1.Event{Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: "idle"}}}
+	}
+
+	publish(status()) // between turns
+	publish(&rafikiv1.Event{Payload: &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}}})
+	publish(status()) // inside the turn
+	publish(&rafikiv1.Event{Payload: &rafikiv1.Event_TurnEnd{TurnEnd: &rafikiv1.TurnEnd{}}})
+	publish(status()) // after it
+
+	spans := rec.Ended()
+	var turn, appends = (func() (sdktrace.ReadOnlySpan, []sdktrace.ReadOnlySpan) {
+		var t0 sdktrace.ReadOnlySpan
+		var as []sdktrace.ReadOnlySpan
+		for _, s := range spans {
+			switch {
+			case s.Name() == "event_log.append":
+				as = append(as, s)
+			case strings.HasPrefix(s.Name(), "invoke_agent"):
+				t0 = s
+			}
+		}
+		return t0, as
+	})()
+	ck.Require().True(turn != nil, "the turn span ended")
+	types := make([]string, 0, len(appends))
+	for _, a := range appends {
+		ck.Eq(turn.SpanContext().SpanID(), a.Parent().SpanID(), "every append span is under the turn")
+		for _, kv := range a.Attributes() {
+			if kv.Key == "rafiki.event.type" {
+				types = append(types, kv.Value.AsString())
+			}
+		}
+	}
+	ck.EqDeep([]string{"turn_start", "agent_status", "turn_end"}, types,
+		"the turn's own start and end and the event inside it; the two between turns are untraced")
 }

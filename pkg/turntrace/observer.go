@@ -635,6 +635,48 @@ func (o *Observer) TurnSpanContext(childID string) trace.SpanContext {
 	return cs.turn.span.SpanContext()
 }
 
+// EventAppend opens the span for one durable event-log append. The span nests
+// under the child's turn so the log write shows up in the conversation's trace,
+// with the database statement under it.
+//
+// preferred is the turn span the caller captured BEFORE feeding the event to
+// Observe: the event that ENDS a turn closes that span first, and its own append
+// still belongs to it. When preferred is invalid the child's open turn is used,
+// which is how the event that STARTS a turn finds the span Observe just opened.
+// With neither, nothing is traced: an append outside a turn (a status change
+// between turns, a spawn) never becomes a root trace, the same rule the
+// database spans follow.
+//
+// The returned context carries the span and must be the one the append runs
+// under. end records the assigned ordinal or the error and must be called once.
+func (o *Observer) EventAppend(childID string, preferred trace.SpanContext, typeName string) (context.Context, func(ordinal int32, err error)) {
+	noop := func(int32, error) {}
+	if o == nil {
+		return context.Background(), noop
+	}
+	parent := preferred
+	if !parent.IsValid() {
+		parent = o.TurnSpanContext(childID)
+	}
+	if !parent.IsValid() {
+		return context.Background(), noop
+	}
+	ctx, span := o.tracer.Start(trace.ContextWithSpanContext(context.Background(), parent), "event_log.append",
+		trace.WithAttributes(
+			attribute.String("rafiki.event.type", typeName),
+			attribute.String("gen_ai.agent.id", childID),
+		))
+	return ctx, func(ordinal int32, err error) {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "event log append failed")
+		} else {
+			span.SetAttributes(attribute.Int64("rafiki.event.ordinal", int64(ordinal)))
+		}
+		span.End()
+	}
+}
+
 // ParentFor resolves the span a subagent message should be parented to: the
 // Task tool span that produced prevMessageID when it is still open, otherwise
 // the child's open turn, otherwise the zero value.
