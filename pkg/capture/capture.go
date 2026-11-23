@@ -526,15 +526,24 @@ func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt ti
 	return retryDB(ctx, "failTurn", func(ctx context.Context) error {
 		tag, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET status='error', error=$3
-			  WHERE id=$1::uuid AND created_at=$2`,
+			  WHERE id=$1::uuid AND created_at=$2 AND status <> 'complete'`,
 			turnID, createdAt, errMsg)
 		if err != nil {
 			return err
 		}
-		if n := tag.RowsAffected(); n != 1 {
-			return fmt.Errorf("fail-turn: expected 1 row, updated %d (stale/skewed key)", n)
+		if tag.RowsAffected() == 1 {
+			return nil
 		}
-		return nil
+		// A completed turn is not failed: the commit landed and only the answer was
+		// lost, so marking it errored would make the row disagree with the tree.
+		done, derr := s.turnCompleted(ctx, turnID, createdAt)
+		if derr != nil {
+			return derr
+		}
+		if done {
+			return nil
+		}
+		return fmt.Errorf("fail-turn: expected 1 row, updated 0 (stale/skewed key)")
 	})
 }
 
@@ -582,6 +591,22 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 	msgs, err := requestMessages(reqBody)
 	if err != nil {
 		return "", err
+	}
+	// Its place is the failed-turn path: a turn that completed stored its request
+	// nodes in the same transaction as its reply, so attaching them again would
+	// move the head back onto nodes a later turn has moved past. The head it
+	// recorded is the answer the caller would have got.
+	if done, derr := s.turnCompleted(ctx, turnID, createdAt); derr != nil {
+		return "", derr
+	} else if done {
+		var head string
+		err := s.pool.QueryRow(ctx,
+			`SELECT coalesce(request_head_id::text, '') FROM conversations.conversation_turn WHERE id=$1::uuid AND created_at=$2`,
+			turnID, createdAt).Scan(&head)
+		if err != nil {
+			return "", fmt.Errorf("decompose: read the recorded request head: %w", err)
+		}
+		return head, nil
 	}
 	var head string
 	err = retryDB(ctx, "decomposeRequest", func(ctx context.Context) error {
@@ -1161,6 +1186,14 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 func (s *CaptureStore) RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error {
 	resolve := s.threadResolver()
 	return retryDB(ctx, "recordThread", func(ctx context.Context) error {
+		// A turn that already completed carries the thread its completion wrote in
+		// the same transaction as its nodes; re-stamping it here would only be a
+		// second, weaker opinion.
+		if done, derr := s.turnCompleted(ctx, turnID, createdAt); derr != nil {
+			return derr
+		} else if done {
+			return nil
+		}
 		// Classification looks the predecessor up, so it shares the retry: a
 		// transient read failure here is the same blip as one in the update.
 		threadID, err := resolve(ctx, session, convID, turnID, prevMessageID, isSubagent)

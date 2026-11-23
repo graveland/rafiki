@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multigres/testkit/assert"
 
@@ -376,8 +377,9 @@ func TestCompleteCapturedTurnReplayDoesNotRewindTheHead(t *testing.T) {
 	c.Eq(before, readCompletedTurn(t, ctx, pool, turnID), "and rewrites no turn value")
 }
 
-// A failed commit after the hook ran leaves the model unwritten and the memo
-// cold, so the next completion backfills it.
+// A commit refused after the hook ran takes the hook's model backfill with it:
+// the rollback is the backend's, so the column stays NULL and the memo stays
+// cold for the next completion.
 func TestCompleteCapturedTurnModelBackfillRollsBackWithTheCommit(t *testing.T) {
 	s, pool := newTestStore(t)
 	ctx := context.Background()
@@ -404,18 +406,18 @@ type refusesAfterTheHook struct{ conv.Backend }
 
 func (b refusesAfterTheHook) Commit(ctx context.Context, cm conv.Commit) (time.Time, error) {
 	if cm.Finalize != nil {
-		if err := cm.Finalize(ctx, hookRanTx{}); err != nil {
-			return time.Time{}, err
+		inner := cm.Finalize
+		cm.Finalize = func(ctx context.Context, x conv.TxExec) error {
+			if err := inner(ctx, x); err != nil {
+				return err
+			}
+			// The hook's statements ran on the real transaction; this error is what
+			// rolls them back.
+			return errors.New("commit refused after the hook")
 		}
 	}
-	return time.Time{}, errors.New("commit refused after the hook")
+	return b.Backend.Commit(ctx, cm)
 }
-
-// hookRanTx is the transaction a refusing commit hands the hook: every statement
-// reports one row, so the hook runs to its end.
-type hookRanTx struct{}
-
-func (hookRanTx) Exec(context.Context, string, ...any) (int64, error) { return 1, nil }
 
 // A re-issued completion of a turn that already completed stores nothing, even
 // when the reply carries no provider id: the turn row's own final state is the
@@ -609,4 +611,95 @@ func TestFailCompletedTurnStaleKeyIsAnError(t *testing.T) {
 	c.ErrorContains(s.FailCompletedTurn(ctx, TurnResult{
 		TurnID: turnID, CreatedAt: createdAt.Add(time.Second), ConversationID: convID}, "boom"),
 		"expected 1 row", "a skewed key is refused")
+}
+
+// The failed-turn re-writes leave a completed turn alone: its thread came from
+// the completion's own transaction, and re-attaching its request nodes would
+// move the head back onto nodes a later turn has moved past.
+func TestFailedTurnWritesSkipACompletedTurn(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	session := "skiplanded-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix := routing.PrefixHash(req)
+	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "the call")
+
+	later := mustAppendReply(t, ctx, pool, s, convID, mustHead(t, ctx, pool, convID),
+		canonicalReply("msg_later", "later"), "end_turn")
+	nodes := mustNodeCount(t, ctx, pool, convID)
+	before := readCompletedTurn(t, ctx, pool, turnID)
+
+	// The two failure-path re-writes, on a turn that already landed. The request
+	// body names a message the conversation does not hold, so an unguarded
+	// DecomposeRequest would append it and move the head.
+	fresh := []byte(`{"model":"m","messages":[{"role":"user","content":"never stored"}]}`)
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, fresh, prefix, "")
+	c.NoError(err, "DecomposeRequest on a completed turn")
+	c.Eq(before.RequestHeadID, head, "it answers the head the completion recorded")
+	c.NoError(s.RecordThread(ctx, session, convID, turnID, createdAt, "", "msg_other", true),
+		"RecordThread on a completed turn")
+
+	c.Eq(later, mustHead(t, ctx, pool, convID), "the head stays on the later turn's node")
+	c.Eq(nodes, mustNodeCount(t, ctx, pool, convID), "and no request node was attached")
+	c.Eq(before, readCompletedTurn(t, ctx, pool, turnID), "the completed turn is unchanged")
+}
+
+// FailTurn is the absolute last resort of the failure path and is held to the
+// same rule: it never downgrades a turn that completed.
+func TestFailTurnLeavesACompletedTurnAlone(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	session := "failturncomplete-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix := routing.PrefixHash(req)
+	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "the call")
+	before := readCompletedTurn(t, ctx, pool, turnID)
+
+	c.NoError(s.FailTurn(ctx, turnID, createdAt, "capture completion failed: ambiguous commit"),
+		"a completed turn is not failed")
+	c.Eq(before, readCompletedTurn(t, ctx, pool, turnID), "the completed row is untouched")
+}
+
+// A transient thread-lookup failure is retried, so a subagent keeps its thread
+// and its chain key instead of being filed on the main thread.
+func TestCompleteCapturedTurnRetriesATransientThreadLookup(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	c := assert.NewAborting(t)
+	old := dbRetryDelays
+	dbRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { dbRetryDelays = old })
+
+	session := "threadretry-" + uuid.NewString()
+	convID := newCompletionConversation(t, s, session)
+	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	prefix := routing.PrefixHash(req)
+	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
+
+	thread := uuid.Must(uuid.NewV7()).String()
+	calls := 0
+	s.resolveThreadFn = func(context.Context, string, string, string, string, bool) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", &pgconn.PgError{Code: "40001"}
+		}
+		return thread, nil
+	}
+	t.Cleanup(func() { s.resolveThreadFn = nil })
+
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "the completion")
+	c.Eq(2, calls, "the lookup was retried once")
+
+	row := readCompletedTurn(t, ctx, pool, turnID)
+	c.Eq(thread, row.ThreadID, "the retry's thread is stamped")
+	c.Eq("msg_reply", row.ResponseMessageID, "and the chain key survives with it")
 }

@@ -161,7 +161,7 @@ func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletio
 			}
 			respOrd := res.Nodes[reqNodes].Ordinal
 			n, err := x.Exec(ctx, `UPDATE conversations.conversation_turn SET
-        status='complete', response=$3, stop_reason=$4, upstream=$5,
+        status='complete', error=NULL, response=$3, stop_reason=$4, upstream=$5,
         input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10,
         model=COALESCE(NULLIF($11,''), model), served_provider=$12,
         response_message_id=NULLIF($13,''), thread_id=$14::uuid,

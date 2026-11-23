@@ -1530,11 +1530,16 @@ func (p *MessagesProxy) failTurn(r *http.Request, cr captureRef, reason string) 
 }
 
 // failCompletion records a call whose response arrived but whose capture
-// transaction failed. Best-effort and in this order, on one detached context so
-// the tail stays inside gateStallTimeout: the call's usage (the provider billed
-// it whatever happened to our write), the thread identity (a founding subagent
-// turn must keep it), and the request nodes (the last call of a session has no
-// later call to re-send them).
+// transaction failed. Best-effort and in this order, on detached contexts so the
+// tail stays inside gateStallTimeout: the call's usage (the provider billed it
+// whatever happened to our write), the thread identity (a founding subagent turn
+// must keep it), and the request nodes (the last call of a session has no later
+// call to re-send them).
+//
+// A turn that is already complete is left alone by the store methods themselves:
+// the transaction landed and only the answer was lost, so re-writing its thread or
+// its request nodes would move the head back onto nodes a later turn has moved
+// past.
 func (p *MessagesProxy) failCompletion(r *http.Request, cr captureRef, result capture.TurnResult, ownMsg string, cerr error) {
 	reason := "capture completion failed: " + cerr.Error()
 	if cr.outcome != nil && cr.outcome.failure == "" {
