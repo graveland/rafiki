@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/msg"
 	"go.graveland.dev/rafiki/pkg/msg/anthropic"
 	"go.graveland.dev/rafiki/pkg/server"
@@ -42,7 +44,7 @@ func seedBound(t *testing.T, r *claudeDeliveryRegistry, childID, responseID stri
 func echo(t *testing.T, r *claudeDeliveryRegistry, childID string, gen uint64, d claudeDelivery) {
 	t.Helper()
 	u := "u-" + childID + "-" + d.rowID
-	if _, ok := r.register(childID, u, d.rowID, d.text, d.images); !ok {
+	if _, ok := r.register(childID, u, d.rowID, d.text, d.sentAttachments()); !ok {
 		t.Fatalf("register(%s, %s): no live launch", childID, d.rowID)
 	}
 	if _, _, ok := r.take(childID, gen, u); !ok {
@@ -441,4 +443,100 @@ func TestClaudeLinkWorksOnTheRecordedMidTurnRelay(t *testing.T) {
 	ck.EqDeep([]string{"row-also"}, ids, "the recorded relay links to the row that carried it")
 	ck.Len(logs, 0, "an exact match warns about nothing")
 	ck.Eq(0, r.acceptedCount("c"), "the linked delivery left the queue")
+}
+
+// sentAttachments is what the delivery carried: its own attachments, or
+// placeholders for the image count a test names without caring about the bytes.
+func (d claudeDelivery) sentAttachments() []inbox.Attachment {
+	if d.attachments != nil {
+		return d.attachments
+	}
+	return make([]inbox.Attachment, d.images)
+}
+
+func TestOutstandingIsWhatNoRequestCarried(t *testing.T) {
+	ck := assert.NewAborting(t)
+	var r claudeDeliveryRegistry
+	gen := r.beginLaunch("c_1")
+
+	// carried: echoed, and a response began after it, so its request went out.
+	echo(t, &r, "c_1", gen, claudeDelivery{rowID: "row-carried", text: "carried"})
+	r.bind("c_1", gen, "msg_1")
+	// echoed since, no assistant frame yet.
+	img := []inbox.Attachment{{MediaType: "image/png", Data: []byte{1}}}
+	echo(t, &r, "c_1", gen, claudeDelivery{rowID: "row-echoed", text: "echoed", attachments: img})
+	// written, never echoed; uuids sort by send time.
+	_, ok := r.register("c_1", "0002", "row-late", "late", nil)
+	ck.True(ok, "register late")
+	_, ok = r.register("c_1", "0001", "row-early", "early", nil)
+	ck.True(ok, "register early")
+
+	r.mu.Lock()
+	got := r.outstandingLocked("c_1", gen)
+	r.mu.Unlock()
+
+	var texts []string
+	for _, u := range got {
+		texts = append(texts, u.text)
+	}
+	ck.EqDeep([]string{"echoed", "early", "late"}, texts, "outstanding, oldest first")
+	ck.EqDeep(img, got[0].attachments, "the attachments ride with the message")
+}
+
+// The launch teardown is where the entries die, so the carry has to happen
+// there: a snapshot taken by the abort after the process exits finds nothing.
+func TestAbortCarriesWhatTheLaunchTeardownRetires(t *testing.T) {
+	ck := assert.NewAborting(t)
+	var r claudeDeliveryRegistry
+	inst := &child.Child{}
+	gen := r.beginLaunch("c_1")
+	r.attach(inst, gen)
+	_, ok := r.register("c_1", "u1", "row-1", "first", nil)
+	ck.True(ok, "register")
+
+	r.beginAbort("c_1")
+	_, ok = r.register("c_1", "u2", "row-2", "second, while dying", nil)
+	ck.True(ok, "register while aborting")
+	r.endLaunch("c_1", inst)
+
+	got := r.takeCarried("c_1")
+	ck.Eq(2, len(got), "carried")
+	ck.Eq("first", got[0].text, "carried[0]")
+	ck.Eq("second, while dying", got[1].text, "carried[1]")
+	ck.Eq(0, len(r.takeCarried("c_1")), "taking twice")
+}
+
+func TestExitWithoutAnAbortCarriesNothing(t *testing.T) {
+	ck := assert.NewAborting(t)
+	var r claudeDeliveryRegistry
+	inst := &child.Child{}
+	r.attach(inst, r.beginLaunch("c_1"))
+	_, ok := r.register("c_1", "u1", "row-1", "lost with the process", nil)
+	ck.True(ok, "register")
+	r.endLaunch("c_1", inst)
+	ck.Eq(0, len(r.takeCarried("c_1")), "an ordinary exit must not queue a resend for the next launch")
+}
+
+func TestCancelledAbortDoesNotLeaveTheTeardownCarrying(t *testing.T) {
+	ck := assert.NewAborting(t)
+	var r claudeDeliveryRegistry
+	inst := &child.Child{}
+	r.attach(inst, r.beginLaunch("c_1"))
+	r.beginAbort("c_1")
+	r.cancelAbort("c_1")
+	_, ok := r.register("c_1", "u1", "row-1", "x", nil)
+	ck.True(ok, "register")
+	r.endLaunch("c_1", inst)
+	ck.Eq(0, len(r.takeCarried("c_1")), "a cancelled abort must not arm the next exit")
+}
+
+func TestUndeliveredTextLabelsEachMessage(t *testing.T) {
+	ck := assert.NewAborting(t)
+	got := undeliveredText([]undelivered{
+		{text: "one"},
+		{text: "", attachments: make([]inbox.Attachment, 2)},
+	})
+	for _, want := range []string{"2 messages", "[message 1 of 2]\none", "[message 2 of 2, with 2 images attached below]\n(no text)"} {
+		ck.True(strings.Contains(got, want), "missing %q in:\n%s", want, got)
+	}
 }

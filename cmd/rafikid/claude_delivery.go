@@ -3,11 +3,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -16,6 +18,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/claudeargv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -54,6 +57,9 @@ type claudeDelivery struct {
 	rowID  string
 	text   string
 	images int
+	// attachments is what the row carried, kept so a message an abort
+	// interrupted can be sent again with them (see undelivered).
+	attachments []inbox.Attachment
 }
 
 // acceptedDelivery is one delivery Claude Code has accepted and the capture
@@ -66,11 +72,12 @@ type claudeDelivery struct {
 // is the same id the request's capture reports. Binding is by stdout order
 // alone — see bind.
 type acceptedDelivery struct {
-	rowID      string
-	text       string
-	images     int
-	gen        uint64
-	responseID string
+	rowID       string
+	text        string
+	images      int
+	attachments []inbox.Attachment
+	gen         uint64
+	responseID  string
 }
 
 // claudeDeliveryRegistry maps a delivery uuid to the inbox row it names.
@@ -114,6 +121,23 @@ type claudeDeliveryRegistry struct {
 	// of them missed its capture (the report beat the stdout frame), and nothing
 	// will ever report that id again.
 	reported map[string][]string
+	// aborting marks a child whose abort is waiting for its process to die, and
+	// carried holds what that launch's teardown found undelivered. The exit
+	// path retires the launch's entries, so the abort cannot read them after
+	// the fact: the teardown moves them here, in the same critical section that
+	// deletes them, which also covers a message that lands while the process is
+	// dying.
+	aborting map[string]bool
+	carried  map[string][]undelivered
+}
+
+// undelivered is a message a claude process was handed but never took into a
+// request, and so never persisted to its session: an interrupt-and-resume
+// cannot recover it, the inbox row is already consumed, and the registry entry
+// dies with the launch. It is what an abort sends again.
+type undelivered struct {
+	text        string
+	attachments []inbox.Attachment
 }
 
 // beginLaunch starts a new launch generation for childID and retires every
@@ -155,7 +179,7 @@ func (r *claudeDeliveryRegistry) beginLaunch(childID string) uint64 {
 // child has no live launch (a daemon that never launched it, or one whose exit
 // already tore the generation down): nothing would ever acknowledge it, so the
 // caller writes no uuid.
-func (r *claudeDeliveryRegistry) register(childID, deliveryUUID, rowID, text string, images int) (gen uint64, ok bool) {
+func (r *claudeDeliveryRegistry) register(childID, deliveryUUID, rowID, text string, attachments []inbox.Attachment) (gen uint64, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	gen, ok = r.gens[childID]
@@ -165,7 +189,7 @@ func (r *claudeDeliveryRegistry) register(childID, deliveryUUID, rowID, text str
 	if r.rows == nil {
 		r.rows = make(map[claudeDeliveryKey]claudeDelivery)
 	}
-	r.rows[claudeDeliveryKey{childID: childID, gen: gen, uuid: deliveryUUID}] = claudeDelivery{rowID: rowID, text: text, images: images}
+	r.rows[claudeDeliveryKey{childID: childID, gen: gen, uuid: deliveryUUID}] = claudeDelivery{rowID: rowID, text: text, images: len(attachments), attachments: attachments}
 	return gen, true
 }
 
@@ -196,7 +220,7 @@ func (r *claudeDeliveryRegistry) take(childID string, gen uint64, deliveryUUID s
 		r.accepted = make(map[string][]acceptedDelivery)
 	}
 	q := append(r.accepted[childID], acceptedDelivery{
-		rowID: d.rowID, text: d.text, images: d.images, gen: gen,
+		rowID: d.rowID, text: d.text, images: d.images, attachments: d.attachments, gen: gen,
 	})
 	if len(q) > claudeLinkQueueCap {
 		dropped = q[0].rowID
@@ -306,6 +330,9 @@ func (r *claudeDeliveryRegistry) endLaunch(childID string, ch *child.Child) {
 	if r.gens[childID] != gen {
 		return
 	}
+	if r.aborting[childID] {
+		r.carried[childID] = append(r.carried[childID], r.outstandingLocked(childID, gen)...)
+	}
 	delete(r.gens, childID)
 	for k := range r.rows {
 		if k.childID == childID && k.gen == gen {
@@ -315,6 +342,87 @@ func (r *claudeDeliveryRegistry) endLaunch(childID string, ch *child.Child) {
 	r.retireAccepted(childID, gen)
 	delete(r.lastResponse, childID)
 	delete(r.reported, childID)
+}
+
+// outstandingLocked lists, oldest first, the messages gen's process was handed
+// and never carried into a request: deliveries written but not yet echoed, and
+// echoed ones with no assistant frame printed since. An echo followed by a new
+// response id means the request carrying the message went out, which is what
+// puts it in the session, so those are not here.
+//
+// Echoed ones come first because an echo follows its write; the unechoed ones
+// are ordered by uuid, which is a v7 and so sorts by send time.
+func (r *claudeDeliveryRegistry) outstandingLocked(childID string, gen uint64) []undelivered {
+	var out []undelivered
+	for _, a := range r.accepted[childID] {
+		if a.gen == gen && a.responseID == "" {
+			out = append(out, undelivered{text: a.text, attachments: a.attachments})
+		}
+	}
+	var keys []claudeDeliveryKey
+	for k := range r.rows {
+		if k.childID == childID && k.gen == gen {
+			keys = append(keys, k)
+		}
+	}
+	slices.SortFunc(keys, func(a, b claudeDeliveryKey) int { return strings.Compare(a.uuid, b.uuid) })
+	for _, k := range keys {
+		d := r.rows[k]
+		out = append(out, undelivered{text: d.text, attachments: d.attachments})
+	}
+	return out
+}
+
+// beginAbort arms childID's launch teardown to keep what it finds
+// undelivered. Call it before signalling the process, and finish with exactly
+// one of takeCarried (the process died) or cancelAbort (the signal failed).
+func (r *claudeDeliveryRegistry) beginAbort(childID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.aborting == nil {
+		r.aborting = make(map[string]bool)
+		r.carried = make(map[string][]undelivered)
+	}
+	r.aborting[childID] = true
+	delete(r.carried, childID)
+}
+
+// cancelAbort disarms beginAbort and discards anything it carried.
+func (r *claudeDeliveryRegistry) cancelAbort(childID string) {
+	r.takeCarried(childID)
+}
+
+// takeCarried disarms beginAbort and returns what the dead launch left
+// undelivered.
+func (r *claudeDeliveryRegistry) takeCarried(childID string) []undelivered {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.carried[childID]
+	delete(r.carried, childID)
+	delete(r.aborting, childID)
+	return out
+}
+
+// retireOutstanding returns childID's undelivered messages and forgets the
+// current launch's entries, for a restart that replaces the process under the
+// same launch generation (a daraja-hosted child), where no teardown runs.
+func (r *claudeDeliveryRegistry) retireOutstanding(childID string) []undelivered {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	gen, ok := r.gens[childID]
+	if !ok {
+		return nil
+	}
+	out := r.outstandingLocked(childID, gen)
+	for k := range r.rows {
+		if k.childID == childID && k.gen == gen {
+			delete(r.rows, k)
+		}
+	}
+	r.retireAccepted(childID, gen)
+	delete(r.lastResponse, childID)
+	delete(r.reported, childID)
+	return out
 }
 
 // abandonLaunch retires childID's current generation for a spawn that never
@@ -445,7 +553,7 @@ func (c *Controller) claudeDeliveryFor(b inbox.Batch) (deliveryUUID string, gen 
 	if err != nil {
 		return "", 0, fmt.Errorf("inbox: mint a claude delivery uuid: %w", err)
 	}
-	gen, ok = c.claudeDeliveries.register(b.ChildID, u.String(), b.IDs[0], strings.Join(b.Frags, "\n"), len(b.Attachments))
+	gen, ok = c.claudeDeliveries.register(b.ChildID, u.String(), b.IDs[0], strings.Join(b.Frags, "\n"), b.Attachments)
 	if !ok {
 		// No live launch to acknowledge against. Deliver untracked rather than
 		// write a uuid nothing will ever resolve.
@@ -551,4 +659,94 @@ func rejectsAFlag(stderr string) bool {
 		}
 	}
 	return false
+}
+
+// undeliveredText renders messages an interrupted claude process never took
+// into a request as ONE prompt body, so the resumed child answers them in one
+// API call. Each message keeps its own marker: they were separate sends, and
+// the agent should not read them as one paragraph the user wrote.
+func undeliveredText(msgs []undelivered) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Your previous turn was interrupted before you saw the %s below. "+
+		"The user sent them while you were working. They are separate messages, oldest first.\n",
+		pluralise(len(msgs), "message"))
+	for i, m := range msgs {
+		fmt.Fprintf(&b, "\n[message %d of %d", i+1, len(msgs))
+		if n := len(m.attachments); n > 0 {
+			fmt.Fprintf(&b, ", with %s attached below", pluralise(n, "image"))
+		}
+		b.WriteString("]\n")
+		if m.text == "" {
+			b.WriteString("(no text)\n")
+		} else {
+			b.WriteString(m.text + "\n")
+		}
+	}
+	return b.String()
+}
+
+func pluralise(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// resendUndelivered queues what an abort threw away as one prompt for the
+// resumed child and delivers it. See parkUndelivered for the same without the
+// delivery.
+func (c *Controller) resendUndelivered(childID string, msgs []undelivered) {
+	if !c.parkUndelivered(childID, msgs) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := c.inbox.Deliver(ctx, childID, ""); err != nil {
+		if quietDeferral(err) {
+			slog.Debug("inbox: resend of interrupted messages deferred; it stays queued",
+				"childId", childID, "reason", err)
+			return
+		}
+		slog.Warn("inbox: resend of interrupted messages failed; it stays queued",
+			"childId", childID, "error", err)
+	}
+}
+
+// parkUndelivered persists msgs as one pending prompt row and reports whether
+// it did, without delivering it: the next delivery to the child sends it.
+//
+// It writes through the store rather than Queue.Accept because the target may
+// be exited (a failed resume) or over budget, both of which Accept's admission
+// refuses and both of which must still not lose the messages. The text is
+// wrapped here with the row's Source left empty, as sendClaudeNudge does, so a
+// replay delivers the envelope it already carries.
+func (c *Controller) parkUndelivered(childID string, msgs []undelivered) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	if c.inbox == nil || c.inboxStore == nil {
+		slog.Warn("abort: interrupted messages cannot be queued without an inbox; dropped",
+			"childId", childID, "messages", len(msgs))
+		return false
+	}
+	text, err := inject.Render(inject.KindUndelivered, undeliveredText(msgs))
+	if err != nil {
+		slog.Error("abort: could not wrap interrupted messages; dropped",
+			"childId", childID, "messages", len(msgs), "error", err)
+		return false
+	}
+	var atts []inbox.Attachment
+	for _, m := range msgs {
+		atts = append(atts, m.attachments...)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.inboxStore.Accept(ctx, inbox.Inbound{
+		ChildID: childID, Mode: inbox.ModePrompt, Text: text, Attachments: atts,
+	}); err != nil {
+		slog.Error("abort: could not queue interrupted messages; dropped",
+			"childId", childID, "messages", len(msgs), "error", err)
+		return false
+	}
+	return true
 }

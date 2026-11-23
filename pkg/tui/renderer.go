@@ -804,6 +804,8 @@ func decorationFor(kind string) injectedDecoration {
 		return injectedDecoration{"⏸", "rate limit", styleWarn}
 	case inject.KindBudget:
 		return injectedDecoration{"⊘", "budget", styleWarn}
+	case inject.KindUndelivered:
+		return injectedDecoration{"↩", "interrupted messages", styleWarn}
 	case inject.KindContext:
 		return injectedDecoration{"↳", "context", styleInjectedKind}
 	case inject.KindClaudeReminder:

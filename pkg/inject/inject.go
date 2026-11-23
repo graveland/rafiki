@@ -56,6 +56,9 @@ const (
 	KindDaemonRestart Kind = "daemon-restart"
 	// KindRateLimit tells a child an upstream rate limit has reset.
 	KindRateLimit Kind = "rate-limit"
+	// KindUndelivered returns messages the user sent that an interrupted turn
+	// never took into a context, so the resumed agent still sees them.
+	KindUndelivered Kind = "undelivered"
 	// KindContext is an injected context update the harness itself wrote
 	// (an environment change, a file-changed notice).
 	KindContext Kind = "context"
@@ -228,6 +231,8 @@ func Label(k Kind) string {
 		return "daemon restart"
 	case KindRateLimit:
 		return "rate limit"
+	case KindUndelivered:
+		return "interrupted messages"
 	case KindContext:
 		return "context"
 	case KindNotification:

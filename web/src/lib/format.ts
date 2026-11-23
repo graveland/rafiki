@@ -78,6 +78,8 @@ export function injectedLabel(kind: string): string {
       return 'daemon restart'
     case 'rate-limit':
       return 'rate limit'
+    case 'undelivered':
+      return 'interrupted messages'
     case 'claude-reminder':
       return 'harness reminder'
     default:

@@ -393,6 +393,22 @@ EMPTY, so they arrive as direct messages and do get a receipt. That is harmless
 why the predicate stays the plain one. A client must therefore treat an
 unmatched `message_id` as ordinary, not as an error.
 
+**An abort resends what it threw away.** Interrupting a `claude` child kills
+its process, and a message it was handed but never carried into an API request
+(written and not yet echoed, or echoed with no assistant frame printed since) is
+not in the session the resumed process loads, while its inbox row was already
+consumed on the write. The abort carries those messages across the restart and
+sends them to the resumed child as ONE prompt, oldest first, each under its own
+`[message i of n]` marker with its attachments appended in order, wrapped as
+`undelivered` (`inject.KindUndelivered`). That prompt is a new inbox row, so it
+gets its own receipt and a captured `UserMessage` whose `injected_kind` is
+`undelivered`; the original sends are not linked to it, and the "delivered"
+mark a client drew for them ends with the aborted turn. A message that lands
+while the process is dying is carried too. A message whose request had already
+gone out is not resent. If the resume fails the prompt is left pending and the
+next delivery to the child sends it; a daraja-hosted child takes the same path
+through its restart. An abort with nothing outstanding sends nothing.
+
 The narrowness is real and client-visible: a client that sends a coalesced batch,
 or talks to a non-claude child, gets no receipt and must keep its own fallback.
 Pinned end to end by `TestClaudeDeliveryReceiptNamesTheInboxRow`,

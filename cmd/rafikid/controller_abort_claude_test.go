@@ -4,12 +4,16 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/darajapb"
+	"go.graveland.dev/rafiki/pkg/inbox"
+	"go.graveland.dev/rafiki/pkg/inject"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
 
@@ -216,4 +220,121 @@ func TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields(t *testing.T) {
 	c.Eq("be terse", spec.Claude.AppendSystemPrompt, "AppendSystemPrompt")
 	c.EqDiff([]string{"--foo", "bar"}, spec.Claude.ExtraArgs, "ExtraArgs")
 	c.Eq(protocol.WorkspaceToolsRafiki, spec.Claude.WorkspaceTools, "WorkspaceTools")
+}
+
+// loggingClaudeScript is a fake claude that appends "<pid> <stdin line>" to log
+// for every line it reads and never echoes a user message, so a delivery to it
+// stays unacknowledged.
+func loggingClaudeScript(t *testing.T, log string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "fakeclaude.sh")
+	body := "#!/bin/bash\n" +
+		"SID=fresh\n" +
+		"for a in \"$@\"; do if [ \"$prev\" = \"--resume\" ]; then SID=\"got-$a\"; fi; prev=\"$a\"; done\n" +
+		"printf '%s\\n' \"{\\\"type\\\":\\\"system\\\",\\\"subtype\\\":\\\"init\\\",\\\"session_id\\\":\\\"$SID\\\",\\\"model\\\":\\\"claude-opus-4-8\\\"}\"\n" +
+		"while IFS= read -r line; do printf '%s %s\\n' \"$$\" \"$line\" >> '" + log + "'; done\n" +
+		"while true; do sleep 0.05; done\n"
+	assert.NewAborting(t).NoError(os.WriteFile(script, []byte(body), 0o755), "write fake")
+	return script
+}
+
+// logLinesFrom returns the logged stdin lines written by the process with pid.
+func logLinesFrom(t *testing.T, log string, pid int) []string {
+	t.Helper()
+	raw, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	assert.NewAborting(t).NoError(err, "read stdin log")
+	prefix := strconv.Itoa(pid) + " "
+	var out []string
+	for _, l := range strings.Split(string(raw), "\n") {
+		if rest, ok := strings.CutPrefix(l, prefix); ok {
+			out = append(out, rest)
+		}
+	}
+	return out
+}
+
+// TestClaudeAbortResendsMessagesTheChildNeverTookIntoAContext: a message queued
+// behind a running turn is consumed on its stdin write, so the abort's
+// interrupt-and-resume would otherwise throw it away with the dead process.
+// The messages go back as ONE prompt to the resumed child, each labelled.
+func TestClaudeAbortResendsMessagesTheChildNeverTookIntoAContext(t *testing.T) {
+	ck := assert.NewAborting(t)
+	log := filepath.Join(t.TempDir(), "stdin.log")
+	ctrl, childID := newClaudeTestChild(t, loggingClaudeScript(t, log))
+	ctrl.inbox = ctrl.newInboxQueue(inbox.NewMemory())
+
+	before, ok := ctrl.cm.Get(childID)
+	ck.True(ok, "child %s not live", childID)
+	pidBefore := before.PID()
+
+	ctx := context.Background()
+	for _, text := range []string{"queued-one", "queued-two"} {
+		_, err := ctrl.acceptAndDeliver(ctx, inbox.Inbound{ChildID: childID, Mode: inbox.ModeSteer, Text: text})
+		ck.NoError(err, "send %s", text)
+	}
+	awaitWithin(t, 5*time.Second, "both messages reach the first process", func() bool {
+		return len(logLinesFrom(t, log, pidBefore)) == 2
+	})
+
+	ck.NoError(ctrl.Send(childID, []byte(`{"type":"abort"}`)), "send abort")
+
+	var after *child.Child
+	awaitWithin(t, 8*time.Second, "child resumed under the same id", func() bool {
+		ch, ok := ctrl.cm.Get(childID)
+		if ok && ch.PID() != pidBefore && ch.Status() == protocol.StatusIdle {
+			after = ch
+		}
+		return after != nil
+	})
+
+	var got []string
+	awaitWithin(t, 5*time.Second, "the resumed process receives the undelivered messages", func() bool {
+		got = logLinesFrom(t, log, after.PID())
+		return len(got) > 0
+	})
+	ck.Eq(1, len(got), "undelivered messages must arrive as ONE frame, got %v", got)
+	for _, want := range []string{"queued-one", "queued-two", string(inject.KindUndelivered)} {
+		ck.True(strings.Contains(got[0], want), "resent frame lacks %q: %s", want, got[0])
+	}
+	ck.True(strings.Index(got[0], "queued-one") < strings.Index(got[0], "queued-two"), "order lost: %s", got[0])
+}
+
+// TestClaudeAbortWithNothingOutstandingSendsNothing: an abort with no undelivered
+// message must not invent a prompt for the resumed child.
+func TestClaudeAbortWithNothingOutstandingSendsNothing(t *testing.T) {
+	ck := assert.NewAborting(t)
+	log := filepath.Join(t.TempDir(), "stdin.log")
+	ctrl, childID := newClaudeTestChild(t, loggingClaudeScript(t, log))
+	ctrl.inbox = ctrl.newInboxQueue(inbox.NewMemory())
+
+	before, _ := ctrl.cm.Get(childID)
+	pidBefore := before.PID()
+	ck.NoError(ctrl.Send(childID, []byte(`{"type":"abort"}`)), "send abort")
+
+	var after *child.Child
+	awaitWithin(t, 8*time.Second, "child resumed", func() bool {
+		ch, ok := ctrl.cm.Get(childID)
+		if ok && ch.PID() != pidBefore && ch.Status() == protocol.StatusIdle {
+			after = ch
+		}
+		return after != nil
+	})
+	time.Sleep(300 * time.Millisecond)
+	ck.Eq(0, len(logLinesFrom(t, log, after.PID())), "resumed child was sent an unrequested prompt")
+}
+
+// awaitWithin fails the test unless cond turns true within d.
+func awaitWithin(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for: %s", d, what)
 }

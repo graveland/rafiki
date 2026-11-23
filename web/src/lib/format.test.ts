@@ -77,6 +77,7 @@ it('ctxLabel renders millions as M', () => {
 it('injectedLabel names the kind the same way the TUI does', () => {
   expect(injectedLabel('jobs')).toBe('job')
   expect(injectedLabel('daemon-restart')).toBe('daemon restart')
+  expect(injectedLabel('undelivered')).toBe('interrupted messages')
   expect(injectedLabel('notify:github')).toBe('notification')
   // A kind this build does not know keeps its own name rather than vanishing.
   expect(injectedLabel('future-kind')).toBe('future-kind')

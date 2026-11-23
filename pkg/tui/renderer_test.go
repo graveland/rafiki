@@ -921,7 +921,7 @@ func TestUrgentInjectedKindsAreDrawnInTheirOwnColour(t *testing.T) {
 	routine := renderBlockFor(t, session.Block{
 		Kind: session.KindInjected, Text: "x", InjectedKind: "jobs",
 	})
-	for _, kind := range []string{"daemon-restart", "rate-limit", "budget"} {
+	for _, kind := range []string{"daemon-restart", "rate-limit", "budget", "undelivered"} {
 		raw := renderBlockFor(t, session.Block{
 			Kind: session.KindInjected, Text: "x", InjectedKind: kind,
 		})

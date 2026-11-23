@@ -4817,7 +4817,11 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 		_ = c.st.Update(childID, func(s *childstore.Session) { s.SessionID = sessionID })
 	}
 
+	// Armed before the signal so the launch's teardown keeps whatever the dying
+	// process was handed and never took into a request; see resendUndelivered.
+	c.claudeDeliveries.beginAbort(childID)
 	if err := ch.Interrupt(); err != nil {
+		c.claudeDeliveries.cancelAbort(childID)
 		return fmt.Errorf("claude abort interrupt: %w", err)
 	}
 
@@ -4862,9 +4866,12 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 
 	// Re-spawn resumed. apiKey "" is correct for claude (auth via CLAUDE_CONFIG_DIR,
 	// no --api-key); Resume uses snap.SessionID for kind == "claude".
+	lost := c.claudeDeliveries.takeCarried(childID)
 	if _, err := c.Resume(context.Background(), childID, ""); err != nil {
+		c.parkUndelivered(childID, lost)
 		return fmt.Errorf("claude abort resume: %w", err)
 	}
+	c.resendUndelivered(childID, lost)
 
 	return nil
 }
@@ -4904,7 +4911,14 @@ func (c *Controller) handleDarajaClaudeAbort(childID string, ch *child.Child, sn
 		_ = c.st.Update(childID, func(s *childstore.Session) { s.SessionID = sessionID })
 	}
 	spec := buildDarajaAbortSpec(snap, sessionID)
-	if _, err := c.darajaPool.Restart(context.Background(), childID, spec, 3*time.Second); err != nil {
+	// No exit teardown runs here (the Child and its launch generation survive
+	// the restart), so the undelivered messages are taken now. A failed restart
+	// still resends them: the process state is unknown, and a duplicate is
+	// better than a message the user believes arrived.
+	lost := c.claudeDeliveries.retireOutstanding(childID)
+	_, err := c.darajaPool.Restart(context.Background(), childID, spec, 3*time.Second)
+	c.resendUndelivered(childID, lost)
+	if err != nil {
 		return fmt.Errorf("claude abort restart: %w", err)
 	}
 	return nil
