@@ -117,6 +117,13 @@ var ErrConflict = errors.New("conv: conversation head moved")
 // returned as-is, never retried: the caller must stop writing AND stop acting.
 var ErrLeaseLost = errors.New("store: conversation lease lost") // text kept: store.ErrLeaseLost aliases it
 
+// TxExec runs one statement on the transaction a Commit is part of. It is the
+// only door a Finalize hook has to the database, so pkg/conv stays free of any
+// driver import.
+type TxExec interface {
+	Exec(ctx context.Context, sql string, args ...any) (rowsAffected int64, err error)
+}
+
 // Commit is one atomic tree write: the rows to insert and the head they leave
 // behind.
 type Commit struct {
@@ -129,6 +136,12 @@ type Commit struct {
 	Fallback            bool
 	ConsumeClearPending bool
 	Lease               Lease // zero = unfenced
+	// Finalize, when non-nil, runs inside the commit's transaction after every
+	// insert and the conversation counters, and before the transaction commits.
+	// An error rolls the whole commit back. A backend that commits without
+	// running a non-nil Finalize breaks the contract; Handle.Append reports it
+	// as ErrFinalizeNotRun.
+	Finalize func(ctx context.Context, x TxExec) error
 }
 
 // Backend is the storage a Store sits in front of. Every method is
@@ -201,6 +214,12 @@ type Append struct {
 	Nodes               []NewNode // empty only with ParentID: then only the head moves
 	Fallback            bool
 	ConsumeClearPending bool
+	// Finalize, when non-nil, writes to the database in the same transaction as
+	// the append: it receives the chain's identities as they will stand once the
+	// commit lands (ids and ordinals set, CreatedAt zero). It may run again after
+	// an ambiguous commit, so it must be a pure function of its inputs. An error
+	// from it rolls the append back and is never retried.
+	Finalize func(ctx context.Context, x TxExec, res Result) error
 }
 
 // NewNode is one message to append, before the core assigns its identity.
