@@ -10,6 +10,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -203,6 +204,11 @@ type claudeStreamFrame struct {
 	Subtype string `json:"subtype,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Result  string `json:"result,omitempty"`
+	// StopReason and IsError are the result frame's verdict on the turn's last
+	// call. Assistant frames carry a null stop_reason while streaming, so only
+	// the result frame is a source for TurnEnd.
+	StopReason string `json:"stop_reason,omitempty"`
+	IsError    bool   `json:"is_error,omitempty"`
 	// ParentToolUseID is set on assistant/user frames produced by a sub-agent
 	// (the Task tool); it names the spawning tool call so the activity can be
 	// attributed and indented downstream.
@@ -867,12 +873,17 @@ func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1
 	usage := protoUsage(p.st.lastCallUsage)
 	p.st.lastCallUsage = nil
 	costUSD := p.turnCost(f.TotalCostUSD)
+	stop := eventconv.StopReasonFromString(f.StopReason)
+	if f.IsError {
+		stop = rafikiv1.StopReason_STOP_REASON_ERROR
+	}
 	return []*rafikiv1.Event{{
 		Ts: timestamppb.New(time.UnixMilli(ts)),
 		Payload: &rafikiv1.Event_TurnEnd{
 			TurnEnd: &rafikiv1.TurnEnd{
-				Usage:   usage,
-				CostUsd: costUSD,
+				Usage:      usage,
+				CostUsd:    costUSD,
+				StopReason: stop,
 			},
 		},
 	}}

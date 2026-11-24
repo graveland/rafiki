@@ -527,3 +527,37 @@ func TestNativeToolEventsStillEmitted(t *testing.T) {
 	c.Eq("tu_1", end.GetToolUseId(), "tool_use_id")
 	c.True(end.GetIsError(), "is_error")
 }
+
+func turnEndStopReason(t *testing.T, frames ...string) rafikiv1.StopReason {
+	t.Helper()
+	p := newClaudeProvider()
+	got := rafikiv1.StopReason(-1)
+	for i, line := range frames {
+		for _, ev := range p.BusFramesNative([]byte(line), int64(1000+i)) {
+			if te := ev.GetTurnEnd(); te != nil {
+				got = te.GetStopReason()
+			}
+		}
+	}
+	return got
+}
+
+// The assistant frames carry a null stop_reason while streaming; the result
+// frame's is the turn's, and what turn spans and rafiki_turns_total report.
+func TestNativeTurnEndCarriesTheResultFramesStopReason(t *testing.T) {
+	ck := assert.NewCollecting(t)
+
+	ck.Eq(rafikiv1.StopReason_STOP_REASON_END_TURN, turnEndStopReason(t,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":null}}`,
+		`{"type":"result","subtype":"success","stop_reason":"end_turn"}`,
+	), "end_turn")
+	ck.Eq(rafikiv1.StopReason_STOP_REASON_MAX_TOKENS, turnEndStopReason(t,
+		`{"type":"result","subtype":"success","stop_reason":"max_tokens"}`,
+	), "max_tokens")
+	ck.Eq(rafikiv1.StopReason_STOP_REASON_ERROR, turnEndStopReason(t,
+		`{"type":"result","subtype":"error_during_execution","is_error":true,"stop_reason":"end_turn"}`,
+	), "an errored result is an error whatever the last call said")
+	ck.Eq(rafikiv1.StopReason_STOP_REASON_UNSPECIFIED, turnEndStopReason(t,
+		`{"type":"result","subtype":"success"}`,
+	), "a result with no stop_reason stays unspecified")
+}
