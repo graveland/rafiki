@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/glamour/v2"
 	glamouransi "charm.land/glamour/v2/ansi"
@@ -378,6 +379,14 @@ type renderer struct {
 	// did what it did. Part of the cache key via paneSig for the same reason as
 	// expandArgs: flipping it changes how many rows a block renders.
 	expandInjected bool
+
+	// timeMode decides which timing rows and stamps are drawn (see
+	// timestamps.go). Part of the cache key via paneSig, like the flags above:
+	// it adds rows to blocks already cached.
+	timeMode timeMode
+	// clock replaces time.Now for the timing decoration; nil means the real
+	// clock. Tests set it.
+	clock func() time.Time
 
 	// images is the shared Kitty thumbnail store, or nil when this renderer
 	// must never draw pixels. drawImages and smallIDs are set per render by
@@ -757,8 +766,17 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	// them put a "── tool_use" rule under EVERY block of a tool-calling turn,
 	// which is most blocks, competing with the content for attention while
 	// carrying none.
+	// The turn's duration shares that row: it is the same footnote about how
+	// the turn ended.
+	var footer []string
 	if b.Final && interestingStop(b.StopReason) {
-		sb.WriteString(styleMeta.Render("  ── " + sanitizeControlChars(b.StopReason)))
+		footer = append(footer, sanitizeControlChars(b.StopReason))
+	}
+	if r.timeMode != timeOff && b.Final && b.TurnDuration > 0 {
+		footer = append(footer, turnDurStr(b.TurnDuration))
+	}
+	if len(footer) > 0 {
+		sb.WriteString(styleMeta.Render("  ── " + strings.Join(footer, " · ")))
 		sb.WriteString("\n")
 	}
 
@@ -850,7 +868,7 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 		r.liveOut = nil
 	}
 	for i := r.cachedUpTo; i < finalized; i++ {
-		r.cached = append(r.cached, blockLines(r.renderBlock(blocks[i]))...)
+		r.cached = append(r.cached, r.drawBlock(blocks, i)...)
 	}
 	r.cachedUpTo = finalized
 
@@ -862,7 +880,7 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 		r.lastFP = fp
 		var tail []string
 		for i := finalized; i < len(blocks); i++ {
-			tail = append(tail, blockLines(r.renderBlock(blocks[i]))...)
+			tail = append(tail, r.drawBlock(blocks, i)...)
 		}
 		r.liveOut = tail
 	}

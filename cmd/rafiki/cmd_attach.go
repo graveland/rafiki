@@ -43,7 +43,8 @@ resubscribing.
 text as the next turn instead (⌃⏎ where the terminal reports it), ⇧⏎ (or ^J)
 inserts a newline, esc (or ^X) aborts the turn.
 ^O cycles the level of detail (tool arguments and thinking in full, then injected
-messages in full), ^L repaints the screen.
+messages in full), ^T cycles the timing shown (gap dividers and turn
+durations, a time on every message, none), ^L repaints the screen.
 ⇥ cycles the three panes — input, agents, transcript — and each one owns its
 keys while it has focus. ^N hops to the next agent that needs you, ^↑/^↓ move,
 ^B collapses the rail, ^S turns it into a conversation search (⏎ switches to

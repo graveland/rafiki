@@ -49,7 +49,11 @@ type keyMap struct {
 	Redraw        key.Binding
 	// ^Y is free: not in textareaKeys, and bound nowhere else in the cockpit.
 	ToggleImages key.Binding
-	Abort        key.Binding
+	// ToggleTime cycles how much timing the transcript shows (timeMode). ^T is
+	// a textarea key (transpose), so like ^B/^G/^D it is grandfathered: you
+	// cannot transpose a character while typing in the prompt.
+	ToggleTime key.Binding
+	Abort      key.Binding
 
 	// SearchToggle switches the rail column between the agent list and the
 	// conversation search. ^S is free: not in textareaKeys (the textarea has
@@ -135,6 +139,7 @@ func defaultKeyMap() keyMap {
 		// Kitty graphics support. ^Y is free: not in textareaKeys, and bound
 		// nowhere else in the cockpit.
 		ToggleImages: key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("^Y", "images")),
+		ToggleTime:   key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("^T", "times")),
 		// esc first: it is what muscle memory reaches for to stop a running
 		// turn, and it is free in the input pane (the textarea ignores it,
 		// and the other two panes match their own Escape before this).
@@ -303,6 +308,10 @@ var grandfathered = map[string]bool{
 	// ^N/^P are cursor down/up in the textarea; ↑/↓ do the same job, and a
 	// hop to the next agent needing you must work from the input pane.
 	"ctrl+n": true, "ctrl+p": true,
+	// ^T cycles the transcript's timing display. It IS a textarea key
+	// (transpose-character-backward); transposing mid-prompt is the rarer
+	// need. Same trade as ^B/^G/^D.
+	"ctrl+t": true,
 	// Scroll keys the input pane claims outright. pgup/pgdown page a
 	// three-line box, which is meaningless; home/end are line-start/line-end,
 	// which ^A gave up anyway and alt+</ctrl+home still provide.
@@ -318,6 +327,7 @@ func (k keyMap) globalConflicts() []string {
 		"HopPrev": k.HopPrev, "HopNext": k.HopNext,
 		"ToggleRail": k.ToggleRail, "Help": k.Help,
 		"ExpandArgs": k.ExpandArgs, "ToggleImages": k.ToggleImages,
+		"ToggleTime":   k.ToggleTime,
 		"SearchToggle": k.SearchToggle,
 		"Redraw":       k.Redraw, "Abort": k.Abort,
 	}

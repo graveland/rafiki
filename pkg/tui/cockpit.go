@@ -429,6 +429,9 @@ type Cockpit struct {
 	detail         detailLevel
 	expandArgs     bool
 	expandInjected bool
+	// timeMode is the ^T density of timing in the transcript: gap dividers
+	// and turn durations (the default), a stamp on every message, or none.
+	timeMode timeMode
 	// railPeek records that an explicit request revealed a rail the default look
 	// hides — ⇥ onto a hidden rail, or ^R below two rows — so committing or
 	// cancelling puts it back. Picking an agent is a round trip, not a mode
@@ -2118,6 +2121,13 @@ func (c *Cockpit) handleGlobalKey(msg tea.KeyPressMsg, armed bool) (tea.Model, t
 		c.invalidatePanes()
 		c.setNotice("detail: " + c.detail.String())
 		return c, nil, true
+	case key.Matches(msg, k.ToggleTime):
+		// Dividers and footers add rows to blocks the renderer already cached,
+		// so the panes are invalidated, not just re-signed (see ^O above).
+		c.timeMode = timeMode((int(c.timeMode) + 1) % timeModes)
+		c.invalidatePanes()
+		c.setNotice("times: " + c.timeMode.String())
+		return c, nil, true
 	case key.Matches(msg, k.ToggleImages):
 		if c.caps.mode() != imageModeKitty {
 			c.setNotice("this terminal cannot draw images; start with --images=kitty to force it")
@@ -2568,6 +2578,7 @@ func (c *Cockpit) searchTranscript(width, height int) string {
 		drawImages:     c.drawImages(),
 		smallIDs:       c.caps.smallIDs(),
 		expandInjected: c.expandInjected,
+		timeMode:       c.timeMode,
 	}, c.overlayFor(""))
 	if lines != nil {
 		c.syncViewport(p, lines)
@@ -3839,6 +3850,7 @@ func (c *Cockpit) footerHints() string {
 		// says "[+N lines]" and a folded tool call says "[omitted N lines]",
 		// and neither marker can name the key that opens it.
 		c.keys.ExpandArgs.Help().Key+" "+c.keys.ExpandArgs.Help().Desc,
+		c.keys.ToggleTime.Help().Key+" "+c.keys.ToggleTime.Help().Desc,
 		c.keys.Redraw.Help().Key+" "+c.keys.Redraw.Help().Desc)
 	return strings.Join(parts, "  ")
 }
@@ -3891,6 +3903,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.SearchToggle, "Switch the rail between the agent list and the conversation search. Type to search, move as in the agent rail, ⏎ to switch to the conversation (a closed one opens read-only), tab to cycle the sort; esc or ^S again goes back."},
 		entry{k.Help, "Show or hide this page."},
 		entry{k.ExpandArgs, "Cycle the level of detail: collapsed, then tool-call arguments and results in full, then the notices the daemon and the agent's harness inject in full as well."},
+		entry{k.ToggleTime, "Cycle the timing shown in the transcript: a divider where the conversation paused plus each turn's duration, then a time on every message in place of the dividers, then none."},
 		entry{k.ToggleImages, "Show or hide image thumbnails. Needs a terminal with Kitty graphics."},
 		entry{k.Redraw, "Repaint the screen. Try it when the display or the cursor looks wrong."},
 		entry{k.Quit, "Quit; press twice within two seconds to confirm. Your agents keep running."},
@@ -4046,6 +4059,7 @@ func (c *Cockpit) View() tea.View {
 			drawImages:     c.drawImages(),
 			smallIDs:       c.caps.smallIDs(),
 			expandInjected: c.expandInjected,
+			timeMode:       c.timeMode,
 		}, c.overlayFor(f))
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly

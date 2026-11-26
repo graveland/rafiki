@@ -50,6 +50,7 @@ type renderOpts struct {
 	drawImages     bool
 	smallIDs       bool
 	expandInjected bool
+	timeMode       timeMode
 }
 
 // paneSig identifies the rendered content. Two of the fields are geometry
@@ -64,6 +65,7 @@ type paneSig struct {
 	drawImages     bool
 	smallIDs       bool
 	expandInjected bool
+	timeMode       timeMode
 	liveFP         string
 	// overlay is the optimistic sends drawn after the transcript. It is a
 	// signature, not the rows themselves: a row moving from pending to sent
@@ -111,7 +113,10 @@ func (p *paneState) linesFor(s *session.Session, width, height int, opts renderO
 		drawImages:     opts.drawImages,
 		smallIDs:       opts.smallIDs,
 		expandInjected: opts.expandInjected,
-		overlay:        ov.sig,
+		// timeMode adds divider rows and footers to blocks already cached, so
+		// like expandInjected it is wrong, not stale, in the other mode.
+		timeMode: opts.timeMode,
+		overlay:  ov.sig,
 	}
 	if p.sigInit && sig == p.sig {
 		return nil
@@ -120,7 +125,7 @@ func (p *paneState) linesFor(s *session.Session, width, height int, opts renderO
 	// cached prefix built in the other one is wrong, not stale. paneSig alone
 	// only forces a rebuild through linesFor; the renderer's own cache has to go
 	// with it.
-	if p.renderer.expandInjected != opts.expandInjected {
+	if p.renderer.expandInjected != opts.expandInjected || p.renderer.timeMode != opts.timeMode {
 		p.invalidate()
 	}
 	p.sig, p.sigInit = sig, true
@@ -128,6 +133,7 @@ func (p *paneState) linesFor(s *session.Session, width, height int, opts renderO
 	p.renderer.drawImages = opts.drawImages
 	p.renderer.smallIDs = opts.smallIDs
 	p.renderer.expandInjected = opts.expandInjected
+	p.renderer.timeMode = opts.timeMode
 	lines := p.renderer.Lines(s.Blocks, s.Finalized, width)
 	// The renderer answers "nothing to draw" with nil, which is also this
 	// function's "nothing to do". Past the signature check this is a FRESH

@@ -83,6 +83,7 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | `^G` | Toggle the help page: every key with a sentence on what it does. `PgUp`/`PgDn`, `home`/`end` scroll it when it does not fit |
 | `^O` | Cycle the level of detail: collapsed, then tool arguments in full, then the messages the daemon and the harness injected in full as well (see below) |
 | `^Y` | Toggle image thumbnails (Kitty-graphics terminals only) |
+| `^T` | Cycle the transcript's timing: gap dividers and turn durations (default), a time on every message, none (see below) |
 | `^C`/`^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time |
 
 **Input pane**
@@ -219,6 +220,22 @@ The level of detail is a view decision: the messages stay in the transcript
 already fetched, so the toggle costs no refetch, and scrolling and the position
 readout are unaffected either way. A transcript whose only blocks are injected
 is content, not an empty conversation, and is drawn as such.
+
+## Timing in the transcript
+
+`^T` cycles three levels. The times are the ones the daemon recorded for each
+message, so a reattach or a replayed history shows when things happened, not
+when your client received them.
+
+| Level | Draws |
+|---|---|
+| gaps (default) | A dim divider above the first message, wherever the conversation was quiet for more than five minutes, and wherever the day changed, plus each finished turn's duration in the footnote under its last reply (`── 12.4s`). A divider for today reads `── 14:32 ──`; for any other day it names the date and how long ago, `── Fri Nov 20 14:32 · 6d ago ──`, so an old conversation always says which day you are looking at |
+| every message | Instead of the dividers (they would repeat it), the time right-aligned on the first row of every message, with the turn durations kept: `14:32:05` for today, `Nov 20 14:32:05 · 6d ago` for an older day, shortened to what fits |
+| off | Nothing beyond a tool call's own duration, which is always shown |
+
+A turn's duration is its `turn_start` to its `turn_end`. A conversation read
+back from history carries no turn events, so those turns show dividers but no
+duration.
 
 ## Unacknowledged sends
 

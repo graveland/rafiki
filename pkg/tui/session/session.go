@@ -76,7 +76,11 @@ type Block struct {
 	ThinkText  string // accumulated thinking
 	ToolCalls  []ToolCall
 	StopReason string
-	Final      bool // true when the turn has ended
+	// TurnDuration is TurnStart to TurnEnd, set on the turn's last assistant
+	// block only. Zero when either event carried no ts, and always zero in a
+	// history replay.
+	TurnDuration time.Duration
+	Final        bool // true when the turn has ended
 	// Stream marks a KindScriptOutput block's stream ("stdout"/"stderr").
 	Stream string
 	// InjectedKind says WHAT was injected on a KindInjected block (pkg/inject's
@@ -123,6 +127,7 @@ func (b Block) Fingerprint() string {
 	}
 	writeImages(&sb, b.Images)
 	sb.WriteString(b.StopReason)
+	sb.WriteString(strconv.FormatInt(int64(b.TurnDuration), 10))
 	sb.WriteString(b.InjectedKind)
 	if b.Stream != "" {
 		sb.WriteString(b.Stream)
@@ -208,6 +213,23 @@ type Session struct {
 	// results-only or injected-only row is dropped rather than drawn — and a
 	// receipt that joins afterwards must not insert a block for it again.
 	linked map[string]struct{}
+	// evAt is the producer's time (Event.ts) of the event applyPayload is
+	// folding in, zero outside it. Blocks are stamped from it so a replayed
+	// history or a reattach shows when things HAPPENED, not when this client
+	// received them.
+	evAt time.Time
+	// turnStart is the ts of the open turn's TurnStart, zero between turns.
+	// History carries no turn events, so a replayed turn has no duration.
+	turnStart time.Time
+}
+
+// stamp returns the time a block built right now belongs to: the event's own
+// ts when it carries one, else the local clock.
+func (s *Session) stamp() time.Time {
+	if !s.evAt.IsZero() {
+		return s.evAt
+	}
+	return time.Now()
 }
 
 // New returns an empty session for one child.
@@ -251,7 +273,7 @@ func (s *Session) InsertProvisional(messageID, text string) {
 	}
 	if !s.insertBeforePlaceholder([]Block{{
 		Kind:        KindUser,
-		At:          time.Now(),
+		At:          s.stamp(),
 		Text:        text,
 		MessageID:   messageID,
 		Provisional: true,
@@ -386,13 +408,19 @@ func (s *Session) ApplyHistory(ev *rafikiv1.Event) {
 }
 
 func (s *Session) applyPayload(ev *rafikiv1.Event) {
+	// An unset ts, or the epoch an older row decodes to, means "unknown".
+	if ts := ev.GetTs(); ts != nil && ts.AsTime().Unix() > 0 {
+		s.evAt = ts.AsTime()
+	}
+	defer func() { s.evAt = time.Time{} }()
 	switch p := ev.Payload.(type) {
 	case *rafikiv1.Event_UserMessage:
 		s.applyUserMessage(p.UserMessage)
 	case *rafikiv1.Event_AssistantMessage:
 		s.applyAssistantMessage(p.AssistantMessage)
 	case *rafikiv1.Event_TurnStart:
-		s.Blocks = append(s.Blocks, Block{Kind: KindAssistant, At: time.Now()})
+		s.turnStart = s.evAt
+		s.Blocks = append(s.Blocks, Block{Kind: KindAssistant, At: s.stamp()})
 	case *rafikiv1.Event_TurnEnd:
 		s.applyTurnEnd(p.TurnEnd)
 		s.DropProvisional()
@@ -407,7 +435,7 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 	case *rafikiv1.Event_Error:
 		s.Blocks = append(s.Blocks, Block{
 			Kind:  KindSystem,
-			At:    time.Now(),
+			At:    s.stamp(),
 			Text:  "Error: " + p.Error.GetMessage(),
 			Final: true,
 		})
@@ -420,7 +448,7 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 		// only on an appended KindUser block.
 		s.Blocks = append(s.Blocks, Block{
 			Kind:  KindSystem,
-			At:    time.Now(),
+			At:    s.stamp(),
 			Text:  formatCompactionBoundary(p.CompactionBoundary),
 			Final: true,
 		})
@@ -439,7 +467,7 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 		if p.Retry.GetWillRetry() {
 			s.Blocks = append(s.Blocks, Block{
 				Kind:  KindSystem,
-				At:    time.Now(),
+				At:    s.stamp(),
 				Text:  retryScheduleText(p.Retry),
 				Final: true,
 			})
@@ -456,7 +484,7 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 	case *rafikiv1.Event_ScriptReport:
 		s.Blocks = append(s.Blocks, Block{
 			Kind:  KindSystem,
-			At:    time.Now(),
+			At:    s.stamp(),
 			Text:  scriptReportText(p.ScriptReport),
 			Final: true,
 		})
@@ -497,7 +525,7 @@ func (s *Session) applyScriptOutput(so *rafikiv1.ScriptOutput) {
 	}
 	s.Blocks = append(s.Blocks, Block{
 		Kind:   KindScriptOutput,
-		At:     time.Now(),
+		At:     s.stamp(),
 		Text:   so.GetText(),
 		Stream: so.GetStream(),
 		Final:  true,
@@ -517,7 +545,7 @@ func (s *Session) applyScriptOutput(so *rafikiv1.ScriptOutput) {
 func (s *Session) applySystemMessage(sm *rafikiv1.SystemMessage) {
 	s.Blocks = append(s.Blocks, Block{
 		Kind:         KindInjected,
-		At:           time.Now(),
+		At:           s.stamp(),
 		Text:         TextFromContent(sm.GetContent()),
 		InjectedKind: firstInjectedKind(sm.GetContent()),
 		Final:        true,
@@ -585,7 +613,7 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 	for _, cb := range um.GetInjected() {
 		added = append(added, Block{
 			Kind:         KindInjected,
-			At:           time.Now(),
+			At:           s.stamp(),
 			Text:         TextFromContent([]*rafikiv1.ContentBlock{cb}),
 			InjectedKind: cb.GetInjectedKind(),
 			Final:        true,
@@ -665,7 +693,7 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 	}
 	added = append(added, Block{
 		Kind:      KindUser,
-		At:        time.Now(),
+		At:        s.stamp(),
 		Text:      text,
 		Images:    images,
 		MessageID: um.GetMessageId(),
@@ -743,7 +771,7 @@ func (s *Session) attachToolResult(tr *rafikiv1.ToolResultBlock) {
 func (s *Session) applyAssistantMessage(am *rafikiv1.AssistantMessage) {
 	block := Block{
 		Kind:       KindAssistant,
-		At:         time.Now(),
+		At:         s.stamp(),
 		Content:    am.GetContent(),
 		StopReason: am.GetRawStopReason(),
 		Final:      true,
@@ -833,7 +861,13 @@ func (s *Session) applyTurnEnd(te *rafikiv1.TurnEnd) {
 		if te.StopReason != rafikiv1.StopReason_STOP_REASON_UNSPECIFIED {
 			last.StopReason = te.GetRawStopReason()
 		}
+		if !s.turnStart.IsZero() && !s.evAt.IsZero() {
+			if d := s.evAt.Sub(s.turnStart); d > 0 {
+				last.TurnDuration = d
+			}
+		}
 	}
+	s.turnStart = time.Time{}
 	s.settleAll()
 }
 
@@ -847,7 +881,7 @@ func (s *Session) applyTurnEnd(te *rafikiv1.TurnEnd) {
 func (s *Session) applyDelta(delta *rafikiv1.ContentBlockDelta) {
 	last := s.LastAssistant()
 	if last == nil || last.Final {
-		s.Blocks = append(s.Blocks, Block{Kind: KindAssistant, At: time.Now()})
+		s.Blocks = append(s.Blocks, Block{Kind: KindAssistant, At: s.stamp()})
 		last = &s.Blocks[len(s.Blocks)-1]
 	}
 	switch d := delta.Delta.(type) {
