@@ -15,9 +15,9 @@ import (
 // whole body unmarshalled into map[string]any, "messages" deleted, marshalled,
 // sha256, hex.
 //
-// It is the only definition of what a stored prefix_hash MEANS — every turn row
-// in every database was written by it — and it is compared turn to turn to flag
-// a cache break, so a drifted hash would flag a false break on every live
+// It is the only definition of what a stored prefix_hash MEANS, since every turn
+// row in every database was written by it, and it is compared turn to turn to
+// flag a cache break, so a drifted hash would flag a false break on every live
 // conversation.
 func oraclePrefixHash(requestJSON []byte) string {
 	var m map[string]any
@@ -87,6 +87,41 @@ func TestPrefixHashMatchesOracle(t *testing.T) {
 			"so this test cannot catch an implementation that skips it")
 	}
 	t.Logf("fixtures whose raw-marshal hash differs (the round trip is load-bearing): %v", discriminating)
+}
+
+// TestPrefixHashMatchesOracleOnUnrepresentableNumbers pins the ONE way the
+// parallel decode could drift from the whole-body one it replaced: a value Go's
+// JSON decoder cannot represent (a number past float64's range) fails that whole
+// decode, so the old hash was "" and the turn stored a NULL prefix_hash.
+//
+// "messages" is excluded from the hash, but not from that failure: a body whose
+// only such value sits inside messages must STILL hash to "". The body is
+// constructed so the skip-everything-but-messages implementation would answer a
+// real hash, which is what makes this test fail if that validation is removed.
+func TestPrefixHashMatchesOracleOnUnrepresentableNumbers(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cases := map[string]string{
+		"inside messages":  `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"x","n":1e1000}]}]}`,
+		"outside messages": `{"model":"m","seed":1e1000,"messages":[]}`,
+		"nested in tools":  `{"model":"m","tools":[{"name":"T","input_schema":{"minimum":1e1000}}],"messages":[]}`,
+		// The same numbers that stay in range DO hash, so the cases above are
+		// about representability, not about numbers per se.
+		"large but representable": `{"model":"m","seed":9007199254740993,"messages":[{"role":"user","content":"x"}]}`,
+	}
+	for name, body := range cases {
+		want := oraclePrefixHash([]byte(body))
+		req, err := Parse([]byte(body))
+		c.Require().NoError(err, "%s: the top-level decode must accept it", name)
+		c.Eq(want, req.PrefixHash(), "%s: the hash must agree with the whole-body algorithm", name)
+		if name == "large but representable" {
+			c.NotEq("", want, "%s: a representable number must still hash", name)
+			continue
+		}
+		c.Eq("", want, "%s: the oracle must reject it", name)
+		// The accessor must reach "": raw marshalling of the same keys succeeds,
+		// so nothing but the decode failure can explain the empty hash.
+		c.NotEq("", rawMarshalHash(req), "%s: raw marshalling cannot be what answers \"\"", name)
+	}
 }
 
 // TestPrefixHashIsMessageInvariant pins the property the hash exists for: a

@@ -21,7 +21,7 @@ var inlineFixtures = map[string]string{
 	"tools with null schema":   `{"model":"m","tools":[{"name":"web_search","input_schema":null}],"messages":[]}`,
 	"tools with real schema":   `{"model":"m","tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[]}`,
 	"tools absent":             `{"model":"m","messages":[]}`,
-	"unicode and escapes":      `{"model":"m","system":"héllo — \"quoted\" \\ backslash \u00e9 ✓","messages":[{"role":"user","content":"a < b & \"c\""}]}`,
+	"unicode and escapes":      `{"model":"m","system":"héllo für \"quoted\" \\ backslash \u00e9 ✓","messages":[{"role":"user","content":"a < b & \"c\""}]}`,
 	"integer above 2^53":       `{"model":"m","max_tokens":9007199254740993,"seed":12345678901234567890,"messages":[]}`,
 	"floats":                   `{"model":"m","temperature":0.7,"top_p":0.90000000000000002,"messages":[]}`,
 	"nested keys out of order": `{"model":"m","metadata":{"z":1,"a":{"y":[1,2,{"b":true,"a":false}]}},"messages":[]}`,
@@ -33,15 +33,17 @@ var inlineFixtures = map[string]string{
 	"messages with breakpoints": `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}}]},` +
 		`{"role":"assistant","content":"plain string mentioning \\\"cache_control\\\""},` +
 		`{"role":"user","content":[{"type":"text","text":"b"}]}]}`,
-	"role is not a string": `{"model":"m","messages":[{"role":1,"content":[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]}]}`,
-	"stream true":          `{"model":"m","stream":true,"messages":[]}`,
-	"unparseable body":     `not json`,
+	"role is not a string":                 `{"model":"m","messages":[{"role":1,"content":[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]}]}`,
+	"stream true":                          `{"model":"m","stream":true,"messages":[]}`,
+	"number in messages past float64":      `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"x","n":1e1000}]}]}`,
+	"number outside messages past float64": `{"model":"m","seed":1e1000,"messages":[]}`,
+	"unparseable body":                     `not json`,
 }
 
 // bodyFixtures returns every fixture these tests pin, named: the inline table
 // plus every request body under pkg/capture/testdata and pkg/server/testdata.
-// Nothing is skipped — a fixture directory that holds a body must be covered —
-// so a new recorded body is picked up without touching the tests.
+// Nothing is skipped, since a fixture directory that holds a body must be
+// covered, so a new recorded body is picked up without touching the tests.
 func bodyFixtures(t *testing.T) map[string][]byte {
 	t.Helper()
 	out := make(map[string][]byte, len(inlineFixtures))

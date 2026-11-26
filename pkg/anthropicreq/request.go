@@ -5,9 +5,9 @@
 // paths ask of it.
 //
 // A request body carries the whole conversation, so it is the largest thing the
-// proxy handles. Each consumer used to decode it independently — routing's
+// proxy handles. Each consumer used to decode it independently: routing's
 // prefix hash, the three Claude Code thread signals, capture's decomposition
-// and its cache-breakpoint scan, the stream flag, and three rewrites — so one
+// and its cache-breakpoint scan, the stream flag, and three rewrites, so one
 // proxied turn parsed the same megabytes about nine times. Parse performs the
 // single top-level decode, and each accessor lazily decodes just the key it
 // needs, at most once per Request.
@@ -34,8 +34,9 @@ import (
 // for "the proxy parses each body once". Top counts Parse's single top-level
 // decode; Messages counts a messages[] array decode (the strict one, plus the
 // content-only fallback EnvelopeAndBreakpoints takes when the strict one fails).
-// Per-key value decodes are not counted — they are bounded by one key, not by
-// the size of the conversation.
+// Per-key value decodes are not counted, being bounded by one key rather than by
+// the size of the conversation, and neither is PrefixHash's validation-only
+// decode of messages[], which derives nothing.
 var DecodeCount = struct {
 	Top      atomic.Int64
 	Messages atomic.Int64
@@ -104,10 +105,10 @@ func (l *lazy[T]) get(compute func() T) T {
 // A body that does not decode as a JSON object returns the decode error AND a
 // usable *Request: Raw answers body verbatim, every parse-derived accessor
 // answers its zero result, and Messages/EnvelopeAndBreakpoints report the
-// failure. That is deliberate — a body rafiki cannot parse is still forwarded
-// upstream, which is the authority on what it will accept — so a caller always
-// has something to thread through the forwarding path; the error is returned so
-// it can say why nothing was derived.
+// failure. That is deliberate: a body rafiki cannot parse is still forwarded
+// upstream, which is the authority on what it will accept, so a caller always
+// has something to thread through the forwarding path. The error is returned so
+// the caller can say why nothing was derived.
 func Parse(body []byte) (*Request, error) {
 	DecodeCount.Top.Add(1)
 	r := &Request{raw: body}
@@ -155,7 +156,7 @@ func (r *Request) Fields() map[string]json.RawMessage {
 // WithFields returns a NEW Request carrying fields marshalled into their new
 // bytes: this is how a rewrite (resolveAndAdapt, clampEffortBody, doOpenRouter)
 // produces the body actually sent upstream. The new Request's lazy caches are
-// empty, so every later accessor reads the FORWARDED bytes — exactly what the
+// empty, so every later accessor reads the FORWARDED bytes, exactly what the
 // per-field helpers did when they read the rewritten body before this package
 // existed.
 //
@@ -228,7 +229,7 @@ func (r *Request) DeclaresClientTools() bool {
 //
 // An absent or null messages key is no messages (nil, no error). A messages
 // value that is not an array of objects is an error wrapping "decompose:
-// unmarshal request:" — that prefix is capture's own error vocabulary, restated
+// unmarshal request:". That prefix is capture's own error vocabulary, restated
 // here so an operator's log line is unchanged.
 func (r *Request) Messages() ([]Message, error) {
 	res := r.messages.get(func() messagesResult {
@@ -273,7 +274,7 @@ func (r *Request) envelopeAndBreakpoints() envelopeResult {
 		}
 	} else if raw, ok := r.fields["messages"]; ok {
 		// The strict decode failed: a message whose role is not a string. The
-		// splitter never required one — it read only each message's content — so
+		// splitter never required one (it read only each message's content), so
 		// fall back to that shape rather than change what breakpoints a turn
 		// records. Only a body the Messages accessor refuses gets here, which is
 		// a body capture fails on anyway.
@@ -318,15 +319,27 @@ func (r *Request) envelopeAndBreakpoints() envelopeResult {
 // therefore hashes identically across a conversation's turns.
 //
 // It is stored on every turn and compared turn to turn to flag a cache break, so
-// its output must stay byte-identical to routing.PrefixHash's: every non-messages
-// value is decoded through `any` before the canonical marshal, which is what
-// rounds integers past 2^53 and re-spaces nested JSON the way a whole-body
-// round trip used to. Returns "" when the request could not be parsed (the column
-// is nullable; a turn with no prefix hash simply never flags a break).
+// its output must stay byte-identical to the algorithm that wrote the column:
+// every value is decoded through `any` before the canonical marshal, which is
+// what rounds integers past 2^53 and re-spaces nested JSON the way a whole-body
+// round trip did. Returns "" when the request could not be decoded (the column is
+// nullable; a turn with no prefix hash simply never flags a break).
+//
+// "messages" is not part of the hash, but it is still decoded (and discarded)
+// first. The whole-body decode this replaced failed on ANY value it could not
+// represent, messages included, so a request carrying such a value hashed to ""
+// and stored a NULL; skipping the key would hand those turns a real hash and
+// manufacture exactly the false cache break the hash exists to detect.
 func (r *Request) PrefixHash() string {
 	return r.prefix.get(func() string {
 		if r.parseErr != nil {
 			return ""
+		}
+		var ignored any
+		if raw, ok := r.fields["messages"]; ok {
+			if err := json.Unmarshal(raw, &ignored); err != nil {
+				return ""
+			}
 		}
 		var m map[string]any
 		if r.fields != nil {
@@ -356,7 +369,7 @@ func (r *Request) PrefixHash() string {
 // blocks (the shape cache_control actually appears in) and inspects each
 // block's cache_control field directly, so a message whose text merely
 // contains the literal substring "cache_control" is not a false positive.
-// Plain-string content carries no cache_control block, so it is always false —
+// Plain-string content carries no cache_control block, so it is always false,
 // even when the string text embeds the literal token. Only a genuinely
 // unexpected shape falls back to a conservative substring check.
 func messageHasCacheControl(content json.RawMessage) bool {
@@ -378,6 +391,6 @@ func messageHasCacheControl(content json.RawMessage) bool {
 	if err := json.Unmarshal(content, &str); err == nil {
 		return false
 	}
-	// Genuinely unexpected shape — conservative substring check so capture never fails.
+	// Genuinely unexpected shape: conservative substring check so capture never fails.
 	return bytes.Contains(content, []byte(`"cache_control"`))
 }

@@ -16,8 +16,8 @@ import (
 // verbatim from the call sites this package took over (pkg/server's
 // requestsStream, pkg/capture's splitEnvelopeAndBreakpoints/requestMessages and
 // messageHasCacheControl). They are test-only on purpose: they are what "same
-// behaviour" means, so a change to a rule must be made in two places — the
-// accessor and its oracle — which is the point.
+// behaviour" means, so a change to a rule must be made in two places, the
+// accessor and its oracle, which is the point.
 //
 // The thread-signal oracles are not copies: pkg/claudethread still exports its
 // byte-slice form for the OpenAI face, and that is the oracle.
