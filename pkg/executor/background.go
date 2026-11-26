@@ -21,8 +21,8 @@ type registryBackgrounder struct {
 	workspaceID string
 }
 
-func (b *registryBackgrounder) Start(argv, env []string, dir, command, owner string) (tools.Provisional, error) {
-	j, err := b.r.startProvisional(argv, env, dir, b.workspaceID, owner, command)
+func (b *registryBackgrounder) Start(argv, env []string, dir, command, owner string, timeout time.Duration) (tools.Provisional, error) {
+	j, err := b.r.startProvisional(argv, env, dir, b.workspaceID, owner, command, timeout)
 	if err != nil {
 		// Returned verbatim, never stringified: a missing binary must stay an
 		// *exec.Error wrapping exec.ErrNotFound / os.ErrPermission so the bash
@@ -84,3 +84,5 @@ func (p jobProvisional) Snapshot() (string, time.Time) {
 func (p jobProvisional) Promote() string { return p.r.promote(p.j) }
 
 func (p jobProvisional) Discard() { p.r.discard(p.j) }
+
+func (p jobProvisional) TimedOut() bool { return p.j.timedOutNow() }

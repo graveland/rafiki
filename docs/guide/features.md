@@ -62,7 +62,7 @@
   [what an agent can address](executors.md#what-an-agent-can-address)). `rafikid` itself can run in Kubernetes with no local filesystem
   of interest at all — you connect from the cockpit on your laptop and start
   agents against executors elsewhere, isolated per agent if you want it.
-  Background jobs survive a 600s `bash` ceiling and notify on completion;
+  A `bash` command still running after 60s moves to a background job and notifies on completion (its `timeout`, default 1h, is a kill deadline);
   workspaces can be pinned to a machine or rescheduled across an
   interchangeable pool.
 - **A Python library that follows the agent around.** `pymodule_put` saves a

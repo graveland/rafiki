@@ -51,6 +51,10 @@ type Options struct {
 	// JobOutputBudget is how many bytes of retained background-job output one
 	// workspace may hold. Zero means defaultJobBudget.
 	JobOutputBudget int64
+	// BashPromoteAfter overrides how long a bash call blocks before moving to
+	// the background. Zero means tools.BashPromoteAfter; tests set it so a
+	// promotion does not take a minute.
+	BashPromoteAfter time.Duration
 	// LSPConfig is the path to an lsp.json describing language servers this
 	// executor may start. Empty means auto-detect what is installed on PATH.
 	//
@@ -302,6 +306,8 @@ func toolOptsFor(opts Options, root string) tools.ToolOpts {
 		RTK:          opts.RTK,
 		OutputPolicy: tools.OutputPolicy{SpillDir: opts.SpillDir},
 		Env:          opts.Env,
+
+		BashPromoteAfter: opts.BashPromoteAfter,
 		// Web is set unconditionally: the executor has no web POLICY of its
 		// own — the daemon's ToolsWeb decides whether an agent's tools[]
 		// contains download, and this registry only materializes workspace

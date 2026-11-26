@@ -478,13 +478,23 @@ pre-phase-08 behaviour kept as a compatibility path so an executor and a
 daemon of different vintages still interoperate.
 
 **`timeout` bounds a NON-auto call only.** `autoBackground` (set for `bash`
-calls) makes a command still running at its own tool timeout a background job
-instead of a kill, so such a call OWNS its deadline — the bash tool's own
-promote timer, not the caller's `timeout` (the executor does not wrap the call
-in `timeout` when `autoBackground` is set). A caller's `timeout` need therefore
-only STRICTLY exceed the bash tool's clamped maximum: `pkg/execpool`'s
-`executorCallTimeout` (`tools.MaxBashTimeout + 30s`) is the enforcement, so the
-promote always wins the race against a caller deadline.
+calls) makes the bash tool own the call's lifetime: a command still running at
+`tools.BashPromoteAfter` (60s, fixed) becomes a background job and the call
+returns the handoff, so the call ends there whatever the tool's own `timeout`
+argument says (the executor does not wrap the call in `timeout` when
+`autoBackground` is set). That argument, milliseconds, is instead a KILL
+deadline for the whole command, background time included (default 1h, capped at
+24h; a call without `autoBackground` blocks and keeps the old bounds, 120s and 600s).
+The job registry arms it when the command starts and kills the process group
+when it expires: the job exits with code **124** (the GNU `timeout` convention),
+its output ends with `[job killed: still running after its <d> timeout]`, and
+the exit is published like any other, so a stuck job always ends in a
+`WatchJobs` event. A deadline at or below 60s kills the command inside the call,
+which answers `command timed out after <d> and was killed`. A job started by
+`background=true` / `bash_start` has no deadline. A caller's `timeout` need
+only STRICTLY exceed `tools.MaxBashTimeout`: `pkg/execpool`'s
+`executorCallTimeout` (`tools.MaxBashTimeout + 30s`) is the enforcement, and the
+60s promote is always inside it.
 
 `owner` is the daemon's id for the agent making the call, opaque here. It is
 stored on any job the call creates and rides every `WatchJobs` event for that
@@ -499,7 +509,7 @@ The normal path is:
    a background job and streams only the handle.
 3. Otherwise, the tool runs synchronously; the server streams
    `Result{content[], observedMtime}` on success or `Failed{…}` on error. An
-   `autoBackground` bash call that reaches its own timeout takes this same path
+   `autoBackground` bash call still running after 60s takes this same path
    with a handoff `Result` naming the promoted job's handle.
 
 **Result carries typed content**, not a bare string. `content[]` holds

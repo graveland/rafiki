@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -750,6 +751,7 @@ func newExecutorServeCmd() *cobra.Command {
 		rtkMode            string
 		spillDir           string
 		jobBudgetMB        int64
+		bashPromoteAfter   time.Duration
 		lspConfig          string
 		noLSP              bool
 		skillsSync         bool
@@ -1002,6 +1004,7 @@ every existing install already has; any other name lives under profiles/<name>.`
 				RTK:                 tools.ParseRTKMode(rtkMode),
 				SpillDir:            spillDir,
 				JobOutputBudget:     jobBudgetMB << 20,
+				BashPromoteAfter:    bashPromoteAfter,
 				LSPConfig:           lspConfig,
 				NoLSP:               noLSP,
 				SkillsSync:          skillsSyncEnabled(cmd, skillsSync, launchKinds),
@@ -1101,6 +1104,11 @@ every existing install already has; any other name lives under profiles/<name>.`
 	cmd.Flags().Int64Var(&jobBudgetMB, "job-output-budget-mb", 256,
 		"megabytes of background-job output retained per workspace, oldest finished job dropped "+
 			"first. Output is kept until the workspace is released; there is no time limit")
+	// Hidden: how long a bash call blocks before a still-running command moves
+	// to the background (default 60s). Not an operator setting; the integration
+	// tests shorten it so a promotion does not take a minute.
+	cmd.Flags().DurationVar(&bashPromoteAfter, "bash-promote-after", 0, "")
+	_ = cmd.Flags().MarkHidden("bash-promote-after")
 	cmd.Flags().StringVar(&lspConfig, "lsp-config", "",
 		"path to an lsp.json describing language servers this executor may start (default: auto-detect what is on PATH)")
 	cmd.Flags().BoolVar(&noLSP, "no-lsp", false, "disable language servers on this executor entirely")

@@ -15,9 +15,8 @@ import (
 // four blueprints here are argument TRANSLATIONS, not implementations: Read,
 // Write and Edit forward their input unchanged to this package's read, write
 // and edit (which already accept file_path, old_string/new_string/replace_all,
-// and clamp Read's offset < 1 to 1), and Bash renames Claude Code's `timeout`
-// to the executor's `timeout_ms` and turns run_in_background into an executor
-// job.
+// and clamp Read's offset < 1 to 1), and Bash turns run_in_background into an
+// executor job and drops `description`.
 //
 // They materialize only under ToolOpts.ClaudeShapedWorkspace, which ALSO makes
 // the native read/write/edit/bash decline: two spellings of one operation
@@ -34,8 +33,16 @@ const (
 		"replacement. Replaces the built-in Edit; read the file first."
 
 	claudeBashDescription = "Runs a shell command on an executor. Replaces the " +
-		"built-in Bash. run_in_background starts a job: read its output with " +
-		"bash_output and stop it with bash_kill, naming the same executor."
+		"built-in Bash. Run long commands (builds, test suites, deploys) directly: " +
+		"one still running after 60s is moved to the background as a job, and you " +
+		"get its output so far, a handle, and a message when it exits. Then end " +
+		"your turn or do other work and read the message when it arrives. Waiting " +
+		"is event-driven: never sleep, loop on bash_output, or schedule a wakeup " +
+		"to wait for a command, because the exit message is immediate and any " +
+		"polling is strictly slower. timeout is a kill deadline for the whole " +
+		"command (default 1 hour), not a wait. run_in_background starts a job with " +
+		"no deadline at once: read its output with bash_output and stop it with " +
+		"bash_kill, naming the same executor."
 )
 
 func init() {
@@ -186,7 +193,7 @@ func (ClaudeBashBlueprint) InputSchema() Schema {
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "command", Type: "string", Description: "Shell command to run via bash -c on the executor."},
-			{Name: "timeout", Type: "number", Description: "Timeout in milliseconds. Omit to use the executor's default (120s); clamped to a 600000 (600s) maximum."},
+			{Name: "timeout", Type: "number", Description: bashTimeoutDescription},
 			{Name: "description", Type: "string", Description: "A one-line description of what the command does. Not forwarded to the executor."},
 			{Name: "run_in_background", Type: "boolean", Description: "Start the command as a job instead of waiting for it to finish."},
 		},
@@ -241,7 +248,7 @@ func (t *claudeBashTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 
 	payload := map[string]any{"command": in.Command}
 	if in.Timeout != nil && *in.Timeout > 0 {
-		payload["timeout_ms"] = int(*in.Timeout)
+		payload["timeout"] = *in.Timeout
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

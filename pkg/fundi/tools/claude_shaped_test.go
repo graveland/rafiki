@@ -142,15 +142,16 @@ func TestClaudeShapedEditForwardsInputUnchanged(t *testing.T) {
 	c.Eq("replaced 2 occurrence(s) in /w/a.txt", res.Text, "Edit result text")
 }
 
-// Bash is the one that translates: Claude Code's `timeout` (a number of
-// milliseconds) becomes the executor's timeout_ms, and `description` is dropped
-// because the executor's bash has no such argument.
-func TestClaudeShapedBashTranslatesTimeout(t *testing.T) {
+// Bash is the one that translates: `timeout` (a number of milliseconds) reaches
+// the executor under the same name, a non-positive one is omitted so the
+// executor's default applies, and `description` is dropped because the
+// executor's bash has no such argument.
+func TestClaudeShapedBashForwardsTimeout(t *testing.T) {
 	cases := []struct{ name, input, want string }{
 		{
-			"timeout becomes timeout_ms",
+			"timeout is forwarded",
 			`{"command":"x","timeout":5000,"description":"d"}`,
-			`{"command":"x","timeout_ms":5000}`,
+			`{"command":"x","timeout":5000}`,
 		},
 		{"absent timeout is omitted", `{"command":"x"}`, `{"command":"x"}`},
 		{"zero timeout is omitted", `{"command":"x","timeout":0}`, `{"command":"x"}`},

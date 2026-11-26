@@ -201,7 +201,7 @@ func TestProvisionalJobIsInvisibleUntilPromoted(t *testing.T) {
 	ch, cancel := r.subscribe()
 	defer cancel()
 
-	j, err := r.startProvisional([]string{"bash", "-c", "echo hi; sleep 30"}, nil, "", "ws-1", "owner-1", "echo hi; sleep 30")
+	j, err := r.startProvisional([]string{"bash", "-c", "echo hi; sleep 30"}, nil, "", "ws-1", "owner-1", "echo hi; sleep 30", 0)
 	c.NoError(err, "startProvisional")
 
 	if _, _, _, _, found := r.output(j.handle, 0); found {
@@ -236,7 +236,7 @@ func TestPromoteAfterExitPublishesBoth(t *testing.T) {
 	r := newJobRegistry(t.TempDir(), t.TempDir(), defaultJobBudget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-1") })
 
-	j, err := r.startProvisional([]string{"true"}, nil, "", "ws-1", "owner-1", "true")
+	j, err := r.startProvisional([]string{"true"}, nil, "", "ws-1", "owner-1", "true", 0)
 	c.NoError(err, "startProvisional")
 	select {
 	case <-j.done:
@@ -265,7 +265,7 @@ func TestDiscardRemovesFileAndEntry(t *testing.T) {
 	ch, cancel := r.subscribe()
 	defer cancel()
 
-	j, err := r.startProvisional([]string{"bash", "-c", "sleep 30"}, nil, "", "ws-1", "owner-1", "sleep 30")
+	j, err := r.startProvisional([]string{"bash", "-c", "sleep 30"}, nil, "", "ws-1", "owner-1", "sleep 30", 0)
 	c.NoError(err, "startProvisional")
 	path := j.out.path
 	if _, err := os.Stat(path); err != nil {
@@ -318,7 +318,7 @@ func TestProvisionalCapturesStderrHead(t *testing.T) {
 	t.Cleanup(func() { r.releaseWorkspace("ws-1") })
 
 	script := `echo on-stdout; for i in $(seq 1 2000); do printf 'abc' >&2; done`
-	j, err := r.startProvisional([]string{"bash", "-c", script}, nil, "", "ws-1", "owner-1", script)
+	j, err := r.startProvisional([]string{"bash", "-c", script}, nil, "", "ws-1", "owner-1", script, 0)
 	c.NoError(err, "startProvisional")
 	select {
 	case <-j.done:
@@ -351,7 +351,7 @@ func TestReleaseWorkspacePublishesNoExit(t *testing.T) {
 	c.True(running.running, "start must publish a running event")
 
 	// A provisional job in the same workspace, for the promote-after-release leg.
-	j, err := r.startProvisional([]string{"bash", "-c", "sleep 30"}, nil, "", "ws-1", "owner-1", "sleep 30")
+	j, err := r.startProvisional([]string{"bash", "-c", "sleep 30"}, nil, "", "ws-1", "owner-1", "sleep 30", 0)
 	c.NoError(err, "startProvisional")
 
 	r.releaseWorkspace("ws-1")

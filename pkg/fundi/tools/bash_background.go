@@ -12,8 +12,10 @@ import (
 // keeps kill-at-timeout.
 type Backgrounder interface {
 	// Start runs argv in dir under env as a provisional job: running, its
-	// output recorded, but not yet visible as a job.
-	Start(argv, env []string, dir, command string, owner string) (Provisional, error)
+	// output recorded, but not yet visible as a job. The command is killed if
+	// it is still running after timeout, whether or not it has been promoted
+	// by then.
+	Start(argv, env []string, dir, command string, owner string, timeout time.Duration) (Provisional, error)
 }
 
 // Provisional is a running command that is not yet a job.
@@ -33,6 +35,9 @@ type Provisional interface {
 	Promote() string
 	// Discard kills it if still running and removes every trace.
 	Discard()
+	// TimedOut reports that the backgrounder killed it at its timeout. Valid
+	// after Done.
+	TimedOut() bool
 }
 
 type autoBackgroundKey struct{}
@@ -62,6 +67,8 @@ type autoRun struct {
 	stderr   string
 	err      error
 	promoted bool
+	// timedOut: the command was killed at its timeout.
+	timedOut bool
 	snap     string
 	last     time.Time
 	handle   string
@@ -69,30 +76,42 @@ type autoRun struct {
 
 // runAuto runs argv — the same argv run would exec (an rtk rewrite, or
 // `bash -c <command>`) — as a provisional job under bt's env and cwd, then
-// waits either for it to exit or for timeout to elapse. A clean finish is
+// waits for it to exit or for promoteAfter to elapse. A clean finish is
 // returned so the caller can run it through the ordinary exit-code and clip
-// handling; a timeout promotes the still-running process to a visible job and
-// returns its handle. ctx here is the CALLER's context, not the timed one: the
-// timer owns the promote deadline, so a done ctx means genuine cancellation
-// (a timed context would race the timer at exactly timeout).
-func (bt *bashTool) runAuto(ctx context.Context, timeout time.Duration, argv []string, command, owner string) autoRun {
-	p, err := bt.bg.Start(argv, bt.env, bt.cwd, command, owner)
+// handling; a command still running at promoteAfter becomes a visible job and
+// its handle is returned. timeout is the kill deadline, owned by the
+// backgrounder so it holds after promotion; a timeout at or below promoteAfter
+// never promotes, because the command is dead before the timer would fire.
+// ctx here is the CALLER's context, not a timed one: the timer owns the
+// promote deadline, so a done ctx means genuine cancellation.
+func (bt *bashTool) runAuto(ctx context.Context, timeout, promoteAfter time.Duration, argv []string, command, owner string) autoRun {
+	p, err := bt.bg.Start(argv, bt.env, bt.cwd, command, owner, timeout)
 	if err != nil {
 		return autoRun{err: err}
 	}
 	finish := func() autoRun {
 		combined, stderrHead, runErr := p.Result()
+		timedOut := p.TimedOut()
 		p.Discard()
-		return autoRun{out: combined, stderr: stderrHead, err: runErr}
+		return autoRun{out: combined, stderr: stderrHead, err: runErr, timedOut: timedOut}
 	}
-	timer := time.NewTimer(timeout)
+	if timeout <= promoteAfter {
+		select {
+		case <-p.Done():
+			return finish()
+		case <-ctx.Done():
+			p.Discard()
+			return autoRun{err: ctx.Err()}
+		}
+	}
+	timer := time.NewTimer(promoteAfter)
 	defer timer.Stop()
 	select {
 	case <-p.Done():
 		return finish()
 	case <-timer.C:
 		// Done and timer.C can both be ready (the process exited at the
-		// instant of the timeout); Go's select picks at random. One
+		// instant of the threshold); Go's select picks at random. One
 		// non-blocking check — an event test, not a poll — prefers the
 		// finished result. It narrows, but cannot close, the window, which
 		// is why Promote must tolerate an already-exited job.
@@ -114,19 +133,19 @@ func (bt *bashTool) runAuto(ctx context.Context, timeout time.Duration, argv []s
 // moved to the background: what it printed so far, how fresh that is, and how
 // to read more or stop it. rtkApplied adds the note that a rewritten command's
 // output only appears once it exits.
-func (bt *bashTool) backgroundHandoff(r autoRun, timeout time.Duration, rtkApplied bool) string {
+func (bt *bashTool) backgroundHandoff(r autoRun, waited, timeout time.Duration, rtkApplied bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[still running after %s; moved to the background as job %s]\n", timeout, r.handle)
+	fmt.Fprintf(&b, "[still running after %s; moved to the background as job %s; killed if still running after %s]\n", waited, r.handle, timeout)
 	b.WriteString(bt.p.Clip(r.snap, "bash-"+r.handle))
 	b.WriteString("\n")
 	if r.last.IsZero() {
-		fmt.Fprintf(&b, "[no output for %s]\n", timeout)
+		fmt.Fprintf(&b, "[no output for %s]\n", waited)
 	} else {
 		fmt.Fprintf(&b, "[last output %s ago]\n", time.Since(r.last).Round(time.Second))
 	}
 	if rtkApplied {
 		b.WriteString("(output is compacted by rtk and appears when it exits)\n")
 	}
-	fmt.Fprintf(&b, "You will get a message when it exits. Read more with bash_output {\"handle\":\"%s\"}; stop it with bash_kill.\n", r.handle)
+	fmt.Fprintf(&b, "You will get a message when it exits, so end your turn or do other work instead of polling. Read more with bash_output {\"handle\":\"%s\"}; stop it with bash_kill.\n", r.handle)
 	return b.String()
 }

@@ -21,6 +21,7 @@ type fakeStartRecord struct {
 	dir     string
 	command string
 	owner   string
+	timeout time.Duration
 }
 
 // fakeBackgrounder is a Backgrounder whose per-call behaviour the test
@@ -32,8 +33,8 @@ type fakeBackgrounder struct {
 	fn    func(fakeStartRecord) (Provisional, error)
 }
 
-func (f *fakeBackgrounder) Start(argv, env []string, dir, command, owner string) (Provisional, error) {
-	rec := fakeStartRecord{argv: argv, env: env, dir: dir, command: command, owner: owner}
+func (f *fakeBackgrounder) Start(argv, env []string, dir, command, owner string, timeout time.Duration) (Provisional, error) {
+	rec := fakeStartRecord{argv: argv, env: env, dir: dir, command: command, owner: owner, timeout: timeout}
 	f.mu.Lock()
 	f.calls = append(f.calls, rec)
 	fn := f.fn
@@ -64,6 +65,7 @@ type fakeProvisional struct {
 	handle    string
 	promoted  bool
 	discarded bool
+	timedOut  bool
 }
 
 func newFakeProvisional(handle string) *fakeProvisional {
@@ -104,6 +106,12 @@ func (p *fakeProvisional) Discard() {
 	p.discarded = true
 }
 
+func (p *fakeProvisional) TimedOut() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.timedOut
+}
+
 func (p *fakeProvisional) wasPromoted() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -123,6 +131,8 @@ func testAutoBashTool(t *testing.T, bg Backgrounder) Tool {
 		OutputPolicy: OutputPolicy{Budget: 30000, SpillDir: t.TempDir()},
 		Cwd:          t.TempDir(),
 		Backgrounder: bg,
+		// The real threshold is a minute; a test must not wait for it.
+		BashPromoteAfter: 50 * time.Millisecond,
 	})
 	assert.NewAborting(t).NoError(err)
 	return tool
@@ -152,15 +162,15 @@ func TestAutoBackgroundFinishedUnderThresholdReturnsNormalResult(t *testing.T) {
 	tool := testAutoBashTool(t, fbg)
 
 	ctx := WithAutoBackground(context.Background(), "owner-1")
-	res, err := tool.Execute(ctx, ToolInput(json.RawMessage(`{"command":"echo hello","timeout_ms":5000}`)))
+	res, err := tool.Execute(ctx, ToolInput(json.RawMessage(`{"command":"echo hello","timeout":5000}`)))
 	c.NoError(err)
 	c.StrContains(res.Text, "hello", "expected the command's output, got")
 	c.False(!p.wasDiscarded(), "Discard must be called on a finished provisional")
 	c.False(p.wasPromoted(), "Promote must not be called when the command finished in time")
 }
 
-// TestAutoBackgroundPromotesAtThreshold: a command still running at its
-// timeout is promoted to a job, and the model receives the handoff text naming
+// TestAutoBackgroundPromotesAtThreshold: a command still running at the
+// promote threshold is promoted to a job, and the model receives the handoff text naming
 // the handle and how to read more.
 func TestAutoBackgroundPromotesAtThreshold(t *testing.T) {
 	c := assert.NewAborting(t)
@@ -169,11 +179,13 @@ func TestAutoBackgroundPromotesAtThreshold(t *testing.T) {
 	tool := testAutoBashTool(t, fbg)
 
 	ctx := WithAutoBackground(context.Background(), "owner-1")
-	res, err := tool.Execute(ctx, ToolInput(json.RawMessage(`{"command":"sleep 5","timeout_ms":50}`)))
+	res, err := tool.Execute(ctx, ToolInput(json.RawMessage(`{"command":"sleep 5"}`)))
 	c.NoError(err)
 	c.StrContains(res.Text, "moved to the background as job h1", "expected the handoff naming the job, got")
 	c.StrContains(res.Text, `bash_output {"handle":"h1"}`, "expected a bash_output hint, got")
-	c.StrContains(res.Text, "still running after 50ms", "expected the raw, unrounded timeout in the handoff, got")
+	c.StrContains(res.Text, "still running after 50ms", "expected the raw, unrounded promote threshold in the handoff, got")
+	c.StrContains(res.Text, "killed if still running after 1h0m0s", "the handoff must name the kill deadline, got")
+	c.StrContains(res.Text, "instead of polling", "the handoff must steer away from polling, got")
 	c.False(!p.wasPromoted(), "Promote must be called at the threshold")
 	c.False(p.wasDiscarded(), "a promoted job must not be discarded")
 }
@@ -273,9 +285,74 @@ func TestAutoBackgroundHandoffSaysNoOutputYet(t *testing.T) {
 	tool := testAutoBashTool(t, fbg)
 
 	ctx := WithAutoBackground(context.Background(), "owner-1")
-	res, err := tool.Execute(ctx, ToolInput(json.RawMessage(`{"command":"sleep 5","timeout_ms":50}`)))
+	res, err := tool.Execute(ctx, ToolInput(json.RawMessage(`{"command":"sleep 5"}`)))
 	c.NoError(err)
 	c.StrContains(res.Text, "[no output for ", "expected the no-output marker, got")
+}
+
+// TestAutoBackgroundHandsTheKillDeadlineToTheBackgrounder: the timeout argument
+// is the backgrounder's kill deadline (it must outlive the call that promoted
+// the command), defaulting to an hour.
+func TestAutoBackgroundHandsTheKillDeadlineToTheBackgrounder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  time.Duration
+	}{
+		{"default is an hour", `{"command":"x"}`, time.Hour},
+		{"explicit milliseconds", `{"command":"x","timeout":90000}`, 90 * time.Second},
+		{"zero means the default", `{"command":"x","timeout":0}`, time.Hour},
+		{"capped at a day", `{"command":"x","timeout":999999999999}`, 24 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
+			p := newFakeProvisional("h1")
+			p.finish("ok\n", "", nil)
+			fbg := &fakeBackgrounder{fn: func(fakeStartRecord) (Provisional, error) { return p, nil }}
+			tool := testAutoBashTool(t, fbg)
+			_, err := tool.Execute(WithAutoBackground(context.Background(), "o"), ToolInput(json.RawMessage(tc.input)))
+			c.NoError(err)
+			recs := fbg.records()
+			c.Len(recs, 1, "Start calls")
+			c.Eq(tc.want, recs[0].timeout, "kill deadline handed to the backgrounder")
+		})
+	}
+}
+
+// TestAutoBackgroundTimeoutBelowThresholdNeverPromotes: a deadline at or below
+// the promote threshold kills the command while the call is still waiting, so
+// there is nothing to hand off, and the result says it was killed.
+func TestAutoBackgroundTimeoutBelowThresholdNeverPromotes(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := newFakeProvisional("h1")
+	fbg := &fakeBackgrounder{fn: func(fakeStartRecord) (Provisional, error) {
+		p.mu.Lock()
+		p.timedOut = true
+		p.mu.Unlock()
+		p.finish("partial\n", "", errors.New("signal: killed"))
+		return p, nil
+	}}
+	tool := testAutoBashTool(t, fbg)
+
+	res, err := tool.Execute(WithAutoBackground(context.Background(), "o"), ToolInput(json.RawMessage(`{"command":"sleep 99","timeout":20}`)))
+	c.NoError(err)
+	c.StrContains(res.Text, "partial", "output so far")
+	c.StrContains(res.Text, "timed out after 20ms and was killed", "kill note")
+	c.False(p.wasPromoted(), "a command killed inside the threshold must not be promoted")
+}
+
+// TestAutoBackgroundNonzeroExitIsNotReportedAsKilled: a command that fails on
+// its own is not labelled a timeout just because a deadline exists.
+func TestAutoBackgroundNonzeroExitIsNotReportedAsKilled(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := newFakeProvisional("h1")
+	p.finish("boom\n", "", realExitError(t))
+	fbg := &fakeBackgrounder{fn: func(fakeStartRecord) (Provisional, error) { return p, nil }}
+	tool := testAutoBashTool(t, fbg)
+
+	res, err := tool.Execute(WithAutoBackground(context.Background(), "o"), ToolInput(json.RawMessage(`{"command":"false","timeout":20}`)))
+	c.NoError(err)
+	c.NotStrContains(res.Text, "timed out", "a nonzero exit is not a timeout")
 }
 
 // TestBashDescriptionMentionsBackgroundAndKill pins the contract change in the
@@ -284,6 +361,21 @@ func TestBashDescriptionMentionsBackgroundAndKill(t *testing.T) {
 	c := assert.NewAborting(t)
 	desc := BashBlueprint{}.Description()
 	c.StrContains(desc, "moved to the background", "description must mention auto-background, got")
-	c.StrContains(desc, "bash_kill", "description must mention bash_kill, got")
+	c.StrContains(desc, "kill deadline", "description must say timeout is a kill deadline, got")
 	c.False(strings.Contains(desc, "Defaults to a 120s timeout"), "the old timeout sentence must be gone, got")
+}
+
+// TestBashDescriptionsSteerAwayFromPolling: both spellings of bash tell the
+// model that waiting is event-driven, which is the sentence that keeps an
+// agent from reaching for sleep loops or ScheduleWakeup.
+func TestBashDescriptionsSteerAwayFromPolling(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for name, d := range map[string]string{
+		"bash": BashBlueprint{}.Description(),
+		"Bash": ClaudeBashBlueprint{}.Description(),
+	} {
+		c.StrContains(d, "event-driven", "%s description", name)
+		c.StrContains(d, "schedule a wakeup", "%s description", name)
+		c.StrContains(d, "message when it exits", "%s description", name)
+	}
 }

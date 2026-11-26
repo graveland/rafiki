@@ -16,13 +16,16 @@ func init() {
 }
 
 const (
-	cronCreateDescription = `Schedule a prompt to be delivered to you at a future time, once or on a recurring schedule. Uses standard 5-field cron (minute hour day-of-month month day-of-week) evaluated in your owner's timezone, or the daemon's when your owner has none; the result names the zone. recurring defaults to true; pass false for a one-shot reminder with minute, hour, day-of-month and month pinned. A recurring schedule must not fire more often than every 5 minutes. Jobs persist with this conversation: they survive daemon restarts, are delivered into your message queue whether or not you are mid-turn, never expire, and end only through CronDelete or when this agent is closed. While this agent tree is over its budget, fires are held and delivered together once the budget is raised. Returns a job id for CronDelete.`
+	cronCreateDescription = `Schedule a prompt to be delivered to you at a future time, once or on a recurring schedule. Uses standard 5-field cron (minute hour day-of-month month day-of-week) evaluated in your owner's timezone, or the daemon's when your owner has none; the result names the zone. recurring defaults to true; pass false for a one-shot reminder with minute, hour, day-of-month and month pinned. A recurring schedule must not fire more often than every 5 minutes. For time-based work only (a reminder, a daily job): never use it to wait for a command, background job, build, or subagent, because those message you the moment they finish and a schedule is slow polling. Jobs persist with this conversation: they survive daemon restarts, are delivered into your message queue whether or not you are mid-turn, never expire, and end only through CronDelete or when this agent is closed. While this agent tree is over its budget, fires are held and delivered together once the budget is raised. Returns a job id for CronDelete.`
 
 	cronDeleteDescription = "Cancel a job you created with CronCreate or ScheduleWakeup, by the id it returned."
 
 	cronListDescription = "List your own pending scheduled jobs — CronCreate jobs and any pending ScheduleWakeup — with each one's next fire time and zone."
 
-	scheduleWakeupDescription = "Wake yourself up later with a prompt. delaySeconds is clamped to 300–3600 (5 minutes to an hour). Each call replaces your pending wakeup; stop: true cancels it. The wakeup persists with this conversation and is delivered into your message queue. reason and noop are accepted for compatibility and not used."
+	scheduleWakeupDescription = "Wake yourself up later with a prompt, for work that is due at a TIME. " +
+		"Never use it to wait for a command, background job, build, test run, or subagent: each " +
+		"messages you the moment it finishes, so end your turn and wait for that message. A wakeup " +
+		"is slow polling and always arrives later than the event it would be checking for. delaySeconds is clamped to 300–3600 (5 minutes to an hour). Each call replaces your pending wakeup; stop: true cancels it. The wakeup persists with this conversation and is delivered into your message queue. reason and noop are accepted for compatibility and not used."
 )
 
 // ScheduleInfo is one job as the tools render it.

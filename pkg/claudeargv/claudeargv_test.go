@@ -434,6 +434,11 @@ func TestCoordinationPromptStatesTheWaitingRule(t *testing.T) {
 	for _, want := range []string{"end your turn", "as a message", "TOP-LEVEL", "not a reason to poll"} {
 		c.StrContains(coordinationWaiting, want, "coordinationWaiting")
 	}
+	// Commands wait the same way subagents do: the exit message, not a loop.
+	for _, want := range []string{"moves to the background", "messaged when it exits", "ScheduleWakeup are slow polling"} {
+		c.StrContains(coordinationWaiting, want, "coordinationWaiting must extend the rule to commands")
+	}
+	c.NotStrContains(CoordinationPrompt, "a recurring check", "the schedule sentence must not invite polling by schedule")
 	// The channel distinction is the point: a parented child's settlement never
 	// takes the log fan-out, so the note's warning must not read as the rule.
 	c.NotStrContains(coordinationWaiting, "never wait for one",

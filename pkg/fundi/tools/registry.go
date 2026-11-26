@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/msg"
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
@@ -269,6 +270,11 @@ type ToolOpts struct {
 
 	// Backgrounder lets bash hand a long command off as a job (executor only).
 	Backgrounder Backgrounder
+
+	// BashPromoteAfter overrides how long a bash call blocks before moving to
+	// the background. Zero means the BashPromoteAfter constant; only tests set
+	// it, because the real value is deliberately not an argument.
+	BashPromoteAfter time.Duration
 
 	Skills []skillspkg.SkillMeta
 	// InlineSkillBody fetches a database-backed skill's body on the turn the

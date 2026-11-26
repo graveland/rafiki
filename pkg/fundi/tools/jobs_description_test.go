@@ -37,3 +37,18 @@ func TestBashStartResultNamesTheNotification(t *testing.T) {
 	c.StrContains(got, "notified", "result")
 	c.NotStrContains(got, "Poll it with", "result")
 }
+
+// ScheduleWakeup and CronCreate are the tools an agent reaches for when it does
+// not trust the exit message, so their descriptions are where polling by
+// schedule has to be refused.
+func TestScheduleDescriptionsRefuseWaitingOnEvents(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for name, d := range map[string]string{
+		"ScheduleWakeup": scheduleWakeupDescription,
+		"CronCreate":     cronCreateDescription,
+	} {
+		c.StrContains(d, "slow polling", "%s description", name)
+		c.StrContains(d, "background job", "%s description", name)
+	}
+	c.StrContains(scheduleWakeupDescription, "delaySeconds is clamped to 300–3600", "ScheduleWakeup must still document its clamp")
+}

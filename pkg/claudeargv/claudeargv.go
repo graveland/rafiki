@@ -64,7 +64,7 @@ const CoordinationPrompt = "You are running under rafiki, which exposes its agen
 	" If recall tools (recall, recall_context, memory_get/memory_put) are listed, search your " +
 	"owner's past conversations and saved memories with recall before non-trivial work, expand " +
 	"a promising hit with recall_context, and save durable facts with memory_put." +
-	" For timed work — a reminder, a recurring check, waking yourself later — use rafiki's CronCreate, CronDelete, CronList and ScheduleWakeup tools: their jobs persist with this conversation and survive daemon restarts." +
+	" For work due at a TIME — a reminder, a daily job — use rafiki's CronCreate, CronDelete, CronList and ScheduleWakeup tools: their jobs persist with this conversation and survive daemon restarts. Never use them to wait for something that will tell you when it is done." +
 	coordinationWaiting +
 	coordinationInstall
 
@@ -88,7 +88,10 @@ const coordinationWaiting = " Waiting: a subagent you spawn is not announced on 
 	"starts a new turn. So end your turn instead of sleeping, polling agent_list/agent_view, " +
 	"or scheduling a wakeup to re-check. The \"settlement notification may be dropped\" " +
 	"warnings on MCP tools describe the best-effort log channel a client relies on for a " +
-	"TOP-LEVEL agent it spawned; they are not your channel and are not a reason to poll."
+	"TOP-LEVEL agent it spawned; they are not your channel and are not a reason to poll. " +
+	"The same holds for commands: a Bash call still running after 60s moves to the background and " +
+	"you are messaged when it exits, so run long commands directly and end your turn. Event-driven " +
+	"waiting is immediate; sleep loops, repeated bash_output reads and ScheduleWakeup are slow polling."
 
 // coordinationInstall names the executor-install capability, for the same reason
 // coordinationWaiting exists: the tool's description is a fact the model has no

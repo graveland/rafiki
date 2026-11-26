@@ -14,10 +14,12 @@ func init() {
 
 const (
 	bashStartDescription = "Start a long-running shell command in the background and " +
-		"return a handle immediately. Use this for anything that outlives a single " +
-		"tool call — dev servers, log tails, watch modes, test suites longer than ten " +
-		"minutes — all of which plain `bash` cannot run, because it is synchronous " +
-		"with a 600s ceiling. Do not poll bash_output in a loop to detect " +
+		"return a handle immediately. Use this for things that are meant to keep " +
+		"running — dev servers, log tails, watch modes — and for anything that must " +
+		"outlive plain `bash`'s 24h kill deadline: a job started here has no " +
+		"deadline. A command that merely takes a while does not need it, because " +
+		"plain `bash` moves one still running after 60s to the background for you. " +
+		"Do not poll bash_output in a loop to detect " +
 		"completion — you are notified when the job finishes, so end your turn (or " +
 		"do other work) and read the notification when it arrives; call bash_output " +
 		"only when you actually want the output so far. Stop a job with bash_kill. " +

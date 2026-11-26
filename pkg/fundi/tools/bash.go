@@ -19,33 +19,64 @@ import (
 )
 
 const (
+	// defaultBashTimeout and maxBashTimeout bound a bash call that cannot move
+	// to the background (the call did not set AutoBackground, as from a daemon
+	// that predates it, or no Backgrounder was wired): it blocks, so the
+	// deadline is also how long the agent waits. A model never sees these.
 	defaultBashTimeout = 120 * time.Second
 	maxBashTimeout     = 600 * time.Second
-	bashWaitDelay      = 5 * time.Second
 
-	// MaxBashTimeout is the largest a bash call's timeout_ms can select
-	// (bashTimeout clamps to it). Exported because a caller that imposes its
-	// OWN deadline on an executor RPC must keep that deadline ABOVE this: a
-	// bash call that reaches its timeout is PROMOTED to a background job by a
-	// timer firing at exactly this value, and if the call's context deadline is
-	// at or below it the two fire together and the select may take ctx.Done() —
-	// discarding and killing a command that should have been promoted. See
+	// defaultJobTimeout and maxJobTimeout bound a call that CAN move to the
+	// background. There the deadline is a backstop for a stuck command, not a
+	// wait: the call returns at BashPromoteAfter whatever the deadline is.
+	defaultJobTimeout = time.Hour
+	maxJobTimeout     = 24 * time.Hour
+
+	// BashPromoteAfter is how long a bash call blocks before a still-running
+	// command is moved to the background as a job. Fixed, not an argument: the
+	// agent gains nothing from tuning it, and a long wait is the opposite of
+	// waiting for the exit message. 60s keeps the commands that finish in a
+	// minute (all but ~3% of calls) in the foreground, where they cost no
+	// extra message round trip.
+	BashPromoteAfter = 60 * time.Second
+
+	bashWaitDelay = 5 * time.Second
+
+	// MaxBashTimeout bounds how long ONE bash call blocks: a call that cannot
+	// move to the background is killed at it, and one that can is moved to the
+	// background at BashPromoteAfter, well inside it. Exported because a caller
+	// that imposes its OWN deadline on an executor RPC must keep that deadline
+	// ABOVE this, or it pre-empts the call's own handling of its deadline. See
 	// pkg/execpool's executorCallTimeout.
 	MaxBashTimeout = maxBashTimeout
 
 	bashDescription = "Run a shell command via `bash -c` in the working directory. " +
 		"stdout and stderr are merged into one result. A non-zero exit code is " +
-		"reported as text in the result, not as a tool error. Waits up to " +
-		"120s by default; pass timeout_ms to change that, up to 600s. A " +
-		"command still running when that time is up is moved to the " +
-		"background as a job — you get its output so far and a handle, a " +
-		"message when it exits, and can stop it with bash_kill — or, when " +
-		"this agent has no executor process, killed. " +
+		"reported as text in the result, not as a tool error. " +
+		"Run long commands (builds, test suites, deploys) directly: one still " +
+		"running after 60s is moved to the background as a job, and you get its " +
+		"output so far, a handle, and a message when it exits. Then end your turn " +
+		"or do other work and read the message when it arrives. Waiting is " +
+		"event-driven: never sleep, loop on bash_output, or schedule a wakeup to " +
+		"wait for a command, because the exit message is immediate and any " +
+		"polling is strictly slower. " +
+		"timeout is a kill deadline for the whole command, background time " +
+		"included, in milliseconds: it defaults to 1 hour and is capped at 24 " +
+		"hours. It is a backstop for a stuck command, not a wait. A command " +
+		"killed at it exits 124 and its output ends with a note. " +
 		"Large output is clipped (head and tail kept, middle elided) with the " +
 		"full output spilled to a file whose path is named in the result. " +
 		"Each call is a fresh shell that starts in your working directory (named " +
 		"in your environment block): a cd does NOT persist to the next call — " +
 		"chain it within one command (cd X && ...) or use absolute paths."
+
+	// bashTimeoutDescription is the timeout argument's description, shared by
+	// both spellings of the tool so they cannot drift.
+	bashTimeoutDescription = "Kill deadline in milliseconds for the whole command, " +
+		"including any time it spends moved to the background. Not a wait: a " +
+		"command still running after 60s moves to the background and you are " +
+		"messaged when it exits. Defaults to 3600000 (1h), capped at 86400000 " +
+		"(24h)."
 )
 
 func init() { DefaultBlueprint.Register(&BashBlueprint{}) }
@@ -59,7 +90,7 @@ func (BashBlueprint) InputSchema() Schema {
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "command", Type: "string", Description: "Shell command to run via bash -c."},
-			{Name: "timeout_ms", Type: "integer", Description: "Timeout in milliseconds. Defaults to 120000 (120s); clamped to a 600000 (600s) maximum."},
+			{Name: "timeout", Type: "number", Description: bashTimeoutDescription},
 		},
 		Required: []string{"command"},
 	}
@@ -79,6 +110,7 @@ func (BashBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 		cwd:           opts.Cwd,
 		rtkMode:       opts.RTK,
 		bg:            opts.Backgrounder,
+		promoteAfter:  opts.BashPromoteAfter,
 		// NonInteractiveEnv snapshots os.Environ() when opts.Env is nil, so a
 		// nil env is pinned here at Materialize time, not inherited live at
 		// each call.
@@ -99,13 +131,16 @@ func (BashBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 
 type bashTool struct {
 	BashBlueprint
-	p        OutputPolicy
-	cwd      string
-	rtkMode  RTKMode
-	env      []string
-	bg       Backgrounder
-	bashPath string
-	fallback atomic.Int64
+	p       OutputPolicy
+	cwd     string
+	rtkMode RTKMode
+	env     []string
+	bg      Backgrounder
+	// promoteAfter is how long a call blocks before moving to the background;
+	// zero means BashPromoteAfter. Only tests set it.
+	promoteAfter time.Duration
+	bashPath     string
+	fallback     atomic.Int64
 }
 
 func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
@@ -117,7 +152,13 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		return ToolResult{}, fmt.Errorf("bash: command is required")
 	}
 
-	timeout := bashTimeout(in.TimeoutMs)
+	// Auto-background is opt-in per CALL (WithAutoBackground, set by an
+	// executor that can own a job) and per TOOL (a Backgrounder was wired).
+	// Without both, this is byte-for-byte the old kill-at-timeout path.
+	owner, bgEligible := autoBackground(ctx)
+	useAuto := bt.bg != nil && bgEligible
+
+	timeout := bashTimeout(in.Timeout, useAuto)
 
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -133,25 +174,23 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		argv0, argvRest = bt.interpreter(), []string{"-c", in.Command}
 	}
 
-	// Auto-background is opt-in per CALL (WithAutoBackground, set by an
-	// executor that can own a job) and per TOOL (a Backgrounder was wired).
-	// Without both, this is byte-for-byte the old kill-at-timeout path.
-	owner, bgEligible := autoBackground(ctx)
-	useAuto := bt.bg != nil && bgEligible
-
 	// runArgv executes one argv either as a provisional background job (the
 	// auto path) or as a plain kill-at-timeout subprocess. A non-empty
 	// handoff means the command was promoted to a visible job and the caller
 	// must surface that text verbatim.
+	var timedOut bool
 	runArgv := func(rtk bool, name string, args []string) (out, stderrText, handoff string, runErr error) {
 		if useAuto {
 			argv := append([]string{name}, args...)
 			// The CALLER's ctx, not cctx: the timer owns the promote
 			// deadline, so a done ctx means genuine cancellation (a timed
 			// context would race the timer at exactly timeout).
-			r := bt.runAuto(ctx, timeout, argv, in.Command, owner)
+			r := bt.runAuto(ctx, timeout, bt.promoteDelay(), argv, in.Command, owner)
 			if r.promoted {
-				return "", "", bt.backgroundHandoff(r, timeout, rtk), nil
+				return "", "", bt.backgroundHandoff(r, bt.promoteDelay(), timeout, rtk), nil
+			}
+			if r.timedOut {
+				timedOut = true
 			}
 			return r.out, r.stderr, "", r.err
 		}
@@ -198,10 +237,11 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 
 	if runErr != nil {
 		switch {
-		case !useAuto && errors.Is(cctx.Err(), context.DeadlineExceeded):
-			// The auto path never kills at its timeout — it promotes — so a
-			// DeadlineExceeded here would mislabel a process that exited
-			// nonzero in the shadow of the deadline as "killed".
+		case (!useAuto && errors.Is(cctx.Err(), context.DeadlineExceeded)) || timedOut:
+			// The auto path reports a kill only when the registry says it
+			// killed the command (timedOut): its cctx deadline is never the
+			// one that fires, and a process that exited nonzero in the shadow
+			// of the deadline must not be mislabelled "killed".
 			out += fmt.Sprintf("\n[bash: command timed out after %s and was killed]\n", timeout)
 		case errors.Is(cctx.Err(), context.Canceled):
 			out += "\n[bash: command was canceled and killed]\n"
@@ -372,18 +412,36 @@ func isNonZeroExit(err error) bool {
 	return errors.As(err, &exitErr)
 }
 
+// bashInput is bash's argument shape. Timeout is a pointer so an absent
+// argument stays distinguishable from 0; both mean the default, but a caller
+// that sends one means something else than a caller that sends the other.
 type bashInput struct {
-	Command   string `json:"command"`
-	TimeoutMs int    `json:"timeout_ms"`
+	Command string   `json:"command"`
+	Timeout *float64 `json:"timeout"`
 }
 
-func bashTimeout(timeoutMs int) time.Duration {
-	if timeoutMs <= 0 {
-		return defaultBashTimeout
+// bashTimeout resolves the timeout argument (milliseconds) to the kill
+// deadline. A call that can move to the background gets the job defaults,
+// because there the deadline is only a backstop; one that cannot keeps the
+// short blocking bounds, because there it is also how long the agent waits.
+func bashTimeout(ms *float64, canBackground bool) time.Duration {
+	def, limit := defaultBashTimeout, maxBashTimeout
+	if canBackground {
+		def, limit = defaultJobTimeout, maxJobTimeout
 	}
-	const maxMs = int64(maxBashTimeout / time.Millisecond)
-	if int64(timeoutMs) >= maxMs {
-		return maxBashTimeout
+	if ms == nil || *ms <= 0 {
+		return def
 	}
-	return time.Duration(timeoutMs) * time.Millisecond
+	if *ms >= float64(limit/time.Millisecond) {
+		return limit
+	}
+	return time.Duration(*ms * float64(time.Millisecond))
+}
+
+// promoteDelay is how long this call blocks before moving to the background.
+func (bt *bashTool) promoteDelay() time.Duration {
+	if bt.promoteAfter > 0 {
+		return bt.promoteAfter
+	}
+	return BashPromoteAfter
 }

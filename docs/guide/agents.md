@@ -161,7 +161,7 @@ agent with no owner all get the one identical refusal. Completion is a
 **signal**: `agent_spawn` returns as soon as
 the child is registered, and settlement lands as one coalesced digest per
 parent turn regardless of how many descendants finished together. Background
-jobs (`bash_start`, and a `bash` command promoted to a job at its timeout)
+jobs (`bash_start`, and a `bash` command moved to a job after 60s)
 settle the same way. That is why both runtimes' prompts tell a coordinator to
 end its turn instead of polling — fundi's `## Waiting` section and
 `claudeargv.CoordinationPrompt`'s waiting paragraph: a turn held open by

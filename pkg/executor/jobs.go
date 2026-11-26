@@ -62,6 +62,12 @@ const (
 	// already merged into the job's output file, so the head is a copy, not
 	// the record.
 	stderrHeadSize = 4096
+
+	// timeoutExitCode is the exit code a job reports when the registry killed it
+	// at its deadline. 124 is the code GNU timeout(1) uses for the same event, so
+	// it reads as "timed out" to anyone who has met it; the job's output ends
+	// with a note that says so in words.
+	timeoutExitCode = 124
 )
 
 // jobOutput is one job's output: a file with drop-oldest semantics.
@@ -334,6 +340,10 @@ type job struct {
 	exitCode   int
 	waitErr    error
 	finishedAt time.Time
+	// timedOut records that the registry killed the job at its deadline;
+	// deadline is the timer that does it (nil for a job with none).
+	timedOut bool
+	deadline *time.Timer
 
 	// acked/provisional/exitPublished are guarded by the REGISTRY's mutex, not
 	// j.mu: they are read and written by the registry (kill, ack, promote,
@@ -481,7 +491,12 @@ func (r *jobRegistry) start(command, handle, workspaceID, dir, owner string) (st
 // Unlike start it runs the argv directly (no `bash -c`) and uses the caller's
 // pinned env as-is. stderr is teed to a head buffer so the rtk-refusal check
 // can see it without the full output being buffered twice.
-func (r *jobRegistry) startProvisional(argv, env []string, dir, workspaceID, owner, command string) (*job, error) {
+//
+// timeout is the job's kill deadline, measured from the start and holding after
+// promotion; zero means none. The registry owns it, not the foreground call,
+// because the call returns at promotion and the job outlives it: a stuck job
+// must end in an exit event, never in silence.
+func (r *jobRegistry) startProvisional(argv, env []string, dir, workspaceID, owner, command string, timeout time.Duration) (*job, error) {
 	handle := randomID()
 	out, err := newJobOutput(filepath.Join(r.spillDir, "job-"+handle+".log"))
 	if err != nil {
@@ -518,6 +533,11 @@ func (r *jobRegistry) startProvisional(argv, env []string, dir, workspaceID, own
 		stderrHead:  head,
 		provisional: true,
 	}
+	if timeout > 0 {
+		// Armed before the job is registered: wait stops it, and wait cannot
+		// run until the goroutine below starts.
+		j.deadline = time.AfterFunc(timeout, func() { r.expire(j, timeout) })
+	}
 	r.mu.Lock()
 	r.jobs[handle] = j
 	r.enforceBudget(workspaceID)
@@ -525,6 +545,31 @@ func (r *jobRegistry) startProvisional(argv, env []string, dir, workspaceID, own
 
 	go r.wait(j, cmd, out, workspaceID)
 	return j, nil
+}
+
+// expire kills a job that outlived its deadline. The kill is not acked, so the
+// exit it causes publishes an event like any other exit: that event is the
+// point, because a stuck job is otherwise one that never reports.
+func (r *jobRegistry) expire(j *job, timeout time.Duration) {
+	j.mu.Lock()
+	if j.exited || j.timedOut {
+		j.mu.Unlock()
+		return
+	}
+	j.timedOut = true
+	j.mu.Unlock()
+	// Written before the signal, so a reader who sees the exit sees the note.
+	_, _ = fmt.Fprintf(j.out, "\n[job killed: still running after its %s timeout]\n", timeout)
+	if j.cmd.Process != nil {
+		_ = syscall.Kill(-j.cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+// timedOutNow reports whether expire killed the job.
+func (j *job) timedOutNow() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.timedOut
 }
 
 // wait is the goroutine behind every job: it reaps the process and records its
@@ -539,6 +584,9 @@ func (r *jobRegistry) startProvisional(argv, env []string, dir, workspaceID, own
 // against publishing it twice.
 func (r *jobRegistry) wait(j *job, cmd *exec.Cmd, out *jobOutput, workspaceID string) {
 	err := cmd.Wait()
+	if j.deadline != nil {
+		j.deadline.Stop()
+	}
 
 	// Written BEFORE the job is marked exited, so a reader that sees
 	// "exited" has already been able to see the note.
@@ -557,6 +605,9 @@ func (r *jobRegistry) wait(j *job, cmd *exec.Cmd, out *jobOutput, workspaceID st
 		j.exitCode = cmd.ProcessState.ExitCode()
 	} else {
 		j.exitCode = -1
+	}
+	if j.timedOut {
+		j.exitCode = timeoutExitCode
 	}
 	j.finishedAt = time.Now()
 	j.mu.Unlock()

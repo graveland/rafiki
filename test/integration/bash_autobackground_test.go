@@ -5,7 +5,7 @@ package integration_test
 // Auto-background bash, end to end over a real daemon and a real executor.
 //
 // A fundi child (driven by the hidden --fake-turns scripted sender) runs a
-// `bash` call whose command outlives its timeout_ms. The executor's
+// `bash` call whose command outlives the executor's promote threshold (shortened to 1s here). The executor's
 // auto-background seam promotes the still-running command to a job and returns
 // a handoff telling the model so; when the job later exits, the executor pushes
 // the exit over WatchJobs and the daemon lands the "finished with exit code"
@@ -195,13 +195,13 @@ func (h *autoBgDaemon) bootSuccessor(t *testing.T) {
 }
 
 // writeAutoBgTurns writes a --fake-turns script: one bash tool_use call running
-// command under timeout_ms, then a plain end_turn reply for the tool result.
-func writeAutoBgTurns(t *testing.T, command string, timeoutMs int) string {
+// command, then a plain end_turn reply for the tool result.
+func writeAutoBgTurns(t *testing.T, command string) string {
 	t.Helper()
 	c := assert.NewAborting(t)
 	commandJSON := mustJSON(t, command)
 
-	toolUse := fmt.Sprintf(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"bash","input":{"command":%s,"timeout_ms":%d}}],"usage":{"input_tokens":10,"output_tokens":5}}`, commandJSON, timeoutMs)
+	toolUse := fmt.Sprintf(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"bash","input":{"command":%s}}],"usage":{"input_tokens":10,"output_tokens":5}}`, commandJSON)
 	const endTurn = `{"id":"msg_2","type":"message","role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"ack"}],"usage":{"input_tokens":4,"output_tokens":2}}`
 
 	path := filepath.Join(t.TempDir(), "fake-turns.ndjson")
@@ -398,11 +398,11 @@ func TestAutoBackgroundLongBashBecomesAJobAndNotifies(t *testing.T) {
 	t.Parallel()
 	dsn := requireExecutorDB(t)
 	g := bootAutoBgDaemon(t, dsn)
-	g.enrollExecutor(t, map[string]string{"env": "home"})
+	g.enrollExecutorExtra(t, map[string]string{"env": "home"}, "--bash-promote-after", "1s")
 	g.waitForLiveExecutors(t, 1)
 
 	marker := "autobg-" + uniqueSuffix()
-	script := writeAutoBgTurns(t, "sleep 3; echo "+marker, 1000)
+	script := writeAutoBgTurns(t, "sleep 3; echo "+marker)
 
 	childID := spawnAutoBgChild(t, g.grantDaemon, script)
 	dropAutoBgInboxRows(t, dsn, childID)
@@ -432,7 +432,7 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 	t.Parallel()
 	dsn := requireExecutorDB(t)
 	g := bootAutoBgDaemon(t, dsn)
-	g.enrollExecutor(t, map[string]string{"env": "home"})
+	g.enrollExecutorExtra(t, map[string]string{"env": "home"}, "--bash-promote-after", "1s")
 	g.waitForLiveExecutors(t, 1)
 
 	marker := "autobg-" + uniqueSuffix()
@@ -441,7 +441,7 @@ func TestAutoBackgroundExitDuringDaemonRestartIsDelivered(t *testing.T) {
 	// after restart is a genuine REPLAY, never a live push the old daemon made
 	// and the first stream happened to miss.
 	done := filepath.Join(t.TempDir(), "job-done")
-	script := writeAutoBgTurns(t, "sleep 4; echo "+marker+"; touch '"+done+"'", 1000)
+	script := writeAutoBgTurns(t, "sleep 4; echo "+marker+"; touch '"+done+"'")
 
 	childID := spawnAutoBgChild(t, g.grantDaemon, script)
 	dropAutoBgInboxRows(t, dsn, childID)
@@ -519,6 +519,7 @@ func (g *autoBgDaemon) enrollExecutorUDS(t *testing.T) string {
 		"--enroll-token", token,
 		"--credential-file", credFile,
 		"--root", root,
+		"--bash-promote-after", "1s",
 	)
 	cmd.Env = subprocessEnv(
 		"HOME="+execHome,
@@ -570,7 +571,7 @@ func TestAutoBackgroundExitDuringDaemonRestartOverUnixSocketIsDelivered(t *testi
 
 	marker := "autobg-" + uniqueSuffix()
 	done := filepath.Join(t.TempDir(), "job-done")
-	script := writeAutoBgTurns(t, "sleep 4; echo "+marker+"; touch '"+done+"'", 1000)
+	script := writeAutoBgTurns(t, "sleep 4; echo "+marker+"; touch '"+done+"'")
 
 	childID := spawnAutoBgChild(t, g.grantDaemon, script)
 	dropAutoBgInboxRows(t, dsn, childID)

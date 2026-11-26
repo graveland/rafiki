@@ -23,13 +23,29 @@ import (
 )
 
 // jobHandleRe extracts the job handle from a bash auto-background handoff:
-// "[still running after 300ms; moved to the background as job <handle>]".
-var jobHandleRe = regexp.MustCompile(`moved to the background as job ([0-9a-f]+)\]`)
+// "[still running after 300ms; moved to the background as job <handle>; killed
+// if still running after 1h0m0s]".
+var jobHandleRe = regexp.MustCompile(`moved to the background as job ([0-9a-f]+);`)
+
+// testPromoteAfter is how long a test server's bash call blocks before moving
+// to the background. The real value is a minute; no test should wait for that.
+const testPromoteAfter = 300 * time.Millisecond
+
+// autoBgServer is an executor whose bash promotes after testPromoteAfter.
+func autoBgServer(t *testing.T, spill string) *executor.Server {
+	t.Helper()
+	return executor.NewServer(executor.Options{
+		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: spill,
+		BashPromoteAfter: testPromoteAfter,
+	})
+}
 
 // executeAutoBackground runs one NON-background bash call through the
 // executor's root registry and returns its result text. autoBack is the
 // per-call auto_background flag; owner is the child the call is on behalf of.
 // A failure event is fatal.
+//
+// timeoutMs is bash's timeout argument, the kill deadline; 0 omits it.
 func executeAutoBackground(t *testing.T, client executorpbconnect.ExecutorServiceClient, command string, timeoutMs int, autoBack bool, owner string) string {
 	t.Helper()
 	return executeAutoBackgroundWS(t, client, "", command, timeoutMs, autoBack, owner)
@@ -48,7 +64,11 @@ func executeAutoBackgroundWS(t *testing.T, client executorpbconnect.ExecutorServ
 // text, reporting failures as an error rather than through t so it is safe to
 // call from a goroutine.
 func runAutoBackground(client executorpbconnect.ExecutorServiceClient, wsID, command string, timeoutMs int, autoBack bool, owner string) (string, error) {
-	input := `{"command":` + strconv.Quote(command) + `,"timeout_ms":` + strconv.Itoa(timeoutMs) + `}`
+	input := `{"command":` + strconv.Quote(command)
+	if timeoutMs > 0 {
+		input += `,"timeout":` + strconv.Itoa(timeoutMs)
+	}
+	input += `}`
 	stream, err := client.Execute(context.Background(), connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:           "bash",
 		InputJson:      []byte(input),
@@ -123,16 +143,14 @@ func noJobLogs(t *testing.T, spillDir string) {
 	}
 }
 
-// A command that finishes under its timeout is an ordinary result: no job is
+// A command that finishes before it would move to the background is an ordinary result: no job is
 // created, no event is published, and no job output file is left behind. This
 // is the whole point of the provisional-then-promote design — the common case
 // costs exactly what it always did.
 func TestAutoBackgroundShortCommandLeavesNoJob(t *testing.T) {
 	c := assert.NewCollecting(t)
 	spill := t.TempDir()
-	srv := executor.NewServer(executor.Options{
-		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: spill,
-	})
+	srv := autoBgServer(t, spill)
 	client := newTestClient(t, srv)
 
 	// Subscribe BEFORE the call: if the short command wrongly created a job,
@@ -143,7 +161,7 @@ func TestAutoBackgroundShortCommandLeavesNoJob(t *testing.T) {
 	c.Require().NoError(err, "WatchJobs")
 	drainReplay(t, stream)
 
-	out := executeAutoBackground(t, client, "echo hi", 5000, true, "c_x")
+	out := executeAutoBackground(t, client, "echo hi", 0, true, "c_x")
 	c.Eq("hi\n", out, "a short command's result must be the ordinary one")
 
 	gotEvent := make(chan struct{}, 1)
@@ -161,14 +179,12 @@ func TestAutoBackgroundShortCommandLeavesNoJob(t *testing.T) {
 	noJobLogs(t, spill)
 }
 
-// A command still running at its timeout is promoted to a visible job: the
+// A command still running at the promote threshold becomes a visible job: the
 // caller gets a handoff naming the handle, a WatchJobs subscriber sees the
 // exit with the owner set, and the output stays readable.
 func TestAutoBackgroundLongCommandBecomesAJob(t *testing.T) {
 	c := assert.NewCollecting(t)
-	srv := executor.NewServer(executor.Options{
-		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: t.TempDir(),
-	})
+	srv := autoBgServer(t, t.TempDir())
 	client := newTestClient(t, srv)
 
 	wctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -177,7 +193,7 @@ func TestAutoBackgroundLongCommandBecomesAJob(t *testing.T) {
 	c.Require().NoError(err, "WatchJobs")
 	drainReplay(t, stream)
 
-	out := executeAutoBackground(t, client, "sleep 2; echo done", 300, true, "c_owner")
+	out := executeAutoBackground(t, client, "sleep 2; echo done", 0, true, "c_owner")
 	m := jobHandleRe.FindStringSubmatch(out)
 	c.Require().True(m != nil, "the handoff named no job handle: %q", out)
 	handle := m[1]
@@ -243,9 +259,7 @@ func TestAutoBackgroundLongCommandBecomesAJob(t *testing.T) {
 func TestAutoBackgroundFlagOffKeepsKillAtTimeout(t *testing.T) {
 	c := assert.NewCollecting(t)
 	spill := t.TempDir()
-	srv := executor.NewServer(executor.Options{
-		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: spill,
-	})
+	srv := autoBgServer(t, spill)
 	client := newTestClient(t, srv)
 
 	out := executeAutoBackground(t, client, "sleep 2; echo done", 300, false, "c_x")
@@ -260,9 +274,7 @@ func TestAutoBackgroundFlagOffKeepsKillAtTimeout(t *testing.T) {
 // job (and its process) without the id minted before the registry is built.
 func TestAutoBackgroundWorkspaceJobEndsOnRelease(t *testing.T) {
 	c := assert.NewCollecting(t)
-	srv := executor.NewServer(executor.Options{
-		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: t.TempDir(),
-	})
+	srv := autoBgServer(t, t.TempDir())
 	client := newTestClient(t, srv)
 	ctx := context.Background()
 
@@ -308,7 +320,7 @@ func TestAutoBackgroundWorkspaceJobEndsOnRelease(t *testing.T) {
 		}
 	}
 
-	out := executeAutoBackgroundWS(t, client, wsID, "sleep 30; echo ws-done", 300, true, "c_ws")
+	out := executeAutoBackgroundWS(t, client, wsID, "sleep 30; echo ws-done", 0, true, "c_ws")
 	handle := jobHandleFrom(t, out)
 
 	// The promote's Running event is expected and confirms the job became
@@ -336,16 +348,14 @@ func TestAutoBackgroundWorkspaceJobEndsOnRelease(t *testing.T) {
 // ends it.
 func TestAutoBackgroundRootJobSurvivesOtherWorkspaceRelease(t *testing.T) {
 	c := assert.NewCollecting(t)
-	srv := executor.NewServer(executor.Options{
-		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: t.TempDir(),
-	})
+	srv := autoBgServer(t, t.TempDir())
 	client := newTestClient(t, srv)
 	ctx := context.Background()
 
 	otherWS := provisionWorkspace(t, client, "c_other")
 
 	// No workspace id: this job belongs to the executor's own root registry.
-	out := executeAutoBackgroundWS(t, client, "", "sleep 30; echo root-done", 300, true, "c_root")
+	out := executeAutoBackgroundWS(t, client, "", "sleep 30; echo root-done", 0, true, "c_root")
 	handle := jobHandleFrom(t, out)
 
 	_, err := client.Release(ctx, connect.NewRequest(&executorpb.ReleaseRequest{WorkspaceId: otherWS}))
@@ -368,6 +378,7 @@ func TestAutoBackgroundProvisionalInvisibleInHealth(t *testing.T) {
 	root := t.TempDir()
 	srv := executor.NewServer(executor.Options{
 		Root: root, Concurrency: 6, Version: "test", SpillDir: t.TempDir(),
+		BashPromoteAfter: 1500 * time.Millisecond,
 	})
 	client := newTestClient(t, srv)
 	ctx := context.Background()
@@ -379,7 +390,7 @@ func TestAutoBackgroundProvisionalInvisibleInHealth(t *testing.T) {
 	}
 	done := make(chan runResult, 1)
 	go func() {
-		out, err := runAutoBackground(client, "", fmt.Sprintf("touch %q; sleep 3; echo hi", started), 1500, true, "c_x")
+		out, err := runAutoBackground(client, "", fmt.Sprintf("touch %q; sleep 3; echo hi", started), 0, true, "c_x")
 		done <- runResult{out: out, err: err}
 	}()
 
@@ -401,18 +412,16 @@ func TestAutoBackgroundProvisionalInvisibleInHealth(t *testing.T) {
 
 // TestAutoBackgroundIgnoresCallerTimeout pins that a bash call carrying BOTH
 // ExecuteRequest.Timeout and auto_background is bounded by bash's own promote
-// timer, not by the caller deadline: a Timeout shorter than timeout_ms must not
+// timer, not by the caller deadline: a Timeout shorter than the promote threshold must not
 // turn a live command into CODE_TIMEOUT.
 func TestAutoBackgroundIgnoresCallerTimeout(t *testing.T) {
 	c := assert.NewCollecting(t)
-	srv := executor.NewServer(executor.Options{
-		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: t.TempDir(),
-	})
+	srv := autoBgServer(t, t.TempDir())
 	client := newTestClient(t, srv)
 
 	stream, err := client.Execute(context.Background(), connect.NewRequest(&executorpb.ExecuteRequest{
 		Tool:           "bash",
-		InputJson:      []byte(`{"command":"sleep 5","timeout_ms":600}`),
+		InputJson:      []byte(`{"command":"sleep 5"}`),
 		Timeout:        durationpb.New(100 * time.Millisecond),
 		AutoBackground: true,
 		Owner:          "c_owner",
@@ -431,4 +440,131 @@ func TestAutoBackgroundIgnoresCallerTimeout(t *testing.T) {
 	}
 	c.NoError(stream.Err(), "stream")
 	c.StrContains(text, "moved to the background as job", "expected the handoff, got")
+}
+
+// execEvent is one WatchJobs event, flattened for the deadline tests.
+type execEvent struct {
+	handle   string
+	exited   bool
+	exitCode int32
+}
+
+func collectJobEvents(stream *connect.ServerStreamForClient[executorpb.WatchJobsResponse]) <-chan execEvent {
+	events := make(chan execEvent, 16)
+	go func() {
+		defer close(events)
+		for stream.Receive() {
+			switch msg := stream.Msg().Event.(type) {
+			case *executorpb.WatchJobsResponse_Running:
+				events <- execEvent{handle: msg.Running.Handle}
+			case *executorpb.WatchJobsResponse_Exited:
+				events <- execEvent{handle: msg.Exited.Handle, exited: true, exitCode: msg.Exited.ExitCode}
+			}
+		}
+	}()
+	return events
+}
+
+// A promoted job is still bound by the call's timeout: the kill deadline
+// outlives the call that moved it to the background, and its expiry is a
+// normal exit event (code 124, output ending in a note). A stuck job therefore
+// ends in a message the agent receives, never in silence.
+func TestAutoBackgroundJobIsKilledAtItsDeadlineAndReportsIt(t *testing.T) {
+	c := assert.NewCollecting(t)
+	srv := autoBgServer(t, t.TempDir())
+	client := newTestClient(t, srv)
+
+	wctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	stream, err := client.WatchJobs(wctx, connect.NewRequest(&executorpb.WatchJobsRequest{}))
+	c.Require().NoError(err, "WatchJobs")
+	drainReplay(t, stream)
+	events := collectJobEvents(stream)
+
+	// 300ms to promote, 1500ms to the deadline; the command would run 30s.
+	start := time.Now()
+	out := executeAutoBackground(t, client, "sleep 30; echo never", 1500, true, "c_owner")
+	handle := jobHandleFrom(t, out)
+	c.StrContains(out, "killed if still running after 1.5s", "the handoff must name the deadline")
+
+	var exit execEvent
+	deadline := time.After(10 * time.Second)
+wait:
+	for {
+		select {
+		case e, ok := <-events:
+			if !ok {
+				c.Require().Fail("event stream closed before the job's exit")
+			}
+			if e.handle == handle && e.exited {
+				exit = e
+				break wait
+			}
+		case <-deadline:
+			c.Require().Fail("a job past its deadline published no exit event: a stuck job would be silent")
+		}
+	}
+	c.Eq(int32(124), exit.exitCode, "a job killed at its deadline exits 124")
+	c.LessOrEqual(8*time.Second, time.Since(start), "the deadline did not fire near its configured time")
+
+	resp, err := client.JobOutput(context.Background(), connect.NewRequest(&executorpb.JobOutputRequest{Handle: handle}))
+	c.Require().NoError(err, "JobOutput")
+	c.True(resp.Msg.Exited, "the killed job must report exited")
+	c.StrContains(string(resp.Msg.Data), "job killed: still running after its 1.5s timeout", "output must say why")
+	c.NotStrContains(string(resp.Msg.Data), "never", "the command ran past its deadline")
+}
+
+// A timeout at or below the promote threshold is a plain kill inside the call:
+// there is no job to hand over, and the result says the command was killed.
+func TestAutoBackgroundTimeoutInsideThresholdKillsInTheCall(t *testing.T) {
+	c := assert.NewCollecting(t)
+	spill := t.TempDir()
+	srv := executor.NewServer(executor.Options{
+		Root: t.TempDir(), Concurrency: 6, Version: "test", SpillDir: spill,
+		BashPromoteAfter: 5 * time.Second,
+	})
+	client := newTestClient(t, srv)
+
+	start := time.Now()
+	out := executeAutoBackground(t, client, "echo started; sleep 30; echo never", 300, true, "c_x")
+	c.LessOrEqual(4*time.Second, time.Since(start), "the call outlasted its deadline")
+	c.StrContains(out, "started", "output so far")
+	c.StrContains(out, "timed out after 300ms and was killed", "kill note")
+	c.NotStrContains(out, "moved to the background", "a killed command has nothing to hand off")
+	noJobLogs(t, spill)
+}
+
+// A command that exits before its deadline is not touched by it: no timeout
+// note, the real exit code, and the deadline timer does not outlive the job.
+func TestAutoBackgroundJobFinishingBeforeItsDeadlineIsNotReportedAsTimedOut(t *testing.T) {
+	c := assert.NewCollecting(t)
+	srv := autoBgServer(t, t.TempDir())
+	client := newTestClient(t, srv)
+
+	wctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	stream, err := client.WatchJobs(wctx, connect.NewRequest(&executorpb.WatchJobsRequest{}))
+	c.Require().NoError(err, "WatchJobs")
+	drainReplay(t, stream)
+	events := collectJobEvents(stream)
+
+	out := executeAutoBackground(t, client, "sleep 1; echo fine; exit 3", 600_000, true, "c_owner")
+	handle := jobHandleFrom(t, out)
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case e := <-events:
+			if e.handle != handle || !e.exited {
+				continue
+			}
+			c.Eq(int32(3), e.exitCode, "the job's own exit code")
+			resp, err := client.JobOutput(context.Background(), connect.NewRequest(&executorpb.JobOutputRequest{Handle: handle}))
+			c.Require().NoError(err, "JobOutput")
+			c.NotStrContains(string(resp.Msg.Data), "job killed", "a job that exited on its own carries no kill note")
+			return
+		case <-deadline:
+			c.Require().Fail("no exit event")
+		}
+	}
 }

@@ -191,37 +191,49 @@ func TestBashMissingCommandIsToolError(t *testing.T) {
 	assert.NewAborting(t).Error(err, "expected error for missing command")
 }
 
-// TestBashTimeoutClamping pins the default (120s) and max (600s) timeout
-// values from the brief as a pure function, so the 610s/0/negative edge
-// cases don't require an actual multi-minute sleep in the test suite.
+// TestBashTimeoutClamping pins the default and max timeout values as a pure
+// function, so the over-max/0/negative edge cases don't require an actual
+// multi-minute sleep in the test suite. A call that can move to the background
+// gets the job bounds (1h default, 24h max); one that cannot keeps the
+// blocking bounds (120s, 600s).
 func TestBashTimeoutClamping(t *testing.T) {
+	ms := func(v float64) *float64 { return &v }
 	cases := []struct {
-		name      string
-		timeoutMs int
-		want      time.Duration
+		name          string
+		timeoutMs     *float64
+		canBackground bool
+		want          time.Duration
 	}{
-		{"zero uses default", 0, 120 * time.Second},
-		{"negative uses default", -5, 120 * time.Second},
-		{"within range passes through", 5000, 5 * time.Second},
-		{"over max clamps to max", 700_000, 600 * time.Second},
-		{"exactly max passes through", 600_000, 600 * time.Second},
+		{"absent uses default", nil, false, 120 * time.Second},
+		{"zero uses default", ms(0), false, 120 * time.Second},
+		{"negative uses default", ms(-5), false, 120 * time.Second},
+		{"within range passes through", ms(5000), false, 5 * time.Second},
+		{"fractional milliseconds pass through", ms(1500.5), false, 1500*time.Millisecond + 500*time.Microsecond},
+		{"over max clamps to max", ms(700_000), false, 600 * time.Second},
+		{"exactly max passes through", ms(600_000), false, 600 * time.Second},
 		// Overflow guard: converting to a Duration BEFORE clamping wraps
 		// int64 and yields a negative duration, which passes a
-		// "> maxBashTimeout" test and produces an already-expired context —
-		// a huge timeout silently becoming an instant one.
-		{"overflowing value clamps to max", math.MaxInt, 600 * time.Second},
-		{"just past the overflow boundary clamps to max", 9_300_000_000_000, 600 * time.Second},
+		// "> max" test and produces an already-expired context — a huge
+		// timeout silently becoming an instant one.
+		{"overflowing value clamps to max", ms(math.MaxFloat64), false, 600 * time.Second},
+		{"just past the overflow boundary clamps to max", ms(9_300_000_000_000), false, 600 * time.Second},
+
+		{"job: absent is an hour", nil, true, time.Hour},
+		{"job: zero is an hour", ms(0), true, time.Hour},
+		{"job: passes through past the blocking max", ms(1_800_000), true, 30 * time.Minute},
+		{"job: capped at a day", ms(90_000_000), true, 24 * time.Hour},
+		{"job: overflowing value clamps to a day", ms(math.MaxFloat64), true, 24 * time.Hour},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := bashTimeout(c.timeoutMs)
-			assert.NewCollecting(t).Eq(c.want, got, "bashTimeout(%d) = %v, want", c.timeoutMs, got)
+			got := bashTimeout(c.timeoutMs, c.canBackground)
+			assert.NewCollecting(t).Eq(c.want, got, "bashTimeout(%v, %v) = %v, want", c.timeoutMs, c.canBackground, got)
 		})
 	}
 }
 
 // TestBashTimeoutFires drives a real timeout end-to-end: a command that
-// outlives its timeout_ms must be killed and reported, well before the
+// outlives its timeout must be killed and reported, well before the
 // command's own sleep would have finished.
 //
 // The command deliberately uses `&&`, for which bash FORKS instead of
@@ -239,7 +251,7 @@ func TestBashTimeoutFires(t *testing.T) {
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 	start := time.Now()
 	outRes, err := r.Execute(context.Background(), "bash",
-		json.RawMessage(`{"command":"sleep `+sleepArg+` && echo never","timeout_ms":200}`))
+		json.RawMessage(`{"command":"sleep `+sleepArg+` && echo never","timeout":200}`))
 	out := outRes.Text
 	elapsed := time.Since(start)
 	c.NoError(err)

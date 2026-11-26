@@ -32,8 +32,8 @@ const recallSection = "## Recall\n\nBefore non-trivial work, search past convers
 // naming none. The tool-specific instruction lives in each tool's own
 // description, which is emitted only when that tool is.
 const waitSection = "## Waiting\n\n" +
-	"Everything you start reports back on its own: a subagent, a bash command promoted to a " +
-	"background job at its timeout, and a script child each settle into a message to you, and " +
+	"Everything you start reports back on its own: a subagent, a bash command still running " +
+	"after 60s (promoted to a background job), and a script child each settle into a message to you, and " +
 	"if your turn has ended that message starts a new turn. So when waiting is all that is " +
 	"left, end your turn and say what you are waiting for. Do not sleep, poll in a loop, or " +
 	"re-check the tools that would tell you it finished, and do not schedule a wakeup as a " +
