@@ -250,86 +250,101 @@ func (c *Controller) spawnRecoveryResume(pr pendingResume) bool {
 	slog.Info("auto-resuming child", "childId", id, "kind", pr.rec.Kind)
 	go func() {
 		defer c.spawnClaims.release(id)
-		rctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)
-		defer cancel()
-
-		if pr.rec.Kind == protocol.KindClaude {
-			// A claude child has no engine to re-issue its interrupted turn;
-			// its unconfirmed inbox rows must be returned to pending BEFORE
-			// the resumed child can mark anything 'sent', or rows left 'sent'
-			// by the dead daemon strand (only a fundi engine's
-			// OnConversationResolved resets them).
-			c.releaseInboxOnExit(id)
-			if _, err := c.resumeClaimed(rctx, id, "", false); err != nil {
-				slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
-				c.dropLease(id)
-				return
-			}
-			// The nudge rides the durable inbox: a child that dies again
-			// before reading it replays it on its next resume.
-			if claudeWasWorkingAtDeath(pr.rec) {
-				if err := c.sendClaudeNudge(id, inject.KindDaemonRestart, claudeRestartResumeText); err != nil {
-					slog.Warn("auto-resume continuation prompt failed; it stays queued",
-						"childId", id, "error", err)
-				}
-			}
-			// No lease to gate on (a claude child never holds one), so
-			// replay runs unconditionally: ownership was already decided by
-			// the walk's classification, which is what the fundi branch's
-			// holdsLease check stands in for. replayInbox catches the
-			// fragment-sourced rows the resumed child's own idle drain
-			// deliberately leaves alone.
-			rctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel2()
-			// Arm this child's open jobs before the replay: a schedule fire is
-			// an inbox fragment like any other, and a catch-up registration is
-			// queued until the boot walk finishes if it runs this early.
-			c.registerSchedules(rctx2, id, true)
-			c.replayInbox(rctx2, id)
-			return
-		}
-
-		if _, err := c.resumeClaimedWithAutoRecovery(rctx, id); err != nil {
-			if errors.Is(err, errMCPExecutorNotLive) {
-				// The child's MCP server lives on an executor that has not
-				// reconnected yet (resolved once, at spawn). Park it; the sweep
-				// fired on every executor connection retries it.
-				c.pendResume(pr)
-				slog.Info("deferring auto-resume until an executor serving the child's MCP servers connects",
-					"childId", id, "error", err)
-				return
-			}
-			slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
-			c.dropLease(id)
-			return
-		}
-		// A success return does not prove THIS daemon owns the child: the
-		// in-process engine build runs on its own goroutine (Runner.Start
-		// returns before Build completes), and activateLiveChild's
-		// Idle-or-5s-timeout select cannot tell "became idle" apart from
-		// "the build already failed, including on a refused lease". Every
-		// child row is visible to every daemon (loadChildren lists the whole
-		// table), so a walked row may belong to another daemon that is live
-		// RIGHT NOW; without this check a lease refusal there still replays
-		// as though it succeeded, flipping the OTHER daemon's live child's
-		// 'sent' rows to 'pending' and stranding them.
-		//
-		// The gate applies only when leasing is actually in play — the same
-		// condition OnConversationResolved itself uses to decide whether to
-		// acquire at all. A daemon with no identity (c.daemonID == "") never
-		// tracks a lease for anything and is already unfenced by design in
-		// that case (see NewController), so it has nothing to gate on.
-		if c.daemonID != "" && !c.holdsLease(id) {
-			slog.Warn("auto-resume reported success without holding this child's lease; "+
-				"not replaying its inbox", "childId", id)
-			return
-		}
-		rctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel2()
-		c.registerSchedules(rctx2, id, true)
-		c.replayInbox(rctx2, id)
+		c.runRecoveryResume(pr)
 	}()
 	return true
+}
+
+// runRecoveryResume is spawnRecoveryResume's body: one recovered child's resume,
+// with the kind's own preprocessing and postprocessing around it. It runs on its
+// own goroutine in production and directly in a test, which is why the claim and
+// its release stay in the caller.
+//
+// BOTH terminal failure branches end the child's native thread children: the boot
+// reconcile SPARED them because this resume was keeping the parent, and a failure
+// here says it is not keeping it after all (endNativeChildrenOfFailedResume).
+func (c *Controller) runRecoveryResume(pr pendingResume) {
+	id := pr.rec.ChildID
+	rctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)
+	defer cancel()
+
+	if pr.rec.Kind == protocol.KindClaude {
+		// A claude child has no engine to re-issue its interrupted turn;
+		// its unconfirmed inbox rows must be returned to pending BEFORE
+		// the resumed child can mark anything 'sent', or rows left 'sent'
+		// by the dead daemon strand (only a fundi engine's
+		// OnConversationResolved resets them).
+		c.releaseInboxOnExit(id)
+		if _, err := c.resumeClaimed(rctx, id, "", false); err != nil {
+			slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
+			c.dropLease(id)
+			c.endNativeChildrenOfFailedResume(id)
+			return
+		}
+		// The nudge rides the durable inbox: a child that dies again
+		// before reading it replays it on its next resume.
+		if claudeWasWorkingAtDeath(pr.rec) {
+			if err := c.sendClaudeNudge(id, inject.KindDaemonRestart, claudeRestartResumeText); err != nil {
+				slog.Warn("auto-resume continuation prompt failed; it stays queued",
+					"childId", id, "error", err)
+			}
+		}
+		// No lease to gate on (a claude child never holds one), so
+		// replay runs unconditionally: ownership was already decided by
+		// the walk's classification, which is what the fundi branch's
+		// holdsLease check stands in for. replayInbox catches the
+		// fragment-sourced rows the resumed child's own idle drain
+		// deliberately leaves alone.
+		rctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel2()
+		// Arm this child's open jobs before the replay: a schedule fire is
+		// an inbox fragment like any other, and a catch-up registration is
+		// queued until the boot walk finishes if it runs this early.
+		c.registerSchedules(rctx2, id, true)
+		c.replayInbox(rctx2, id)
+		return
+	}
+
+	if _, err := c.resumeClaimedWithAutoRecovery(rctx, id); err != nil {
+		if errors.Is(err, errMCPExecutorNotLive) {
+			// The child's MCP server lives on an executor that has not
+			// reconnected yet (resolved once, at spawn). Park it; the sweep
+			// fired on every executor connection retries it.
+			c.pendResume(pr)
+			slog.Info("deferring auto-resume until an executor serving the child's MCP servers connects",
+				"childId", id, "error", err)
+			return
+		}
+		slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
+		c.dropLease(id)
+		c.endNativeChildrenOfFailedResume(id)
+		return
+	}
+	// A success return does not prove THIS daemon owns the child: the
+	// in-process engine build runs on its own goroutine (Runner.Start
+	// returns before Build completes), and activateLiveChild's
+	// Idle-or-5s-timeout select cannot tell "became idle" apart from
+	// "the build already failed, including on a refused lease". Every
+	// child row is visible to every daemon (loadChildren lists the whole
+	// table), so a walked row may belong to another daemon that is live
+	// RIGHT NOW; without this check a lease refusal there still replays
+	// as though it succeeded, flipping the OTHER daemon's live child's
+	// 'sent' rows to 'pending' and stranding them.
+	//
+	// The gate applies only when leasing is actually in play — the same
+	// condition OnConversationResolved itself uses to decide whether to
+	// acquire at all. A daemon with no identity (c.daemonID == "") never
+	// tracks a lease for anything and is already unfenced by design in
+	// that case (see NewController), so it has nothing to gate on.
+	if c.daemonID != "" && !c.holdsLease(id) {
+		slog.Warn("auto-resume reported success without holding this child's lease; "+
+			"not replaying its inbox", "childId", id)
+		return
+	}
+	rctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+	c.registerSchedules(rctx2, id, true)
+	c.replayInbox(rctx2, id)
 }
 
 // sweepPendingResumes resumes every pending child whose executor requirement

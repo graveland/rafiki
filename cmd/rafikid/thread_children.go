@@ -463,15 +463,36 @@ func (c *Controller) exitNativeChild(childID string, at time.Time) bool {
 }
 
 // exitNativeChildrenOf ends every synthetic thread child of parentChildID at
-// the parent's own exit time. Called when the parent exits: a Task subagent
-// runs inside its parent's process, so it cannot outlive it, and leaving it
-// idle forever is what made these children unkillable and uncloseable in the
-// first place.
-func (c *Controller) exitNativeChildrenOf(parentChildID string, at time.Time) {
+// the parent's own exit time, reporting how many it ended. Called when the parent
+// exits: a Task subagent runs inside its parent's process, so it cannot outlive
+// it, and leaving it idle forever is what made these children unkillable and
+// uncloseable in the first place.
+func (c *Controller) exitNativeChildrenOf(parentChildID string, at time.Time) (ended int) {
 	for _, id := range c.nativeChildrenOf(parentChildID) {
 		if c.exitNativeChild(id, at) {
+			ended++
 			slog.Debug("native subagent ended with its parent", "child", id, "parent", parentChildID)
 		}
+	}
+	return ended
+}
+
+// endNativeChildrenOfFailedResume ends a parent's thread children when a resume
+// this boot LAUNCHED or PENDED ends in failure.
+//
+// It closes the one hole the boot reconcile's `resuming` set opens: those threads
+// are spared because the parent is coming back, and a resume that then fails (a
+// refused mode, an unreadable plan, a spawn error) means it is not. handleChildExit
+// is the ordinary path to exitNativeChildrenOf and a failed resume never reaches
+// it, so without this the rows sit idle under a parent that is not running until
+// the next boot ends them — the same stranding review A3 fixed on the crash path.
+//
+// Best effort and never fatal: the failure itself is already logged, and a row
+// write that fails must not become a second error path out of a resume.
+func (c *Controller) endNativeChildrenOfFailedResume(parentChildID string) {
+	if n := c.exitNativeChildrenOf(parentChildID, time.Now()); n > 0 {
+		slog.Info("native subagents ended with a parent whose recovery resume failed",
+			"parent", parentChildID, "count", n)
 	}
 }
 

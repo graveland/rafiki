@@ -856,6 +856,85 @@ func TestRecoveryEndsNativeChildrenOfAGoneParent(t *testing.T) {
 	}
 }
 
+// TestFailedRecoveryResumeEndsTheParentsNativeChildren pins the other half of the
+// `resuming` set the boot reconcile reads: it SPARES a kept parent's threads, so a
+// resume that then FAILS must end them here. handleChildExit is the ordinary caller
+// of exitNativeChildrenOf and a failed resume never reaches it, so without this the
+// rows sit idle under a parent that is not running until the next boot — the same
+// stranding A3 fixed on the crash path.
+//
+// The resume is failed deterministically and before any process work: the row
+// carries workspace_tools "rafiki", which this daemon cannot serve, so
+// resumeClaimed refuses it.
+func TestFailedRecoveryResumeEndsTheParentsNativeChildren(t *testing.T) {
+	// One case per terminal failure branch of runRecoveryResume: a claude row
+	// refused for a workspace_tools mode this daemon cannot serve, and a fundi row
+	// whose resume has no model to build an engine from. Both must end the
+	// parent's threads, and both fail before any process is minted.
+	for _, tc := range []struct {
+		name string
+		// setup fills the recovered row's kind-specific fields. A Session holds a
+		// mutex, so the case carries a fill function, never a Session to copy.
+		setup func(*childstore.Session)
+	}{
+		{
+			name: "claude resume refused",
+			setup: func(s *childstore.Session) {
+				s.Kind = protocol.KindClaude
+				s.SessionID = "session-before-the-crash"
+				s.WorkspaceTools = protocol.WorkspaceToolsRafiki
+			},
+		},
+		{
+			name: "fundi resume fails",
+			setup: func(s *childstore.Session) {
+				s.Kind = protocol.KindFundi
+				s.SessionID = "conv-before-the-crash"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			ctrl := newTestController(t)
+			ctrl.daemonID = "me"
+
+			const parent = "c_nat_failed_resume"
+			sess := childstore.Session{
+				ChildID: parent, Status: protocol.StatusExited, Cwd: t.TempDir(),
+				StartedAt: time.Now(), ExitedAt: time.Now(),
+			}
+			tc.setup(&sess)
+			ctrl.st.Insert(&sess)
+			ck.Require().NoError(ctrl.EnsureThreadChild(parent, "t1", "conv-failed-resume"), "EnsureThreadChild")
+			nativeID := threadChildID(parent, "t1")
+			born, ok := ctrl.st.Get(nativeID)
+			ck.Require().True(ok, "the thread child exists")
+			ck.Eq(protocol.StatusIdle, born.Status, "a fresh thread child is idle")
+
+			// The store goes in AFTER the birth, so the exit write is the only one
+			// this test can see.
+			recorder := &recordingChildStore{}
+			ctrl.children = recorder
+
+			ctrl.runRecoveryResume(pendingResume{rec: childstore.ChildRecord{
+				ChildID: parent, Kind: sess.Kind, Status: string(protocol.StatusExited),
+			}})
+
+			snap, ok := ctrl.st.Get(nativeID)
+			ck.Require().True(ok, "the native child stays in the store, exited")
+			ck.Eq(protocol.StatusExited, snap.Status,
+				"a resume this boot launched and then failed ends the parent's threads with it")
+			written := recorder.upsertsFor(nativeID)
+			ck.Require().Len(written, 1, "the exit must be persisted, not only held in memory")
+			ck.Eq(string(protocol.StatusExited), written[0].Status, "the persisted status")
+
+			parentSnap, ok := ctrl.st.Get(parent)
+			ck.Require().True(ok, "the parent stays in the store")
+			ck.Eq(protocol.StatusExited, parentSnap.Status, "a failed resume leaves the parent exited")
+		})
+	}
+}
+
 // TestNativeExitIsNotPersistedDuringShutdown pins A2: the daemon's own shutdown
 // deliberately leaves rows LIVE so the next daemon resumes them (handleChildExit
 // skips the parent's write for exactly that reason), so a native child's exit

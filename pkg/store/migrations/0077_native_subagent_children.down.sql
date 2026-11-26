@@ -2,9 +2,12 @@
 -- up migration backfilled: the marker (the rafiki/native-subagent label + a NULL
 -- pid) is the same for a row 0077 inserted and one the new daemon wrote at birth,
 -- and there is no provenance bit to tell them apart. So a rollback DISCARDS the
--- native child rows written while the new binary ran — their lineage, their
--- status and their accounting — and there is no lossless inverse for a migration
--- that added a whole kind of row.
+-- native child rows written while the new binary ran — their lineage, their status
+-- and the identity that ATTRIBUTED their spend. The spend itself survives: a
+-- thread's branch conversation is still priced through its parent's '<child>:'
+-- ref arm. Lost with the row is the closed thread's tombstone too, so a thread an
+-- operator had closed comes back live on the next upgrade. There is no lossless
+-- inverse for a migration that added a whole kind of row.
 --
 -- That is the intended cost, and it is why a rollback must run this FIRST (an
 -- older daemon resumes every claude row that is not exited, so it would launch a

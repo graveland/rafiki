@@ -199,12 +199,11 @@ whose status is not exited, so it launches `claude --resume` per idle native row
 with the thread's branch-conversation uuid as the session. `Migrate` does not
 refuse a database ahead of the binary, so apply the down migration FIRST
 (`rafikid db psql -- -f pkg/store/migrations/0077_native_subagent_children.down.sql`),
-and only then start the older binary. What that costs is stated in the down
-migration itself: it deletes EVERY native row, so the child lineage and
-accounting rows written while the new binary ran go with it. The conversations
-survive, and the next upgraded daemon writes a row again (0077 is idempotent, so
-delete its `rafiki_schema_migrations` row too if you want the backfill re-run for
-the threads that predate it).
+and only then start the older binary. What that costs is ATTRIBUTION, not money:
+spend survives, because a branch conversation is priced through its parent's
+`<child>:` ref arm either way, but the per-thread row that attributed it and
+recorded the lineage is gone. A down+up round trip also loses a closed thread's
+tombstone, so a thread an operator closed comes back live on the next upgrade.
 
 **Captured owner identity.** The proxy face's per-boot token identity changed
 from `fundi-child` to `rafiki-child`, and historical database rows kept the old
