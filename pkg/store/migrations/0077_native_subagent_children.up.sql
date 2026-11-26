@@ -34,6 +34,14 @@
 -- pid stays NULL: a native child has no process of its own (it is a thread
 -- inside the parent's), and every NOT NULL column the table has is either
 -- supplied here or carries a default.
+--
+-- ROLLING BACK: this row shape is understood by the daemon that has a native
+-- branch in recovery, and by nothing else. An OLDER binary resumes every claude
+-- row whose status is not exited, so starting one against a database that has
+-- run this migration launches a `claude --resume` per idle native row, using the
+-- thread's branch conversation uuid as the session. Migrate does not refuse a
+-- database ahead of the binary, so apply the down migration BEFORE starting an
+-- older binary (docs/MIGRATING.md, "Rolling the binary back after 0077").
 
 INSERT INTO conversations.child (
     child_id, conversation_id, owner_user_id, kind, name, status, spawned_at,

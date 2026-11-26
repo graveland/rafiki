@@ -15,11 +15,27 @@ import (
 // closedUsageMemo holds, per CLOSED lineage member, the usage rows that member
 // owns, keyed by child id.
 //
-// A closed child never changes: Close refuses a live child, nothing clears
-// closed_at, so the rows behind a closed member are fixed and an entry needs no
-// invalidation and no TTL. An entry holding NO rows is a real hit — the closed
-// children whose conversations hold no turns — which is why the map is read with
-// presence rather than emptiness.
+// The memo rests on ONE fact: nothing the daemon does writes a closed child's
+// ROW. Close refuses a live child, and the native birth path refuses a
+// tombstoned row (the live-only upsert), so a closed member stays closed and an
+// entry needs no invalidation and no TTL. An entry holding NO rows is a real hit
+// — the closed children whose conversations hold no turns — which is why the map
+// is read with presence rather than emptiness.
+//
+// It caches the CONVERSATION's usage, and a conversation can outlive its row: a
+// closed NATIVE thread child's branch conversation keeps growing when its parent
+// is resumed and re-enters the thread (EnsureThreadChild refuses the closed row
+// and the turns land in "<parent>:<thread>" anyway). A memoised entry can
+// therefore lag a conversation an OPEN member still spends into, which is why
+// usageForMembers lets FRESH rows win the dedupe rather than trusting the memo.
+//
+// One staleness source is BOUNDED and deliberately left: a cockpit
+// target-and-descendants close is Kill then Close back to back, and an in-flight
+// turn's usage is written by failCompletion on a detached context after the
+// process dies. A subtree read inside that window memoises the closed member
+// without its last turn — and no OPEN member's fresh read reaches a closed
+// fundi/claude child's own conversation, so fresh-first cannot help there. That is
+// at most one turn per closed child, for the life of the daemon, accepted.
 //
 // An OPEN member is never memoised: it is spending as we speak.
 type closedUsageMemo struct {
@@ -63,6 +79,13 @@ func (m *closedUsageMemo) put(childID string, rows []insights.ConversationUsage)
 // and the union comes back DEDUPLICATED BY (conversation, model): a conversation
 // two members can reach — a claude parent's thread branch and the native
 // subagent row that claims it — is one conversation's spend.
+//
+// A FRESH row always wins that dedupe, whatever order the members arrive in.
+// Member order is the lineage query's result order (no ORDER BY), so "first
+// seen" would decide it by heap layout, and the wrong winner is the expensive
+// direction: a closed native member's memo can be a turn — or a whole resumed
+// session — behind the branch conversation its open parent is still spending
+// into, and taking the stale row under-counts its ancestors' budget.
 func (c *Controller) usageForMembers(ctx context.Context, members []childstore.LineageMember) ([]insights.ConversationUsage, error) {
 	if c.coster == nil {
 		return nil, errors.New("no cost source configured")
@@ -103,16 +126,29 @@ func (c *Controller) usageForMembers(ctx context.Context, members []childstore.L
 		}
 	}
 
+	// Fresh first, explicitly: a member read THIS call outranks one the memo
+	// answered, so a stale memoised row can never displace a fresh one for the
+	// same (conversation, model). Two passes because member order carries no
+	// meaning worth depending on.
+	readNow := make(map[string]struct{}, len(queried))
+	for _, m := range queried {
+		readNow[m.ChildID] = struct{}{}
+	}
 	seen := make(map[usageKey]struct{}, len(fresh))
 	var out []insights.ConversationUsage
-	for _, m := range members {
-		for _, row := range byChild[m.ChildID] {
-			key := usageKey{conversationID: row.ConversationID, model: row.Model}
-			if _, dup := seen[key]; dup {
+	for _, freshPass := range []bool{true, false} {
+		for _, m := range members {
+			if _, isFresh := readNow[m.ChildID]; isFresh != freshPass {
 				continue
 			}
-			seen[key] = struct{}{}
-			out = append(out, row)
+			for _, row := range byChild[m.ChildID] {
+				key := usageKey{conversationID: row.ConversationID, model: row.Model}
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, row)
+			}
 		}
 	}
 	return out, nil

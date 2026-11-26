@@ -588,7 +588,9 @@ func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt ti
 // previous turn's, and records cache-breakpoints on the turn. A request that is
 // already decoded is passed in (pkg/anthropicreq), so this path never re-parses
 // the body. Returns the error for the caller to escalate (the proxy fails the
-// turn), never panics, never alters req.
+// turn) and never alters req. It never panics on a request it cannot decode —
+// every accessor answers a zero result — but a NIL req is a caller bug and
+// dereferences it, so callers pass what Parse returned.
 func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, req *anthropicreq.Request, prefixHash, prevMessageID string) (string, error) {
 	msgs, err := requestMessages(req)
 	if err != nil {

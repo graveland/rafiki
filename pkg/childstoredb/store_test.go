@@ -2,6 +2,7 @@ package childstoredb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -361,4 +362,58 @@ func TestExecutorSetRoundTrip(t *testing.T) {
 		c.True(got.ExecutorSet != nil, "%s: must be non-nil", tc.name)
 		c.EqDeep(tc.set, got.ExecutorSet, tc.name)
 	}
+}
+
+// TestUpsertRefuseIfClosedLeavesTheTombstone pins the one row write that may NOT
+// clear closed_at: a native thread child's, whose id is deterministic
+// (<parent>:<thread>) and so can address a closed row on a later turn of the
+// same thread. The guard is the DATABASE's — the conflict update is gated on
+// closed_at IS NULL — so it holds even when the caller's own "is this row
+// closed?" read came back stale, which is the interleaving this exists for.
+//
+// The second half pins that the exception stays an exception: the SAME write
+// without the flag keeps the clear-on-write semantics every other caller has.
+func TestUpsertRefuseIfClosedLeavesTheTombstone(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := scratchPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	id := fmt.Sprintf("c_refuseclosed_%d", time.Now().UnixNano())
+	rec := childstore.ChildRecord{
+		ChildID:   id,
+		Kind:      protocol.KindClaude,
+		Name:      "task:t1",
+		Status:    string(protocol.StatusExited),
+		SpawnedAt: time.Now(),
+		DaemonID:  "daemon-a",
+		// The row IS the only native marker recovery reads, so the label is set and
+		// the flag is what the write path asks for.
+		Labels:         map[string]string{"rafiki/parent": "c_parent", "rafiki/root": "c_parent"},
+		RefuseIfClosed: false,
+	}
+	c.Require().NoError(s.Upsert(ctx, rec), "first write")
+	c.Require().NoError(s.Delete(ctx, id), "tombstone the row")
+
+	live := rec
+	live.Status = string(protocol.StatusIdle)
+	live.RefuseIfClosed = true
+	err := s.Upsert(ctx, live)
+	c.True(errors.Is(err, childstore.ErrClosed), "err = %v, want childstore.ErrClosed", err)
+
+	closed, err := s.IsClosed(ctx, id)
+	c.Require().NoError(err, "is closed")
+	c.True(closed, "a refused write must leave the tombstone standing")
+	// List skips closed rows by design, so the status is read directly.
+	var status string
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT status FROM conversations.child WHERE child_id = $1`, id).Scan(&status), "read the closed row")
+	c.Eq(string(protocol.StatusExited), status, "the refused write must not have landed its status either")
+
+	plain := rec
+	plain.Status = string(protocol.StatusIdle)
+	c.Require().NoError(s.Upsert(ctx, plain), "an ordinary write still clears closed_at")
+	closed, err = s.IsClosed(ctx, id)
+	c.Require().NoError(err, "is closed after the ordinary write")
+	c.False(closed, "the general Upsert semantics are unchanged for every other caller")
 }

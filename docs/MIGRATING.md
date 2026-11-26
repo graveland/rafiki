@@ -191,6 +191,21 @@ spelling after the migration. Apply it with every daemon stopped, because a
 daemon still running the previous binary writes the old spelling and its rows
 land without the lineage columns the new daemon reads.
 
+**Rolling the binary back after `0077`.** `0077_native_subagent_children` adds
+native subagent rows — a Claude Code Task subagent as a `conversations.child`
+row of its own, pid NULL — and this binary's recovery never resumes one. An
+older daemon has no such branch: its `shouldAutoResume` resumes every claude row
+whose status is not exited, so it launches `claude --resume` per idle native row
+with the thread's branch-conversation uuid as the session. `Migrate` does not
+refuse a database ahead of the binary, so apply the down migration FIRST
+(`rafikid db psql -- -f pkg/store/migrations/0077_native_subagent_children.down.sql`),
+and only then start the older binary. What that costs is stated in the down
+migration itself: it deletes EVERY native row, so the child lineage and
+accounting rows written while the new binary ran go with it. The conversations
+survive, and the next upgraded daemon writes a row again (0077 is idempotent, so
+delete its `rafiki_schema_migrations` row too if you want the backfill re-run for
+the threads that predate it).
+
 **Captured owner identity.** The proxy face's per-boot token identity changed
 from `fundi-child` to `rafiki-child`, and historical database rows kept the old
 string. Both spellings are now gone: migration `0019_user_attribution` replaced

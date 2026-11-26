@@ -188,7 +188,12 @@ func (c *Controller) resumeWaitsForExecutor(pr pendingResume) bool {
 // The kind branch is the resume shape: a fundi child's engine re-submits the
 // interrupted turn itself (AutoResume), a claude child re-attaches its session
 // and gets a continuation prompt only when the row says it was mid-turn.
-func (c *Controller) launchRecoveryResume(rec childstore.ChildRecord, own ownership) {
+//
+// The answer is whether this boot is KEEPING the child — launched now or pended
+// for the executor that will fire it — and it is what recoverOne reports to the
+// native reconcile. False means the row is genuinely dead for this boot: the
+// store holds it as exited and its thread children ended with it.
+func (c *Controller) launchRecoveryResume(rec childstore.ChildRecord, own ownership) bool {
 	// A claude conversation has no lease to fence with (only a fundi engine's
 	// build acquires one), so the classification IS the safety gate: this
 	// daemon auto-resumes a claude row only when it can prove the row is its
@@ -200,7 +205,7 @@ func (c *Controller) launchRecoveryResume(rec childstore.ChildRecord, own owners
 	if rec.Kind == protocol.KindClaude && own != ownedByMe {
 		slog.Info("claude child recovered from another daemon; not auto-resumed",
 			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID, "ownership", own.String())
-		return
+		return false
 	}
 
 	// The only field the deferred resume needs beyond the record is the
@@ -212,9 +217,9 @@ func (c *Controller) launchRecoveryResume(rec childstore.ChildRecord, own owners
 		c.pendResume(pr)
 		slog.Info("deferring auto-resume until the child's executor connects",
 			"childId", rec.ChildID, "kind", rec.Kind, "executor", rec.Labels["rafiki/executor"])
-		return
+		return true
 	}
-	c.spawnRecoveryResume(pr)
+	return c.spawnRecoveryResume(pr)
 }
 
 // spawnRecoveryResume takes childID's claim and runs the resume on its own
@@ -225,18 +230,22 @@ func (c *Controller) launchRecoveryResume(rec childstore.ChildRecord, own owners
 // and a claim taken on another goroutine is one in which a send (a sibling's
 // settle fragment) is rejected as "child has exited" — see validateSendTarget.
 // The goroutine releases it.
-func (c *Controller) spawnRecoveryResume(pr pendingResume) {
+//
+// It reports whether the child is being resumed. Only a stopping daemon answers
+// false: a claim already held means another resume (or the spawn itself) is in
+// flight for this id, which is a child that IS coming back.
+func (c *Controller) spawnRecoveryResume(pr pendingResume) bool {
 	id := pr.rec.ChildID
 	if c.stopping.Load() {
 		// The daemon is dying: a child spawned now would miss the shutdown
 		// ladder (ShutdownAllChildren already collected its ids) and survive
 		// as an orphan. The next boot re-walks the row and resumes it.
 		slog.Info("recovery resume skipped; the daemon is stopping", "childId", id)
-		return
+		return false
 	}
 	if !c.spawnClaims.tryClaim(id) {
 		slog.Warn("resume already in progress; not auto-resuming", "childId", id)
-		return
+		return true
 	}
 	slog.Info("auto-resuming child", "childId", id, "kind", pr.rec.Kind)
 	go func() {
@@ -320,6 +329,7 @@ func (c *Controller) spawnRecoveryResume(pr pendingResume) {
 		c.registerSchedules(rctx2, id, true)
 		c.replayInbox(rctx2, id)
 	}()
+	return true
 }
 
 // sweepPendingResumes resumes every pending child whose executor requirement

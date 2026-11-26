@@ -412,6 +412,42 @@ func TestForkFromClaudeSourceResolvesRootThread(t *testing.T) {
 	ck.Eq(node.ID, got, "the root thread's completed turn")
 }
 
+// A native thread child — a Claude Code Task subagent's persisted row — is a
+// forkable source in its own right. Its conversation_id is the thread's BRANCH
+// conversation, so a fork of it starts from the transcript the subagent actually
+// ran. Before native rows were persisted this id answered "not visible"; the row
+// is a real child now (owner, parent chain, conversation), so the fork reach is
+// deliberate and documented next to the other fork rules.
+func TestForkFromNativeSubagentForksItsBranchConversation(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	f := newForkFixture(t)
+	ctx := context.Background()
+	parent := uniqueForkName("natfork_parent")
+	nativeID := threadChildID(parent, "task1")
+	branch := f.conversation(t)
+	node := f.turn(t, branch)
+
+	ck.Require().NoError(f.store.Upsert(ctx, childstore.ChildRecord{
+		ChildID:        nativeID,
+		OwnerUserID:    f.owner,
+		Kind:           protocol.KindClaude,
+		ConversationID: branch, // the branch conversation, not a Claude Code session
+		Status:         string(protocol.StatusIdle),
+		SpawnedAt:      time.Now(),
+		Labels: map[string]string{
+			labelNativeSubagent:    "1",
+			childstore.LabelParent: parent,
+			childstore.LabelRoot:   parent,
+		},
+	}), "upsert the native subagent row")
+
+	got, source, err := f.ctrl.resolveFork(ctx,
+		forkRequest("", &protocol.ForkFrom{ChildID: nativeID}, ""), users.Identity{UserID: f.owner})
+	ck.Require().NoError(err, "a native subagent's branch conversation is forkable")
+	ck.Eq(node.ID, got, "the fork point is the BRANCH conversation's completed turn")
+	ck.Eq(nativeID, source, "the provenance names the native child itself, not its parent")
+}
+
 // forkTestModel is a provider-qualified model providers.Default() knows, so a
 // real fundi spawn can build an engine without an API key or a network.
 const forkTestModel = "anthropic/claude-sonnet-4-5"

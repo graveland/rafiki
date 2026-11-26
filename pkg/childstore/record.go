@@ -96,6 +96,15 @@ type ChildRecord struct {
 	// LastTurnError is why the child's last turn failed. Empty when unset
 	// (stored as SQL NULL). See childstore.Session.LastTurnError.
 	LastTurnError string
+
+	// RefuseIfClosed makes the row write refuse a TOMBSTONED row instead of
+	// clearing its closed_at: the write is then childstore.ErrClosed and the row
+	// is left exactly as it was. It is set for native thread children only, whose
+	// id is deterministic (<parent>:<thread>) and can therefore address the row
+	// an operator closed — the one place the closed_at = NULL clear would
+	// resurrect durable state. Every other writer keeps the clear-on-write
+	// semantics: their ids are never reused.
+	RefuseIfClosed bool
 }
 
 // ChildConfig is the spawn configuration that only matters on resume. It is
@@ -143,6 +152,11 @@ type ChildConfig struct {
 // the authoritative rule; this sentinel is how a violation of it reaches Go
 // code that has to tell it apart from every other write failure.
 var ErrNameTaken = errors.New("childstore: name taken by a live sibling")
+
+// ErrClosed is returned by an upsert whose ChildRecord.RefuseIfClosed met a row
+// that already carries a close tombstone. The row was NOT written and is still
+// closed: the caller's answer is "this child is gone for good", never "retry".
+var ErrClosed = errors.New("childstore: row is closed")
 
 // ChildStore persists child state records.
 //

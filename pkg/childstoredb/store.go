@@ -81,13 +81,32 @@ ON CONFLICT (child_id) DO UPDATE SET
     closed_at         = NULL,
     updated_at        = now()`
 
+// upsertLiveSQL is upsertSQL with the conflict update gated on the row still
+// being live. The WHERE belongs to the DO UPDATE action: a conflicting row that
+// fails it is left EXACTLY as it was — closed_at included — and the statement
+// reports zero rows, which Upsert turns into childstore.ErrClosed.
+//
+// This is what makes a native thread child's birth safe against a concurrent
+// close: the caller's "is this row closed?" read and its write cannot be one
+// statement, so the WRITE is the authority. A row written after its tombstone
+// was stamped stays tombstoned.
+const upsertLiveSQL = upsertSQL + `
+WHERE conversations.child.closed_at IS NULL`
+
 // Upsert writes rec, creating the row or updating it in place.
 //
-// closed_at is cleared unconditionally: an upsert is the daemon asserting this
+// closed_at is cleared unconditionally — an upsert is the daemon asserting this
 // child is live, and writing into a tombstoned row without clearing it would
-// leave a row that exists, updates, and is never returned by List — invisible
-// to recovery and to rafiki list, with nothing to observe. Child ids are ULIDs
-// and are never reused, so this is defensive rather than a path anything takes.
+// leave a row that exists, updates, and is never returned by List — invisible to
+// recovery and to rafiki list, with nothing to observe. Child ids are ULIDs and
+// are never reused, so this is defensive rather than a path anything takes.
+//
+// rec.RefuseIfClosed is the ONE exception, and it exists because an id CAN be
+// reused: a native thread child's id is <parent>:<thread>, deterministic, so a
+// closed row is a state the daemon really meets. With it set the conflict update
+// is gated on closed_at IS NULL (upsertLiveSQL) and a tombstoned row is left
+// untouched, answered childstore.ErrClosed. Every other caller keeps the
+// clear-on-write semantics it has always had.
 //
 // executor_set is deliberately absent from the conflict update: a fresh row
 // gets it from the INSERT and every later change goes through SetExecutorSet,
@@ -118,7 +137,11 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 		return fmt.Errorf("childstoredb: marshal labels: %w", err)
 	}
 
-	_, err = s.pool.Exec(ctx, upsertSQL,
+	sql := upsertSQL
+	if rec.RefuseIfClosed {
+		sql = upsertLiveSQL
+	}
+	tag, err := s.pool.Exec(ctx, sql,
 		rec.ChildID, nullString(rec.ConversationID), nullString(rec.OwnerUserID),
 		rec.Kind, rec.Name, rec.Cwd, rec.ConfigDir,
 		nullInt(rec.PID), rec.DaemonID, rec.NSToken, rec.Provider, rec.Model, rec.Thinking,
@@ -136,6 +159,11 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 			return fmt.Errorf("childstoredb: upsert %s: %w", rec.ChildID, childstore.ErrNameTaken)
 		}
 		return fmt.Errorf("childstoredb: upsert %s: %w", rec.ChildID, err)
+	}
+	if rec.RefuseIfClosed && tag.RowsAffected() == 0 {
+		// The conflict row exists and DO UPDATE's WHERE refused it: the row is
+		// closed, and this write left it exactly as it found it.
+		return fmt.Errorf("childstoredb: upsert %s: %w", rec.ChildID, childstore.ErrClosed)
 	}
 	return nil
 }

@@ -307,6 +307,11 @@ func (c *Controller) loadChildren(ctx context.Context) {
 
 	var skipped, adopted int
 	var scriptSettles []childstore.ChildRecord
+	// resuming is every child this boot hands to a resume (now, or when its
+	// executor connects): the settled answer the native reconcile reads, which
+	// the store's status cannot give once recoverOne has written every recovered
+	// row as exited.
+	resuming := make(map[string]struct{})
 	for _, rec := range recs {
 		own := recoveryOwnership(rec, c.daemonID, live)
 		switch own {
@@ -323,7 +328,9 @@ func (c *Controller) loadChildren(ctx context.Context) {
 		if scriptNeedsRestartSettle(rec, own) {
 			scriptSettles = append(scriptSettles, rec)
 		}
-		c.recoverOne(ctx, rec, live)
+		if c.recoverOne(ctx, rec, live) {
+			resuming[rec.ChildID] = struct{}{}
+		}
 	}
 	if skipped > 0 || adopted > 0 {
 		slog.Info("recovery scoped by daemon ownership",
@@ -331,10 +338,13 @@ func (c *Controller) loadChildren(ctx context.Context) {
 	}
 	// The walk is what makes the parent question answerable, so the native
 	// reconcile runs HERE and not inside recoverOne: a thread child whose parent
-	// recovered as exited (a daemon that crashed never ran handleChildExit) has
-	// to be ended, and a parent earlier in the walk is only "exited" once it has
-	// been loaded. Spawned children are untouched — that is the scope boundary.
-	c.reconcileNativeChildren()
+	// recovery leaves exited (a daemon that crashed never ran handleChildExit) has
+	// to be ended, and the answer is only settled once the whole walk has run.
+	// `resuming` is the half the in-memory status cannot carry — recoverOne loads
+	// every non-native row as exited BEFORE its resume launch, so a parent being
+	// resumed looks exactly like a dead one at this instant. Spawned children are
+	// untouched — that is the scope boundary.
+	c.reconcileNativeChildren(resuming)
 	for _, rec := range scriptSettles {
 		// The process is gone (local hosting: the script dies with whichever
 		// daemon hosted it, and this one just classified the row as adoptable
@@ -384,7 +394,13 @@ func nativeRecoverySession(rec childstore.ChildRecord) *childstore.Session {
 }
 
 // recoverOne loads a single record into the store and decides whether to resume.
-func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord, live map[string]bool) {
+//
+// It reports whether this boot KEEPS the child — it launched a resume, or pended
+// one for the executor that will fire it. That is the only settled answer at this
+// point: the store was just written with StatusExited for every row that is not
+// native (the row is a placeholder until the resume takes over), so the
+// reconcile that runs after the walk must be told which of those exits are real.
+func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord, live map[string]bool) (resuming bool) {
 	// NATIVE FIRST, before any ownership, adoption, orphan-signal, lease or
 	// executor logic: a native thread child is a Claude Code Task subagent that
 	// runs inside its parent's process, so there is nothing here to run, resume,
@@ -402,7 +418,7 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 		c.st.Insert(sess)
 		slog.Debug("native subagent row loaded; it has no process to recover",
 			"childId", rec.ChildID, "status", rec.Status)
-		return
+		return false
 	}
 
 	// Signal a still-live orphan of THIS daemon's own past life: the row must
@@ -467,7 +483,7 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 		c.st.Insert(sess)
 		slog.Debug("child owned by another live daemon; not recovering",
 			"childId", rec.ChildID, "ownerDaemonId", rec.DaemonID)
-		return
+		return false
 	}
 	// Adopting means the row becomes OURS on disk, not just in this scan —
 	// see adoptOwnership for the close-gate bug this fixes.
@@ -525,7 +541,7 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 		// resetUnconfirmedOnOwnership's doc comment) because nothing here
 		// delivers anything, and there is no engine running yet to race.
 		c.releaseInboxOnExit(rec.ChildID)
-		return
+		return false
 	}
 
 	// The lease is acquired at engine build, not here. Two acquisition sites
@@ -539,8 +555,10 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
 	}
 	// The resume launch — now, or pended for the executor-connect sweep — and
-	// the per-kind resume shape live in pending_resume.go.
-	c.launchRecoveryResume(rec, own)
+	// the per-kind resume shape live in pending_resume.go. Its answer is ours:
+	// it declines a claude row it cannot prove is ours, and that row's threads
+	// ended with it.
+	return c.launchRecoveryResume(rec, own)
 }
 
 // adoptOwnership transfers a foreign-lapsed row to this daemon.

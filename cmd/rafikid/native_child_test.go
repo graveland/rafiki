@@ -15,6 +15,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/darajapool"
+	"go.graveland.dev/rafiki/pkg/execpool"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
@@ -35,6 +37,20 @@ type seededRecordingStore struct {
 
 func (s *seededRecordingStore) List(context.Context) ([]childstore.ChildRecord, error) {
 	return s.recs, nil
+}
+
+// staleClosedStore forces the interleaving a concurrent Close produces: its
+// IsClosed answers "not closed" NO MATTER WHAT, as the read does when the
+// tombstone lands between it and the write that follows. Every other method is
+// the real store, so only the write can hold the tombstone.
+type staleClosedStore struct {
+	childstore.ChildStore
+	isClosedCalls int
+}
+
+func (s *staleClosedStore) IsClosed(context.Context, string) (bool, error) {
+	s.isClosedCalls++
+	return false, nil
 }
 
 // TestEnsureThreadChildPersistsRow is the core of the change: a Task subagent
@@ -302,6 +318,65 @@ func TestEnsureThreadChildRefusesAClosedRow(t *testing.T) {
 		Scan(&rows, &closedAt), "read the tombstoned row")
 	c.Eq(1, rows, "the refusal must not create a duplicate row")
 	c.Require().True(closedAt != nil, "the refusal must not un-close the row")
+}
+
+// TestEnsureThreadChildRefusesAClosedRowWhoseReadWasStale is the forced
+// interleaving of a Close landing between EnsureThreadChild's IsClosed check and
+// its row write: the read here answers "not closed" by construction while the
+// row behind it is already tombstoned. Only the database's own guard can hold
+// the tombstone at that point, and it must: an upsert that cleared closed_at
+// would resurrect a child the operator closed in BOTH memory and the database,
+// silently, and the parent would keep producing turns under it.
+func TestEnsureThreadChildRefusesAClosedRowWhoseReadWasStale(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	pool := scratchPool(t)
+
+	ctrl := newTestController(t)
+	real := childstoredb.New(pool)
+	stale := &staleClosedStore{ChildStore: real}
+	ctrl.children = stale
+	const parent = "c_nat_stale_parent"
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: parent, Kind: protocol.KindClaude, Status: protocol.StatusIdle, Cwd: t.TempDir(),
+	})
+	var convID string
+	c.Require().NoError(pool.QueryRow(ctx,
+		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by) VALUES ('test', 'client') RETURNING id::text`).
+		Scan(&convID), "seed the thread's conversation")
+	c.Require().NoError(ctrl.EnsureThreadChild(parent, "thread-stale", convID), "EnsureThreadChild")
+	id := threadChildID(parent, "thread-stale")
+	c.Require().True(ctrl.exitNativeChild(id, time.Now()), "exit the native child")
+
+	// The Close that races the next turn: session gone, row tombstoned, and the
+	// read above the write will still say "not closed".
+	c.Require().NoError(ctrl.Close(id), "close the thread child (tombstone its row)")
+	closed, err := real.IsClosed(ctx, id)
+	c.Require().NoError(err, "is closed")
+	c.Require().True(closed, "the fixture must really have tombstoned the row")
+
+	err = ctrl.EnsureThreadChild(parent, "thread-stale", convID)
+	c.Require().Error(err, "a write that meets a tombstone must be refused, not applied")
+	c.True(stale.isClosedCalls > 0, "the fixture must have exercised the stale read, not a path that skipped it")
+	var ce *connectapi.ControllerError
+	c.Require().True(errors.As(err, &ce), "the refusal must be an authored ControllerError, got %T: %v", err, err)
+	c.Eq(protocol.ErrFailedPrecondition, ce.Code, "the refusal code is the same one the read produces")
+	c.StrContains(ce.Message, id, "the refusal must name the child: %s", ce.Message)
+
+	if _, ok := ctrl.st.Get(id); ok {
+		t.Fatal("a refused thread child left a session behind; the close must still stand")
+	}
+	var (
+		rows     int
+		status   string
+		closedAt *time.Time
+	)
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT count(*), max(status), max(closed_at) FROM conversations.child WHERE child_id = $1`, id).
+		Scan(&rows, &status, &closedAt), "read the tombstoned row")
+	c.Eq(1, rows, "the refused write must not create a duplicate row")
+	c.Require().True(closedAt != nil, "the tombstone must still stand after the write")
+	c.Eq(string(protocol.StatusExited), status, "the refused write must not have landed its status either")
 }
 
 // TestCloseParentClosesNativeChildren pins the close half of the scope boundary:
@@ -644,23 +719,33 @@ func TestRecoveryLoadsNativeRowWithoutResuming(t *testing.T) {
 // never ran handleChildExit, so its parent recovers as exited while the thread
 // rows still say idle — and no verb can end them (Close wants an exited child;
 // Kill/Send/Resume refuse a native one). The boot reconcile is the only thing
-// that can, and it must not touch a child whose parent is still running, a
-// SPAWNED child, or another daemon's rows.
+// that can, and it must not touch a child whose parent recovery is still KEEPING
+// (resumed, or pended for the executor that will fire it), a SPAWNED child, or
+// another daemon's rows.
+//
+// Every case runs the REAL walk (loadChildren), because that is what produces the
+// answer the reconcile reads: recoverOne writes each non-native row as exited
+// BEFORE handing its resume to a goroutine, so a hand-set parent status is a
+// shape recovery never presents at reconcile time — the case this replaces
+// passed for exactly that reason.
 func TestRecoveryEndsNativeChildrenOfAGoneParent(t *testing.T) {
 	now := time.Now().Add(-time.Hour).Truncate(time.Second)
 
-	// Each case seeds the store directly (the reconcile is store-driven) and runs
-	// the same reconcile loadChildren runs after its walk.
 	for _, tc := range []struct {
-		name       string
-		parent     *childstore.Session
-		wantStatus protocol.Status
+		name string
+		// parent is the recovered ROW: nil means its row is gone (closed, or never
+		// written), which is what a parent tombstoned before the crash looks like.
+		parent       *childstore.ChildRecord
+		executorPool bool // route claude through a pool, so a resumed parent PENDS instead of launching
+		wantStatus   protocol.Status
+		wantPending  int
 	}{
 		{
 			name: "parent exited",
-			parent: &childstore.Session{
-				ChildID: "c_rec_gone", Kind: protocol.KindClaude, Status: protocol.StatusExited,
-				ExitedAt: now, StartedAt: now, Labels: map[string]string{"rafiki/daemon": "me"},
+			parent: &childstore.ChildRecord{
+				ChildID: "c_rec_gone", Kind: protocol.KindClaude, Status: string(protocol.StatusExited),
+				DaemonID: "me", SpawnedAt: now, ExitedAt: now,
+				Labels: map[string]string{"rafiki/daemon": "me"},
 			},
 			wantStatus: protocol.StatusExited,
 		},
@@ -670,72 +755,103 @@ func TestRecoveryEndsNativeChildrenOfAGoneParent(t *testing.T) {
 			wantStatus: protocol.StatusExited,
 		},
 		{
-			name: "parent still running",
-			parent: &childstore.Session{
-				ChildID: "c_rec_gone", Kind: protocol.KindClaude, Status: protocol.StatusStreaming,
-				StartedAt: now, Labels: map[string]string{"rafiki/daemon": "me"},
+			// The live shape recovery really presents: the row said the child was
+			// ALIVE when its daemon died, so this boot resumes it — pended here for
+			// the executor that owns it, exactly like a daraja-hosted claude whose
+			// process survived the restart. Its threads are running with it.
+			name: "parent still running (being resumed)",
+			parent: &childstore.ChildRecord{
+				ChildID: "c_rec_gone", Kind: protocol.KindClaude, Status: string(protocol.StatusIdle),
+				DaemonID: "me", SpawnedAt: now, Cwd: t.TempDir(),
+				Labels: map[string]string{"rafiki/daemon": "me", "rafiki/executor": "e-gone"},
+			},
+			executorPool: true,
+			wantStatus:   protocol.StatusIdle,
+			wantPending:  1,
+		},
+		{
+			name: "parent owned by another live daemon",
+			parent: &childstore.ChildRecord{
+				ChildID: "c_rec_gone", Kind: protocol.KindClaude, Status: string(protocol.StatusExited),
+				DaemonID: "someone-else", SpawnedAt: now, // written just now: that daemon is alive
+				UpdatedAt: time.Now(),
+				Labels:    map[string]string{"rafiki/daemon": "someone-else"},
 			},
 			wantStatus: protocol.StatusIdle,
 		},
 		{
-			name: "parent owned by another daemon",
-			parent: &childstore.Session{
-				ChildID: "c_rec_gone", Kind: protocol.KindClaude, Status: protocol.StatusExited,
-				ExitedAt: now, StartedAt: now, Labels: map[string]string{"rafiki/daemon": "someone-else"},
+			// A LAPSED foreign claude row is adopted but NEVER resumed (two claude
+			// processes on one session would interleave writes), so its threads
+			// ended with it: `resuming` follows the launch decision, not the plan.
+			name: "parent adopted from a dead daemon (a claude row is never resumed across daemons)",
+			parent: &childstore.ChildRecord{
+				ChildID: "c_rec_gone", Kind: protocol.KindClaude, Status: string(protocol.StatusIdle),
+				DaemonID: "old-daemon", SpawnedAt: now, Cwd: t.TempDir(),
+				Labels: map[string]string{"rafiki/daemon": "old-daemon"},
 			},
-			wantStatus: protocol.StatusIdle,
+			wantStatus: protocol.StatusExited,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ck := assert.NewAborting(t)
 			ctrl := newTestController(t)
 			ctrl.daemonID = "me"
-			store := &seededRecordingStore{}
-			ctrl.children = store
+			if tc.executorPool {
+				ctrl.execPoolConn = &execpool.Pool{}
+				ctrl.darajaPool = &darajapool.Pool{}
+			}
 
 			const parentID = "c_rec_gone"
 			nativeID := threadChildID(parentID, "t1")
-			if tc.parent != nil {
-				ctrl.st.Insert(tc.parent)
-			}
-			ctrl.st.Insert(&childstore.Session{
-				ChildID: nativeID, Kind: protocol.KindClaude, Native: true, Status: protocol.StatusIdle,
-				StartedAt: now, Labels: map[string]string{
-					labelNativeSubagent:    "1",
-					childstore.LabelParent: parentID,
-					childstore.LabelRoot:   parentID,
-				},
-			})
-			// A SPAWNED child of the same parent, live: the reconcile must never
-			// touch it, whatever the parent is doing.
+			// A SPAWNED child of the same parent: the reconcile must never touch
+			// it, whatever the parent is doing.
 			const spawnedID = "c_rec_gone_spawned"
-			ctrl.st.Insert(&childstore.Session{
-				ChildID: spawnedID, Kind: protocol.KindFundi, Status: protocol.StatusIdle,
-				StartedAt: now, Labels: map[string]string{
-					childstore.LabelParent: parentID,
-					childstore.LabelRoot:   parentID,
+			store := &seededRecordingStore{}
+			if tc.parent != nil {
+				store.recs = append(store.recs, *tc.parent)
+			}
+			store.recs = append(store.recs,
+				childstore.ChildRecord{
+					ChildID: nativeID, Kind: protocol.KindClaude, Status: string(protocol.StatusIdle),
+					DaemonID: "me", SpawnedAt: now,
+					Labels: map[string]string{
+						labelNativeSubagent:    "1",
+						childstore.LabelParent: parentID,
+						childstore.LabelRoot:   parentID,
+					},
 				},
-			})
+				childstore.ChildRecord{
+					ChildID: spawnedID, Kind: protocol.KindFundi, Status: string(protocol.StatusIdle),
+					DaemonID: "me", SpawnedAt: now,
+					Labels: map[string]string{
+						childstore.LabelParent: parentID,
+						childstore.LabelRoot:   parentID,
+					},
+				},
+			)
+			ctrl.children = store
 
-			ctrl.reconcileNativeChildren()
+			ctrl.loadChildren(context.Background())
 
+			ck.Eq(tc.wantPending, ctrl.pendingCount(), "children this boot is holding for an executor")
 			snap, ok := ctrl.st.Get(nativeID)
 			ck.Require().True(ok, "the native child stays in the store, exited or not")
 			ck.Eq(tc.wantStatus, snap.Status, "native child status")
 			if tc.wantStatus == protocol.StatusIdle {
-				ck.Eq(0, len(store.upsertsFor(nativeID)), "an untouched native child must not be written")
+				ck.Empty(store.upsertsFor(nativeID), "a thread of a parent recovery is still keeping must not be written")
 			} else {
 				ck.Require().Len(store.upsertsFor(nativeID), 1, "the exit must be persisted, not only held in memory")
 				ck.Eq(string(protocol.StatusExited), store.upsertsFor(nativeID)[0].Status, "the persisted status")
-				if !snap.ExitedAt.IsZero() && tc.parent != nil && !tc.parent.ExitedAt.IsZero() {
+				if tc.parent != nil && !tc.parent.ExitedAt.IsZero() {
 					ck.True(snap.ExitedAt.Equal(tc.parent.ExitedAt),
 						"the thread ends at its parent's exit instant: %v want %v", snap.ExitedAt, tc.parent.ExitedAt)
 				}
 			}
 
-			spawned, _ := ctrl.st.Get(spawnedID)
-			ck.Eq(protocol.StatusIdle, spawned.Status, "a SPAWNED child is never touched by the native reconcile")
-			ck.Empty(store.upsertsFor(spawnedID), "and never written by it")
+			spawned, ok := ctrl.st.Get(spawnedID)
+			ck.Require().True(ok, "the spawned child is loaded")
+			ck.False(spawned.Native, "a spawned child is not native")
+			ck.Empty(store.upsertsFor(spawnedID), "a SPAWNED child is never written by the native reconcile")
 		})
 	}
 }

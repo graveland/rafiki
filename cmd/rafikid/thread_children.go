@@ -85,7 +85,15 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 	}
 	id := threadChildID(parentChildID, threadID)
 	if snap, ok := c.st.Get(id); ok {
-		return c.reviveThreadChild(snap, conversationID)
+		if err := c.reviveThreadChild(snap, conversationID); err != nil {
+			// A close that landed between loading this snapshot and writing it back
+			// is the same refusal the birth path answers, not an internal error.
+			if errors.Is(err, childstore.ErrClosed) {
+				return threadChildClosedRefusal(id)
+			}
+			return err
+		}
+		return nil
 	}
 	// A CLOSED ROW IS FINAL, INCLUDING FOR THIS DETERMINISTIC ID. A child id is
 	// <parent>:<thread>, so the same thread asks for the same row on every turn —
@@ -101,15 +109,17 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 	//
 	// This state is reachable, not theoretical: before the close ORDER was fixed,
 	// a parent persist failure could close its native children under a live
-	// parent, and an operator can close a thread's row while the parent process
-	// keeps running.
+	// parent, an operator can close a thread's row while the parent process keeps
+	// running, and a Close concurrent with this one can land HERE — the read
+	// below answers "not closed" and the tombstone arrives before the write. That
+	// last window is why the read is not the guard: the WRITE refuses a
+	// tombstoned row in the database itself (ChildRecord.RefuseIfClosed over
+	// closed_at IS NULL), and a write that is refused is answered with the same
+	// failed_precondition this read produces.
 	if closed, err := c.threadChildRowClosed(id); err != nil {
 		return fmt.Errorf("ensure thread child: %w", err)
 	} else if closed {
-		return &connectapi.ControllerError{
-			Code:    protocol.ErrFailedPrecondition,
-			Message: fmt.Sprintf("thread child %s is closed; a closed child is never revived and its id is never reused", id),
-		}
+		return threadChildClosedRefusal(id)
 	}
 	parent, ok := c.st.Get(parentChildID)
 	if !ok {
@@ -156,6 +166,11 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 		// Nothing has been published for this id, but a spawn-shaped span or
 		// observer entry may already have been queued against it.
 		c.trace.ChildGone(id)
+		// A tombstone that landed after the IsClosed read above is the SAME
+		// refusal, not a write failure: the row is closed and this birth is over.
+		if errors.Is(err, childstore.ErrClosed) {
+			return threadChildClosedRefusal(id)
+		}
 		slog.Warn("ensure thread child: row not persisted",
 			"parent", parentChildID, "thread", threadID, "error", err)
 		return err
@@ -198,6 +213,10 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 // moves the name, never the identity or the lineage. "task:<thread>", then
 // "-2" through "-9", is the documented bound; past it the last name-taken error
 // is returned and the caller forgets the child.
+//
+// A childstore.ErrClosed is returned unchanged and NOT retried under a new name:
+// the suffix would move the name on a row the database just refused to touch,
+// and no name makes a closed row writable again.
 func (c *Controller) persistThreadChild(childID, threadID string) error {
 	err := c.writeRecord(childID)
 	if err == nil || !errors.Is(err, childstore.ErrNameTaken) {
@@ -213,6 +232,16 @@ func (c *Controller) persistThreadChild(childID, threadID string) error {
 		}
 	}
 	return err
+}
+
+// threadChildClosedRefusal is the ONE answer for a closed thread row, from either
+// guard: the pre-write IsClosed read or the database refusing the write itself.
+// Same code and same text, because to the caller they are the same fact.
+func threadChildClosedRefusal(childID string) error {
+	return &connectapi.ControllerError{
+		Code:    protocol.ErrFailedPrecondition,
+		Message: fmt.Sprintf("thread child %s is closed; a closed child is never revived and its id is never reused", childID),
+	}
 }
 
 // reviveThreadChild re-idles a thread child that already exists but reads as
@@ -454,22 +483,33 @@ func (c *Controller) exitNativeChildrenOf(parentChildID string, at time.Time) {
 // refuse a native one). Without this, a crash strands them until an operator
 // intervenes.
 //
-// Decided once, from the loaded store, after the recovery walk has loaded every
-// row: a parent is "gone" when its session is absent (its row is closed — List
-// skips tombstones — or never existed) or reads exited AND is a row this daemon
-// owns. A FOREIGN parent is deliberately left alone: recovery loads every
-// other daemon's row as exited here, so its status says nothing about its
-// threads, and writing another daemon's child rows is not ours to do.
+// Decided once, after the recovery walk has loaded every row, from the parent's
+// SETTLED state and not from the status it happens to hold at this instant:
+// recoverOne writes every non-native recovered row as exited BEFORE handing its
+// resume to a goroutine, so "exited in the store" is a placeholder for a child
+// this boot is about to resume — a local claude re-attach, a fundi engine
+// rebuild, or a resume pended for the executor that will fire it. Ending the
+// threads of one of those is the bug this parameter exists to prevent: it ends a
+// running daraja-hosted subagent (whose process survived the restart) and
+// contradicts exitNativeChild's own shutdown skip, which leaves native rows live
+// precisely so the next daemon resumes the parent and its threads together.
+//
+// So a parent is "gone" when its session is absent (its row is closed — List
+// skips tombstones — or never existed), or recovery left it exited: it is not in
+// `resuming` AND it reads exited AND it is a row this daemon owns. A FOREIGN
+// parent is deliberately left alone: recovery loads every other daemon's row as
+// exited here, so its status says nothing about its threads, and writing another
+// daemon's child rows is not ours to do.
 //
 // Best effort and never boot-fatal: a failed row write is logged by
 // exitNativeChild and the walk carries on.
-func (c *Controller) reconcileNativeChildren() {
+func (c *Controller) reconcileNativeChildren(resuming map[string]struct{}) {
 	var ended int
 	for _, snap := range c.st.List() {
 		if !snap.Native || snap.Status == protocol.StatusExited {
 			continue
 		}
-		at, gone := c.nativeParentEnded(snap)
+		at, gone := c.nativeParentEnded(snap, resuming)
 		if !gone {
 			continue
 		}
@@ -484,8 +524,8 @@ func (c *Controller) reconcileNativeChildren() {
 
 // nativeParentEnded reports whether snap's parent cannot be running, and the
 // instant to end the thread at. See reconcileNativeChildren for why a foreign
-// parent is never "ended".
-func (c *Controller) nativeParentEnded(snap childstore.Snapshot) (time.Time, bool) {
+// parent is never "ended" and why a resuming one is not either.
+func (c *Controller) nativeParentEnded(snap childstore.Snapshot, resuming map[string]struct{}) (time.Time, bool) {
 	parentID, ok := childstore.ParentLabel(snap.Labels)
 	if !ok {
 		// A native child with no parent label only ever existed as a thread, so
@@ -495,6 +535,12 @@ func (c *Controller) nativeParentEnded(snap childstore.Snapshot) (time.Time, boo
 	parent, present := c.st.Get(parentID)
 	if !present {
 		return time.Time{}, true
+	}
+	// The settled answer, before any status read: a parent this boot resumed (or
+	// pended for its executor) is alive, and the exited status recoverOne left in
+	// the store is only the placeholder the resume writes over.
+	if _, keep := resuming[parentID]; keep {
+		return time.Time{}, false
 	}
 	if !c.ownsChildRow(parent) || parent.Status != protocol.StatusExited {
 		return time.Time{}, false
@@ -518,7 +564,9 @@ func (c *Controller) nativeParentEnded(snap childstore.Snapshot) (time.Time, boo
 //
 // Fail-closed on a persist error, like the parent's: a child whose lineage
 // could not be recorded must not silently drop out of its ancestors' spend, so
-// the child stays in the store and the caller gets the error.
+// the child stays in the store and the caller gets the error. The ONE exception
+// is childstore.ErrClosed — the row is already tombstoned, so there is nothing
+// left to persist and the close has reached the state it wanted.
 func (c *Controller) closeNativeChild(childID string) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
@@ -529,10 +577,18 @@ func (c *Controller) closeNativeChild(childID string) error {
 	owns := c.ownsChildRow(snap)
 	if owns {
 		if err := c.writeRecord(childID); err != nil {
-			// The child id and the error TYPE only, never the message — the
-			// same rule Close's own persist warning follows.
-			slog.Warn("close: native child not persisted", "childId", childID, "errorType", fmt.Sprintf("%T", err))
-			return fmt.Errorf("close %s: %w", childID, err)
+			if errors.Is(err, childstore.ErrClosed) {
+				// Another writer tombstoned this row first (a daemon sharing the
+				// database, or a direct `rafiki close` of the native id). Its snapshot
+				// is already durable, so failing the parent's close here would
+				// refuse a close that has nothing left to do.
+				slog.Debug("close: native child row was already closed", "childId", childID)
+			} else {
+				// The child id and the error TYPE only, never the message — the
+				// same rule Close's own persist warning follows.
+				slog.Warn("close: native child not persisted", "childId", childID, "errorType", fmt.Sprintf("%T", err))
+				return fmt.Errorf("close %s: %w", childID, err)
+			}
 		}
 	}
 	// Before the delete, like every close site: the event carries the lineage a

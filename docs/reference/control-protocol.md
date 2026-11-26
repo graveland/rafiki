@@ -2260,6 +2260,11 @@ of two ways, and they are mutually exclusive:
 The rules, in order:
 
 - a child may fork itself or its subtree, closed children included;
+- a NATIVE thread child (a Claude Code Task subagent's persisted row) is a
+  forkable source like any other agent: its `conversation_id` is the thread's own
+  BRANCH conversation, so `fork_from=<native id>` forks the transcript the
+  subagent actually ran, not the parent's main thread (`childstoredb.ForkSource`
+  reads the row, closed or not);
 - a user may fork anything they own; a user who names `parent_child_id` forks
   with that parent's authority;
 - only `kind=fundi` can be forked to;

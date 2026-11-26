@@ -4252,9 +4252,13 @@ func (c *Controller) Close(childID string) error {
 	// reachable failure leaves a consistent pair. A parent persist failure closes
 	// NOTHING (no native row has been touched yet); a native persist failure
 	// fails the parent's close with the parent still live and un-tombstoned, so
-	// the pair is retried together on the next call; and a native child can never
-	// be closed while its parent is still live, which is the shape that used to
-	// leave a live parent's thread traffic writing to a tombstoned child.
+	// the pair is retried together on the next call; and this close tombstones a
+	// thread child only while its parent is still live, which is the shape that
+	// used to leave a parent's thread traffic writing to a tombstoned child. (A
+	// LIVE parent can still end up with a closed thread — an operator closing a
+	// native id directly, or a close that left one closed and the parent live —
+	// which is why EnsureThreadChild's refusal of a tombstoned row is a real path,
+	// not a hypothetical one.)
 	owns := c.ownsChildRow(snap)
 	if owns {
 		if err := c.writeRecord(childID); err != nil {
@@ -5871,6 +5875,11 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 		if snap.Kind == protocol.KindFundi || snap.Native {
 			rec.ConversationID = snap.SessionID
 		}
+		// A native thread child's write must never clear a close tombstone: its
+		// id is deterministic, so the row an operator closed is one this daemon
+		// can still address (see childstore.ChildRecord.RefuseIfClosed). The
+		// database decides that, not the caller's IsClosed read.
+		rec.RefuseIfClosed = snap.Native
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := c.children.Upsert(ctx, rec)
 		cancel()

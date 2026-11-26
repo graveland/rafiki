@@ -358,6 +358,63 @@ func TestClosedUsageMemoFilledOnceNeverForOpen(t *testing.T) {
 	ck.Eq(1, countOccurrences(coster.selectors[1].ConversationIDs, openConv), "and on pass 1: an open member is never memoised")
 }
 
+// A CLOSED native member's memo can go stale while an OPEN parent's fresh read of
+// the same conversation is exact, and the fresh row must win.
+//
+// A Claude Code Task subagent's row is native: its conversation_id is the thread's
+// branch conversation. Close it, resume the parent, and Claude Code re-enters the
+// same thread — EnsureThreadChild refuses the closed row and the turn is captured
+// into "<parent>:<thread>" anyway. Both members own that one conversation: the
+// native by UUID, the parent by its `<child>:` prefix arm. The native sits FIRST
+// in the lineage read (the query has no ORDER BY, so position is what decides a
+// first-seen dedupe), so a memo that outranked the fresh row would freeze the
+// branch at its close-time total and under-count the parent's budget.
+func TestClosedNativeMemoNeverOutranksAFreshRow(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	pool := openTestPool(t)
+	ctx := context.Background()
+
+	uniq := fmt.Sprintf("c_stalenative%d", time.Now().UnixNano())
+	parent, native := uniq+"_parent", uniq+"_native"
+	convMain := insertConvForCost(t, pool, parent)
+	convBranch := insertConvForCost(t, pool, parent+threadRefSep+"task1")
+	cleanupConvs(t, pool, convMain, convBranch)
+	insertTurnForCost(t, pool, convMain, "test/model", 1000, 100)
+	insertTurnForCost(t, pool, convBranch, "test/model", 1000, 100)
+
+	coster := pricedUsageCoster(t, pool)
+	c := &Controller{st: childstore.New(), coster: coster}
+	nativeRow := lineageRow(native, parent, parent, "", true)
+	nativeRow.Member.ConversationID = convBranch // the branch conversation its turns land on
+	c.lineage = &fakeLineageSource{rows: []childstore.LineageRow{
+		// The CLOSED native first: this is the order a first-seen dedupe would
+		// resolve in favour of the memo, and the order the spend must not depend on.
+		nativeRow,
+		lineageRow(parent, "", "", "", false),
+	}}
+
+	// Pass 1 memoises the closed native at the branch's ONE turn.
+	first, err := c.subtreeSpend(ctx, parent)
+	ck.Require().NoError(err, "first spend")
+	ck.LessOrEqual(1e-12, math.Abs(first-2*oneTestTurnUSD),
+		"the opening total is the parent's conversation plus the branch: %v", first)
+	memoised, ok := c.closedUsage.get(native)
+	ck.Require().True(ok, "the closed native member is memoised")
+	ck.Require().Len(memoised, 1, "one branch conversation")
+	ck.Eq(int64(1000), memoised[0].In, "the memo holds the branch as it stood at close time")
+
+	// The parent is resumed and the thread spends again: a second turn in the SAME
+	// branch conversation, which only the parent's `<child>:` prefix arm reaches now
+	// that the native row is closed.
+	insertTurnForCost(t, pool, convBranch, "test/model", 1000, 100)
+
+	got, err := c.subtreeSpend(ctx, parent)
+	ck.Require().NoError(err, "second spend")
+	ck.LessOrEqual(1e-12, math.Abs(got-3*oneTestTurnUSD),
+		"spend = %v, want %v: the memoised closed native must not displace the parent's fresh row for the branch conversation",
+		got, 3*oneTestTurnUSD)
+}
+
 // An empty child id is refused: the key is what ties a row set to its member, so
 // a blank one would let one member's rows answer for every empty-id member.
 func TestClosedUsageMemoRefusesAnEmptyChildID(t *testing.T) {
