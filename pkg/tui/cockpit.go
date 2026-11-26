@@ -3454,7 +3454,18 @@ func taskBoxRows(box []string) int {
 }
 
 func (c *Cockpit) bodyHeight() int {
-	h := c.height - c.ta.Height() - 3 - taskBoxRows(c.taskBoxLines())
+	h := c.height - c.ta.Height() - 3
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+// transcriptHeight is the transcript's share of bodyHeight: the task box lives
+// inside the conversation column, so the rail keeps the full body height and
+// only the transcript gives rows up to the box.
+func (c *Cockpit) transcriptHeight() int {
+	h := c.bodyHeight() - taskBoxRows(c.taskBoxLines())
 	if h < 1 {
 		return 1
 	}
@@ -3609,7 +3620,7 @@ func (c *Cockpit) syncViewport(p *paneState, lines []string) {
 	wasAtBottom := p.vp.AtBottom()
 	prev := p.vp.YOffset()
 
-	h := c.bodyHeight()
+	h := c.transcriptHeight()
 	p.vp.SetWidth(c.convWidth())
 	p.vp.SetHeight(h)
 	// Bottom-anchored: a transcript shorter than the pane is padded at the TOP
@@ -4040,7 +4051,7 @@ func (c *Cockpit) View() tea.View {
 	case c.sessions[f] != nil:
 		s := c.sessions[f]
 		p := c.pane(f)
-		lines := p.linesFor(s, convWidth, bodyHeight, renderOpts{
+		lines := p.linesFor(s, convWidth, c.transcriptHeight(), renderOpts{
 			expandArgs:     c.expandArgs,
 			drawImages:     c.drawImages(),
 			smallIDs:       c.caps.smallIDs(),
@@ -4080,6 +4091,13 @@ func (c *Cockpit) View() tea.View {
 	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && c.renameForm == nil && c.tagForm == nil && !c.showHelp && !c.searchOpen && c.sessions[f] != nil:
 		if n, ok := c.rail.Get(f); ok && rail.Working(n.Status) {
 			conv += "\n" + styleWorking.Render(rail.SpinnerFrame(c.frame)+" "+workingLabel(n.Status))
+		}
+		// The task box belongs to the viewed agent's column, so it is drawn
+		// here and never spans the rail. transcriptHeight already gave it its
+		// rows; the two must move together, which is why both go through
+		// taskBoxLines.
+		if box := c.taskBoxLines(); len(box) > 0 {
+			conv += "\n" + styleMeta.Render(strings.Repeat("─", max(convWidth, 0))) + "\n" + strings.Join(box, "\n")
 		}
 	}
 
@@ -4150,12 +4168,6 @@ func (c *Cockpit) View() tea.View {
 
 	out := joinColumns(railText, conv, railCols, convWidth, bodyHeight,
 		c.focus == focusRail)
-	// The task box sits between the transcript and the input, and bodyHeight
-	// already subtracted its height -- the two must move together, which is
-	// why both go through taskBoxLines.
-	if box := c.taskBoxLines(); len(box) > 0 {
-		out += "\n" + styleDivider + "\n" + strings.Join(box, "\n")
-	}
 	out += "\n" + styleDivider + "\n" + c.ta.View() + "\n" +
 		styleMeta.Render(statusLine) + "\n" + styleMeta.Render(footer)
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -77,4 +78,33 @@ func TestTaskBoxRowsCountsItsDivider(t *testing.T) {
 	c.Require().NotEmpty(box, "box did not render")
 	got, want := taskBoxRows(box), len(box)+1
 	c.Eq(want, got, "taskBoxRows")
+}
+
+// The box belongs to the viewed agent's column: no row of it may reach into the
+// rail column.
+func TestTaskBoxStaysInsideTheConversationColumn(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.focusChild = "c_1"
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Labels: map[string]string{}},
+		{ChildId: "c_2", Name: "other", Labels: map[string]string{}},
+	})
+	c.tasks = map[string][]*rafikiv1.TaskRow{"c_1": {row("1", "boxed task", "in_progress")}}
+
+	rc := c.railCols()
+	ck.Greater(0, rc, "setup: the rail must be drawn")
+	lines := strings.Split(ansi.Strip(c.View().Content), "\n")
+	found := false
+	for _, l := range lines {
+		if !strings.Contains(l, "boxed task") && !strings.Contains(l, "╭ tasks") {
+			continue
+		}
+		found = true
+		r := []rune(l)
+		ck.NotStrContains(string(r[:min(len(r), rc)]), "╭", "box row reaches into the rail column: "+l)
+		ck.NotStrContains(string(r[:min(len(r), rc)]), "boxed", "box row reaches into the rail column: "+l)
+	}
+	ck.True(found, "the task box was not drawn")
 }
