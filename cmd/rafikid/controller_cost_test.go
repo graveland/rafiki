@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -150,7 +149,7 @@ func TestListChildrenPricesResponsesModelByCatalogID(t *testing.T) {
 }
 
 // TestSubtreeCostPricesQualifiedResponsesModelID pins the QUALIFIED-id arm at
-// the spend consumer a budget is enforced against: SubtreeCost, the number
+// the spend consumer a budget is enforced against: subtreeSpend, the number
 // budgetHalted compares a child's lifetime maxCost to. A turn row can record
 // "oa/gpt-6.1-sol" — the qualified string the messages proxy stores once it has
 // resolved a spawn's provider — and CatalogModelID leaves a slashed id alone, so
@@ -158,7 +157,7 @@ func TestListChildrenPricesResponsesModelByCatalogID(t *testing.T) {
 // raw id, the lookup missed, and the child priced at 0 with no indication of it.
 //
 // Mutation-checked: reverting the stripped candidate leaves the model in
-// SubtreeCostDetailed's unpriced list and the total at 0.
+// PriceUsage's unpriced list and the total at 0.
 func TestSubtreeCostPricesQualifiedResponsesModelID(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := openTestPool(t)
@@ -183,9 +182,13 @@ func TestSubtreeCostPricesQualifiedResponsesModelID(t *testing.T) {
 		filepath.Join(dir, "c.sock"), nil, pool, nil, false, ctx, nil, nil, nil,
 		mustParseProviders(t, responsesProvidersTOML))
 	ctrl.SetCatalog(seedResponsesCatalog())
+	// The child's row, as the database holds it: the spend path reads its line
+	// and finds the conversation by the external ref the proxy set.
+	ctrl.SetLineageSource(&fakeLineageSource{rows: []childstore.LineageRow{
+		lineageRow(extRef, "", "", "", false),
+	}})
 
-	// The selector shape and the interface method budget enforcement uses.
-	got, err := ctrl.coster.SubtreeCost(ctx, insights.SubtreeSelector{ConversationIDs: []string{convID}})
-	c.NoError(err, "SubtreeCost")
-	c.LessOrEqual(1e-9, math.Abs(got-10.5), "SubtreeCost = %v, want 10.5 ($3/1M in for 1M + $15/1M out for 0.5M)", got)
+	got, err := ctrl.subtreeSpend(ctx, extRef)
+	c.NoError(err, "subtreeSpend")
+	c.LessOrEqual(1e-9, math.Abs(got-10.5), "subtreeSpend = %v, want 10.5 ($3/1M in for 1M + $15/1M out for 0.5M)", got)
 }

@@ -81,7 +81,7 @@ func TestChildConversationScopeIsOwnerWhenLineageHasOwner(t *testing.T) {
 }
 
 // An ownerless lineage keeps the subtree boundary, resolved through the same
-// subtreeSelector SubtreeCost prices.
+// subtreeSelector subtree spend reads its members from.
 func TestChildConversationScopeIsSubtreeForOwnerlessLineage(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	t0 := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
@@ -423,7 +423,9 @@ func TestListConversationsAdapterVisibleCodesAStoreError(t *testing.T) {
 // conversation read gives, not a raw sentinel.
 func TestListConversationsAdapterVisibleUnwiredPoolIsUnavailable(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	a := connectConversations{c: &Controller{st: childstore.New(), cm: newChildManager()}}
+	c := &Controller{st: childstore.New(), cm: newChildManager()}
+	c.lineage = liveLineage(c)
+	a := connectConversations{c: c}
 
 	_, err := a.Visible(childTokenCtx("c_d0"), "01a0-worker")
 	ck.Eq(connect.CodeUnavailable, connect.CodeOf(err), "unwired pool err = %v, want unavailable", err)

@@ -32,6 +32,37 @@ func memberIDs(ms []childstore.LineageMember) []string {
 	return out
 }
 
+func rowIDs(rows []childstore.LineageRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Member.ChildID)
+	}
+	return out
+}
+
+// TestLineageRowsOfKeepsLabelsForADeeperWalk pins the row-shaped form of the
+// walk: the labels survive, so ONE read of a tree answers for a subtree inside
+// it (a list of script children under one root costs one read).
+func TestLineageRowsOfKeepsLabelsForADeeperWalk(t *testing.T) {
+	c := assert.NewCollecting(t)
+	rows := []childstore.LineageRow{
+		member("r", "", "", false),
+		member("a", "r", "r", false),
+		member("b", "a", "r", true),
+		member("c", "r", "r", false),
+	}
+
+	kept := childstore.LineageRowsOf(rows, "r")
+	c.ElementsMatch([]string{"r", "a", "b", "c"}, rowIDs(kept), "LineageRowsOf(r) = %v", rowIDs(kept))
+
+	deeper := childstore.LineageRowsOf(kept, "a")
+	c.ElementsMatch([]string{"a", "b"}, rowIDs(deeper), "the same rows answer a deeper subtree: LineageRowsOf(a) = %v", rowIDs(deeper))
+	c.EqDeep(rows[1].Labels, deeper[0].Labels, "a row keeps the labels it was read with")
+
+	// DescendantsOf is the same walk, projected.
+	c.ElementsMatch(memberIDs(childstore.DescendantsOf(rows, "a")), rowIDs(deeper), "DescendantsOf must be LineageRowsOf's projection")
+}
+
 // TestDescendantsOfIncludesClosedAndNestedMembers pins the core semantics: the
 // ancestor's own row is returned, every descendant at any depth is returned,
 // and a closed descendant comes back flagged rather than filtered out. Fails

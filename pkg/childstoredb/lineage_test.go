@@ -58,10 +58,10 @@ func insertLineageChild(t *testing.T, s *Store, id, parent, root string, closed 
 	}
 }
 
-func lineageIDs(ms []childstore.LineageMember) []string {
-	out := make([]string, 0, len(ms))
-	for _, m := range ms {
-		out = append(out, m.ChildID)
+func lineageIDs(rows []childstore.LineageRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Member.ChildID)
 	}
 	return out
 }
@@ -90,8 +90,8 @@ func TestLineageIncludesTombstonedDescendants(t *testing.T) {
 	c.ElementsMatch([]string{root, live, closed, grand}, lineageIDs(got), "Lineage = %v", lineageIDs(got))
 
 	closedByID := map[string]bool{}
-	for _, m := range got {
-		closedByID[m.ChildID] = m.Closed
+	for _, r := range got {
+		closedByID[r.Member.ChildID] = r.Member.Closed
 	}
 	c.True(closedByID[closed], "the closed child must come back Closed=true")
 	c.False(closedByID[live], "a live child must not be marked closed")
@@ -150,9 +150,9 @@ func TestLineageOfAClosedAncestor(t *testing.T) {
 	c.Require().NoError(err, "Lineage(%s)", root)
 	c.ElementsMatch([]string{root, child}, lineageIDs(got), "Lineage = %v; a closed ancestor must still resolve its subtree", lineageIDs(got))
 
-	for _, m := range got {
-		if m.ChildID == root {
-			c.True(m.Closed, "the closed ancestor must be returned Closed=true")
+	for _, r := range got {
+		if r.Member.ChildID == root {
+			c.True(r.Member.Closed, "the closed ancestor must be returned Closed=true")
 		}
 	}
 }
@@ -186,8 +186,8 @@ func TestLineageCarriesSessionAndConversationIds(t *testing.T) {
 	c.Require().NoError(err, "Lineage(%s)", root)
 
 	byID := map[string]childstore.LineageMember{}
-	for _, m := range got {
-		byID[m.ChildID] = m
+	for _, r := range got {
+		byID[r.Member.ChildID] = r.Member
 	}
 	c.Eq("sess-123", byID[child].SessionID, "SessionID")
 	c.Eq(convID, byID[child].ConversationID, "ConversationID")

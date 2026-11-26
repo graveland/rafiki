@@ -60,13 +60,14 @@ func (c *Controller) ListChildren(statuses []string) []protocol.ChildSummary {
 
 // summariesFor maps snapshots onto the protocol summaries every list-shaped
 // verb serves: ONE batched cost rollup for the non-script kinds (see costsFor
-// — N serial round trips was the cockpit's seed-path stall), per-subtree
-// pricing for script children (see scriptSpend), and the snapshotToSummary
-// field mapping (provider+model join, nil PID for an exited child,
-// Unix-millis stamps, catalog-sourced context window) that is easy to get
-// subtly wrong by hand. Both the operator list and the child-scoped subtree
-// list go through it, so a child caller's ListChildren answers with the same
-// per-row facts an operator's does, minus the rows outside its subtree.
+// — N serial round trips was the cockpit's seed-path stall), ONE lineage read
+// per distinct root and ONE usage query for every script child (see
+// scriptSpends), and the snapshotToSummary field mapping (provider+model join,
+// nil PID for an exited child, Unix-millis stamps, catalog-sourced context
+// window) that is easy to get subtly wrong by hand. Both the operator list and
+// the child-scoped subtree list go through it, so a child caller's ListChildren
+// answers with the same per-row facts an operator's does, minus the rows
+// outside its subtree.
 func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSummary {
 	// ONE bounded context for the whole list's cost work, and ONE rollup for
 	// the whole list. Pricing each child with its own SubtreeCost call meant N
@@ -74,10 +75,10 @@ func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSu
 	// path -- and the seed is re-run whenever an unknown child produces
 	// traffic, which is exactly the busy-fleet case where N is large. The
 	// single ctx matters as much as the single rollup: the rollup and the
-	// per-script subtree queries run SEQUENTIALLY, so two separate timeout
-	// windows would give one list a 2×costRollupTimeout latency bound.
+	// script subtree reads run SEQUENTIALLY, so two separate timeout windows
+	// would give one list a 2×costRollupTimeout latency bound.
 	// Script children are withheld from the rollup: their CostUSD is their
-	// SUBTREE's spend (scriptSpend), never a rollup of their own rows.
+	// SUBTREE's spend (scriptSpends), never a rollup of their own rows.
 	ctx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
 	defer cancel()
 
@@ -89,9 +90,11 @@ func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSu
 	}
 	costs := c.costsFor(ctx, costSnaps)
 
-	// The script children price one subtree query each, under the same batch
-	// bound as the rollup — the SAME ctx, not a second window: both are
-	// display numbers that must not hold up the list they decorate.
+	// Every script child's subtree is priced from the same two reads, under the
+	// same batch bound as the rollup — the SAME ctx, not a second window: both
+	// are display numbers that must not hold up the list they decorate.
+	scriptCosts := c.scriptSpends(ctx, kept)
+
 	ids := make([]string, len(kept))
 	for i, s := range kept {
 		ids[i] = s.ChildID
@@ -104,7 +107,9 @@ func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSu
 	for _, s := range kept {
 		sum := snapshotToSummary(s, c.ContextWindow, displayState)
 		if s.Kind == protocol.KindScript {
-			sum.CostUSD = c.scriptSpend(ctx, s.ChildID)
+			if spend, ok := scriptCosts[s.ChildID]; ok {
+				sum.CostUSD = &spend
+			}
 		} else if cost, ok := costs[s.ChildID]; ok {
 			sum.CostUSD = &cost
 		}
@@ -150,6 +155,78 @@ func (c *Controller) scriptSpend(ctx context.Context, childID string) *float64 {
 		return nil
 	}
 	return &spend
+}
+
+// scriptSpends prices every script child among snaps, keyed by child id; an
+// absent child means its spend was not read (no cost source, or a lineage or
+// usage error) and leaves CostUSD unset rather than reporting a zero nothing
+// measured.
+//
+// It is the batch form of scriptSpend and the reason the list path does not
+// serialise: script children are grouped by ROOT, so K scripts under one
+// coordinator cost ONE lineage read (the root's tree, walked per child with
+// childstore.DescendantsOf) and the whole list costs ONE usage query. N
+// per-child subtree spends would be N lineage reads and N cost queries on the
+// cockpit's seed path.
+func (c *Controller) scriptSpends(ctx context.Context, snaps []childstore.Snapshot) map[string]float64 {
+	if c.coster == nil {
+		return nil
+	}
+	scripts := make([]childstore.Snapshot, 0, len(snaps))
+	for _, s := range snaps {
+		if s.Kind == protocol.KindScript {
+			scripts = append(scripts, s)
+		}
+	}
+	if len(scripts) == 0 {
+		return nil
+	}
+
+	byRoot := make(map[string][]childstore.Snapshot, len(scripts))
+	var roots []string
+	for _, s := range scripts {
+		root := childstore.RootLabel(s.Labels)
+		if root == "" {
+			root = s.ChildID // a top-level script child is its own root
+		}
+		if _, seen := byRoot[root]; !seen {
+			roots = append(roots, root)
+		}
+		byRoot[root] = append(byRoot[root], s)
+	}
+
+	members := make(map[string][]childstore.LineageMember, len(scripts))
+	var union []childstore.LineageMember
+	for _, root := range roots {
+		rows, err := c.lineageRows(ctx, root)
+		if err != nil {
+			// The scripts under this root keep an unset CostUSD; the rest of the
+			// list is unaffected.
+			slog.Debug("connect: script child subtree spend unavailable",
+				"root", root, "error", err)
+			continue
+		}
+		for _, s := range byRoot[root] {
+			ms := c.membersWithin(rows, s.ChildID)
+			members[s.ChildID] = ms
+			union = append(union, ms...)
+		}
+	}
+	if len(members) == 0 {
+		return nil
+	}
+
+	usage, err := c.usageForMembers(ctx, union)
+	if err != nil {
+		slog.Debug("connect: script child subtree spend unavailable", "error", err)
+		return nil
+	}
+	out := make(map[string]float64, len(members))
+	for childID, ms := range members {
+		total, _ := c.coster.PriceUsage(usageOfMembers(usage, ms))
+		out[childID] = total
+	}
+	return out
 }
 
 // snapshotToSummary converts a childstore.Snapshot to the wire ChildSummary

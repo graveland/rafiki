@@ -123,15 +123,23 @@ type Controller struct {
 	// childstore.ExecutorSetWriter. Nil without a database.
 	setWriter childstore.ExecutorSetWriter
 
-	// lineage resolves an ancestor's FULL subtree for the reads that must cover
-	// closed descendants too — subtree spend (checkBudget, sweepBudgets,
-	// SetChildBudget) and a child credential's conversation scope. Unlike c.st,
-	// which is live-state only and forgets a child the moment it is closed, this
-	// source reads the database (tombstoned rows included). Wired once at
-	// startup via SetLineageSource from the Postgres child store — see
-	// wireLineageSource. Nil on a DB-less daemon or in a test, where
-	// subtreeSelector falls back to the live set alone.
+	// lineage resolves a child's FULL line for the reads that must cover closed
+	// descendants too — subtree spend (checkBudget, sweepBudgets, SetChildBudget)
+	// and a child credential's conversation scope. It is the ONLY lineage source:
+	// every child, native subagents included, has a row, so nothing derives a
+	// subtree from live state. Unlike c.st, which is live-state only and forgets a
+	// child the moment it is closed, this source reads the database (tombstoned
+	// rows included). Wired once at startup via SetLineageSource from the Postgres
+	// child store — see wireLineageSource. Nil is an ERROR at the read, never an
+	// empty (cheap) scope: a daemon that cannot read its lineage cannot enforce a
+	// budget.
 	lineage childstore.LineageSource
+
+	// closedUsage memoises the usage rows of a CLOSED lineage member, keyed by
+	// child id. A closed child never changes, so subtree spend reads it once
+	// instead of re-querying a subtree's closed members on every sweep and every
+	// list. Never filled for an open member — see usageForMembers.
+	closedUsage closedUsageMemo
 
 	// forks is the child store's fork view: the durable row (closed children
 	// included) a fork or a tag reads a source's owner, kind and conversation
@@ -842,16 +850,17 @@ func (c *Controller) SetProviderGuard(g *routing.ProviderGuard) {
 }
 
 // SetLineageSource records the daemon's lineage source: the child store's view
-// of an ancestor's full subtree, closed descendants included. Consulted by
-// subtreeSelector (limits.go) so subtree spend and a child credential's
-// conversation scope keep covering a child that has been closed. Wired once at
-// startup, before the socket accepts anything.
+// of a child's full line, closed descendants included. Consulted by
+// subtreeSelector and subtreeSpend (limits.go) so subtree spend and a child
+// credential's conversation scope keep covering a child that has been closed.
+// Wired once at startup, before the socket accepts anything.
 //
 // A nil interface is REFUSED and leaves the field nil — the same discipline
 // SetRoutePolicy, SetBatcher and connectapi's Set*Manager setters apply. An
-// absent source must stay absent (subtreeSelector then falls back to the live
-// in-memory set), never be stored as a non-nil interface over a nil pointer
-// that nil-panics on the first Lineage call.
+// absent source must stay absent, never be stored as a non-nil interface over a
+// nil pointer that nil-panics on the first Lineage call; a read with no source
+// is an error (there is no live-set fallback), so the daemon fails closed rather
+// than pricing a subtree it cannot see.
 func (c *Controller) SetLineageSource(src childstore.LineageSource) {
 	if src == nil {
 		return
@@ -886,9 +895,9 @@ func (c *Controller) syncer() *pathSyncer {
 // NewController so TestControllerSatisfiesConnectSeams can pin it with a stub:
 // the Controller's children field is typed as the narrower ChildStore, which
 // does NOT include Lineage, so a store that lost its Lineage method would
-// still satisfy that field and silently leave subtree spend and child scope
-// blind to closed children. The assertion is explicit at the wiring site for
-// exactly that reason.
+// still satisfy that field and leave subtree spend and child scope with no
+// lineage source — which is an error at every read, not a degraded answer. The
+// assertion is explicit at the wiring site for exactly that reason.
 func wireLineageSource(ctrl *Controller, store childstore.ChildStore) {
 	if src, ok := store.(childstore.LineageSource); ok {
 		ctrl.SetLineageSource(src)

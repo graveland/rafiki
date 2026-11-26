@@ -21,9 +21,14 @@ func intp(v int) *int { return &v }
 // requested depth, each link granting the depth given.
 //
 //	c_d0 (depth 0 in the tree) -> c_d1 -> c_d2 -> ...
+//
+// Its lineage source answers from that same live store (see liveLineage): a unit
+// test has no child table, and every child this fixture inserts would have a row
+// in one.
 func limitsFixture(t *testing.T, grants ...int) *Controller {
 	t.Helper()
 	c := &Controller{st: childstore.New(), cm: newChildManager()}
+	c.lineage = liveLineage(c)
 	prev, root := "", ""
 	for i, g := range grants {
 		id := "c_d" + string(rune('0'+i))
@@ -290,14 +295,23 @@ func TestGrantedChildrenDefaultIsTen(t *testing.T) {
 }
 
 // fakeCoster stands in for insights so the admission logic is testable
-// without a database.
+// without a database. spend is what its pricer answers, so a test sets dollars
+// and the numbers it drives stay dollars; err fails the usage read, which is
+// the fail-closed case.
 type fakeCoster struct {
 	spend float64
 	err   error
 }
 
-func (f fakeCoster) SubtreeCost(context.Context, insights.SubtreeSelector) (float64, error) {
-	return f.spend, f.err
+func (f fakeCoster) UsageByConversation(context.Context, insights.SubtreeSelector) ([]insights.ConversationUsage, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return nil, nil
+}
+
+func (f fakeCoster) PriceUsage([]insights.ConversationUsage) (float64, []string) {
+	return f.spend, nil
 }
 
 func (f fakeCoster) CostsByConversation(context.Context, insights.SubtreeSelector) ([]insights.ConversationCost, error) {

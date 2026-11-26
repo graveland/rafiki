@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -185,12 +186,21 @@ func (c *Controller) checkConcurrency(req protocol.SpawnRequest) error {
 	return nil
 }
 
-// subtreeCoster is the one thing the budget checks need from insights.
+// subtreeCoster is the one thing the budget checks and the spend rollups need
+// from insights.
 type subtreeCoster interface {
-	SubtreeCost(ctx context.Context, sel insights.SubtreeSelector) (float64, error)
+	// UsageByConversation returns the selection's token sums per (conversation,
+	// model), unpriced, in one round trip. Subtree spend reads it rather than a
+	// pre-priced total so a closed member's rows can be memoised and the union
+	// priced once.
+	UsageByConversation(ctx context.Context, sel insights.SubtreeSelector) ([]insights.ConversationUsage, error)
+	// PriceUsage prices those rows through the SAME pricer this coster prices
+	// its SQL rollups with, so "what does this subtree cost" cannot acquire a
+	// second definition of list prices.
+	PriceUsage(rows []insights.ConversationUsage) (total float64, unpriced []string)
 	// CostsByConversation prices the selection per conversation in one round
-	// trip. The budget path wants the collapsed total; a LIST wants each
-	// child's own number, and asking SubtreeCost N times is N round trips.
+	// trip. A LIST wants each child's own number, and asking for a priced
+	// subtree once per child is N round trips.
 	CostsByConversation(ctx context.Context, sel insights.SubtreeSelector) ([]insights.ConversationCost, error)
 }
 
@@ -266,11 +276,11 @@ const budgetQueryTimeout = 5 * time.Second
 // subtree, INCLUDING rootChildID's own.
 //
 // Three routes, because a subtree routinely mixes execution models: a fundi
-// child's conversation id is on its snapshot (SessionID), while a claude or
-// pi child's row correlates by external_ref, which the daemon sets to the
-// childID (controller.go's X-Rafiki-Session header). The third is the branch
-// prefix "<childID>:", which catches a claude child's thread branches that
-// have no synthetic child of their own — Claude Code's WebFetch and WebSearch
+// child's conversation id is on its lineage row (session_id / conversation_id),
+// while a claude or pi child's row correlates by external_ref, which the daemon
+// sets to the childID (controller.go's X-Rafiki-Session header). The third is
+// the branch prefix "<childID>:", which catches a claude child's thread branches
+// that have no synthetic child of their own — Claude Code's WebFetch and WebSearch
 // helpers fork one per call and are deliberately not agents, but their spend
 // is the parent's. Following only one under-reports, and under-reporting a
 // budget is the expensive direction.
@@ -279,16 +289,10 @@ const budgetQueryTimeout = 5 * time.Second
 // parent's prefix; the query ORs the three lists in one pass, so a row
 // matching twice is still one row.
 //
-// Two sources are UNIONED. The LIVE in-memory set (c.st.Get and
-// c.st.Descendants — the same rows every live-state read uses) is the whole
-// answer when no lineage source is wired. When c.lineage is non-nil the
-// database's full lineage is added on top: it covers descendants that have
-// been CLOSED and so forgotten from the live set, which is the point — a
-// closed child must stay in its ancestors' subtree for spend and scope.
-//
-// The dedupe across both sources (and within each list) is load-bearing: a
-// child present in BOTH is named once, so a row matching through more than
-// one route stays one row.
+// ONE source: the database lineage. Every child — native subagents included —
+// has a row, so unioning the live in-memory set would be a second definition of
+// what a subtree contains, and a disagreement in the CHEAP direction is an
+// unenforced budget. The live store answers only live-state questions.
 //
 // A lineage error is RETURNED, never swallowed, so each caller decides what
 // an unreadable lineage means for it: admission and budget mutation fail
@@ -296,32 +300,16 @@ const budgetQueryTimeout = 5 * time.Second
 // child-credential scope path answers an error rather than an empty-and-
 // allowed scope, and a display path (a heartbeat's cost clause) degrades by
 // omitting the number. Returning an empty selector instead would fail OPEN on
-// every budget path — closing a child could LOWER an ancestor's spend.
+// every budget path — closing a child could LOWER an ancestor's spend. A
+// missing lineage source is an error for the same reason, never an empty scope.
 func (c *Controller) subtreeSelector(ctx context.Context, rootChildID string) (insights.SubtreeSelector, error) {
+	members, err := c.lineageMembers(ctx, rootChildID)
+	if err != nil {
+		return insights.SubtreeSelector{}, err
+	}
 	var sel insights.SubtreeSelector
-	add := func(childID string, convs ...string) {
-		for _, conv := range convs {
-			if conv != "" {
-				sel.ConversationIDs = append(sel.ConversationIDs, conv)
-			}
-		}
-		sel.ExternalRefs = append(sel.ExternalRefs, childID)
-		sel.ExternalRefPrefixes = append(sel.ExternalRefPrefixes, childID+threadRefSep)
-	}
-	if snap, ok := c.st.Get(rootChildID); ok {
-		add(snap.ChildID, snap.SessionID)
-	}
-	for _, snap := range c.st.Descendants(rootChildID) {
-		add(snap.ChildID, snap.SessionID)
-	}
-	if c.lineage != nil {
-		members, err := c.lineageMembers(ctx, rootChildID)
-		if err != nil {
-			return insights.SubtreeSelector{}, fmt.Errorf("subtree lineage for %s: %w", rootChildID, err)
-		}
-		for _, m := range members {
-			add(m.ChildID, m.SessionID, m.ConversationID)
-		}
+	for _, m := range members {
+		addLineageMember(&sel, m)
 	}
 	sel.ConversationIDs = dedupeStrings(sel.ConversationIDs)
 	sel.ExternalRefs = dedupeStrings(sel.ExternalRefs)
@@ -329,25 +317,74 @@ func (c *Controller) subtreeSelector(ctx context.Context, rootChildID string) (i
 	return sel, nil
 }
 
-// lineageMembers resolves rootChildID's lineage through the wired source,
-// passing a root fallback when the source can use one. The database's own view
-// of an ancestor's root comes from the ancestor's row, so a MISSING ancestor row
-// loses its whole persisted subtree; the live store still knows the root of an
-// ancestor it is running, so pass it down. An ancestor unknown to BOTH the
-// database and the live store stays the live-set-only fallback.
-func (c *Controller) lineageMembers(ctx context.Context, rootChildID string) ([]childstore.LineageMember, error) {
-	if rooted, ok := c.lineage.(childstore.RootedLineageSource); ok {
-		if root := c.st.RootOf(rootChildID); root != "" {
-			return rooted.LineageWithRoot(ctx, rootChildID, root)
+// addLineageMember names one member by all three correlation routes: its
+// conversation id(s) by UUID, its child id by external_ref, and the "<childID>:"
+// branch prefix its thread branches carry.
+func addLineageMember(sel *insights.SubtreeSelector, m childstore.LineageMember) {
+	for _, conv := range []string{m.ConversationID, m.SessionID} {
+		if conv != "" {
+			sel.ConversationIDs = append(sel.ConversationIDs, conv)
 		}
 	}
-	return c.lineage.Lineage(ctx, rootChildID)
+	sel.ExternalRefs = append(sel.ExternalRefs, m.ChildID)
+	sel.ExternalRefPrefixes = append(sel.ExternalRefPrefixes, m.ChildID+threadRefSep)
+}
+
+// lineageRows reads childID's line straight from the database: the child's own
+// row and every row beneath it, live or closed, labels included.
+//
+// A missing lineage source is an ERROR, never an empty line: a daemon that
+// cannot read its lineage cannot price a subtree or scope a child credential,
+// and answering "nothing is in it" fails OPEN on every budget path. The one
+// entry point is childstore.LineageSource.Lineage — there is no root-fallback
+// dialect, because the database knows an ancestor's root from the ancestor's
+// own row.
+func (c *Controller) lineageRows(ctx context.Context, childID string) ([]childstore.LineageRow, error) {
+	if c.lineage == nil {
+		return nil, fmt.Errorf("subtree lineage for %s: no lineage source", childID)
+	}
+	rows, err := c.lineage.Lineage(ctx, childID)
+	if err != nil {
+		return nil, fmt.Errorf("subtree lineage for %s: %w", childID, err)
+	}
+	return rows, nil
+}
+
+// lineageMembers is lineageRows projected onto the database-free member shape.
+func (c *Controller) lineageMembers(ctx context.Context, childID string) ([]childstore.LineageMember, error) {
+	rows, err := c.lineageRows(ctx, childID)
+	if err != nil {
+		return nil, err
+	}
+	return c.membersWithin(rows, childID), nil
+}
+
+// membersWithin selects childID's own line from a row set a lineage read
+// returned, adding childID's own row from the LIVE store when the row set has
+// none. That is the only place the live store answers a lineage question, and it
+// is deliberately narrow: a child that is running but whose own row is not in
+// the read still prices the conversations it is writing, and the direction that
+// must never be wrong is the one that counts the money. It never contributes a
+// second member — the subtree itself comes from the database.
+func (c *Controller) membersWithin(rows []childstore.LineageRow, childID string) []childstore.LineageMember {
+	members := childstore.DescendantsOf(rows, childID)
+	for _, m := range members {
+		if m.ChildID == childID {
+			return members
+		}
+	}
+	if snap, ok := c.st.Get(childID); ok {
+		return append([]childstore.LineageMember{
+			{ChildID: snap.ChildID, SessionID: snap.SessionID},
+		}, members...)
+	}
+	return members
 }
 
 // dedupeStrings removes duplicates from in, preserving first-seen order. It is
-// the union step subtreeSelector needs: the live set and the lineage overlap by
-// design (every live child is also in the database), and a selector that named
-// a row twice would pass it to the query twice.
+// the union step subtreeSelector needs: a member names a row through more than
+// one route, and a selector that named a row twice would pass it to the query
+// twice.
 func dedupeStrings(in []string) []string {
 	if len(in) == 0 {
 		return in
@@ -364,19 +401,33 @@ func dedupeStrings(in []string) []string {
 	return out
 }
 
-// subtreeSpend prices rootChildID's whole subtree. It propagates both its own
-// "no cost source" error and subtreeSelector's lineage error, so an unreadable
-// lineage stays a fail-closed refusal at every budget caller rather than an
-// empty (cheap) selector.
+// subtreeSpend prices rootChildID's whole subtree: every lineage member's usage
+// rows, each conversation counted once, priced through the coster's own pricer.
+//
+// It propagates its own "no cost source" error, the lineage error and the usage
+// error, so an unreadable subtree stays a fail-closed refusal at every budget
+// caller rather than an empty (cheap) one.
 func (c *Controller) subtreeSpend(ctx context.Context, rootChildID string) (float64, error) {
 	if c.coster == nil {
 		return 0, errors.New("no cost source configured")
 	}
-	sel, err := c.subtreeSelector(ctx, rootChildID)
+	members, err := c.lineageMembers(ctx, rootChildID)
 	if err != nil {
 		return 0, err
 	}
-	return c.coster.SubtreeCost(ctx, sel)
+	usage, err := c.usageForMembers(ctx, members)
+	if err != nil {
+		return 0, err
+	}
+	total, unpriced := c.coster.PriceUsage(usage)
+	if len(unpriced) > 0 {
+		// Nothing in the daemon acts on the unpriced list — the number is a
+		// display and budget figure either way — but a model with no list price
+		// reads as free, so name them so the gap is diagnosable.
+		slog.Debug("subtree spend could not price every model",
+			"root", rootChildID, "models", unpriced)
+	}
+	return total, nil
 }
 
 // childDepthFor is where a child of parentID would land. Kept separate from

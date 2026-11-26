@@ -59,6 +59,9 @@ func settleFixture(t *testing.T) (*Controller, *clock.FakeClock, *capturedFlush)
 	buf.SetBusy(func(string) bool { return false })
 
 	c := &Controller{st: childstore.New(), cm: newChildManager(), evbuf: buf}
+	// The fixture's children are in its store, not in a child table: its lineage
+	// source answers from there (see liveLineage).
+	c.lineage = liveLineage(c)
 	c.st.Insert(&childstore.Session{ChildID: "c_coord", Status: protocol.StatusIdle, StartedAt: time.Now()})
 	for _, id := range []string{"c_w1", "c_w2", "c_w3", "c_w4", "c_w5"} {
 		c.st.Insert(&childstore.Session{

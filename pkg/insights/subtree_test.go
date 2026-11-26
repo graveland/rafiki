@@ -246,3 +246,28 @@ func TestPriceUsageReportsUnpriced(t *testing.T) {
 	c.Eq(0.0, total, "nil pricer total")
 	c.Eq(2, len(unpriced), "nil pricer names every model once; got %v", unpriced)
 }
+
+// The METHOD form prices through the pricer the instance was built with, which
+// is what lets a caller price a union of memoised and freshly read usage rows
+// without reaching for a second price list (the daemon's subtree spend does
+// exactly that). A pricer-less instance prices nothing and names every model.
+func TestInsightsPriceUsageBindsTheInstancePricer(t *testing.T) {
+	c := assert.NewAborting(t)
+	ins := New(nil).WithPricer(func(model string) (routing.ModelPricing, bool) {
+		if model == "test/model" {
+			return routing.ModelPricing{PromptUSD: 1e-6, CompletionUSD: 2e-6}, true
+		}
+		return routing.ModelPricing{}, false
+	})
+
+	total, unpriced := ins.PriceUsage([]ConversationUsage{
+		{ConversationID: "conv-a", Model: "test/model", In: 1_000_000},
+		{ConversationID: "conv-b", Model: "mystery/model", In: 5_000_000},
+	})
+	c.LessOrEqual(1e-9, math.Abs(total-1.0), "total = %f, want 1.0", total)
+	c.EqDeep([]string{"mystery/model"}, unpriced, "the unpriced model is reported")
+
+	total, unpriced = New(nil).PriceUsage([]ConversationUsage{{Model: "test/model", In: 1_000_000}})
+	c.Eq(0.0, total, "a pricer-less instance prices nothing")
+	c.EqDeep([]string{"test/model"}, unpriced, "and names what it could not price")
+}

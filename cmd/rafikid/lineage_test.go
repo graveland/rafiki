@@ -19,30 +19,90 @@ import (
 )
 
 // fakeLineageSource stands in for childstoredb.Store's lineage view without a
-// database: it returns whatever members the test hands it, or a chosen error.
+// database: it returns whatever rows the test hands it, or a chosen error. Every
+// row carries the parent/root it was read with (lineageRow), because the walk
+// crosses labels — a member with no parent label is a row beneath nothing.
 type fakeLineageSource struct {
-	members []childstore.LineageMember
-	err     error
+	rows []childstore.LineageRow
+	err  error
 
 	gotAncestor string
+	calls       int
 }
 
-func (f *fakeLineageSource) Lineage(_ context.Context, ancestorChildID string) ([]childstore.LineageMember, error) {
+func (f *fakeLineageSource) Lineage(_ context.Context, ancestorChildID string) ([]childstore.LineageRow, error) {
 	f.gotAncestor = ancestorChildID
-	return f.members, f.err
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.rows, nil
 }
 
-// recordingCoster records the selector it was priced with, so a test can prove
-// a closed child's conversation is still in the spend boundary.
+// lineageRow is one member with the parent/root labels a real read carries, so a
+// fake source describes a tree the walk can cross. parent and root are empty for
+// a top-level child.
+func lineageRow(childID, parent, root, session string, closed bool) childstore.LineageRow {
+	labels := map[string]string{}
+	if parent != "" {
+		labels[childstore.LabelParent] = parent
+	}
+	if root != "" {
+		labels[childstore.LabelRoot] = root
+	}
+	return childstore.LineageRow{
+		Member: childstore.LineageMember{ChildID: childID, SessionID: session, Closed: closed},
+		Labels: labels,
+	}
+}
+
+// liveLineage is a fixture lineage source over the controller's live in-memory
+// store: the stand-in for the child table a unit test does not have. Every child
+// the fixture inserted is in it, at any depth, and none is closed — which is
+// exactly what the child table holds for a fixture that never closes a child.
+//
+// It is a SOURCE, not a second definition: the selector, the spend and the
+// child scope all read one Lineage call, and a test that wants closed members
+// or a missing row overrides it with fakeLineageSource.
+func liveLineage(c *Controller) childstore.LineageSource { return liveLineageSource{c: c} }
+
+type liveLineageSource struct{ c *Controller }
+
+func (l liveLineageSource) Lineage(_ context.Context, childID string) ([]childstore.LineageRow, error) {
+	if childID == "" {
+		return nil, nil
+	}
+	var rows []childstore.LineageRow
+	add := func(snap childstore.Snapshot) {
+		rows = append(rows, childstore.LineageRow{
+			Member: childstore.LineageMember{ChildID: snap.ChildID, SessionID: snap.SessionID},
+			Labels: snap.Labels,
+		})
+	}
+	if snap, ok := l.c.st.Get(childID); ok {
+		add(snap)
+	}
+	for _, snap := range l.c.st.Descendants(childID) {
+		add(snap)
+	}
+	return rows, nil
+}
+
+// recordingCoster records the selector it was asked for, so a test can prove a
+// closed child's conversation is still in the spend boundary.
 type recordingCoster struct {
 	selector insights.SubtreeSelector
 	spend    float64
 	err      error
 }
 
-func (f *recordingCoster) SubtreeCost(_ context.Context, sel insights.SubtreeSelector) (float64, error) {
+func (f *recordingCoster) UsageByConversation(_ context.Context, sel insights.SubtreeSelector) ([]insights.ConversationUsage, error) {
 	f.selector = sel
-	return f.spend, f.err
+	return nil, f.err
+}
+
+func (f *recordingCoster) PriceUsage([]insights.ConversationUsage) (float64, []string) {
+	return f.spend, nil
 }
 
 func (f *recordingCoster) CostsByConversation(context.Context, insights.SubtreeSelector) ([]insights.ConversationCost, error) {
@@ -73,59 +133,77 @@ func countOccurrences(in []string, want string) int {
 	return n
 }
 
-// A closed child — deleted from the live in-memory set — must stay in its
-// ancestor's subtree selector, through all three correlation routes, because
-// the wired lineage source still knows about it. THIS test fails against the
-// pre-change subtreeSelector (whose signature had no error and never consulted
-// a lineage source): the closed child is simply gone from the live set, so
-// s-closed/c_closed/c_closed: are all absent.
+// A closed child — gone from the live in-memory store, which forgets a child the
+// moment it is closed — must stay in its ancestor's subtree selector through all
+// three correlation routes. The database is the only source: this fixture's live
+// store is empty (both children deleted), so a single definition that leans on
+// live state at all comes back with nothing.
+//
+// Fails against any reintroduction of the live-set union: the members listed
+// here are the whole answer, and the root's own row comes from its lineage row
+// rather than from a store lookup.
 func TestSubtreeSelectorIncludesClosedDescendants(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := limitsFixture(t, 3, 3) // c_d0 -> c_d1
-	_ = c.st.Update("c_d1", func(s *childstore.Session) { s.SessionID = "s-closed" })
-	// The close: Controller.Close forgets live state, so the live set no longer
-	// knows c_d1. Only the lineage source should still carry it.
+	c.st.Delete("c_d0")
 	c.st.Delete("c_d1")
-	c.lineage = &fakeLineageSource{members: []childstore.LineageMember{
-		{ChildID: "c_d1", SessionID: "s-closed", Closed: true},
+	c.lineage = &fakeLineageSource{rows: []childstore.LineageRow{
+		lineageRow("c_d0", "", "", "s-root", false),
+		lineageRow("c_d1", "c_d0", "c_d0", "s-closed", true),
 	}}
 
 	sel, err := c.subtreeSelector(context.Background(), "c_d0")
 	ck.Require().NoError(err, "selector")
+	ck.Contains(sel.ConversationIDs, "s-root", "the root's own conversation comes from its lineage row; ids = %v", sel.ConversationIDs)
 	ck.Contains(sel.ConversationIDs, "s-closed", "the closed child's conversation must stay in the subtree; ids = %v", sel.ConversationIDs)
 	ck.Contains(sel.ExternalRefs, "c_d1", "the closed child's external ref; refs = %v", sel.ExternalRefs)
 	ck.Contains(sel.ExternalRefPrefixes, "c_d1"+threadRefSep, "the closed child's branch prefix; prefixes = %v", sel.ExternalRefPrefixes)
 }
 
-// A live child the lineage source also returns must appear exactly once in each
-// list: closing nothing, the two sources overlap by design.
-func TestSubtreeSelectorDeduplicatesLiveAndLineage(t *testing.T) {
+// A member must appear exactly once in each list, even though each names a row
+// through three routes: a selector that named a row twice would pass it to the
+// query twice, and a duplicated prefix would match it twice again.
+func TestSubtreeSelectorDeduplicatesAcrossRoutes(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := limitsFixture(t, 3, 3) // c_d0 -> c_d1
-	_ = c.st.Update("c_d1", func(s *childstore.Session) { s.SessionID = "s-live" })
-	c.lineage = &fakeLineageSource{members: []childstore.LineageMember{
-		{ChildID: "c_d1", SessionID: "s-live"},
-	}}
+	c.lineage = &fakeLineageSource{rows: func() []childstore.LineageRow {
+		live := lineageRow("c_d1", "c_d0", "c_d0", "s-live", false)
+		live.Member.ConversationID = "s-live" // a fundi child's conversation is its session
+		return []childstore.LineageRow{
+			lineageRow("c_d0", "", "", "s-root", false),
+			live,
+		}
+	}()}
 
 	sel, err := c.subtreeSelector(context.Background(), "c_d0")
 	ck.Require().NoError(err, "selector")
-	ck.Eq(1, countOccurrences(sel.ConversationIDs, "s-live"), "conversation id listed once; ids = %v", sel.ConversationIDs)
+	ck.Eq(1, countOccurrences(sel.ConversationIDs, "s-live"), "a conversation id named through two routes listed once; ids = %v", sel.ConversationIDs)
 	ck.Eq(1, countOccurrences(sel.ExternalRefs, "c_d1"), "external ref listed once; refs = %v", sel.ExternalRefs)
 	ck.Eq(1, countOccurrences(sel.ExternalRefPrefixes, "c_d1"+threadRefSep), "prefix listed once; prefixes = %v", sel.ExternalRefPrefixes)
 }
 
-// With no lineage source (a test, a DB-less daemon) the selector is the live
-// set alone, with no error and no panic.
-func TestSubtreeSelectorWithoutALineageSourceFallsBackToLiveSet(t *testing.T) {
+// A nil lineage source is an ERROR, never an empty scope: a daemon that cannot
+// read its lineage cannot price a subtree or bound a child's scope, and an empty
+// selector reads as "spent nothing" / "sees nothing is allowed" depending on the
+// caller — one of which fails OPEN on a budget.
+func TestSubtreeSelectorNilLineageIsAnError(t *testing.T) {
 	ck := assert.NewCollecting(t)
-	c := limitsFixture(t, 3, 3) // c_d0 -> c_d1
-	_ = c.st.Update("c_d1", func(s *childstore.Session) { s.SessionID = "s-live" })
+	c := &Controller{st: childstore.New(), cm: newChildManager()}
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_root", Status: protocol.StatusIdle, StartedAt: time.Now(),
+	})
 
-	sel, err := c.subtreeSelector(context.Background(), "c_d0")
-	ck.Require().NoError(err, "nil source must not error")
-	ck.Contains(sel.ConversationIDs, "s-live", "live descendant; ids = %v", sel.ConversationIDs)
-	ck.Contains(sel.ExternalRefs, "c_d1", "live descendant ref; refs = %v", sel.ExternalRefs)
-	ck.Contains(sel.ExternalRefPrefixes, "c_d1"+threadRefSep, "live descendant prefix; prefixes = %v", sel.ExternalRefPrefixes)
+	sel, err := c.subtreeSelector(context.Background(), "c_root")
+	ck.Require().Error(err, "a nil lineage source must not degrade to the live set")
+	ck.StrContains(err.Error(), "subtree lineage for c_root: no lineage source", "refusal names the root and the cause; got %v", err)
+	ck.True(sel.ConversationIDs == nil && sel.ExternalRefs == nil && sel.ExternalRefPrefixes == nil, "no selector on error; got %+v", sel)
+
+	// The spend path fails closed for the same reason, with a cost source in
+	// place so the lineage is what it reports.
+	c.coster = fakeCoster{}
+	_, err = c.subtreeSpend(context.Background(), "c_root")
+	ck.Require().Error(err, "subtree spend with no lineage source must fail closed")
+	ck.StrContains(err.Error(), "no lineage source", "spend refusal keeps the cause; got %v", err)
 }
 
 // A lineage error is returned, wrapped, naming the root — never swallowed into
@@ -157,15 +235,16 @@ func TestCheckSpawnLimitsFailsClosedOnALineageError(t *testing.T) {
 	ck.StrContains(err.Error(), "could not be read", "refusal reads as the fail-closed budget message; got %v", err)
 }
 
-// Closing a child must not LOWER its ancestor's spend: the selector handed to
-// the coster still names the closed child's conversation.
+// Closing a child must not LOWER its ancestor's spend: the usage read still
+// asks for the closed child's conversation.
 func TestSubtreeSpendCountsAClosedChildsSpend(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := limitsFixture(t, 3, 3)
 	_ = c.st.Update("c_d1", func(s *childstore.Session) { s.SessionID = "s-closed" })
 	c.st.Delete("c_d1")
-	c.lineage = &fakeLineageSource{members: []childstore.LineageMember{
-		{ChildID: "c_d1", SessionID: "s-closed", Closed: true},
+	c.lineage = &fakeLineageSource{rows: []childstore.LineageRow{
+		lineageRow("c_d0", "", "", "s-root", false),
+		lineageRow("c_d1", "c_d0", "c_d0", "s-closed", true),
 	}}
 	coster := &recordingCoster{spend: 1.25}
 	c.coster = coster

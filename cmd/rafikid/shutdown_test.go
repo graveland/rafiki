@@ -50,6 +50,11 @@ func newTestController(t *testing.T) *Controller {
 	}
 	st := childstore.New()
 	ctrl := NewController(st, stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, nil, nil, false, t.Context(), nil, nil, nil, nil)
+	// No database in a unit fixture, so the children it spawns exist only in its
+	// store: the lineage source answers from there (see liveLineage). A daemon
+	// with neither is a wiring fault, which is why the Controller has no
+	// live-set fallback to lean on.
+	ctrl.lineage = liveLineage(ctrl)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

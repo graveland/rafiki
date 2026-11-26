@@ -76,16 +76,20 @@ func TestPeriodicBudgetSweepSteersOnce(t *testing.T) {
 	ck.Eq(1, n, "steer batches to c_w1 = %d; mark() must dedupe across fires", n)
 }
 
-// panicThenCountCoster panics on its first SubtreeCost call and returns a
-// normal spend afterwards, counting calls. It is the seam the panic-survival
-// test uses to force a sweep body to panic exactly once.
+// panicThenCountCoster panics on its first usage read and answers normally
+// afterwards, counting calls. It is the seam the panic-survival test uses to
+// force a sweep body to panic exactly once.
 type panicThenCountCoster struct{ calls *int }
 
-func (p panicThenCountCoster) SubtreeCost(context.Context, insights.SubtreeSelector) (float64, error) {
+func (p panicThenCountCoster) UsageByConversation(context.Context, insights.SubtreeSelector) ([]insights.ConversationUsage, error) {
 	*p.calls++
 	if *p.calls == 1 {
 		panic("periodic sweep panic (test)")
 	}
+	return nil, nil
+}
+
+func (p panicThenCountCoster) PriceUsage([]insights.ConversationUsage) (float64, []string) {
 	return 99, nil
 }
 

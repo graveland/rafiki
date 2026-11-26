@@ -17,7 +17,7 @@ import (
 // TestScriptCostIsSubtreeSpend pins the design rule: a script child's
 // cost_usd is its SUBTREE's spend, taken from subtreeSpend — never its own
 // conversation rollup, and never the subtree spend leaking onto another
-// kind's row. fakeCoster answers 0.42 from SubtreeCost and nothing from
+// kind's row. fakeCoster answers 0.42 from its pricer and nothing from
 // CostsByConversation, so a 0.42 on the fundi row is exactly the bug this
 // test exists to catch.
 func TestScriptCostIsSubtreeSpend(t *testing.T) {
@@ -26,6 +26,7 @@ func TestScriptCostIsSubtreeSpend(t *testing.T) {
 	st.Insert(&childstore.Session{ChildID: "c_script", Kind: protocol.KindScript})
 	st.Insert(&childstore.Session{ChildID: "c_fundi", Kind: protocol.KindFundi})
 	c := &Controller{coster: fakeCoster{spend: 0.42}, st: st}
+	c.lineage = liveLineage(c)
 
 	byID := map[string]protocol.ChildSummary{}
 	for _, s := range c.ListChildren(nil) {
@@ -70,6 +71,7 @@ func TestScriptCostUnsetWithoutCoster(t *testing.T) {
 
 	// No coster configured: subtreeSpend refuses, the field stays unset.
 	c := &Controller{st: st}
+	c.lineage = liveLineage(c)
 	sums := c.ListChildren(nil)
 	ck.Require().Len(sums, 1, "ListChildren rows")
 	if sums[0].CostUSD != nil {
@@ -91,15 +93,19 @@ func TestScriptCostUnsetWithoutCoster(t *testing.T) {
 }
 
 // ctxRecordingCoster records the context each cost method was handed, so a
-// test can pin that a list's rollup and its per-script subtree queries share
-// ONE bounded window rather than stacking two sequential timeouts.
+// test can pin that a list's rollup and its script-subtree usage read share ONE
+// bounded window rather than stacking two sequential timeouts.
 type ctxRecordingCoster struct {
-	subtreeCtx context.Context
-	costsCtx   context.Context
+	usageCtx context.Context
+	costsCtx context.Context
 }
 
-func (c *ctxRecordingCoster) SubtreeCost(ctx context.Context, _ insights.SubtreeSelector) (float64, error) {
-	c.subtreeCtx = ctx
+func (c *ctxRecordingCoster) UsageByConversation(ctx context.Context, _ insights.SubtreeSelector) ([]insights.ConversationUsage, error) {
+	c.usageCtx = ctx
+	return nil, nil
+}
+
+func (c *ctxRecordingCoster) PriceUsage([]insights.ConversationUsage) (float64, []string) {
 	return 0.42, nil
 }
 
@@ -111,7 +117,7 @@ func (c *ctxRecordingCoster) CostsByConversation(
 }
 
 // One bounded window for a whole list's cost work. The rollup and the
-// per-script subtree queries run SEQUENTIALLY, so two independent timeout
+// script-subtree usage read run SEQUENTIALLY, so two independent timeout
 // windows would give one list a 2×costRollupTimeout latency bound. Both calls
 // must therefore observe the same deadline — equal deadlines are the
 // observable of one shared context.
@@ -122,12 +128,13 @@ func TestSummariesForCostsShareOneBoundedContext(t *testing.T) {
 	st.Insert(&childstore.Session{ChildID: "c_fundi", Kind: protocol.KindFundi})
 	coster := &ctxRecordingCoster{}
 	c := &Controller{coster: coster, st: st}
+	c.lineage = liveLineage(c)
 
 	_ = c.ListChildren(nil)
 
 	ck.Require().NotNil(coster.costsCtx, "CostsByConversation never called")
-	ck.Require().NotNil(coster.subtreeCtx, "SubtreeCost never called")
-	subDL, hasSubDL := coster.subtreeCtx.Deadline()
+	ck.Require().NotNil(coster.usageCtx, "UsageByConversation never called for the script child")
+	subDL, hasSubDL := coster.usageCtx.Deadline()
 	costDL, hasCostDL := coster.costsCtx.Deadline()
 	ck.True(hasSubDL && hasCostDL, "the cost ctx carries no deadline — the list's cost work is unbounded")
 	ck.True(subDL.Equal(costDL),

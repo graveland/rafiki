@@ -232,6 +232,10 @@ func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
 	dir := t.TempDir()
 	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"),
 		filepath.Join(dir, "c.sock"), nil, pool, nil, false, ctx, nil, nil, nil, nil)
+	// This fixture's children live in the in-memory store only — no child rows are
+	// written — so the lineage source answers from there. The conversations below
+	// ARE rows, which is what the scope is read against.
+	ctrl.SetLineageSource(liveLineage(ctrl))
 	caller := uniq + "caller"
 	st.Insert(&childstore.Session{
 		ChildID: caller, SessionID: own, Status: protocol.StatusIdle,

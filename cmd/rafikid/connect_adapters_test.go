@@ -34,7 +34,11 @@ type capturingCoster struct {
 	rows []insights.ConversationCost
 }
 
-func (c *capturingCoster) SubtreeCost(context.Context, insights.SubtreeSelector) (float64, error) {
+func (c *capturingCoster) UsageByConversation(context.Context, insights.SubtreeSelector) ([]insights.ConversationUsage, error) {
+	return nil, nil
+}
+
+func (c *capturingCoster) PriceUsage([]insights.ConversationUsage) (float64, []string) {
 	return 0, nil
 }
 

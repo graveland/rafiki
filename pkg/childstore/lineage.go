@@ -14,29 +14,17 @@ type LineageMember struct {
 	Closed         bool   // child.closed_at IS NOT NULL
 }
 
-// LineageSource resolves an ancestor's full lineage. Unlike a live-state read,
-// it covers closed descendants too, so a closed child stays in its ancestors'
-// lineage for subtree scoping and spend.
+// LineageSource resolves a child's full lineage from the database. Unlike a
+// live-state read, it covers closed descendants too, so a closed child stays in
+// its ancestors' lineage for subtree scoping and spend.
 //
-// Lineage returns the ancestor's OWN row (when it exists) and every descendant
-// at any depth, live or closed. An unknown ancestor yields (nil, nil).
+// Lineage returns the ancestor's OWN row (when it exists) and every row beneath
+// it at any depth, live or closed, LABELS INCLUDED so a caller can select a
+// deeper subtree from the same read (DescendantsOf). It is the one entry point:
+// there is no root-fallback dialect, because a row a caller cannot find here is
+// a row the database does not have. An unknown ancestor yields (nil, nil).
 type LineageSource interface {
-	Lineage(ctx context.Context, ancestorChildID string) ([]LineageMember, error)
-}
-
-// RootedLineageSource is an OPTIONAL capability of a LineageSource that can
-// still resolve a subtree when the ancestor's OWN row is missing, given the
-// ancestor's root supplied by the caller. A database lineage cannot know an
-// unpersisted ancestor's root — it is read from the ancestor's own row — so a
-// missing row would otherwise lose every descendant beneath it. The caller
-// holds the live store, where an unpersisted-but-running ancestor's root is
-// still known (childstore.RootOf), so it passes that root down.
-//
-// An ancestor unknown to BOTH the database and the caller's live store stays
-// the documented (nil, nil) / live-set-only fallback.
-type RootedLineageSource interface {
-	LineageSource
-	LineageWithRoot(ctx context.Context, ancestorChildID, rootFallback string) ([]LineageMember, error)
+	Lineage(ctx context.Context, ancestorChildID string) ([]LineageRow, error)
 }
 
 // LineageRow pairs a member with the parent/root it was read with, so a caller
@@ -56,6 +44,22 @@ type LineageRow struct {
 // It is pure Go: no database, no store. The rows are what a lineage source
 // read, and this is the in-memory walk shared by every implementation.
 func DescendantsOf(rows []LineageRow, ancestorChildID string) []LineageMember {
+	kept := LineageRowsOf(rows, ancestorChildID)
+	if len(kept) == 0 {
+		return nil
+	}
+	out := make([]LineageMember, len(kept))
+	for i, r := range kept {
+		out[i] = r.Member
+	}
+	return out
+}
+
+// LineageRowsOf is DescendantsOf without the projection: the ancestor's own row
+// plus every row beneath it, labels intact, so one read of a tree can answer
+// for several subtrees inside it (a list of script children shares one root's
+// rows). Same walk, same bound, same exclusions.
+func LineageRowsOf(rows []LineageRow, ancestorChildID string) []LineageRow {
 	if ancestorChildID == "" {
 		return nil
 	}
@@ -65,14 +69,14 @@ func DescendantsOf(rows []LineageRow, ancestorChildID string) []LineageMember {
 			labels[r.Member.ChildID] = r.Labels
 		}
 	}
-	var out []LineageMember
+	var out []LineageRow
 	for _, r := range rows {
 		if r.Member.ChildID == ancestorChildID {
-			out = append(out, r.Member)
+			out = append(out, r)
 			continue
 		}
 		if reachesAncestor(labels, r.Member.ChildID, ancestorChildID) {
-			out = append(out, r.Member)
+			out = append(out, r)
 		}
 	}
 	return out

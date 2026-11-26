@@ -28,6 +28,9 @@ type ownerReadChild struct {
 func ownerReadFixture(t *testing.T, children ...ownerReadChild) *Controller {
 	t.Helper()
 	c := &Controller{st: childstore.New(), cm: newChildManager()}
+	// The fixture's children are in its store, not in a child table: its lineage
+	// source answers from there (see liveLineage).
+	c.lineage = liveLineage(c)
 	roots := map[string]string{}
 	for _, ch := range children {
 		labels := map[string]string{}

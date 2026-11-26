@@ -57,6 +57,9 @@ func displayServiceController(t *testing.T) *Controller {
 	}
 	st := childstore.New()
 	ctrl := NewController(st, stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, nil, nil, false, t.Context(), nil, nil, nil, nil)
+	// No database here, so the fixture's children exist only in its store: the
+	// lineage source answers from there (see liveLineage).
+	ctrl.lineage = liveLineage(ctrl)
 	t.Cleanup(func() { ctrl.Stop() })
 	return ctrl
 }

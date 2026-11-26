@@ -198,10 +198,12 @@ func (s *Store) LiveDescendantCount(ancestorID string) int {
 // O(1) test per child; the chain walk then runs only over that set.
 //
 // Native children (Claude Code Task subagents the proxy synthesized) ARE
-// returned: agent_list, subtreeSelector and the budget member lists all walk
-// this, and a synthesized Task subagent is a real conversation with real cost.
-// LiveDescendantCount is the one caller that excludes them, because it is the
-// one that feeds the MaxChildren grant.
+// returned: the agent list and the live-state reads walk this, and a
+// synthesized Task subagent is a real conversation with real cost. Lineage and
+// subtree spend do NOT read it — they come from the child table
+// (childstore.LineageSource), which also holds the closed children this store
+// forgets. LiveDescendantCount is the one caller that excludes natives, because
+// it is the one that feeds the MaxChildren grant.
 //
 // Store has no label index (see store.go) so this scans List(). That is
 // intentional and fine — the store holds tens of children in memory.

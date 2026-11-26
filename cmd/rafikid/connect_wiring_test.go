@@ -77,7 +77,7 @@ func (stubChildStore) NameHolder(context.Context, string, string, string) (strin
 
 type stubLineageStore struct{ stubChildStore }
 
-func (stubLineageStore) Lineage(context.Context, string) ([]childstore.LineageMember, error) {
+func (stubLineageStore) Lineage(context.Context, string) ([]childstore.LineageRow, error) {
 	return nil, nil
 }
 
@@ -96,11 +96,14 @@ func TestControllerWiresLineageSourceFromChildStore(t *testing.T) {
 	wireLineageSource(wired, stubLineageStore{})
 	c.True(wired.lineage != nil, "a store implementing childstore.LineageSource must be wired as the lineage source")
 
-	// A store that is only a ChildStore leaves the field nil, so subtreeSelector
-	// takes the documented live-set fallback rather than panicking on Lineage.
+	// A store that is only a ChildStore leaves the field nil. That is a wiring
+	// fault, not a degradation: every lineage read is then an error, so a budget
+	// fails closed rather than pricing a subtree it cannot see.
 	barren := &Controller{}
 	wireLineageSource(barren, stubChildStore{})
 	c.True(barren.lineage == nil, "a store without Lineage must leave the source nil")
+	_, err := barren.subtreeSelector(context.Background(), "c_any")
+	c.Error(err, "no lineage source must fail the read, not return an empty selector")
 
 	// SetLineageSource refuses nil, the discipline the other Set* setters apply.
 	refused := &Controller{}

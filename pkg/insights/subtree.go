@@ -191,6 +191,15 @@ func (i *Insights) SubtreeCostDetailed(ctx context.Context, sel SubtreeSelector)
 	return total, unpriced, nil
 }
 
+// PriceUsage prices rows with the pricer this Insights was built with, so a
+// caller holding a union of memoised and freshly read usage rows (the daemon's
+// subtree spend) prices them through the SAME list prices every SQL rollup
+// uses. It is the package-level PriceUsage with i.pricer applied — not a second
+// pricing rule.
+func (i *Insights) PriceUsage(rows []ConversationUsage) (total float64, unpriced []string) {
+	return PriceUsage(rows, i.pricer)
+}
+
 // nonNilStrings keeps `= ANY($1)` well-typed for an empty list.
 // A nil slice binds as SQL NULL, and `x = ANY(NULL)` is NULL rather than
 // false — which makes the whole WHERE clause match nothing in a way that looks

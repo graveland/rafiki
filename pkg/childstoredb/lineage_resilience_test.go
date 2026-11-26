@@ -52,11 +52,11 @@ func TestLineageKeepsARowWithExtraNonStringLabels(t *testing.T) {
 		"Lineage = %v; the extra-label row and its child must both stay", lineageIDs(got))
 }
 
-// A missing ancestor row with a caller-supplied root still resolves the
-// subtree: the database cannot read an unpersisted ancestor's root, but the
-// caller's live store can, so its closed descendants are not lost. Without a
-// fallback the (nil, nil) live-set-only contract stands.
-func TestLineageWithRootResolvesAMissingAncestorRow(t *testing.T) {
+// A missing ancestor row yields (nil, nil), which is why every child gets its
+// row before it runs: the database is the only lineage source, so an ancestor
+// with no row of its own has no lineage to read. There is no live-store
+// fallback and no root parameter — one definition of what a subtree contains.
+func TestLineageOfAMissingAncestorRowIsEmpty(t *testing.T) {
 	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	s := New(pool)
@@ -72,11 +72,7 @@ func TestLineageWithRootResolvesAMissingAncestorRow(t *testing.T) {
 
 	none, err := s.Lineage(ctx, mid)
 	c.Require().NoError(err, "Lineage(missing ancestor)")
-	c.Nil(none, "an ancestor with no row and no fallback must stay (nil, nil)")
-
-	got, err := s.LineageWithRoot(ctx, mid, root)
-	c.Require().NoError(err, "LineageWithRoot(missing ancestor, live root)")
-	c.ElementsMatch([]string{leaf}, lineageIDs(got), "LineageWithRoot = %v", lineageIDs(got))
+	c.Nil(none, "an ancestor with no row of its own must stay (nil, nil)")
 }
 
 // The walk must cross a CLOSED middle row: a grandchild closed beneath a closed
