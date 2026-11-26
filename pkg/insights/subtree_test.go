@@ -144,3 +144,105 @@ func TestCostsByConversationSurvivesANonUUIDSessionID(t *testing.T) {
 	c.NoError(err, "one malformed id must not fail the batch")
 	c.False(len(rows) != 1 || math.Abs(rows[0].Cost-1.0) > 1e-9, "got %+v, want one row costing 1.0", rows)
 }
+
+// UsageByConversation is the unpriced primitive both priced rollups are built
+// on: pricing its rows per conversation must reproduce CostsByConversation
+// exactly, and the tokens it reports must be the ones the turns recorded. If
+// these two drift, the budget path and the list disagree about the same spend.
+func TestUsageByConversationMatchesCostsByConversation(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := newTestPool(t)
+	price := func(model string) (routing.ModelPricing, bool) {
+		if model == "test/model" {
+			return routing.ModelPricing{PromptUSD: 1e-6, CompletionUSD: 2e-6}, true
+		}
+		return routing.ModelPricing{}, false
+	}
+	ins := New(pool).WithPricer(price)
+
+	convA := insertConversation(t, pool, "server", "")
+	var convB string
+	c.NoError(pool.QueryRow(context.Background(),
+		`INSERT INTO conversations.conversation (persona, model, origin_entrypoint, driven_by, external_ref)
+		 VALUES ('team-platform', 'claude-fable-5', 'test', 'client', 'c_usage_child') RETURNING id::text`,
+	).Scan(&convB), "insert external_ref conversation")
+
+	// A carries two models across two turns; B one. Same two correlation
+	// routes as the priced tests, so the selector exercises both arms.
+	insertTurn(t, pool, convA, seedTurn{ordinal: 0, model: "test/model", inTok: 1_000_000, outTok: 500_000})
+	insertTurn(t, pool, convA, seedTurn{ordinal: 1, model: "test/other", inTok: 4_000_000})
+	insertTurn(t, pool, convB, seedTurn{ordinal: 0, model: "test/model", inTok: 2_000_000})
+
+	sel := SubtreeSelector{
+		ConversationIDs: []string{convA},
+		ExternalRefs:    []string{"c_usage_child"},
+	}
+	usage, err := ins.UsageByConversation(context.Background(), sel)
+	c.NoError(err)
+	c.Eq(3, len(usage), "one row per (conversation, model), got %+v", usage)
+
+	perConv := make(map[string][]ConversationUsage, 2)
+	for _, u := range usage {
+		c.False(u.ConversationID == "", "every usage row names its conversation")
+		perConv[u.ConversationID] = append(perConv[u.ConversationID], u)
+	}
+	c.Eq(2, len(perConv), "two conversations in the subtree, got %+v", usage)
+
+	costs, err := ins.CostsByConversation(context.Background(), sel)
+	c.NoError(err)
+	c.Eq(2, len(costs), "got %+v, want one cost per conversation", costs)
+	byID := make(map[string]float64, len(costs))
+	for _, cc := range costs {
+		byID[cc.ConversationID] = cc.Cost
+	}
+
+	for convID, rows := range perConv {
+		priced, unpriced := PriceUsage(rows, price)
+		// convA's second model has no list price. It must contribute 0 on BOTH
+		// forms rather than failing the batch, and the primitive must name it.
+		wantUnpriced := 0
+		if convID == convA {
+			wantUnpriced = 1
+		}
+		c.Eq(wantUnpriced, len(unpriced), "conv %s unpriced models = %v", convID, unpriced)
+		if wantUnpriced == 1 {
+			c.Eq("test/other", unpriced[0], "conv %s unpriced model", convID)
+		}
+		c.LessOrEqual(1e-9, math.Abs(priced-byID[convID]),
+			"conv %s: priced usage = %f, CostsByConversation = %f", convID, priced, byID[convID])
+	}
+	// The tokens are the turn rows', unpriceable by their own model rate: B is
+	// a bare 2M input.
+	c.Eq(1, len(perConv[convB]), "conv B has one model")
+	c.Eq(int64(2_000_000), perConv[convB][0].In, "conv B input tokens")
+	c.Eq("c_usage_child", perConv[convB][0].ExternalRef, "conv B external_ref")
+}
+
+// A model with no list price is not free: it contributes 0 — the only honest
+// number without a price — and must be NAMED, or the caller reads a missing
+// price as an unbounded budget. The list names models, not rows.
+func TestPriceUsageReportsUnpriced(t *testing.T) {
+	c := assert.NewAborting(t)
+	price := func(model string) (routing.ModelPricing, bool) {
+		if model == "test/model" {
+			return routing.ModelPricing{PromptUSD: 1e-6}, true
+		}
+		return routing.ModelPricing{}, false
+	}
+	rows := []ConversationUsage{
+		{ConversationID: "conv-a", Model: "test/model", In: 1_000_000},
+		{ConversationID: "conv-b", Model: "mystery/model", In: 5_000_000},
+		{ConversationID: "conv-c", Model: "mystery/model", In: 5_000_000},
+	}
+
+	total, unpriced := PriceUsage(rows, price)
+	c.LessOrEqual(1e-9, math.Abs(total-1.0), "an unpriced model must contribute 0; total = %f", total)
+	c.Eq(1, len(unpriced), "one entry per unpriced MODEL, not per row; got %v", unpriced)
+	c.Eq("mystery/model", unpriced[0], "unpriced[0]")
+
+	// No pricer prices nothing rather than panicking, and still names what it
+	// could not price.
+	total, unpriced = PriceUsage(rows, nil)
+	c.Eq(0.0, total, "nil pricer total")
+	c.Eq(2, len(unpriced), "nil pricer names every model once; got %v", unpriced)
+}
