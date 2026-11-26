@@ -629,8 +629,9 @@ func assertRemovedEverywhere(t *testing.T, f *installFixture, log *steerLog, sto
 	stored, ok := store.stored("c_gone")
 	c.Eq(true, ok, "the exited child's row was written")
 	c.EqDeep([]string{"exec-A"}, stored, "the exited child's persisted set")
-	_, wroteThread := store.stored("c_ap:t1")
-	c.Eq(false, wroteThread, "a native row has no durable record, so none is written")
+	storedThread, wroteThread := store.stored("c_ap:t1")
+	c.Eq(true, wroteThread, "a native row is a persisted child, so the removal reaches its stored set too")
+	c.EqDeep([]string{"exec-A"}, storedThread, "the native thread's persisted set")
 }
 
 func TestUninstallRemovesFromEverySet(t *testing.T) {

@@ -55,6 +55,11 @@ const (
 	ErrNotResumable = "not_resumable"
 	// ErrNotExited is returned by Close when the child is still live.
 	ErrNotExited = "not_exited"
+	// ErrNativeSubagent is returned by Kill, Send and Resume when the target is
+	// a native Task subagent: it is a thread inside its parent's Claude Code
+	// process, so it has no process of its own to kill, message or resume. The
+	// message names the parent to address instead.
+	ErrNativeSubagent = "native_subagent"
 	// ErrSessionFileMissing is returned by Resume when the session file is gone.
 	ErrSessionFileMissing = "session_file_missing"
 	// ErrBackpressure is returned when the child's command channel is full.

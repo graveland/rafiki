@@ -185,19 +185,44 @@ func TestCloseAllExitedSkipsChildrenThePredicateRefuses(t *testing.T) {
 	}
 }
 
-// A synthetic thread child has no durable row: Close must take its unchanged
-// store-delete path and never touch the (failing) persistence store.
-func TestCloseNativeChildDoesNotPersist(t *testing.T) {
+// A native thread child HAS a durable row now, so Close must go through the same
+// persist-before-tombstone step as any other child — and the row it writes must
+// carry the exited status, so the tombstone lands on a row that says why the
+// child is gone.
+func TestCloseNativeChildPersistsItsRow(t *testing.T) {
 	ck := assert.NewAborting(t)
 	ctrl := newTestController(t)
-	// Any writeRecord would fail; the native path must not attempt one.
-	ctrl.children = &failingChildStore{}
+	store := &recordingChildStore{}
+	ctrl.children = store
 
 	id := insertNativeParent(t, ctrl, "c_native_close_parent", protocol.StatusIdle)
-	ck.Require().NoError(ctrl.st.Update(id, func(s *childstore.Session) {
-		s.Status = protocol.StatusExited
-	}), "mark the native child exited")
-	ck.Require().NoError(ctrl.Close(id), "closing a native child must not touch the durable store")
-	_, ok := ctrl.st.Get(id)
-	ck.False(ok, "a native child's store delete IS its close")
+	ck.Require().True(ctrl.exitNativeChild(id, time.Now()), "exit the native child")
+	ck.Require().NoError(ctrl.Close(id), "closing an exited native child")
+
+	rec, ok := store.lastUpsertFor(id)
+	ck.Require().True(ok, "closing a native child must persist its row, not forget a row it never wrote")
+	ck.Eq(string(protocol.StatusExited), rec.Status, "the persisted status")
+	ck.Eq("c_native_close_parent", rec.Labels[childstore.LabelParent], "the persisted lineage label")
+	ck.Eq("1", rec.Labels[labelNativeSubagent], "the persisted native marker")
+	if _, still := ctrl.st.Get(id); still {
+		t.Fatal("a native child's store delete is still its close")
+	}
+}
+
+// And a native child whose row cannot be written must FAIL CLOSED, exactly like
+// any other child: it stays in the live store rather than being forgotten with
+// its lineage unrecorded.
+func TestCloseNativeChildFailsClosedWhenPersistFails(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctrl := newTestController(t)
+	id := insertNativeParent(t, ctrl, "c_native_close_fail_parent", protocol.StatusIdle)
+	ck.Require().True(ctrl.exitNativeChild(id, time.Now()), "exit the native child")
+	ctrl.children = &failingChildStore{}
+
+	err := ctrl.Close(id)
+	ck.Require().Error(err, "closing a native child whose row cannot be written must fail closed")
+	ck.StrContains(err.Error(), id, "the refusal must name the child: %v", err)
+	if _, ok := ctrl.st.Get(id); !ok {
+		t.Fatal("a native child whose row was not written was forgotten anyway")
+	}
 }

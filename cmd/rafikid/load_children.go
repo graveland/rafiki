@@ -290,6 +290,12 @@ func (c *Controller) loadChildren(ctx context.Context) {
 			slog.Error("read live conversation leases; recovering no children this cycle",
 				"error", err)
 			for _, rec := range recs {
+				if isNativeRecord(rec) {
+					// A native row has no process and no resume, so the degraded
+					// path loads it exactly as the walk would.
+					c.st.Insert(nativeRecoverySession(rec))
+					continue
+				}
 				sess := childstore.SessionFromRecord(rec)
 				sess.Status = protocol.StatusExited
 				c.st.Insert(sess)
@@ -353,8 +359,46 @@ func (c *Controller) loadChildren(ctx context.Context) {
 	c.armRecoveredRateLimitResumes()
 }
 
+// isNativeRecord reports whether a recovered row is a native thread child — a
+// Claude Code Task subagent recorded as a row of its own. The marker is the
+// label the proxy writes and migration 0077 backfills; the record type carries
+// no Native field, because a stored row's native-ness IS that label (both the
+// upsert and the backfill write it, and nothing else does).
+func isNativeRecord(rec childstore.ChildRecord) bool {
+	return rec.Labels[labelNativeSubagent] != ""
+}
+
+// nativeRecoverySession builds a recovered native row's store entry: Native set
+// so LiveDescendantCount keeps excluding it, and the status exactly as the row
+// recorded it.
+func nativeRecoverySession(rec childstore.ChildRecord) *childstore.Session {
+	sess := childstore.SessionFromRecord(rec)
+	sess.Native = true
+	return sess
+}
+
 // recoverOne loads a single record into the store and decides whether to resume.
 func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord, live map[string]bool) {
+	// NATIVE FIRST, before any ownership, adoption, orphan-signal, lease or
+	// executor logic: a native thread child is a Claude Code Task subagent that
+	// runs inside its parent's process, so there is nothing here to run, resume,
+	// adopt, lease or signal. Its row exists so the child survives a restart as a
+	// row — the rail, rafiki list, spend and lineage all read it, and its
+	// parent's exit and close reach it — so LOADING is the whole of recovery.
+	//
+	// Status comes from the row, unchanged: unlike every other recovered child
+	// there is no in-memory process to reconcile against, and the row is what the
+	// parent's own exit wrote (or, for a backfilled row, what migration 0077
+	// derived from the parent's status). Native is set so LiveDescendantCount
+	// keeps excluding it after a restart, exactly as it did before.
+	if isNativeRecord(rec) {
+		sess := nativeRecoverySession(rec)
+		c.st.Insert(sess)
+		slog.Debug("native subagent row loaded; it has no process to recover",
+			"childId", rec.ChildID, "status", rec.Status)
+		return
+	}
+
 	// Signal a still-live orphan of THIS daemon's own past life: the row must
 	// carry BOTH proofs. ns_token proves the recorded pid is in a namespace we
 	// actually observe — without it, a stale row's pid number could name an

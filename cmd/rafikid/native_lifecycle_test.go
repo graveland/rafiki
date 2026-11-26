@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
@@ -25,40 +23,16 @@ func insertNativeParent(t *testing.T, c *Controller, parentID string, parentStat
 	return threadChildID(parentID, "thread-a")
 }
 
-// TestKillEndsANativeChild is the bug this whole change exists for: a synthetic
-// child has no process, so Kill's c.cm lookup missed and answered "child not
-// found" for a child the operator could see in the rail.
-func TestKillEndsANativeChild(t *testing.T) {
-	ck := assert.NewCollecting(t)
-	c := newTestController(t)
-	id := insertNativeParent(t, c, "c_parent", protocol.StatusIdle)
-
-	res, err := c.Kill(context.Background(), id, 0, 0)
-	ck.Require().NoError(err, "Kill on a native child")
-	ck.False(res.ExitCode == nil || *res.ExitCode != 0, "exit code = %v, want 0: a thread ended, it did not die", res.ExitCode)
-	snap, ok := c.st.Get(id)
-	ck.Require().True(ok, "Kill removed the row; it must mark it exited so Close can still reach it")
-	ck.Eq(protocol.StatusExited, snap.Status, "status")
-
-	// A second kill is the ordinary already-exited answer, not not-found.
-	_, err = c.Kill(context.Background(), id, 0, 0)
-	var ce *connectapi.ControllerError
-	if !errors.As(err, &ce) || ce.Code != protocol.ErrChildExited {
-		t.Errorf("second Kill error = %v, want %s", err, protocol.ErrChildExited)
-	}
-}
-
-// TestCloseEndsANativeChild pins the other half: Close demands exited, and
-// nothing could put a native child there before Kill learned to.
+// TestCloseEndsANativeChild pins the other half: Close demands exited, and the
+// only thing that puts a native child there is its parent's exit — Kill
+// deliberately refuses a native child (TestKillNativeChildRefused).
 func TestCloseEndsANativeChild(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	id := insertNativeParent(t, c, "c_parent", protocol.StatusIdle)
 
 	ck.Error(c.Close(id), "Close on a live native child must refuse; it is not exited")
-	if _, err := c.Kill(context.Background(), id, 0, 0); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	ck.Require().True(c.exitNativeChild(id, time.Now()), "exit the native child")
 	ck.Require().NoError(c.Close(id), "Close on an exited native child")
 	_, ok := c.st.Get(id)
 	ck.False(ok, "Close left the row in the store")
@@ -99,14 +73,16 @@ func TestParentCloseDeletesItsNativeChildren(t *testing.T) {
 }
 
 // TestCloseAllExitedReportsANativeChildOnce guards the double-report: snaps is
-// read before the loop, so an exited native child appears in it AND is deleted
-// by its parent's cascade.
+// read before the loop, so an exited native child appears in it AND is closed by
+// its parent's cascade. The sweep never closes a native row on its own — a
+// native child has no process that could outlive its parent — so the parent's
+// cascade is the only report.
 func TestCloseAllExitedReportsANativeChildOnce(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	id := insertNativeParent(t, c, "c_parent", protocol.StatusExited)
-	if _, err := c.Kill(context.Background(), id, 0, 0); err != nil {
-		t.Fatalf("Kill native child: %v", err)
+	if !c.exitNativeChild(id, time.Now()) {
+		t.Fatal("exit the native child")
 	}
 
 	closed, err := c.CloseAllExited(0, nil)

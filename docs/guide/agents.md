@@ -224,9 +224,14 @@ rafiki's tool descriptions and injected coordination prompt steer it toward
 native subagent thread is detected from the underlying Claude Code protocol
 traffic and captured as its own conversation, with its own rail row in the
 cockpit and its own cost attribution, rather than disappearing into one
-opaque parent turn. A helper Claude Code spawns internally for a single
-tool call (its WebFetch/WebSearch summarizers) is captured too but not shown
-as an agent row — its cost still rolls up into its parent's total.
+opaque parent turn. The thread is also a real `conversations.child` row (marked
+`rafiki/native-subagent`, with a NULL pid), so it survives a daemon restart and
+keeps its place in its parent's lineage; it exits when its parent's process
+exits and is closed with its parent, and `kill`/`send`/`resume` address the
+parent, not the thread (`invalid_argument`, reason `native_subagent`). A helper
+Claude Code spawns internally for a single tool call (its WebFetch/WebSearch
+summarizers) is captured too but not shown as an agent row — its cost still
+rolls up into its parent's total.
 
 ### Where a subagent runs
 

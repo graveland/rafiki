@@ -304,7 +304,11 @@ backoff (6 attempts, 0.1 s base, 2 s cap — constructor-overridable via
 per-child socket's proxy answers with (HTTP 503 and a Connect body naming
 the code), and a failed dial means the same thing and joins the same
 budget. `permission_denied` and `invalid_argument` are authority and
-caller mistakes — they raise through immediately.
+caller mistakes — they raise through immediately. `kill()`, `send()` and
+`resume()` on a Claude Code subagent's child id are `invalid_argument` with
+`reason == "native_subagent"` (it is a thread inside its parent's process, so
+the message names the parent to address); the SDK adds no verb-level mapping of
+its own for it — the reason is what to match on.
 
 A daemon authenticating several users isolates agents per owner: a non-admin
 token gets `permission_denied` naming the child for any id it does not own

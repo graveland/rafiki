@@ -1,0 +1,76 @@
+[
+  {
+    "name": "client-bash",
+    "why": "one client tool: the ordinary Task subagent shape",
+    "tools": [{"name": "Bash", "input_schema": {"type": "object"}}],
+    "client_tools": true
+  },
+  {
+    "name": "client-two-tools",
+    "why": "several client tools, one with an empty but non-null schema",
+    "tools": [
+      {"name": "Read", "input_schema": {}},
+      {"name": "Task", "input_schema": {"type": "object"}}
+    ],
+    "client_tools": true
+  },
+  {
+    "name": "server-tool-only",
+    "why": "the WebSearch helper: a SERVER tool carries no input_schema, so it is not an agent",
+    "tools": [{"name": "web_search", "type": "web_search_20250305"}],
+    "client_tools": false
+  },
+  {
+    "name": "null-input-schema",
+    "why": "an explicit JSON null schema is the same as none",
+    "tools": [{"name": "Bash", "input_schema": null}],
+    "client_tools": false
+  },
+  {
+    "name": "schema-key-absent",
+    "why": "no input_schema key at all",
+    "tools": [{"name": "Bash", "type": "bash_20250124"}],
+    "client_tools": false
+  },
+  {
+    "name": "empty-tools",
+    "why": "an array with no entries (the haiku helper's shape)",
+    "tools": [],
+    "client_tools": false
+  },
+  {
+    "name": "tools-null",
+    "why": "tools present as JSON null",
+    "tools": null,
+    "client_tools": false
+  },
+  {
+    "name": "tools-absent",
+    "why": "no tools key at all (the key is omitted from the fixture object)",
+    "client_tools": false
+  },
+  {
+    "name": "tools-not-an-array",
+    "why": "the whole tools value has the wrong type, so the declaration is unreadable",
+    "tools": {"name": "Bash", "input_schema": {"type": "object"}},
+    "client_tools": false
+  },
+  {
+    "name": "mixed-scalar-element",
+    "why": "a scalar among the entries makes the array unreadable as a tool list",
+    "tools": [{"name": "Bash", "input_schema": {"type": "object"}}, "junk"],
+    "client_tools": false
+  },
+  {
+    "name": "null-element-beside-client-tool",
+    "why": "a null entry is an empty declaration, not a malformed one, so the client tool still counts",
+    "tools": [null, {"name": "Bash", "input_schema": {"type": "object"}}],
+    "client_tools": true
+  },
+  {
+    "name": "string-input-schema",
+    "why": "any non-null value counts, including one that is not an object",
+    "tools": [{"name": "Bash", "input_schema": "not-a-schema"}],
+    "client_tools": true
+  }
+]

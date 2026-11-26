@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/inboxdb"
 	"go.graveland.dev/rafiki/pkg/notify"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -320,19 +321,37 @@ func TestNotifyStoreFailureUnavailable(t *testing.T) {
 	ck.Empty(f.pending(t, childID), "durable rows after a failed store")
 }
 
+// spawnNamedChildOf spawns a real (fake-pi) claude child owned by owner and
+// named name, and returns its id. Nothing in the notify tests depends on the
+// process; it exists so a Kill leaves the row of a child a kill really ended.
+func spawnNamedChildOf(t *testing.T, ctrl *Controller, owner, name string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := ctrl.Spawn(ctx, protocol.SpawnRequest{
+		Kind:      protocol.KindClaude,
+		Name:      name,
+		Cwd:       t.TempDir(),
+		PiBinary:  fakePiBin(t),
+		NoSession: true,
+	}, users.Identity{UserID: owner})
+	assert.NewAborting(t).Require().NoError(err, "spawn a named child")
+	return res.ChildID
+}
+
 // A killed target keeps its name and its queue: Kill exits the child and leaves
 // its row live, so the notification is still accepted and still pending — not
 // dropped because the target is not currently running.
+//
+// The target is a REAL child killed through the kill ladder rather than a native
+// subagent: a native child refuses Kill outright (`ErrNativeSubagent`), and the
+// state this test is about is the one a real kill leaves.
 func TestNotifyKilledTargetKeepsRow(t *testing.T) {
 	ck := assert.NewAborting(t)
 	f := newNotifyFixture(t)
-	owner, childID := f.seedOwner(t, "owner-killed"), "c_notify_killed"
+	owner := f.seedOwner(t, "owner-killed")
 	name := uniqueNotifyName("killed")
-	f.insertChild(t, childID, owner, "", name, protocol.StatusIdle)
-	// A native child has no process to signal, so Kill takes its end-the-child
-	// branch and leaves exactly what a real kill leaves: an exited row.
-	ck.Require().NoError(f.ctrl.st.Update(childID, func(s *childstore.Session) { s.Native = true }),
-		"mark the target native")
+	childID := spawnNamedChildOf(t, f.ctrl, owner, name)
 
 	_, err := f.ctrl.Kill(t.Context(), childID, time.Second, time.Second)
 	ck.Require().NoError(err, "Kill")

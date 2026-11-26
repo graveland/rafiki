@@ -485,9 +485,7 @@ func (c *Controller) removeFromExecutorSetsLocked(executorID, ownerUserID, name 
 				continue
 			}
 			rest, _ = c.dropMember(snap.ChildID, executorID, rest)
-			if !snap.Native {
-				persist = append(persist, snap.ChildID)
-			}
+			persist = append(persist, snap.ChildID)
 			if live {
 				c.sendSteer(snap.ChildID, executorRemovedNotice(name, c.displayNames(rest)))
 			}
@@ -496,10 +494,10 @@ func (c *Controller) removeFromExecutorSetsLocked(executorID, ownerUserID, name 
 			if !held {
 				continue
 			}
-			// A native subagent row has no durable record to update.
-			if !snap.Native {
-				persist = append(persist, snap.ChildID)
-			}
+			// Every holder of a set has a row to write it to, native subagents
+			// included: a native child is a persisted child (migration 0077 and
+			// EnsureThreadChild) and its own requests resolve against its set.
+			persist = append(persist, snap.ChildID)
 			if live {
 				c.sendSteer(snap.ChildID, executorRemovedNotice(name, c.displayNames(rest)))
 			}

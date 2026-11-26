@@ -3555,6 +3555,14 @@ func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey s
 			Message: "child not found: " + childID,
 		}
 	}
+	// A native thread child has nothing to resume: it is not a process but a
+	// thread inside its parent's, so it comes back when its parent does (a
+	// parent that re-enters the thread lands on this row again through
+	// EnsureThreadChild, which re-idles it). Checked before the status test so
+	// an exited subagent gets the actionable refusal, not "not resumable".
+	if snap.Native {
+		return protocol.SpawnResponseData{}, nativeSubagentRefusal(snap)
+	}
 	if snap.Status != protocol.StatusExited {
 		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrNotResumable,
@@ -3900,6 +3908,15 @@ const (
 )
 
 func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeout, killTimeout time.Duration) (protocol.KillResponseData, error) {
+	// A native thread child has no process: it is a thread inside its parent's
+	// claude process, so there is nothing here to stop and nothing that could
+	// outlive the parent. Refuse BEFORE the side effects below (the daraja
+	// forget, the rate-limit and pending-resume drops) so a refused kill
+	// changes nothing at all, and name the parent the operator has to address.
+	if snap, ok := c.st.Get(childID); ok && snap.Native {
+		return protocol.KillResponseData{}, nativeSubagentRefusal(snap)
+	}
+
 	// Revoke the daraja's reconnect credential so a dead child cannot
 	// re-authenticate on a later port scan or stale-connection replay. The
 	// belt dies with the credential: a killed child is settled by the kill
@@ -3916,30 +3933,13 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeout, 
 	// An operator's kill must not be undone by a pending rate-limit resume:
 	// drop the watch here, where the intent is known, not in handleChildExit
 	// (a passive stdin close makes the same death read as the child's own —
-	// fake-pi and claude alike exit 0 on EOF). Also covers the native-child
-	// early return below, which never reaches the shutdown sequence. This drops
-	// the ROW's pending-resume label too, so a later boot cannot re-arm what the
-	// operator deliberately stopped.
+	// fake-pi and claude alike exit 0 on EOF). This drops the ROW's
+	// pending-resume label too, so a later boot cannot re-arm what the operator
+	// deliberately stopped.
 	c.dropRateLimitWatch(childID)
 	// A pending recovery resume must not fire for a child the operator killed
 	// while it waited for its executor.
 	c.dropPendingResume(childID)
-
-	// A synthetic thread child has no process, so every lookup below misses and
-	// this used to answer "child not found" for a child the operator could see
-	// in the rail. Ending one is a store write; exitNativeChild does it and
-	// emits the same exit events a real one does.
-	if snap, ok := c.st.Get(childID); ok && snap.Native {
-		if snap.Status == protocol.StatusExited {
-			return protocol.KillResponseData{}, &connectapi.ControllerError{
-				Code:    protocol.ErrChildExited,
-				Message: "child has already exited",
-			}
-		}
-		c.exitNativeChild(childID)
-		code := 0
-		return protocol.KillResponseData{ExitCode: &code}, nil
-	}
 
 	ch, ok := c.cm.Get(childID)
 	if !ok {
@@ -4218,16 +4218,19 @@ func (c *Controller) Close(childID string) error {
 		return &connectapi.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
 	}
 
-	// A synthetic thread child exists only in the in-memory store: no durable
-	// row (EnsureThreadChild never calls writeRecord), no inbox, no daraja, no
-	// executor binding, no log dump. Everything below would be a round trip
-	// asking a database to forget something it was never told, so the store
-	// delete IS the close.
+	// A native thread child is finalized like any other child now that it has a
+	// row: persist, announce, tombstone, forget — and nothing else, because it
+	// has no process, no inbox, no daraja binding and no log dump.
 	if snap.Native {
-		c.publishChildClosed(childID)
-		c.st.Delete(childID)
-		c.trace.ChildGone(childID)
-		return nil
+		return c.closeNativeChild(childID)
+	}
+
+	// Its thread children close FIRST, with the same persist-before-tombstone
+	// step and the same fail-closed rule: a native child whose row cannot be
+	// written fails the parent's close, so a closed parent never leaves a live
+	// subagent row pointing at it.
+	if _, err := c.closeNativeChildrenOf(childID); err != nil {
+		return err
 	}
 
 	// Persist the child's current snapshot BEFORE forgetting it: the upsert
@@ -4282,11 +4285,6 @@ func (c *Controller) Close(childID string) error {
 	// A pending recovery resume must not fire for a child that was closed
 	// while it waited for its executor.
 	c.dropPendingResume(childID)
-	// Its synthetic thread children go with it: they carry a parent label, so
-	// leaving them would strand them at the top of the rail pointing at a
-	// session that no longer exists. Their transcripts survive, exactly as this
-	// child's does.
-	c.closeNativeChildrenOf(childID)
 	// Its watcher entry goes with it: nothing else will poll a binding whose
 	// child cannot receive the news.
 	c.forgetBoundExecutor(childID)
@@ -4452,22 +4450,28 @@ func (c *Controller) CloseAllExited(olderThan time.Duration, owns func(childID s
 		}
 		// snaps was read before the loop, and an earlier iteration's cascade may
 		// already have taken this row: an exited native child appears in
-		// FindByStatus in its own right AND is deleted with its parent, so
+		// FindByStatus in its own right AND is closed with its parent, so
 		// without this it would be reported closed twice.
 		if _, still := c.st.Get(s.ChildID); !still {
 			continue
 		}
-		// A synthetic thread child has no durable footprint at all, so the
-		// store delete is its whole close. Same reasoning as Close: nothing to
-		// persist, no failure path.
+		// A native thread child is closed by its PARENT's close and never by this
+		// sweep: it has no process that could outlive the parent, so the pair is
+		// one unit and the parent's cascade is the only place both rows are
+		// tombstoned together. Taking a native row here would also strand the
+		// reverse case — a native row whose parent is gone is an operator's to
+		// close (`rafiki close <child>`), not this sweep's to guess about.
 		if s.Native {
-			c.publishChildClosed(s.ChildID)
-			c.st.Delete(s.ChildID)
-			c.trace.ChildGone(s.ChildID)
-			// A cascaded child is closed and belongs in the answer; the guard above
-			// is what keeps it from being named a second time on its own iteration.
-			closed = append(closed, c.closeNativeChildrenOf(s.ChildID)...)
-			closed = append(closed, s.ChildID)
+			continue
+		}
+		// Its thread children close FIRST, with the same persist-before-tombstone
+		// step and the same fail-closed rule as the parent's own write below: on a
+		// failure this parent is left for a later sweep rather than closing into a
+		// live subagent row.
+		nativeClosed, err := c.closeNativeChildrenOf(s.ChildID)
+		if err != nil {
+			slog.Warn("close-all-exited: native child not persisted", "childId", s.ChildID, "errorType", fmt.Sprintf("%T", err))
+			failed++
 			continue
 		}
 		// Gated on ownsChildRow, same reasoning as Forget above: a recovered
@@ -4494,7 +4498,7 @@ func (c *Controller) CloseAllExited(olderThan time.Duration, owns func(childID s
 		// The row is gone for good; free whatever observer state a late event
 		// (or a send queued before the close) re-created for it.
 		c.trace.ChildGone(s.ChildID)
-		closed = append(closed, c.closeNativeChildrenOf(s.ChildID)...)
+		closed = append(closed, nativeClosed...)
 		// The other deletion path, and the one that leaks without this: a row
 		// for a child forgotten here is never pending-for-a-live-child again
 		// and never terminal, so the retention sweep can never reach it.
@@ -4584,6 +4588,12 @@ func (c *Controller) SetLabels(childID string, set map[string]string, remove []s
 // caller: the row is persisted, the delivery failure is logged, and the idle
 // drain retries it. That is strictly better than discarding the message.
 func (c *Controller) Send(childID string, frame json.RawMessage) error {
+	// A native thread child has no stdin of its own: a prompt, steer or abort
+	// queued for it has nowhere to go, and persisting one would replay into a
+	// turn of its parent's process. Refuse, naming the parent to address.
+	if snap, ok := c.st.Get(childID); ok && snap.Native {
+		return nativeSubagentRefusal(snap)
+	}
 	if c.inbox == nil {
 		return c.sendFrame(childID, frame)
 	}
@@ -5499,10 +5509,11 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		}
 	}
 
-	// A Task subagent runs inside this process, so it dies with it. Before the
-	// exit event below purely for ordering legibility: a subscriber that sees
-	// the parent gone has already been told about its threads.
-	c.exitNativeChildrenOf(childID)
+	// A Task subagent runs inside this process, so it dies with it — at this
+	// child's own exit time, because that is when its thread stopped existing.
+	// Before the exit event below purely for ordering legibility: a subscriber
+	// that sees the parent gone has already been told about its threads.
+	c.exitNativeChildrenOf(childID, now)
 
 	var exitCode *int
 	if exitSignal == "" {
@@ -5833,7 +5844,12 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 		rec.LastStatus = lastStatus
 		rec.DaemonID = c.daemonID
 		rec.NSToken = c.nsToken
-		if snap.Kind == protocol.KindFundi {
+		// A fundi child's SessionID IS its conversation id. A native thread child
+		// has no Claude Code session of its own — it runs inside its parent's
+		// process — so its SessionID slot carries the branch conversation the
+		// thread's turns land on, which is exactly what the row's conversation_id
+		// is (see EnsureThreadChild).
+		if snap.Kind == protocol.KindFundi || snap.Native {
 			rec.ConversationID = snap.SessionID
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

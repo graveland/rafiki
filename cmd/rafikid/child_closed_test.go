@@ -102,7 +102,8 @@ func TestCloseNativeChildrenOfPublishesChildClosed(t *testing.T) {
 	live, cancel := ctrl.native.SubscribeAll()
 	defer cancel()
 
-	closed := ctrl.closeNativeChildrenOf("c_evt_parent")
+	closed, err := ctrl.closeNativeChildrenOf("c_evt_parent")
+	ck.Require().NoError(err, "close the parent's native children")
 	ck.Require().Eq(2, len(closed), "closed native children")
 
 	seen := map[string]bool{}

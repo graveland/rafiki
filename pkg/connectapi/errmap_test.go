@@ -32,6 +32,7 @@ var errCodeByName = map[string]connect.Code{
 	"ErrChildShuttingDown":  connect.CodeFailedPrecondition,
 	"ErrNotResumable":       connect.CodeFailedPrecondition,
 	"ErrNotExited":          connect.CodeFailedPrecondition,
+	"ErrNativeSubagent":     connect.CodeInvalidArgument,
 	"ErrSessionFileMissing": connect.CodeNotFound,
 	"ErrBackpressure":       connect.CodeResourceExhausted,
 	"ErrAtCapacity":         connect.CodeResourceExhausted,

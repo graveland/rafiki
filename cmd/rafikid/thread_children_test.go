@@ -76,6 +76,9 @@ func TestSyntheticChildIsParentedAndDoesNotConsumeTheChildBudget(t *testing.T) {
 	ck.Eq(1, len(c.st.Descendants("c_parent")), "Descendants")
 }
 
+// TestNoteSubagentNamesTheChildAfterItsToolCall pins the rename AND its row
+// write: the name a human reads in `rafiki list` is the Task call's tool id, and
+// a rename held only in memory is gone on the next boot.
 func TestNoteSubagentNamesTheChildAfterItsToolCall(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestController(t)
@@ -84,6 +87,8 @@ func TestNoteSubagentNamesTheChildAfterItsToolCall(t *testing.T) {
 	})
 	ck.Require().NoError(c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"), "EnsureThreadChild")
 	id := threadChildID("c_parent", "thread-a")
+	store := &recordingChildStore{}
+	c.children = store
 
 	// The join: message msg_sub1 belongs to thread-a, and the frame carrying it
 	// named toolu_ABC as its spawning call.
@@ -94,6 +99,11 @@ func TestNoteSubagentNamesTheChildAfterItsToolCall(t *testing.T) {
 	got := snap.Labels[labelSpawnedByTool]
 	ck.Eq("toolu_ABC", got, "%s = %q, want", labelSpawnedByTool, got)
 	ck.Eq("task:toolu_ABC", snap.Name, "name")
+
+	rec, written := store.lastUpsertFor(id)
+	ck.Require().True(written, "the rename must be persisted, not only held in memory")
+	ck.Eq("task:toolu_ABC", rec.Name, "the persisted name")
+	ck.Eq("toolu_ABC", rec.Labels[labelSpawnedByTool], "the persisted %s", labelSpawnedByTool)
 
 	// Idempotent: the hook fires on every frame of the subagent's output.
 	c.noteSubagentToolCall("c_parent", "thread-a", "toolu_ABC")

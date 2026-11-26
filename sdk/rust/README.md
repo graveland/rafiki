@@ -337,7 +337,11 @@ Every failure is an `Error` carrying a Connect `Code` (snake_case on the wire,
 `google.rpc.ErrorInfo` — its `reason`. Nothing in this crate retries.
 `is_unavailable()` is the daemon-restarting signal a caller MAY retry on;
 `is_unauthenticated()`, `is_not_found()`, `is_protocol_mismatch()` and
-`permission_denied` are terminal.
+`permission_denied` are terminal. `kill()`, `send()` and `resume()` on a Claude
+Code subagent's child id are `invalid_argument` with reason
+`"native_subagent"` (a thread inside its parent's process — the message names
+the parent to address instead); nothing in this crate special-cases that per
+verb, so match the reason.
 
 A daemon authenticating several users isolates agents per owner: a non-admin
 token gets `permission_denied` naming the child for any id it does not own
