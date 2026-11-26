@@ -11,8 +11,11 @@ import (
 )
 
 // insertLineageChildRaw writes a child row with a verbatim labels JSON value,
-// so a test can inject a shape the normal Marshal never produces (a non-object,
-// a non-string walk value, an extra key).
+// so a test can inject a shape the normal Marshal never produces (extra keys,
+// including non-string ones the lineage walk never reads). A labels value that
+// is not an object, or a non-string parent/root, cannot be written at all:
+// migration 0076's child_labels_lineage_shape refuses it, which is pinned by
+// TestMigrate0076CheckRefusesAmbiguousLabels (pkg/store).
 func insertLineageChildRaw(t *testing.T, pool *pgxpool.Pool, id, labelsJSON string) {
 	t.Helper()
 	c := assert.NewAborting(t)
@@ -47,49 +50,6 @@ func TestLineageKeepsARowWithExtraNonStringLabels(t *testing.T) {
 	c.Require().NoError(err, "Lineage(%s): an extra non-string label must not fail the call", root)
 	c.ElementsMatch([]string{root, mid, leaf}, lineageIDs(got),
 		"Lineage = %v; the extra-label row and its child must both stay", lineageIDs(got))
-}
-
-// A returned row whose parent key is PRESENT but not a string leaves the chain
-// through it undeterminable: Lineage must fail closed (a budget caller then
-// skips rather than under-counting), naming the ambiguous row by child id.
-func TestLineageErrorsOnNonStringParentLabel(t *testing.T) {
-	c := assert.NewCollecting(t)
-	pool := testPool(t)
-	s := New(pool)
-	ctx := context.Background()
-
-	p := lineagePrefix()
-	root, mid := p+"_root", p+"_mid"
-	cleanupLineage(t, pool, root, mid)
-
-	insertLineageChild(t, s, root, "", "", false)
-	insertLineageChildRaw(t, pool, mid,
-		fmt.Sprintf(`{"rafiki/root":%q,"rafiki/parent":5}`, root))
-
-	_, err := s.Lineage(ctx, root)
-	c.Require().Error(err, "a non-string parent on a returned row must be an error")
-	c.StrContains(err.Error(), mid, "the error must name the ambiguous row: %v", err)
-}
-
-// A returned row whose labels value is not a JSON object at all is ambiguous by
-// shape: Lineage must fail closed. The root's OWN row (selected by child_id) is
-// the returned row here — a non-object value can never match the @> containment,
-// so no descendant row can carry this shape.
-func TestLineageErrorsOnNonObjectLabels(t *testing.T) {
-	c := assert.NewCollecting(t)
-	pool := testPool(t)
-	s := New(pool)
-	ctx := context.Background()
-
-	p := lineagePrefix()
-	root := p + "_root"
-	cleanupLineage(t, pool, root)
-
-	insertLineageChildRaw(t, pool, root, `"not-an-object"`)
-
-	_, err := s.Lineage(ctx, root)
-	c.Require().Error(err, "non-object labels on a returned row must be an error")
-	c.StrContains(err.Error(), root, "the error must name the ambiguous row: %v", err)
 }
 
 // A missing ancestor row with a caller-supplied root still resolves the

@@ -124,8 +124,7 @@ func completeSwitchArgs(cmd *cobra.Command, args []string, toComplete string) ([
 // coordinator: dropping it would move the switch out of the coordinator's
 // lineage (budget, tag scopes, reports) and rename it against the wrong sibling
 // set. A top-level source has no parent label and stays top-level. ParentLabel
-// honours the pre-rename fundi/parent spelling, the same fallback Rename and
-// the lineage reads use.
+// reads the rafiki/parent label, the same one Rename and the lineage reads use.
 //
 // The source's preset re-resolves on the switch spawn: its tool, skill and MCP
 // allowlists and its prompt are part of "the same conversation", and the

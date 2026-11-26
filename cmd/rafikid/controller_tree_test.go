@@ -183,10 +183,11 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 	c.Require().Eq(parentID, snapResumed.Labels[childstore.LabelRoot], "after resume B.LabelRoot")
 }
 
-// tree.go reads fundi/parent as an authoritative fallback for pre-rename
-// records. If a client can WRITE it, lineage is forgeable and IsDescendant —
-// the authority predicate for every steering verb — returns a false positive
-// across agents.
+// tree.go reads only rafiki/parent. fundi/ stays reserved even though nothing
+// writes it: migration 0076 rewrites every stored fundi/<k> onto rafiki/<k>, so
+// a caller-writable key there would be renamed into the daemon's own namespace
+// — lineage forgeable, and IsDescendant (the authority predicate for every
+// steering verb) returning a false positive across agents.
 func TestReservedLabelPrefixesRejectBothSpellings(t *testing.T) {
 	c := assert.NewCollecting(t)
 	for _, key := range []string{

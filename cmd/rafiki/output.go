@@ -393,11 +393,11 @@ type treeRow struct {
 	Depth int
 }
 
-// effectiveParents maps each child to its parent ID, per the
-// rafiki/parent (falling back to fundi/parent) label -- or "" when the child
-// has no parent label, or its parent is absent from this list (filtered out
-// by --status, or already forgotten). Shared by sortChildrenAsTree and
-// subtreeCosts so the two never disagree about what "descendant" means.
+// effectiveParents maps each child to its parent ID, per the rafiki/parent
+// label -- or "" when the child has no parent label, or its parent is absent
+// from this list (filtered out by --status, or already forgotten). Shared by
+// sortChildrenAsTree and subtreeCosts so the two never disagree about what
+// "descendant" means.
 func effectiveParents(children []*rafikiv1.ChildSummary) map[string]string {
 	byID := make(map[string]bool, len(children))
 	for _, ch := range children {
@@ -406,9 +406,6 @@ func effectiveParents(children []*rafikiv1.ChildSummary) map[string]string {
 	out := make(map[string]string, len(children))
 	for _, ch := range children {
 		p := ch.GetLabels()["rafiki/parent"]
-		if p == "" {
-			p = ch.GetLabels()["fundi/parent"]
-		}
 		if byID[p] {
 			out[ch.GetChildId()] = p
 		}

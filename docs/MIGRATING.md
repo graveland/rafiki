@@ -5,8 +5,10 @@ deliberate **hard cut**: no environment-variable aliases, no directory
 fallbacks, no automatic migration. Nothing in the shipped tree reads an old
 name. Run these steps once.
 
-The database schema is untouched — `rafiki_schema_migrations` was already
-correctly named, and no row is rewritten.
+The rename itself touched no database object — `rafiki_schema_migrations` was
+already correctly named. The one row rewrite since then is migration
+`0076_child_lineage_columns`, which canonicalises stored `fundi/*` child label
+keys to `rafiki/*` (see "Two things that do not migrate cleanly" below).
 
 ---
 
@@ -179,10 +181,15 @@ not: a config file of named client tokens, configurable `openai_routes` and
 ## Two things that do not migrate cleanly
 
 **Auto-label prefix.** Reserved auto-labels changed from `fundi/*` to
-`rafiki/*`, and labels are **persisted per child**. A child spawned before the
-upgrade keeps `fundi/kind=…` on its record forever — nothing rewrites old rows.
-A `--has-label rafiki/kind=…` filter written after upgrading will silently not
-match it. Kill and forget pre-existing children, or expect the seam.
+`rafiki/*`, and labels are **persisted per child**. Migration
+`0076_child_lineage_columns` rewrites every stored `fundi/<k>` child label key
+to `rafiki/<k>`, keeping the `rafiki/` value when both spellings are present —
+so `--has-label rafiki/kind=…` matches a child spawned before the rename like
+any other. A query, `--has-label`/`--label` filter or locally cached record that
+still names a `fundi/` key must switch to `rafiki/`: no row carries the old
+spelling after the migration. Apply it with every daemon stopped, because a
+daemon still running the previous binary writes the old spelling and its rows
+land without the lineage columns the new daemon reads.
 
 **Captured owner identity.** The proxy face's per-boot token identity changed
 from `fundi-child` to `rafiki-child`, and historical database rows kept the old

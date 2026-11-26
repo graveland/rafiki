@@ -371,8 +371,8 @@ func (c *Cockpit) switchRequest(ctx context.Context, p spawnParams) (*rafikiv1.S
 	// would move the switch out of the coordinator's lineage and rename it
 	// against the wrong sibling set. The cwd and cap come from the form, which
 	// opened prefilled with the source's.
-	// ParentLabel honours the pre-rename fundi/parent spelling, the
-	// same fallback Rename and the lineage reads use.
+	// ParentLabel reads the rafiki/parent label, the same one Rename and the
+	// lineage reads use.
 	if parent, ok := childstore.ParentLabel(src.GetLabels()); ok {
 		req.ParentChildId = parent
 	}

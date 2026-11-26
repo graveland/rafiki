@@ -103,9 +103,11 @@ func TestDescendantsOfBoundsACycleAndDepth(t *testing.T) {
 	c.NotContains(got, "c_65", "the over-deep tail must be excluded")
 }
 
-// TestDescendantsOfUsesLegacyLabels pins the fundi/ fallback: rows persisted
-// before the rafiki rename still resolve.
-func TestDescendantsOfUsesLegacyLabels(t *testing.T) {
+// TestDescendantsOfIgnoresAPreRenameParentKey pins that the walk reads ONE
+// spelling: migration 0076 rewrites every stored fundi/parent to rafiki/parent,
+// so a map carrying only the old key describes no parent at all rather than a
+// second, tolerated one.
+func TestDescendantsOfIgnoresAPreRenameParentKey(t *testing.T) {
 	c := assert.NewCollecting(t)
 	legacy := childstore.LineageRow{
 		Member: childstore.LineageMember{ChildID: "old"},
@@ -115,15 +117,16 @@ func TestDescendantsOfUsesLegacyLabels(t *testing.T) {
 		member("r", "", "", false),
 		legacy,
 	}
-	c.ElementsMatch([]string{"r", "old"}, memberIDs(childstore.DescendantsOf(rows, "r")), "a fundi/-labelled descendant must still resolve")
+	c.ElementsMatch([]string{"r"}, memberIDs(childstore.DescendantsOf(rows, "r")), "only the canonical key describes a parent")
 }
 
-// TestRootLabelPrecedence pins RootLabel: the current key wins, the legacy key
-// is the fallback, and neither yields "".
-func TestRootLabelPrecedence(t *testing.T) {
+// TestRootLabelReadsTheCanonicalKey pins RootLabel: it answers the one stored
+// key and "" for anything else (a pre-rename map is the migration's subject).
+func TestRootLabelReadsTheCanonicalKey(t *testing.T) {
 	c := assert.NewCollecting(t)
-	c.Eq("new", childstore.RootLabel(map[string]string{"rafiki/root": "new", "fundi/root": "old"}), "rafiki/root must win")
-	c.Eq("old", childstore.RootLabel(map[string]string{"fundi/root": "old"}), "legacy fallback")
+	c.Eq("new", childstore.RootLabel(map[string]string{"rafiki/root": "new"}), "rafiki/root")
+	c.Eq("new", childstore.RootLabel(map[string]string{"rafiki/root": "new", "fundi/root": "old"}), "the canonical key is the only one read")
+	c.Eq("", childstore.RootLabel(map[string]string{"fundi/root": "old"}), "a pre-rename key is not a root")
 	c.Eq("", childstore.RootLabel(map[string]string{"rafiki/parent": "p"}), "no root label")
 	c.Eq("", childstore.RootLabel(nil), "nil labels")
 }

@@ -5367,8 +5367,9 @@ func (c *Controller) handleChildRenamed(childID, newName, previous string) {
 		return
 	}
 	if c.children != nil {
-		// "" parent (no parent label) is top level, and ParentOf carries the
-		// legacy fundi/parent fallback — the same sibling set Rename checks.
+		// "" parent (no parent label) is top level, and ParentOf reads the same
+		// rafiki/parent label the index groups by — the same sibling set Rename
+		// checks.
 		parent, _ := c.st.ParentOf(childID)
 		ctx, cancel := context.WithTimeout(context.Background(), renameCheckTimeout)
 		holderID, holderStatus, taken, err := c.children.NameHolder(ctx, snap.OwnerUserID, parent, newName)

@@ -1369,7 +1369,8 @@ keeps a name, because a killed child is resumable and its name still resolves;
 `Close` (the tombstone) frees it.
 
 The authority is the database index, never a pre-read (migration
-`0054_child_sibling_name`). Both admission paths below pre-read with the SAME
+`0054_child_sibling_name`, rebuilt by `0076_child_lineage_columns` over the
+generated `parent_id` column). Both admission paths below pre-read with the SAME
 emptiness test the index uses — `name == ""`, not `TrimSpace(name) == ""`, so
 a whitespace-only name is admitted to the pre-read rather than passing it and
 failing at the initial write. The index:
@@ -1377,14 +1378,17 @@ failing at the initial write. The index:
 ```sql
 CREATE UNIQUE INDEX child_sibling_name_live ON conversations.child (
     coalesce(owner_user_id::text, ''),
-    coalesce(labels->>'rafiki/parent', labels->>'fundi/parent', ''),
+    coalesce(parent_id, ''),
     name)
   WHERE closed_at IS NULL AND coalesce(name, '') <> '';
 ```
 
-Both coalesces are load-bearing: `''` is the anonymous owner, and one parent's
-children can be split across the `rafiki/parent` and legacy `fundi/parent`
-labels. A violation reaches Go only as `childstore.ErrNameTaken` from
+Both coalesces are load-bearing: `''` is the anonymous owner, and `''` is a
+top-level child. `parent_id` is `GENERATED ALWAYS AS (labels->>'rafiki/parent')
+STORED`, so one parent has exactly one spelling — 0076 rewrote the pre-rename
+`fundi/parent` key, and a row carrying only that key (a daemon older than the
+migration) groups as top level. A violation reaches Go only as
+`childstore.ErrNameTaken` from
 `childstoredb.Store.Upsert`, which matches the SQLSTATE *and* the constraint
 name — every other `23505` on that table stays an internal error rather than
 becoming a retryable name conflict.
@@ -2689,9 +2693,10 @@ classified on purpose, proven by `TestEveryEventTypeHasATier`.
 ### Parent child id
 
 `ChildSummary.parent_child_id` is the id of the child that spawned this one,
-empty for a top-level child. It is read from the `rafiki/parent` label, falling
-back to the legacy `fundi/parent` spelling (`childstore.ParentLabel`), so rows
-written before the rename report it too.
+empty for a top-level child. It is read from the `rafiki/parent` label
+(`childstore.ParentLabel`) — one spelling only: migration
+`0076_child_lineage_columns` rewrote every stored pre-rename `fundi/parent` key
+to `rafiki/parent`, so rows written before the rename report it too.
 
 ### Child workspace tools
 

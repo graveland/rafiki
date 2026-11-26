@@ -18,13 +18,16 @@ func TestChildSummaryCarriesParentChildID(t *testing.T) {
 		ChildID: "c_child", Kind: protocol.KindFundi,
 		Labels: map[string]string{childstore.LabelParent: "c_parent"},
 	})
+	// A row carrying only the pre-rename key (which migration 0076 rewrites)
+	// reports no parent: the summary reads the one canonical label, so a stale
+	// spelling can never forge a lineage edge.
 	st.Insert(&childstore.Session{
 		ChildID: "c_legacy", Kind: protocol.KindFundi,
 		Labels: map[string]string{"fundi/parent": "c_parent"},
 	})
 	c := &Controller{st: st}
 
-	want := map[string]string{"c_parent": "", "c_child": "c_parent", "c_legacy": "c_parent"}
+	want := map[string]string{"c_parent": "", "c_child": "c_parent", "c_legacy": ""}
 
 	t.Run("GetChild", func(t *testing.T) {
 		ck := assert.NewCollecting(t)

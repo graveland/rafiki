@@ -185,14 +185,15 @@ func (s *Store) NameHolder(ctx context.Context, ownerUserID, parentID, name stri
 }
 
 // nameHolderSQL mirrors child_sibling_name_live term for term: the same two
-// coalesces (an empty owner is an anonymous owner; one parent can be spelled
-// rafiki/parent or the older fundi/parent), the same live filter. An index and
-// a query that disagree answer "free" for a name the next Upsert then refuses.
+// coalesces (an empty owner is an anonymous owner; an absent parent is top
+// level), the same live filter. parent_id is the generated column migration
+// 0076 derives from labels->>'rafiki/parent'. An index and a query that
+// disagree answer "free" for a name the next Upsert then refuses.
 const nameHolderSQL = `
 SELECT child_id, status
   FROM conversations.child
  WHERE coalesce(owner_user_id::text, '') = $1
-   AND coalesce(labels->>'rafiki/parent', labels->>'fundi/parent', '') = $2
+   AND coalesce(parent_id, '') = $2
    AND name = $3
    AND closed_at IS NULL
  LIMIT 1`

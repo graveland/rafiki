@@ -12,12 +12,13 @@ var labelKeyRE = regexp.MustCompile(`^[a-zA-Z0-9_./-]+$`)
 
 // reservedLabelPrefixes are the namespaces only the daemon may write.
 //
-// "fundi/" is here and not merely tolerated on read: childstore.labelLookup
-// accepts fundi/parent and fundi/root as authoritative fallbacks for records
-// written before the rename, so a client that could SET them could forge a
-// lineage and make IsDescendant — the authority predicate behind every
-// steering verb — return a false positive across agents. Nothing writes the
-// legacy spelling any more; nothing may.
+// "rafiki/" is where every stored lineage and auto-label lives (migration 0076
+// rewrote the pre-rename fundi/ spellings), so a client that could SET one
+// could forge a lineage and make IsDescendant — the authority predicate behind
+// every steering verb — return a false positive across agents. "fundi/" stays
+// reserved for the same reason even though nothing writes it: migration 0076's
+// key rewrite maps fundi/<k> onto rafiki/<k>, so a user label there would be
+// silently renamed into the daemon's namespace on the next migration.
 var reservedLabelPrefixes = []string{"rafiki/", "fundi/"}
 
 // reservedLabelKeys are labels only the daemon may write. "owner" is here for
@@ -56,12 +57,11 @@ func validateLabelKey(k string) error {
 }
 
 // validateUserLabelKeys checks that all keys in m are syntactically valid and
-// do not use the reserved rafiki/ prefix.
+// do not use a reserved prefix.
 //
-// The prefix was "fundi/" pre-rename; a child spawned before the rename still
-// carries "fundi/*" auto-labels on its persisted record (no migration
-// rewrites old rows), so a "rafiki/*" filter will not match it. See
-// childstore.Session.Labels and docs/MIGRATING.md.
+// The prefix was "fundi/" pre-rename; migration 0076 rewrites every stored
+// fundi/<k> to rafiki/<k>, so a "rafiki/*" filter matches every child whatever
+// version spawned it. See childstore.Session.Labels and docs/MIGRATING.md.
 func validateUserLabelKeys(m map[string]string) error {
 	for k := range m {
 		if err := validateLabelKey(k); err != nil {

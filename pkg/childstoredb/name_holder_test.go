@@ -30,8 +30,7 @@ func uniqueName(tag string) string {
 
 var uniqueSeq atomic.Int64
 
-// childRecord builds a live sibling row. parent "" makes it top-level; the
-// label key is a parameter so the legacy fundi/parent spelling can be exercised.
+// childRecord builds a live sibling row. parent "" makes it top-level.
 func childRecord(id, owner, parent, name, status string) childstore.ChildRecord {
 	rec := childstore.ChildRecord{
 		ChildID:     id,
@@ -167,26 +166,6 @@ func TestSiblingNameIndexNullOwnersCollide(t *testing.T) {
 	err := upsertChild(t, s, pool,
 		childRecord(uniqueName("null-b"), "", "", name, string(protocol.StatusIdle)))
 	c.True(errors.Is(err, childstore.ErrNameTaken), "second anonymous sibling err = %v, want childstore.ErrNameTaken", err)
-}
-
-// TestSiblingNameIndexLegacyParentLabel pins the label coalesce: children
-// labeled with the pre-rename fundi/parent are siblings of children labeled
-// rafiki/parent, because the subtree label was renamed without a backfill.
-func TestSiblingNameIndexLegacyParentLabel(t *testing.T) {
-	c := assert.NewCollecting(t)
-	pool := testPool(t)
-	s := New(pool)
-
-	owner := insertOwner(t, pool)
-	name := uniqueName("legacy")
-	parent := uniqueName("parent")
-
-	legacy := childRecord(uniqueName("legacy-a"), owner, "", name, string(protocol.StatusIdle))
-	legacy.Labels = map[string]string{"fundi/parent": parent}
-	c.Require().NoError(upsertChild(t, s, pool, legacy), "fundi/parent sibling")
-
-	err := upsertChild(t, s, pool, childRecord(uniqueName("legacy-b"), owner, parent, name, string(protocol.StatusIdle)))
-	c.True(errors.Is(err, childstore.ErrNameTaken), "rafiki/parent sibling of a fundi/parent one err = %v, want childstore.ErrNameTaken", err)
 }
 
 // TestNameHolderFindsLiveSibling covers the found case: the holder's id and its

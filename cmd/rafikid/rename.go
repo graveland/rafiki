@@ -34,8 +34,8 @@ func (c *Controller) Rename(ctx context.Context, childID, name string) error {
 	}
 	if c.children != nil {
 		// "" parent (no parent label) is top level, and every top-level agent
-		// of the owner shares that sibling set. ParentOf carries the legacy
-		// fundi/parent fallback, exactly as childstore.Lineage does.
+		// of the owner shares that sibling set. ParentOf reads the same
+		// rafiki/parent label the child_sibling_name_live index groups by.
 		parent, _ := c.st.ParentOf(childID)
 		holderID, holderStatus, taken, err := c.children.NameHolder(ctx, snap.OwnerUserID, parent, name)
 		if err != nil {

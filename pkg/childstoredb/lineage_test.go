@@ -195,7 +195,10 @@ func TestLineageCarriesSessionAndConversationIds(t *testing.T) {
 	c.Eq("", byID[bare].ConversationID, "ConversationID for a child with none")
 }
 
-func TestLineageQueryUsesTheLabelIndex(t *testing.T) {
+// TestLineageQueryUsesTheRootIndex pins that the subtree arm is index-served:
+// root_id is a generated column with its own btree index (migration 0076), not
+// a jsonb containment match, so a lineage read never scans every child row.
+func TestLineageQueryUsesTheRootIndex(t *testing.T) {
 	c := assert.NewAborting(t)
 	pool := scratchPool(t)
 	ctx := context.Background()
@@ -203,15 +206,14 @@ func TestLineageQueryUsesTheLabelIndex(t *testing.T) {
 	_, err := pool.Exec(ctx, `
 		INSERT INTO conversations.child (child_id, kind, status, spawned_at, labels)
 		SELECT 'c_lineageseed' || g, 'fundi', 'idle', now(),
-		       jsonb_build_object('rafiki/root', 'r' || (g % 50))
-		  FROM generate_series(1, 2000) g`)
+		       jsonb_build_object('rafiki/root', 'r' || (g % 200))
+		  FROM generate_series(1, 20000) g`)
 	c.NoError(err, "seed rows")
 	_, err = pool.Exec(ctx, `ANALYZE conversations.child`)
 	c.NoError(err, "analyze")
 
 	var plan string
-	err = pool.QueryRow(ctx, `EXPLAIN (FORMAT JSON) `+lineageSubtreeSQL,
-		"x", []byte(`{"rafiki/root":"x"}`), []byte(`{"fundi/root":"x"}`)).Scan(&plan)
+	err = pool.QueryRow(ctx, `EXPLAIN (FORMAT JSON) `+lineageSubtreeSQL, "x").Scan(&plan)
 	c.NoError(err, "explain")
-	c.StrContains(plan, "child_labels_idx", "the lineage query must use the label index; plan:\n%s", plan)
+	c.StrContains(plan, "child_root_idx", "the lineage query must use the root index; plan:\n%s", plan)
 }

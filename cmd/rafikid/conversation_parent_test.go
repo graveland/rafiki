@@ -28,12 +28,9 @@ import (
 // insertStampChild writes one conversations.child row directly, the way a
 // spawn's first writeRecord would: labels carrying the parent link,
 // conversation_id NULL for a claude-shaped child or set for a fundi one.
-func insertStampChild(t *testing.T, pool *pgxpool.Pool, childID, parentID string, conversationID *string, legacyParent bool) {
+func insertStampChild(t *testing.T, pool *pgxpool.Pool, childID, parentID string, conversationID *string) {
 	t.Helper()
 	labels := fmt.Sprintf(`{"rafiki/parent":%q}`, parentID)
-	if legacyParent {
-		labels = fmt.Sprintf(`{"fundi/parent":%q}`, parentID)
-	}
 	var sql string
 	var args []any
 	if conversationID != nil {
@@ -194,8 +191,8 @@ func TestStampConversationParentFundiChildUsesItsStoredConversation(t *testing.T
 	parentConv := insertStampConversation(t, pool, parentID)
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, parentID}, []string{childConv, parentConv})
-	insertStampChild(t, pool, parentID, "", &parentConv, false)
-	insertStampChild(t, pool, childID, parentID, &childConv, false)
+	insertStampChild(t, pool, parentID, "", &parentConv)
+	insertStampChild(t, pool, childID, parentID, &childConv)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "stamp")
@@ -216,8 +213,8 @@ func TestStampConversationParentClaudeChildResolvesByExternalRef(t *testing.T) {
 	parentConv := insertStampConversation(t, pool, parentID)
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, parentID}, []string{childConv, parentConv})
-	insertStampChild(t, pool, parentID, "", nil, false)
-	insertStampChild(t, pool, childID, parentID, nil, false)
+	insertStampChild(t, pool, parentID, "", nil)
+	insertStampChild(t, pool, childID, parentID, nil)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "stamp")
@@ -238,8 +235,8 @@ func TestStampConversationParentRetriesUntilTheParentsConversationExists(t *test
 
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, parentID}, []string{childConv})
-	insertStampChild(t, pool, parentID, "", nil, false)
-	insertStampChild(t, pool, childID, parentID, nil, false)
+	insertStampChild(t, pool, parentID, "", nil)
+	insertStampChild(t, pool, childID, parentID, nil)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "first stamp")
@@ -268,8 +265,8 @@ func TestStampConversationParentSkipsAMessageLessLedgerParent(t *testing.T) {
 	ledgerConv := insertStampLedgerConversation(t, pool, parentID)
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, parentID}, []string{childConv, ledgerConv})
-	insertStampChild(t, pool, parentID, "", nil, false)
-	insertStampChild(t, pool, childID, parentID, &childConv, false)
+	insertStampChild(t, pool, parentID, "", nil)
+	insertStampChild(t, pool, childID, parentID, &childConv)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "stamp")
@@ -301,8 +298,8 @@ func TestStampConversationParentTreatsAForkAsBrowsable(t *testing.T) {
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, parentID, sourceID},
 		[]string{childConv, parentConv, sourceConv})
-	insertStampChild(t, pool, parentID, "", &parentConv, false)
-	insertStampChild(t, pool, childID, parentID, &childConv, false)
+	insertStampChild(t, pool, parentID, "", &parentConv)
+	insertStampChild(t, pool, childID, parentID, &childConv)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "stamp")
@@ -325,9 +322,9 @@ func TestStampConversationParentNeverOverwrites(t *testing.T) {
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, firstParent, secondParent},
 		[]string{firstConv, secondConv, childConv})
-	insertStampChild(t, pool, firstParent, "", &firstConv, false)
-	insertStampChild(t, pool, secondParent, "", &secondConv, false)
-	insertStampChild(t, pool, childID, firstParent, &childConv, false)
+	insertStampChild(t, pool, firstParent, "", &firstConv)
+	insertStampChild(t, pool, secondParent, "", &secondConv)
+	insertStampChild(t, pool, childID, firstParent, &childConv)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "first stamp")
@@ -353,8 +350,8 @@ func TestStampConversationParentLeavesUpdatedAtAlone(t *testing.T) {
 	parentConv := insertStampConversation(t, pool, parentID)
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, parentID}, []string{childConv, parentConv})
-	insertStampChild(t, pool, parentID, "", &parentConv, false)
-	insertStampChild(t, pool, childID, parentID, &childConv, false)
+	insertStampChild(t, pool, parentID, "", &parentConv)
+	insertStampChild(t, pool, childID, parentID, &childConv)
 
 	_, beforeUpdated := stampParentOf(t, pool, childConv)
 	ctrl := &Controller{pool: pool}
@@ -374,32 +371,12 @@ func TestStampConversationParentTopLevelChildIsUntouched(t *testing.T) {
 
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID}, []string{childConv})
-	insertStampChild(t, pool, childID, "", &childConv, false)
+	insertStampChild(t, pool, childID, "", &childConv)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "stamp")
 	got, _ := stampParentOf(t, pool, childConv)
 	c.Eq("", got, "a top-level child's conversation must stay top level")
-}
-
-// The legacy fundi/parent spelling resolves exactly like rafiki/parent.
-func TestStampConversationParentReadsTheLegacyLabel(t *testing.T) {
-	c := assert.NewAborting(t)
-	pool := openTestPool(t)
-	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
-	parentID := "c_" + uniq + "_legacy_parent"
-	childID := "c_" + uniq + "_legacy_child"
-
-	parentConv := insertStampConversation(t, pool, parentID)
-	childConv := insertStampConversation(t, pool, childID)
-	cleanupStampRows(t, pool, []string{childID, parentID}, []string{childConv, parentConv})
-	insertStampChild(t, pool, parentID, "", &parentConv, false)
-	insertStampChild(t, pool, childID, parentID, &childConv, true)
-
-	ctrl := &Controller{pool: pool}
-	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "stamp")
-	got, _ := stampParentOf(t, pool, childConv)
-	c.Eq(parentConv, got, "the legacy fundi/parent label must resolve")
 }
 
 // A daemon without a database pool stamps nothing and answers nil.
@@ -423,7 +400,7 @@ func TestStampConversationParentRunsFromWriteRecord(t *testing.T) {
 	parentConv := insertStampConversation(t, pool, parentID)
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, parentID}, []string{childConv, parentConv})
-	insertStampChild(t, pool, parentID, "", &parentConv, false)
+	insertStampChild(t, pool, parentID, "", &parentConv)
 
 	ctrl := &Controller{
 		pool:     pool,
@@ -490,9 +467,9 @@ func TestStampConversationParentSecondWriteSkipsTheLookups(t *testing.T) {
 	childConv := insertStampConversation(t, pool, childID)
 	cleanupStampRows(t, pool, []string{childID, firstParent, secondParent},
 		[]string{firstConv, secondConv, childConv})
-	insertStampChild(t, pool, firstParent, "", &firstConv, false)
-	insertStampChild(t, pool, secondParent, "", &secondConv, false)
-	insertStampChild(t, pool, childID, firstParent, &childConv, false)
+	insertStampChild(t, pool, firstParent, "", &firstConv)
+	insertStampChild(t, pool, secondParent, "", &secondConv)
+	insertStampChild(t, pool, childID, firstParent, &childConv)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "first stamp")
@@ -524,9 +501,9 @@ func TestStampConversationParentAdoptedConversationIsMemoizedToo(t *testing.T) {
 	childConv := insertStampConversationWithParent(t, pool, childID, firstConv)
 	cleanupStampRows(t, pool, []string{childID, firstParent, secondParent},
 		[]string{firstConv, secondConv, childConv})
-	insertStampChild(t, pool, firstParent, "", &firstConv, false)
-	insertStampChild(t, pool, secondParent, "", &secondConv, false)
-	insertStampChild(t, pool, childID, firstParent, &childConv, false)
+	insertStampChild(t, pool, firstParent, "", &firstConv)
+	insertStampChild(t, pool, secondParent, "", &secondConv)
+	insertStampChild(t, pool, childID, firstParent, &childConv)
 
 	ctrl := &Controller{pool: pool}
 	c.NoError(ctrl.stampConversationParent(context.Background(), childID), "first stamp on an adopted conversation")

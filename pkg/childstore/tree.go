@@ -6,32 +6,23 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// Pre-rename spellings. Records persisted before the fundi -> rafiki
-// identity consolidation still carry these, so readers tolerate them.
-// Nothing writes them.
-const (
-	legacyLabelParent = "fundi/parent"
-	legacyLabelRoot   = "fundi/root"
-)
-
 // maxChainDepth bounds the parent walk in IsDescendant. Lineage labels are
 // daemon-written and cannot legitimately form a cycle, but a corrupt or
 // hand-edited state record must not wedge a caller in an infinite loop —
 // this predicate runs on the authority path for every steering verb.
 const maxChainDepth = 64
 
-// labelLookup reads key from labels, falling back to the pre-rename spelling.
-func labelLookup(labels map[string]string, key, legacy string) (string, bool) {
-	if v, ok := labels[key]; ok && v != "" {
-		return v, true
+// ParentLabel reads the parent child id from a label map. ok is false for a
+// top-level child.
+func ParentLabel(labels map[string]string) (string, bool) {
+	parent := labels[LabelParent]
+	if parent == "" {
+		return "", false
 	}
-	if v, ok := labels[legacy]; ok && v != "" {
-		return v, true
-	}
-	return "", false
+	return parent, true
 }
 
-// ParentOf returns the direct parent's child id, with legacy spelling fallback.
+// ParentOf returns the direct parent's child id.
 func (s *Store) ParentOf(childID string) (string, bool) {
 	var parent string
 	var has bool
@@ -61,23 +52,16 @@ func (s *Store) exists(childID string) bool {
 	return ok
 }
 
-// ParentLabel reads the parent child id from a label map, honouring the
-// pre-rename spelling. ok is false for a top-level child.
-func ParentLabel(labels map[string]string) (string, bool) {
-	return labelLookup(labels, LabelParent, legacyLabelParent)
-}
-
 // RootOf returns the top-level ancestor's child id. A top-level child is its
 // own root. Returns "" when childID is unknown.
 func (s *Store) RootOf(childID string) string {
 	var root string
-	var has bool
 	if !s.readLabels(childID, func(labels map[string]string) {
-		root, has = labelLookup(labels, LabelRoot, legacyLabelRoot)
+		root = labels[LabelRoot]
 	}) {
 		return ""
 	}
-	if has {
+	if root != "" {
 		return root
 	}
 	return childID
@@ -236,8 +220,8 @@ func (s *Store) Descendants(ancestorID string) []Snapshot {
 		}
 		inTree := false
 		s.readLabels(id, func(labels map[string]string) {
-			r, ok := labelLookup(labels, LabelRoot, legacyLabelRoot)
-			inTree = ok && r == root
+			r := labels[LabelRoot]
+			inTree = r != "" && r == root
 		})
 		if inTree && s.IsDescendant(ancestorID, id) {
 			out = append(out, sess.Snapshot())
@@ -269,8 +253,8 @@ func (s *Store) CountDescendants(ancestorID string, keep func(protocol.Status) b
 		}
 		inTree := false
 		s.readLabels(id, func(labels map[string]string) {
-			r, ok := labelLookup(labels, LabelRoot, legacyLabelRoot)
-			inTree = ok && r == root
+			r := labels[LabelRoot]
+			inTree = r != "" && r == root
 		})
 		if !inTree || !s.IsDescendant(ancestorID, id) {
 			return true

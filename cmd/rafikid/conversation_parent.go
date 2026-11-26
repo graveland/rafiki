@@ -20,7 +20,7 @@ import (
 const stampConversationParentSQL = `
 WITH me AS (
     SELECT ch.child_id,
-           COALESCE(ch.labels->>'rafiki/parent', ch.labels->>'fundi/parent') AS parent_id,
+           ch.parent_id,
            COALESCE(ch.conversation_id,
                     (SELECT v.id FROM conversations.conversation v
                       WHERE v.external_ref = ch.child_id
@@ -67,7 +67,7 @@ const stampConversationParentStateSQL = `
 SELECT COALESCE((
     SELECT CASE
                WHEN c.parent_conversation_id IS NOT NULL THEN '` + stampStateStamped + `'
-               WHEN COALESCE(ch.labels->>'rafiki/parent', ch.labels->>'fundi/parent', '') = ''
+               WHEN COALESCE(ch.parent_id, '') = ''
                    THEN '` + stampStateParentless + `'
                ELSE '` + stampStatePending + `'
            END

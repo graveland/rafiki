@@ -130,7 +130,12 @@ func TestDescendants(t *testing.T) {
 	c.Empty(s.Descendants("z"), "Descendants(z) should be empty")
 }
 
-func TestLegacyFundiPrefixTolerated(t *testing.T) {
+// TestPreRenamePrefixIsNotAParent pins that the tree reads ONE spelling:
+// migration 0076 rewrites stored fundi/parent to rafiki/parent, so a session
+// whose labels still carry the old key (a stale in-memory record, or a row
+// written by a daemon older than the migration) has NO parent and is not a
+// descendant — it must not be silently grafted onto the canonical tree.
+func TestPreRenamePrefixIsNotAParent(t *testing.T) {
 	s := childstore.New()
 	s.Insert(&childstore.Session{
 		ChildID:   "old",
@@ -139,10 +144,10 @@ func TestLegacyFundiPrefixTolerated(t *testing.T) {
 		Labels:    map[string]string{"fundi/parent": "a", "fundi/root": "a"},
 	})
 	insert(t, s, "a", "", "")
-	if p, ok := s.ParentOf("old"); !ok || p != "a" {
-		t.Fatalf("ParentOf on a legacy fundi/ record = %q,%v; want a,true", p, ok)
+	if p, ok := s.ParentOf("old"); ok {
+		t.Fatalf("ParentOf on a pre-rename fundi/ record = %q,%v; want no parent", p, ok)
 	}
-	assert.NewAborting(t).True(s.IsDescendant("a", "old"), "a legacy fundi/-labelled child should still be found as a descendant")
+	assert.NewAborting(t).False(s.IsDescendant("a", "old"), "a pre-rename fundi/ label describes no parent")
 }
 
 func TestCycleTerminates(t *testing.T) {

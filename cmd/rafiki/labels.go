@@ -13,10 +13,9 @@ var cliLabelKeyRE = regexp.MustCompile(`^[a-zA-Z0-9_./-]+$`)
 // validateCLILabelKey validates a single label key from CLI input.
 // Rejects empty keys, disallowed characters, and the reserved rafiki/ prefix.
 //
-// The prefix was "fundi/" pre-rename; a child spawned before the rename still
-// carries "fundi/*" auto-labels on its persisted record (no migration
-// rewrites old rows), so a "rafiki/*" filter will not match it. See
-// childstore.Session.Labels and docs/MIGRATING.md.
+// The prefix was "fundi/" pre-rename; migration 0076 rewrites every stored
+// fundi/<k> to rafiki/<k>, so a "rafiki/*" filter matches every child whatever
+// version spawned it. See childstore.Session.Labels and docs/MIGRATING.md.
 func validateCLILabelKey(k string) error {
 	if k == "" {
 		return fmt.Errorf("label key must not be empty")

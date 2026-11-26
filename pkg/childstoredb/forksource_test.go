@@ -4,10 +4,12 @@ package childstoredb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multigres/testkit/assert"
@@ -160,18 +162,24 @@ func TestForkSourceMissing(t *testing.T) {
 	c.EqDeep(childstore.ForkSource{}, got, "an unknown child answers the zero value")
 }
 
-func TestForkSourceNonObjectLabelsIsError(t *testing.T) {
-	c := assert.NewCollecting(t)
+// TestForkSourceLabelsShapeIsEnforcedAtTheWrite pins where a corrupt labels
+// value is refused: migration 0076's child_labels_lineage_shape constraint, not
+// a decode in ForkSource. The row cannot exist, so the read never has to answer
+// for one — the parent/root columns it reads are always the strings or NULLs
+// the constraint guarantees.
+func TestForkSourceLabelsShapeIsEnforcedAtTheWrite(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := scratchPool(t)
 	s := New(pool)
 	ctx := context.Background()
 
 	childID := forkChildID("badlabels")
 	upsertForkChild(t, s, childstore.ChildRecord{ChildID: childID, Kind: protocol.KindFundi})
-	_, err := pool.Exec(ctx, `UPDATE conversations.child SET labels = '[]'::jsonb WHERE child_id = $1`, childID)
-	assert.NewAborting(t).NoError(err, "corrupt labels")
 
-	_, ok, err := s.ForkSource(ctx, childID)
-	c.False(ok, "a row whose labels are not an object does not answer")
-	c.Error(err, "labels that are not a JSON object are an error")
+	_, err := pool.Exec(ctx, `UPDATE conversations.child SET labels = '[]'::jsonb WHERE child_id = $1`, childID)
+	c.Error(err, "labels that are not a JSON object must be refused by the write")
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		c.Eq("child_labels_lineage_shape", pgErr.ConstraintName, "the refusal must name the shape constraint")
+	}
 }

@@ -39,19 +39,19 @@ type RootedLineageSource interface {
 	LineageWithRoot(ctx context.Context, ancestorChildID, rootFallback string) ([]LineageMember, error)
 }
 
-// LineageRow pairs a member with the labels it was read with, so a caller can
-// walk the parent chain without a second lookup. Labels are the raw child
-// labels (rafiki/parent, rafiki/root, and their legacy fundi/ spellings).
+// LineageRow pairs a member with the parent/root it was read with, so a caller
+// can walk the parent chain without a second lookup. Labels carries only
+// LabelParent and LabelRoot, and only when the row has them.
 type LineageRow struct {
 	Member LineageMember
 	Labels map[string]string
 }
 
 // DescendantsOf returns the ancestor's own row (when present in rows) and
-// every row beneath it, walking the parent labels (LabelParent, legacy
-// fundi/parent) with the same bound as IsDescendant (maxChainDepth). A row
-// whose chain does not reach the ancestor within the bound is excluded; a
-// cycle can never loop (the bound ends it); rows are returned in input order.
+// every row beneath it, walking the parent labels (LabelParent) with the same
+// bound as IsDescendant (maxChainDepth). A row whose chain does not reach the
+// ancestor within the bound is excluded; a cycle can never loop (the bound ends
+// it); rows are returned in input order.
 //
 // It is pure Go: no database, no store. The rows are what a lineage source
 // read, and this is the in-memory walk shared by every implementation.
@@ -88,8 +88,8 @@ func reachesAncestor(labels map[string]map[string]string, cur, ancestor string) 
 		if !ok {
 			return false
 		}
-		parent, ok := labelLookup(l, LabelParent, legacyLabelParent)
-		if !ok {
+		parent := l[LabelParent]
+		if parent == "" {
 			return false
 		}
 		if parent == ancestor {
@@ -101,9 +101,8 @@ func reachesAncestor(labels map[string]map[string]string, cur, ancestor string) 
 }
 
 // RootLabel returns the top-level ancestor's child id stored in labels
-// (LabelRoot, else legacy fundi/root), or "" when neither is present — a
-// top-level child is its own root, which the caller resolves.
+// (LabelRoot), or "" when it is absent — a top-level child is its own root,
+// which the caller resolves.
 func RootLabel(labels map[string]string) string {
-	v, _ := labelLookup(labels, LabelRoot, legacyLabelRoot)
-	return v
+	return labels[LabelRoot]
 }
