@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/conv"
 )
@@ -45,7 +46,7 @@ func (s *recordingStore) CompleteTurn(ctx context.Context, r capture.TurnResult)
 func (s *recordingStore) FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error {
 	return nil
 }
-func (s *recordingStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (string, error) {
+func (s *recordingStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, req *anthropicreq.Request, prefixHash, prevMessageID string) (string, error) {
 	return "head-1", nil
 }
 func (s *recordingStore) CompleteCapturedTurn(ctx context.Context, c capture.TurnCompletion) error {

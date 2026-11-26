@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -26,6 +27,18 @@ import (
 
 	"github.com/multigres/testkit/assert"
 )
+
+// reqOf parses a test's request body the way the proxy does — once, up front —
+// so the capture entry points take the same decoded request production hands
+// them.
+func reqOf(t *testing.T, body []byte) *anthropicreq.Request {
+	t.Helper()
+	req, err := anthropicreq.Parse(body)
+	if err != nil {
+		t.Fatalf("test request body does not parse: %v", err)
+	}
+	return req
+}
 
 // TestCaptureStore requires a real PostgreSQL 18 (for uuidv7()). Set
 // RAFIKI_TEST_DSN to a connection string to run it, e.g.:
@@ -283,7 +296,7 @@ func TestDecomposeRequest_MessagesAndPrefix(t *testing.T) {
 		ConversationID: convID, PrefixHash: routing.PrefixHash(req), Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
 
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, req), routing.PrefixHash(req), "")
 	c.NoError(err, "DecomposeRequest")
 
 	// two message rows, the second hanging off the first, and the head is the
@@ -336,7 +349,7 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 	h := routing.PrefixHash(req)
 	t1, c1, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: h})
 	c.NoError(err, "InsertTurnIntent (t1)")
-	if _, err := s.DecomposeRequest(ctx, convID, t1, c1, req, h, ""); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, t1, c1, reqOf(t, req), h, ""); err != nil {
 		t.Fatalf("DecomposeRequest (t1): %v", err)
 	}
 
@@ -344,7 +357,7 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 	req2 := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
 	t2, c2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: h})
 	c.NoError(err, "InsertTurnIntent (t2)")
-	if _, err := s.DecomposeRequest(ctx, convID, t2, c2, req2, h, ""); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, t2, c2, reqOf(t, req2), h, ""); err != nil {
 		t.Fatalf("DecomposeRequest (t2): %v", err)
 	}
 
@@ -353,28 +366,6 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 		`SELECT prefix_content::text FROM conversations.conversation_turn WHERE id=$1 AND created_at=$2`, t2, c2).Scan(&pc), "read prefix_content")
 	if pc != nil {
 		t.Fatalf("prefix_content = %q, want NULL (prefix_hash unchanged from previous turn)", *pc)
-	}
-}
-
-// TestMessageHasCacheControl checks the structure-aware detection directly (no
-// DB): only a real cache_control field on a content block counts; plain-string
-// content is never a breakpoint even when its text embeds the literal token.
-func TestMessageHasCacheControl(t *testing.T) {
-	cases := []struct {
-		name    string
-		content string
-		want    bool
-	}{
-		{"block with cache_control", `[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]`, true},
-		{"block without cache_control", `[{"type":"text","text":"x"}]`, false},
-		{"plain string mentioning the token", `"please explain \"cache_control\" to me"`, false},
-		{"plain string", `"hello"`, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := messageHasCacheControl(json.RawMessage(c.content))
-			assert.NewCollecting(t).Eq(c.want, got, "messageHasCacheControl(%s) = %v, want", c.content, got)
-		})
 	}
 }
 
@@ -422,7 +413,7 @@ func TestDecomposeRequest_NullEscapeInContent(t *testing.T) {
 	req := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"before\u0000after"}]}]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: routing.PrefixHash(req)})
 	c.Require().NoError(err, "InsertTurnIntent with a \\u0000 in request")
-	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), ""); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, req), routing.PrefixHash(req), ""); err != nil {
 		t.Fatalf("DecomposeRequest with a \\u0000 in content should succeed, got: %v", err)
 	}
 
@@ -461,7 +452,7 @@ func TestDecomposeRequest_PrefixChangeReStores(t *testing.T) {
 	decompose := func(req []byte, h string) (string, time.Time) {
 		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: h})
 		c.NoError(err, "InsertTurnIntent")
-		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h, ""); err != nil {
+		if _, err := s.DecomposeRequest(ctx, convID, id, ca, reqOf(t, req), h, ""); err != nil {
 			t.Fatalf("DecomposeRequest: %v", err)
 		}
 		return id, ca
@@ -508,7 +499,7 @@ func TestDecomposeRequest_CrossTurnIdempotent(t *testing.T) {
 		h := routing.PrefixHash(req)
 		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, PrefixHash: h})
 		c.NoError(err, "InsertTurnIntent")
-		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h, ""); err != nil {
+		if _, err := s.DecomposeRequest(ctx, convID, id, ca, reqOf(t, req), h, ""); err != nil {
 			t.Fatalf("DecomposeRequest: %v", err)
 		}
 	}
@@ -568,7 +559,7 @@ func runTurnFrom(t *testing.T, ctx context.Context, s *CaptureStore, convID stri
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, prevMessageID)
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, req), h, prevMessageID)
 	c.NoError(err, "DecomposeRequest")
 	c.NoError(s.CompleteTurn(ctx, TurnResult{
 		TurnID: turnID, CreatedAt: createdAt, Response: []byte(`{"content":[]}`),
@@ -595,7 +586,7 @@ func runFullTurn(t *testing.T, ctx context.Context, s *CaptureStore, convID stri
 			StopReason: "end_turn", Upstream: "anthropic", InputTokens: inTok, OutputTokens: outTok},
 		PrevMessageID: prevMessageID,
 		OwnMessageID:  MessageIDFromCanonical(reply),
-		ReqBody:       req,
+		Req:           reqOf(t, req),
 		PrefixHash:    h,
 		Canonical:     reply,
 	}), "CompleteCapturedTurn")
@@ -854,7 +845,7 @@ func TestDecomposeRequest_CacheBreakpoints(t *testing.T) {
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, PrefixHash: routing.PrefixHash(req)})
 	c.NoError(err, "InsertTurnIntent")
-	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), ""); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, req), routing.PrefixHash(req), ""); err != nil {
 		t.Fatalf("DecomposeRequest: %v", err)
 	}
 
@@ -894,7 +885,7 @@ func TestAppendResponseMessage(t *testing.T) {
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, PrefixHash: routing.PrefixHash(req)})
 	c.NoError(err, "InsertTurnIntent")
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, req), routing.PrefixHash(req), "")
 	c.NoError(err, "DecomposeRequest")
 
 	canonical := []byte(`{"id":"msg_hello","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}`)
@@ -960,7 +951,7 @@ func TestAppendResponseMessageFailsWhenTheTurnKeyMoved(t *testing.T) {
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, PrefixHash: routing.PrefixHash(req)})
 	c.NoError(err, "InsertTurnIntent")
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, req), routing.PrefixHash(req), "")
 	c.NoError(err, "DecomposeRequest")
 
 	// Move the turn's key out from under the caller's createdAt, which is what a
@@ -1201,7 +1192,7 @@ func TestRequestMessageReplayStaysLenient(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = s.DecomposeRequest(ctx, convID, id, at, body, "h", "")
+		_, err = s.DecomposeRequest(ctx, convID, id, at, reqOf(t, body), "h", "")
 		return err
 	}
 	if err := decompose(); err != nil {
@@ -1265,7 +1256,7 @@ func TestConcurrentThreadsDoNotShareATree(t *testing.T) {
 	for _, conv := range []string{root, branch} {
 		turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: conv, Model: "m"})
 		ck.Require().NoError(err, "InsertTurnIntent")
-		if _, err := s.DecomposeRequest(ctx, conv, turnID, createdAt, body, "h", ""); err != nil {
+		if _, err := s.DecomposeRequest(ctx, conv, turnID, createdAt, reqOf(t, body), "h", ""); err != nil {
 			t.Fatalf("decompose %s: %v", conv, err)
 		}
 	}
@@ -1524,7 +1515,7 @@ func TestIndependentFoundingRequestLandsOnItsOwnBranch(t *testing.T) {
 	tMain, atMain, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: root, Model: "m"})
 	c.Require().NoError(err, "InsertTurnIntent main")
 	c.Require().NoError(s.RecordThread(ctx, session, root, tMain, atMain, "", "msg_main", false), "RecordThread main")
-	mainHead, err := s.DecomposeRequest(ctx, root, tMain, atMain, []byte(`{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}`), "h", "")
+	mainHead, err := s.DecomposeRequest(ctx, root, tMain, atMain, reqOf(t, []byte(`{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}`)), "h", "")
 	c.Require().NoError(err, "decompose main")
 	c.Require().NoError(s.AppendResponseMessage(ctx, root, tMain, atMain, mainHead, []byte(`{"id":"msg_main","role":"assistant","content":[]}`), 1, 1, "end_turn"), "append main response")
 
@@ -1545,7 +1536,7 @@ func TestIndependentFoundingRequestLandsOnItsOwnBranch(t *testing.T) {
 	// The probe's failing step, now green: the founding response appends on
 	// the BRANCH, under the branch's own tree, while the root row keeps its
 	// three nodes.
-	foundingHead, err := s.DecomposeRequest(ctx, branch, tF, atF, []byte(`{"messages":[{"role":"user","content":"quick task"}]}`), "h", "")
+	foundingHead, err := s.DecomposeRequest(ctx, branch, tF, atF, reqOf(t, []byte(`{"messages":[{"role":"user","content":"quick task"}]}`)), "h", "")
 	c.Require().NoError(err, "decompose founding")
 	c.Require().NoError(s.AppendResponseMessage(ctx, branch, tF, atF, foundingHead, []byte(`{"id":"msg_sub1","role":"assistant","content":[]}`), 1, 1, "end_turn"), "append founding response")
 

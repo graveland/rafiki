@@ -39,7 +39,7 @@ func clearDecompose(t *testing.T, ctx context.Context, s *CaptureStore, convID s
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, PrefixHash: h, Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, h, "")
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, req), h, "")
 	c.NoError(err, "DecomposeRequest")
 	return head
 }

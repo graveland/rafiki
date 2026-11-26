@@ -70,11 +70,22 @@ func ParseBillingHeader(systemText string) (Billing, bool) {
 	return Billing{}, false
 }
 
-// BillingFromRequest reads system block 0 out of an Anthropic Messages request
-// and parses its billing line. Every shape other than "an array whose first
-// element has a text field" answers ok=false rather than failing: system is
-// absent on 30 of 4952 stored prefixes, and a non-Claude-Code client may send
-// a plain string.
+// BillingFromSystem reads system block 0 out of a request's `system` value (the
+// raw JSON of the top-level system key) and parses its billing line. Every shape
+// other than "an array whose first element has a text field" answers ok=false
+// rather than failing: system is absent on 30 of 4952 stored prefixes, and a
+// non-Claude-Code client may send a plain string.
+func BillingFromSystem(raw json.RawMessage) (Billing, bool) {
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil || len(blocks) == 0 {
+		return Billing{}, false
+	}
+	return ParseBillingHeader(blocks[0].Text)
+}
+
+// BillingFromRequest is BillingFromSystem for a whole request body.
 func BillingFromRequest(reqBody []byte) (Billing, bool) {
 	var req struct {
 		System json.RawMessage `json:"system"`
@@ -82,17 +93,12 @@ func BillingFromRequest(reqBody []byte) (Billing, bool) {
 	if err := json.Unmarshal(reqBody, &req); err != nil {
 		return Billing{}, false
 	}
-	var blocks []struct {
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(req.System, &blocks); err != nil || len(blocks) == 0 {
-		return Billing{}, false
-	}
-	return ParseBillingHeader(blocks[0].Text)
+	return BillingFromSystem(req.System)
 }
 
-// DeclaresClientTools reports whether the request declares at least one tool
-// the CLIENT must execute — an entry carrying an input_schema.
+// DeclaresClientToolsFrom reports whether a request's `tools` value (the raw
+// JSON of the top-level tools key) declares at least one tool the CLIENT must
+// execute — an entry carrying an input_schema.
 //
 // This separates a Task subagent from Claude Code's per-tool-call model
 // helpers, which cc_is_subagent alone does not: the flag means "not the main
@@ -114,16 +120,14 @@ func BillingFromRequest(reqBody []byte) (Billing, bool) {
 // use them — it declares its own Bash with a full schema — and the failure
 // direction is a real subagent losing its rail row, never a helper gaining
 // one.
-func DeclaresClientTools(reqBody []byte) bool {
-	var req struct {
-		Tools []struct {
-			InputSchema json.RawMessage `json:"input_schema"`
-		} `json:"tools"`
+func DeclaresClientToolsFrom(raw json.RawMessage) bool {
+	var tools []struct {
+		InputSchema json.RawMessage `json:"input_schema"`
 	}
-	if err := json.Unmarshal(reqBody, &req); err != nil {
+	if err := json.Unmarshal(raw, &tools); err != nil {
 		return false
 	}
-	for _, t := range req.Tools {
+	for _, t := range tools {
 		// A literal null decodes to the four bytes "null", not to an empty
 		// RawMessage, so length alone would read a malformed declaration as a
 		// client tool.
@@ -134,22 +138,43 @@ func DeclaresClientTools(reqBody []byte) bool {
 	return false
 }
 
-// PreviousMessageID returns diagnostics.previous_message_id, the id of the
-// assistant message this request's thread last received, or "" when absent.
+// DeclaresClientTools is DeclaresClientToolsFrom for a whole request body.
+func DeclaresClientTools(reqBody []byte) bool {
+	var req struct {
+		Tools json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(reqBody, &req); err != nil {
+		return false
+	}
+	return DeclaresClientToolsFrom(req.Tools)
+}
+
+// PreviousMessageIDFrom reads diagnostics.previous_message_id out of a request's
+// `diagnostics` value (the raw JSON of the top-level diagnostics key), or ""
+// when it is absent.
 //
 // This is the thread chain. Measured on conversation
 // 01a08be4-4315-7ca5-afd2-ccc0ecf6a3b2: 177 turns, 172 carried it, all 172
 // distinct, no forks, across three concurrent Task subagents. Across the whole
 // database only 6 of 3583 linked turns share a predecessor (retries), max
 // fan-out 4. Absent means a thread root.
+func PreviousMessageIDFrom(raw json.RawMessage) string {
+	var d struct {
+		PreviousMessageID string `json:"previous_message_id"`
+	}
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return ""
+	}
+	return d.PreviousMessageID
+}
+
+// PreviousMessageID is PreviousMessageIDFrom for a whole request body.
 func PreviousMessageID(reqBody []byte) string {
 	var req struct {
-		Diagnostics struct {
-			PreviousMessageID string `json:"previous_message_id"`
-		} `json:"diagnostics"`
+		Diagnostics json.RawMessage `json:"diagnostics"`
 	}
 	if err := json.Unmarshal(reqBody, &req); err != nil {
 		return ""
 	}
-	return req.Diagnostics.PreviousMessageID
+	return PreviousMessageIDFrom(req.Diagnostics)
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/convtree"
 	"go.graveland.dev/rafiki/pkg/msg"
@@ -584,11 +585,12 @@ func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt ti
 //
 // Content is stored verbatim (conv.StorableJSON'd; empty content becomes JSON null).
 // Also stores prefix_content on this turn iff prefixHash differs from the
-// previous turn's, and records cache-breakpoints on the turn. Returns the error
-// for the caller to escalate (the proxy fails the turn), never panics, never
-// alters reqBody.
-func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (string, error) {
-	msgs, err := requestMessages(reqBody)
+// previous turn's, and records cache-breakpoints on the turn. A request that is
+// already decoded is passed in (pkg/anthropicreq), so this path never re-parses
+// the body. Returns the error for the caller to escalate (the proxy fails the
+// turn), never panics, never alters req.
+func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, req *anthropicreq.Request, prefixHash, prevMessageID string) (string, error) {
+	msgs, err := requestMessages(req)
 	if err != nil {
 		return "", err
 	}
@@ -615,7 +617,7 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 			return fmt.Errorf("decompose: %w", aerr)
 		}
 		head = h
-		return s.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqBody, prefixHash)
+		return s.StoreTurnPrefix(ctx, convID, turnID, createdAt, req, prefixHash)
 	})
 	if err != nil {
 		return "", err
@@ -623,28 +625,23 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 	return head, nil
 }
 
-// requestMessages parses a request body's messages[] into tree messages.
+// requestMessages parses a request's messages[] into tree messages.
 // Content is stored verbatim (conv.StorableJSON'd; empty content becomes JSON
 // null).
-func requestMessages(reqBody []byte) ([]convtree.Msg, error) {
-	var req struct {
-		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
+func requestMessages(req *anthropicreq.Request) ([]convtree.Msg, error) {
+	msgs, err := req.Messages()
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(reqBody, &req); err != nil {
-		return nil, fmt.Errorf("decompose: unmarshal request: %w", err)
-	}
-	msgs := make([]convtree.Msg, len(req.Messages))
-	for i, m := range req.Messages {
+	out := make([]convtree.Msg, len(msgs))
+	for i, m := range msgs {
 		content := m.Content
 		if len(content) == 0 {
 			content = json.RawMessage(`null`)
 		}
-		msgs[i] = convtree.Msg{Role: m.Role, Content: conv.StorableJSON(content)}
+		out[i] = convtree.Msg{Role: m.Role, Content: conv.StorableJSON(content)}
 	}
-	return msgs, nil
+	return out, nil
 }
 
 // attachRequest performs the attach decision, appends the chain and records the
@@ -962,8 +959,8 @@ func headText(content []byte) string {
 // path: that path writes messages at conversation-history ordinals, which don't
 // align with DecomposeRequest's index-in-request ordinals once history is merged
 // or trimmed. Best-effort: returns an error for the caller to Warn; never panics.
-func (s *CaptureStore) StoreTurnPrefix(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) error {
-	envelope, breakpoints, err := splitEnvelopeAndBreakpoints(reqBody)
+func (s *CaptureStore) StoreTurnPrefix(ctx context.Context, convID, turnID string, createdAt time.Time, req *anthropicreq.Request, prefixHash string) error {
+	envelope, breakpoints, err := splitEnvelopeAndBreakpoints(req)
 	if err != nil {
 		return fmt.Errorf("store turn prefix: %w", err)
 	}
@@ -987,7 +984,10 @@ func (s *CaptureStore) StoreTurnPrefix(ctx context.Context, convID, turnID strin
 // speak the Messages API, so no markers were ever sent). Those are different
 // claims and the column keeps them apart.
 func (s *CaptureStore) StoreTurnPrefixBreakpoints(ctx context.Context, convID, turnID string, createdAt time.Time, body []byte, breakpoints []int, prefixHash string) error {
-	envelope, _, err := splitEnvelopeAndBreakpoints(body)
+	// An undecodable body reports through the splitter, exactly as it did when
+	// the splitter owned the decode.
+	req, _ := anthropicreq.Parse(body)
+	envelope, _, err := splitEnvelopeAndBreakpoints(req)
 	if err != nil {
 		return fmt.Errorf("store turn prefix: %w", err)
 	}
@@ -1048,66 +1048,8 @@ func (s *CaptureStore) prefixChanged(ctx context.Context, convID string, created
 // splitEnvelopeAndBreakpoints returns (request-minus-messages JSONB, cache_control breakpoint
 // ordinals JSONB). Breakpoints are the indices of messages carrying a cache_control marker,
 // as a JSON array; envelope is the request with "messages" removed.
-func splitEnvelopeAndBreakpoints(reqBody []byte) (envelope []byte, breakpoints []byte, err error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(reqBody, &m); err != nil {
-		return nil, nil, fmt.Errorf("split envelope: unmarshal request: %w", err)
-	}
-	// breakpoints: index of each message whose content has a cache_control field
-	var msgs []struct {
-		Content json.RawMessage `json:"content"`
-	}
-	idxs := []int{}
-	if raw, ok := m["messages"]; ok {
-		if err := json.Unmarshal(raw, &msgs); err == nil {
-			for i, mm := range msgs {
-				if messageHasCacheControl(mm.Content) {
-					idxs = append(idxs, i)
-				}
-			}
-		}
-	}
-	delete(m, "messages")
-	envelope, err = json.Marshal(m)
-	if err != nil {
-		return nil, nil, fmt.Errorf("split envelope: marshal envelope: %w", err)
-	}
-	breakpoints, err = json.Marshal(idxs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("split envelope: marshal breakpoints: %w", err)
-	}
-	return envelope, breakpoints, nil
-}
-
-// messageHasCacheControl reports whether a message's content carries a
-// cache_control field on any content block. It decodes content as an array of
-// blocks (the shape cache_control actually appears in) and inspects each
-// block's cache_control field directly, so a message whose text merely
-// contains the literal substring "cache_control" is not a false positive.
-// Plain-string content carries no cache_control block, so it is always false —
-// even when the string text embeds the literal token. Only a genuinely
-// unexpected shape falls back to a conservative substring check.
-func messageHasCacheControl(content json.RawMessage) bool {
-	var blocks []struct {
-		CacheControl json.RawMessage `json:"cache_control"`
-	}
-	if err := json.Unmarshal(content, &blocks); err == nil {
-		for _, b := range blocks {
-			if len(b.CacheControl) > 0 {
-				return true
-			}
-		}
-		return false
-	}
-	// A plain string message has no per-block cache_control; decoding it as a
-	// string (rather than substring-matching) avoids flagging text that merely
-	// mentions the token.
-	var str string
-	if err := json.Unmarshal(content, &str); err == nil {
-		return false
-	}
-	// Genuinely unexpected shape — conservative substring check so capture never fails.
-	return bytes.Contains(content, []byte(`"cache_control"`))
+func splitEnvelopeAndBreakpoints(req *anthropicreq.Request) (envelope []byte, breakpoints []byte, err error) {
+	return req.EnvelopeAndBreakpoints()
 }
 
 // AppendResponseMessage appends the canonical assistant message as a child of

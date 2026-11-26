@@ -64,7 +64,8 @@ func insertCompletionTurn(t *testing.T, s *CaptureStore, convID, model, prefix s
 
 // completion builds a TurnCompletion for one call: the outcome, and the request
 // and response to record.
-func completion(turnID string, createdAt time.Time, convID, session, prev, own string, req []byte, prefix string, canonical []byte) TurnCompletion {
+func completion(t *testing.T, turnID string, createdAt time.Time, convID, session, prev, own string, req []byte, prefix string, canonical []byte) TurnCompletion {
+	t.Helper()
 	return TurnCompletion{
 		TurnResult: TurnResult{TurnID: turnID, CreatedAt: createdAt, ConversationID: convID,
 			Model: "m", StopReason: "end_turn", Upstream: "anthropic",
@@ -72,7 +73,7 @@ func completion(turnID string, createdAt time.Time, convID, session, prev, own s
 		Session:       session,
 		PrevMessageID: prev,
 		OwnMessageID:  own,
-		ReqBody:       req,
+		Req:           reqOf(t, req),
 		PrefixHash:    prefix,
 		Canonical:     canonical,
 	}
@@ -147,7 +148,7 @@ func TestCompleteCapturedTurnWritesTheWholeCallInOneTransaction(t *testing.T) {
 	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
 
 	tr.reset()
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turnID, createdAt, convID, session, "",
 		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "CompleteCapturedTurn")
 	c.Eq(1, tr.countOf("commit"), "the whole call commits exactly once")
 
@@ -183,7 +184,7 @@ func TestCompleteCapturedTurnStaleKeyRollsBackTheNodes(t *testing.T) {
 	prefix := routing.PrefixHash(req)
 	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
 
-	stale := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	stale := completion(t, turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
 	stale.CreatedAt = stale.CreatedAt.Add(time.Second)
 	c.ErrorContains(s.CompleteCapturedTurn(ctx, stale), "expected 1 row", "a skewed key is refused")
 
@@ -210,7 +211,7 @@ func TestCompleteCapturedTurnRecordsTheCallsOutcomeAndThread(t *testing.T) {
 	}
 	t.Cleanup(func() { s.resolveThreadFn = nil })
 
-	call := completion(turnID, createdAt, convID, session, "", "msg_out", req, prefix, canonicalReply("msg_out", "ok"))
+	call := completion(t, turnID, createdAt, convID, session, "", "msg_out", req, prefix, canonicalReply("msg_out", "ok"))
 	call.IsSubagent = true
 	call.Response = canonicalReply("msg_out", "ok")
 	call.ServedProvider = "anthropic"
@@ -238,7 +239,7 @@ func TestCompleteCapturedTurnTwiceIsIdempotent(t *testing.T) {
 	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix := routing.PrefixHash(req)
 	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
-	call := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	call := completion(t, turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
 
 	c.NoError(s.CompleteCapturedTurn(ctx, call), "first")
 	before := turnJSON(t, ctx, pool, turnID)
@@ -270,13 +271,13 @@ func TestCompleteCapturedTurnMatchedRequestAttachesTheReplyUnderTheHead(t *testi
 	req1 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix1 := routing.PrefixHash(req1)
 	turn1, at1 := insertCompletionTurn(t, s, convID, "m", prefix1)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn1, at1, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn1, at1, convID, session, "",
 		"msg_1", req1, prefix1, canonicalReply("msg_1", "ok"))), "turn 1")
 
 	req2 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"text","text":"ok"}]}]}`)
 	prefix2 := routing.PrefixHash(req2)
 	turn2, at2 := insertCompletionTurn(t, s, convID, "m", prefix2)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn2, at2, convID, session, "msg_1",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn2, at2, convID, session, "msg_1",
 		"msg_2", req2, prefix2, canonicalReply("msg_2", "second"))), "turn 2")
 
 	head := mustProviderNode(t, ctx, pool, convID, "msg_1")
@@ -302,7 +303,7 @@ func TestCompleteCapturedTurnWithNoHistoryHangsUnderTheHead(t *testing.T) {
 	req1 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix1 := routing.PrefixHash(req1)
 	turn1, at1 := insertCompletionTurn(t, s, convID, "m", prefix1)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn1, at1, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn1, at1, convID, session, "",
 		"msg_1", req1, prefix1, canonicalReply("msg_1", "ok"))), "turn 1")
 	head := mustHead(t, ctx, pool, convID)
 	c.Eq(mustProviderNode(t, ctx, pool, convID, "msg_1"), head, "turn 1's reply is the head")
@@ -310,7 +311,7 @@ func TestCompleteCapturedTurnWithNoHistoryHangsUnderTheHead(t *testing.T) {
 	req2 := []byte(`{"model":"m","messages":[]}`)
 	prefix2 := routing.PrefixHash(req2)
 	turn2, at2 := insertCompletionTurn(t, s, convID, "m", prefix2)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn2, at2, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn2, at2, convID, session, "",
 		"msg_2", req2, prefix2, canonicalReply("msg_2", "second"))), "turn 2")
 
 	c.Eq(head, mustParent(t, ctx, pool, mustProviderNode(t, ctx, pool, convID, "msg_2")),
@@ -330,14 +331,14 @@ func TestCompleteCapturedTurnWithNoHistoryTwiceIsIdempotent(t *testing.T) {
 	req1 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix1 := routing.PrefixHash(req1)
 	turn1, at1 := insertCompletionTurn(t, s, convID, "m", prefix1)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn1, at1, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn1, at1, convID, session, "",
 		"msg_1", req1, prefix1, canonicalReply("msg_1", "ok"))), "turn 1")
 	head := mustHead(t, ctx, pool, convID)
 
 	req2 := []byte(`{"model":"m","messages":[]}`)
 	prefix2 := routing.PrefixHash(req2)
 	turn2, at2 := insertCompletionTurn(t, s, convID, "m", prefix2)
-	call := completion(turn2, at2, convID, session, "", "msg_2", req2, prefix2, canonicalReply("msg_2", "second"))
+	call := completion(t, turn2, at2, convID, session, "", "msg_2", req2, prefix2, canonicalReply("msg_2", "second"))
 	c.NoError(s.CompleteCapturedTurn(ctx, call), "turn 2")
 	after := readCompletedTurn(t, ctx, pool, turn2)
 	nodes := mustNodeCount(t, ctx, pool, convID)
@@ -362,7 +363,7 @@ func TestCompleteCapturedTurnReplayDoesNotRewindTheHead(t *testing.T) {
 	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix := routing.PrefixHash(req)
 	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
-	call := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	call := completion(t, turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
 	c.NoError(s.CompleteCapturedTurn(ctx, call), "the call")
 
 	// A later turn advances the conversation past this call's reply.
@@ -391,7 +392,7 @@ func TestCompleteCapturedTurnModelBackfillRollsBackWithTheCommit(t *testing.T) {
 	turnID, createdAt := insertCompletionTurn(t, s, convID, "", prefix)
 
 	s = s.WithConv(conv.NewStore(refusesAfterTheHook{Backend: store.NewConvBackend(pool)}, conv.Options{}))
-	call := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	call := completion(t, turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
 	c.Error(s.CompleteCapturedTurn(ctx, call), "a refused commit fails the call")
 
 	c.False(s.memo.modelKnown(convID), "a refused commit leaves the memo cold")
@@ -432,13 +433,13 @@ func TestCompleteCapturedTurnReplayWithoutAReplyIDStoresNothing(t *testing.T) {
 	req1 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix1 := routing.PrefixHash(req1)
 	turn1, at1 := insertCompletionTurn(t, s, convID, "m", prefix1)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn1, at1, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn1, at1, convID, session, "",
 		"msg_1", req1, prefix1, canonicalReply("msg_1", "ok"))), "turn 1")
 
 	req2 := []byte(`{"model":"m","messages":[]}`)
 	prefix2 := routing.PrefixHash(req2)
 	turn2, at2 := insertCompletionTurn(t, s, convID, "m", prefix2)
-	call := completion(turn2, at2, convID, session, "", "", req2, prefix2,
+	call := completion(t, turn2, at2, convID, session, "", "", req2, prefix2,
 		[]byte(`{"role":"assistant","content":[{"type":"text","text":"no id"}]}`))
 	c.NoError(s.CompleteCapturedTurn(ctx, call), "turn 2")
 	before := readCompletedTurn(t, ctx, pool, turn2)
@@ -465,7 +466,7 @@ func TestCompleteCapturedTurnThreadFailureDoesNotFailTheCompletion(t *testing.T)
 	}
 	t.Cleanup(func() { s.resolveThreadFn = nil })
 
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turnID, createdAt, convID, session, "",
 		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "the completion still succeeds")
 
 	row := readCompletedTurn(t, ctx, pool, turnID)
@@ -504,14 +505,14 @@ func TestCompleteCapturedTurnMarksTheModelOnlyAfterCommit(t *testing.T) {
 	c.False(s.memo.modelKnown(convID), "nothing marked the model before the completion")
 	c.Eq("", model(), "the conversation names no model yet")
 
-	stale := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	stale := completion(t, turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
 	stale.CreatedAt = stale.CreatedAt.Add(time.Second)
 	stale.Model = "served-model"
 	c.ErrorContains(s.CompleteCapturedTurn(ctx, stale), "expected 1 row", "the stale key fails")
 	c.False(s.memo.modelKnown(convID), "a failed completion does not mark the model")
 	c.Eq("", model(), "and writes no model")
 
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turnID, createdAt, convID, session, "",
 		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "the retry succeeds")
 	c.True(s.memo.modelKnown(convID), "a committed completion marks the model")
 	c.Eq("m", model(), "and the response model fills the conversation")
@@ -529,12 +530,12 @@ func TestCompleteCapturedTurnStoresPrefixOnlyWhenItChanged(t *testing.T) {
 	body1 := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix1 := routing.PrefixHash(body1)
 	turn1, at1 := insertCompletionTurn(t, s, convID, "m", prefix1)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn1, at1, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn1, at1, convID, session, "",
 		"msg_1", body1, prefix1, canonicalReply("msg_1", "ok"))), "turn 1")
 	c.NotEmpty(readCompletedTurn(t, ctx, pool, turn1).PrefixContent, "the first turn stores its prefix")
 
 	turn2, at2 := insertCompletionTurn(t, s, convID, "m", prefix1)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn2, at2, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn2, at2, convID, session, "",
 		"msg_2", body1, prefix1, canonicalReply("msg_2", "second"))), "turn 2")
 	row2 := readCompletedTurn(t, ctx, pool, turn2)
 	c.Eq("", row2.PrefixContent, "an unchanged prefix is not stored again")
@@ -543,7 +544,7 @@ func TestCompleteCapturedTurnStoresPrefixOnlyWhenItChanged(t *testing.T) {
 	body3 := []byte(`{"model":"m2","messages":[{"role":"user","content":"hi"}]}`)
 	prefix3 := routing.PrefixHash(body3)
 	turn3, at3 := insertCompletionTurn(t, s, convID, "m2", prefix3)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turn3, at3, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turn3, at3, convID, session, "",
 		"msg_3", body3, prefix3, canonicalReply("msg_3", "third"))), "turn 3")
 	c.NotEmpty(readCompletedTurn(t, ctx, pool, turn3).PrefixContent, "a changed prefix is stored")
 }
@@ -590,7 +591,7 @@ func TestFailCompletedTurnLeavesACompletedTurnAlone(t *testing.T) {
 	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix := routing.PrefixHash(req)
 	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
-	call := completion(turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
+	call := completion(t, turnID, createdAt, convID, session, "", "msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))
 	c.NoError(s.CompleteCapturedTurn(ctx, call), "the call")
 	before := readCompletedTurn(t, ctx, pool, turnID)
 
@@ -625,7 +626,7 @@ func TestFailedTurnWritesSkipACompletedTurn(t *testing.T) {
 	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix := routing.PrefixHash(req)
 	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turnID, createdAt, convID, session, "",
 		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "the call")
 
 	later := mustAppendReply(t, ctx, pool, s, convID, mustHead(t, ctx, pool, convID),
@@ -637,7 +638,7 @@ func TestFailedTurnWritesSkipACompletedTurn(t *testing.T) {
 	// body names a message the conversation does not hold, so an unguarded
 	// DecomposeRequest would append it and move the head.
 	fresh := []byte(`{"model":"m","messages":[{"role":"user","content":"never stored"}]}`)
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, fresh, prefix, "")
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, fresh), prefix, "")
 	c.NoError(err, "DecomposeRequest on a completed turn")
 	c.Eq(before.RequestHeadID, head, "it answers the head the completion recorded")
 	c.NoError(s.RecordThread(ctx, session, convID, turnID, createdAt, "", "msg_other", true),
@@ -659,7 +660,7 @@ func TestFailTurnLeavesACompletedTurnAlone(t *testing.T) {
 	req := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 	prefix := routing.PrefixHash(req)
 	turnID, createdAt := insertCompletionTurn(t, s, convID, "m", prefix)
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turnID, createdAt, convID, session, "",
 		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "the call")
 	before := readCompletedTurn(t, ctx, pool, turnID)
 
@@ -695,7 +696,7 @@ func TestCompleteCapturedTurnRetriesATransientThreadLookup(t *testing.T) {
 	}
 	t.Cleanup(func() { s.resolveThreadFn = nil })
 
-	c.NoError(s.CompleteCapturedTurn(ctx, completion(turnID, createdAt, convID, session, "",
+	c.NoError(s.CompleteCapturedTurn(ctx, completion(t, turnID, createdAt, convID, session, "",
 		"msg_reply", req, prefix, canonicalReply("msg_reply", "ok"))), "the completion")
 	c.Eq(2, calls, "the lookup was retried once")
 

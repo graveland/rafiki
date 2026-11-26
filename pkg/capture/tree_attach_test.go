@@ -329,7 +329,7 @@ func TestARequestWithNoMessagesAppendsNothing(t *testing.T) {
 	empty := newConv(t, ctx, s)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: empty, Model: "m"})
 	c.NoError(err, "InsertTurnIntent")
-	_, err = s.DecomposeRequest(ctx, empty, turnID, createdAt, []byte(`{"messages":[]}`), "", "")
+	_, err = s.DecomposeRequest(ctx, empty, turnID, createdAt, reqOf(t, []byte(`{"messages":[]}`)), "", "")
 	c.Error(err, "a request with no messages in an empty conversation has no head to append under")
 
 	convID := newConv(t, ctx, s)
@@ -338,7 +338,7 @@ func TestARequestWithNoMessagesAppendsNothing(t *testing.T) {
 
 	turnID, createdAt, err = s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
 	c.NoError(err, "InsertTurnIntent")
-	got, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, []byte(`{"messages":[]}`), "", "")
+	got, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, []byte(`{"messages":[]}`)), "", "")
 	c.NoError(err, "DecomposeRequest")
 	c.Eq(head, got, "the request head is the conversation's head")
 	c.Eq(nodes, mustNodeCount(t, ctx, pool, convID), "no node was inserted")
@@ -474,7 +474,7 @@ func replayCorpus(t *testing.T, ctx context.Context, s *CaptureStore, convID, re
 				StopReason: "end_turn", Upstream: "anthropic", InputTokens: 1, OutputTokens: 1},
 			PrevMessageID: body.Diagnostics.PreviousMessageID,
 			OwnMessageID:  MessageIDFromCanonical(canonical),
-			ReqBody:       req,
+			Req:           reqOf(t, req),
 			Canonical:     canonical,
 		}), "CompleteCapturedTurn response %d", n)
 	}

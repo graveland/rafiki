@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/msg"
 )
@@ -19,12 +20,12 @@ import (
 // TurnCompletion is everything the proxy holds when a provider response has
 // arrived: the call's outcome and the request and response to record.
 type TurnCompletion struct {
-	TurnResult           // TurnID, CreatedAt, ConversationID, Model, StopReason, Upstream, ServedProvider, usage, LatencyMS
-	Session       string // X-Rafiki-Session the thread was routed on
-	PrevMessageID string // diagnostics.previous_message_id; "" for none
-	OwnMessageID  string // the response's provider message id
-	IsSubagent    bool   // cc_is_subagent
-	ReqBody       []byte // the request body as sent upstream
+	TurnResult                          // TurnID, CreatedAt, ConversationID, Model, StopReason, Upstream, ServedProvider, usage, LatencyMS
+	Session       string                // X-Rafiki-Session the thread was routed on
+	PrevMessageID string                // diagnostics.previous_message_id; "" for none
+	OwnMessageID  string                // the response's provider message id
+	IsSubagent    bool                  // cc_is_subagent
+	Req           *anthropicreq.Request // the request as sent upstream, decoded once
 	PrefixHash    string
 	Canonical     []byte // the response's canonical JSON (its "content" array is stored)
 }
@@ -56,7 +57,7 @@ type TurnCompletion struct {
 // returns success without appending, so it cannot move the head back onto a
 // reply that later turns have moved past.
 func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletion) error {
-	msgs, err := requestMessages(c.ReqBody)
+	msgs, err := requestMessages(c.Req)
 	if err != nil {
 		return err
 	}
@@ -119,7 +120,7 @@ func (s *CaptureStore) CompleteCapturedTurn(ctx context.Context, c TurnCompletio
 		if err != nil {
 			return err
 		}
-		envelope, breakpoints, err := splitEnvelopeAndBreakpoints(c.ReqBody)
+		envelope, breakpoints, err := splitEnvelopeAndBreakpoints(c.Req)
 		if err != nil {
 			return fmt.Errorf("store turn prefix: %w", err)
 		}

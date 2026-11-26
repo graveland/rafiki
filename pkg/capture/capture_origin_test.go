@@ -44,7 +44,7 @@ func TestOriginCaptureNodesAreClaudeCode(t *testing.T) {
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
 		ConversationID: convID, PrefixHash: routing.PrefixHash(req), Protocol: "anthropic"})
 	c.NoError(err, "InsertTurnIntent")
-	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req), "")
+	head, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, reqOf(t, req), routing.PrefixHash(req), "")
 	c.NoError(err, "DecomposeRequest")
 
 	canonical := []byte(`{"id":"msg_origin","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}`)

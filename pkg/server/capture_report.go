@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/claudethread"
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/conv"
 )
 
@@ -57,7 +57,7 @@ func (p *MessagesProxy) SetCaptureSink(s CaptureSink) {
 // reports: the report is also the child gate's release, and a request that
 // armed the gate and reported nothing left the child's stream silent until it
 // exited. See CaptureReport.ReleaseOnly.
-func (p *MessagesProxy) reportCapture(r *http.Request, cr captureRef, reqBody []byte) {
+func (p *MessagesProxy) reportCapture(r *http.Request, cr captureRef, req *anthropicreq.Request) {
 	if p.captureSink == nil || cr.session == "" || cr.outcome == nil ||
 		(!cr.on && cr.refused == "") {
 		return
@@ -66,7 +66,7 @@ func (p *MessagesProxy) reportCapture(r *http.Request, cr captureRef, reqBody []
 	if errText == "" {
 		errText = cr.outcome.failure
 	}
-	releaseOnly := !claudethread.DeclaresClientTools(reqBody)
+	releaseOnly := !req.DeclaresClientTools()
 	var rows []*conv.Node
 	// No read-back for a release-only report: none of its rows can publish, and
 	// the read would be a DB round trip on every titler and helper request.

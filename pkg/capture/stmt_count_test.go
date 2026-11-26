@@ -116,7 +116,7 @@ func capturedTurn(ctx context.Context, t *testing.T, s *CaptureStore, session st
 		Session:       session,
 		PrevMessageID: prevMsg,
 		OwnMessageID:  ownMsg,
-		ReqBody:       req,
+		Req:           reqOf(t, req),
 		PrefixHash:    prefix,
 		Canonical:     canonical,
 	}), "CompleteCapturedTurn")

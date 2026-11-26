@@ -125,6 +125,6 @@ func TestRequestInsertDBFailureIsReturned(t *testing.T) {
 		"00000000-0000-0000-0000-000000000001",
 		"00000000-0000-0000-0000-000000000002",
 		time.Now(),
-		[]byte(`{"messages":[{"role":"user","content":"x"}]}`), "", "")
+		reqOf(t, []byte(`{"messages":[{"role":"user","content":"x"}]}`)), "", "")
 	c.Error(err, "decomposing against a conversation that does not exist")
 }

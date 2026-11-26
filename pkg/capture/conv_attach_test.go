@@ -47,7 +47,7 @@ func TestCaptureUnknownRoleFailsAttach(t *testing.T) {
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
 	c.Require().NoError(err, "InsertTurnIntent")
 	_, err = s.DecomposeRequest(ctx, convID, turnID, createdAt,
-		[]byte(`{"messages":[{"role":"narrator","content":"hi"}]}`), "", "")
+		reqOf(t, []byte(`{"messages":[{"role":"narrator","content":"hi"}]}`)), "", "")
 	c.Require().Error(err, "an unknown role fails the attach")
 	c.StrContains(err.Error(), "attach: message 0", "the error names the message")
 	c.StrContains(err.Error(), "narrator", "the error names the role")

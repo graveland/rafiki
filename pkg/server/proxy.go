@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/net/http2"
 
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/claudethread"
 	"go.graveland.dev/rafiki/pkg/conv"
@@ -41,7 +42,7 @@ type proxyStore interface {
 	CompleteCapturedTurn(ctx context.Context, c capture.TurnCompletion) error
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
 	FailCompletedTurn(ctx context.Context, r capture.TurnResult, errMsg string) error
-	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (headID string, err error)
+	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, req *anthropicreq.Request, prefixHash, prevMessageID string) (headID string, err error)
 	RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error
 	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
 	MessagesSince(ctx context.Context, convID string, since time.Time) ([]*conv.Node, error)
@@ -401,12 +402,12 @@ func (p *MessagesProxy) SetFallback(orKey, orURL string, b *routing.Breaker) {
 	p.breaker = b
 }
 
-// doUpstream forwards reqBody to url with the real key (stripping the
+// doUpstream forwards req to url with the real key (stripping the
 // caller's inbound auth) and the caller's anthropic-version/anthropic-beta
 // headers. bearer selects the auth scheme: Anthropic's API takes the key in
 // x-api-key, OpenRouter takes it in Authorization: Bearer.
-func (p *MessagesProxy) doUpstream(ctx context.Context, url, key, path string, bearer bool, reqBody []byte, r *http.Request) (*http.Response, error) {
-	return p.buildAndDo(ctx, url, key, path, bearer, reqBody, r, false, "")
+func (p *MessagesProxy) doUpstream(ctx context.Context, url, key, path string, bearer bool, req *anthropicreq.Request, r *http.Request) (*http.Response, error) {
+	return p.buildAndDo(ctx, url, key, path, bearer, req, r, false, "")
 }
 
 // upstreamRequest is the OpenRouter variant: additionally forwards
@@ -415,12 +416,14 @@ func (p *MessagesProxy) doUpstream(ctx context.Context, url, key, path string, b
 // conversation id) is used, so OpenRouter-routed traffic that never sets the
 // header (Claude Code) still gets a stable, correlatable pin. The Anthropic
 // primary never sees this header at all.
-func (p *MessagesProxy) upstreamRequest(ctx context.Context, url, key, path string, bearer bool, reqBody []byte, r *http.Request, convID string) (*http.Response, error) {
-	return p.buildAndDo(ctx, url, key, path, bearer, reqBody, r, true, convID)
+func (p *MessagesProxy) upstreamRequest(ctx context.Context, url, key, path string, bearer bool, req *anthropicreq.Request, r *http.Request, convID string) (*http.Response, error) {
+	return p.buildAndDo(ctx, url, key, path, bearer, req, r, true, convID)
 }
 
-func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key, path string, bearer bool, reqBody []byte, r *http.Request, forwardSession bool, convID string) (*http.Response, error) {
-	up, err := http.NewRequestWithContext(ctx, http.MethodPost, url+path, bytes.NewReader(reqBody))
+func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key, path string, bearer bool, req *anthropicreq.Request, r *http.Request, forwardSession bool, convID string) (*http.Response, error) {
+	// Raw() is the body as it stands: the inbound bytes, or the rewrite that
+	// resolveAndAdapt/effortRetry produced.
+	up, err := http.NewRequestWithContext(ctx, http.MethodPost, url+path, bytes.NewReader(req.Raw()))
 	if err != nil {
 		return nil, err
 	}
@@ -472,20 +475,34 @@ func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key, path string, b
 	return p.httpClient.Do(up)
 }
 
-// doOpenRouter rewrites the model in reqBody to its OpenRouter equivalent and
+// doOpenRouter rewrites the request's model to its OpenRouter equivalent and
 // forwards to OpenRouter. Reached both on Anthropic-primary failover and as the
 // direct path for user-requested slash (OpenRouter-native) models. OpenRouter
 // authenticates via Authorization: Bearer (its universal convention), not
 // Anthropic's x-api-key.
-func (p *MessagesProxy) doOpenRouter(ctx context.Context, path string, reqBody []byte, r *http.Request, convID string) (*http.Response, error) {
-	var payload map[string]any
-	if err := json.Unmarshal(reqBody, &payload); err != nil {
-		return nil, err
+func (p *MessagesProxy) doOpenRouter(ctx context.Context, path string, req *anthropicreq.Request, r *http.Request, convID string) (*http.Response, error) {
+	// Only "model" and "provider" are decoded: the rewrite translates the model
+	// id and layers provider routing onto that one key, so every other field is
+	// forwarded byte-exact out of the parse rather than through a whole-body
+	// map[string]any round trip.
+	fields := req.Fields()
+	translated := ""
+	hasModel := false
+	if raw, ok := fields["model"]; ok {
+		var m string
+		if err := json.Unmarshal(raw, &m); err == nil {
+			translated = p.catalog.OpenRouterModel(m)
+			hasModel = true
+		}
 	}
-	if m, ok := payload["model"].(string); ok {
-		payload["model"] = p.catalog.OpenRouterModel(m)
-	} else {
+	if !hasModel {
 		p.logger.WarnContext(r.Context(), "proxy: openrouter request has no string model; forwarding untranslated")
+	} else {
+		encoded, err := json.Marshal(translated)
+		if err != nil {
+			return nil, err
+		}
+		fields["model"] = encoded
 	}
 	// Pinned model lines get their provider preferences injected; a
 	// caller-supplied provider object still wins for the pin. The guard's
@@ -493,10 +510,28 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, path string, reqBody [
 	// its own provider object — a budget guard that any caller can switch off
 	// by sending a provider block is not a guard. A resolver (the daemon's
 	// Controller) layers the session's routing spec on top of all of it.
-	if m, ok := payload["model"].(string); ok {
-		p.applyProviderRouting(payload, m, r)
+	if hasModel {
+		// applyProviderRouting edits one value (payload["provider"], as general
+		// JSON so it can carry a caller map or the spec's own object), so it gets a
+		// scratch map holding just that key rather than the whole body.
+		payload := map[string]any{}
+		if raw, ok := fields["provider"]; ok {
+			var v any
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return nil, err
+			}
+			payload["provider"] = v
+		}
+		p.applyProviderRouting(payload, translated, r)
+		if v, ok := payload["provider"]; ok {
+			encoded, err := json.Marshal(v)
+			if err != nil {
+				return nil, err
+			}
+			fields["provider"] = encoded
+		}
 	}
-	rewritten, err := json.Marshal(payload)
+	rewritten, err := req.WithFields(fields)
 	if err != nil {
 		return nil, err
 	}
@@ -691,8 +726,9 @@ func callerCarriesOnly(v any) bool {
 // (empty -> default, "<family>-latest" -> concrete newest), and proactively
 // adapts output_config.effort to what the resolved model is known to allow
 // (clamp/strip per the runtime effort cache; a cold cache is a no-op and any
-// rejection is caught by effortRetry). A decode failure forwards the input
-// unchanged (nothing was resolved, so nothing can be misrouted); a MARSHAL
+// rejection is caught by effortRetry). A decode failure — the request did not
+// parse at all — forwards the input unchanged (nothing was resolved, so nothing
+// can be misrouted); a MARSHAL
 // failure forwards it unchanged only when no alias was resolved — after an
 // alias hit the input still names the alias, so it becomes an error the callers
 // answer 502 rather than forwarding traffic to a model the caller never asked
@@ -705,30 +741,33 @@ func callerCarriesOnly(v any) bool {
 // background calls and its own /model menu send bare claude-* ids, which are
 // not aliases and must keep resolving exactly as they do without this face.
 // A slashed id is never an alias, so it never reaches the store.
-func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte, string, routing.Spec, error) {
-	// Only the top-level keys are decoded: a request carries the whole
-	// conversation, and the rewrite touches just model and output_config.
-	// Raw values also keep numbers byte-exact, which map[string]any would
-	// round through float64.
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(reqBody, &body); err != nil {
-		p.logger.Warn("proxy: request rewrite decode failed", "error", err)
-		return reqBody, "", routing.Spec{}, nil
+func (p *MessagesProxy) resolveAndAdapt(r *http.Request, req *anthropicreq.Request) (*anthropicreq.Request, string, routing.Spec, error) {
+	// A body that did not decode is forwarded untouched with no model resolved:
+	// nothing was resolved from it, so nothing can be misrouted, and the upstream
+	// is the authority on what it will accept. This is deliberately NOT the same
+	// as an empty request — a body that decodes without a model still resolves
+	// through the default.
+	if !req.Parsed() {
+		return req, "", routing.Spec{}, nil
 	}
-	var requested string
-	_ = json.Unmarshal(body["model"], &requested)
+	// Only the top-level keys are touched: a request carries the whole
+	// conversation, and the rewrite edits just model and output_config. Raw
+	// values also keep numbers byte-exact, which map[string]any would round
+	// through float64.
+	body := req.Fields()
+	requested := req.Model()
 	model := requested
 	var aliasSpec routing.Spec
 	aliasHit := false
 	if p.aliasResolver != nil && model != "" && !strings.ContainsAny(model, "/[") {
 		target, ok, err := p.aliasResolver.LookupModelAlias(r.Context(), p.requestOwner(r), model)
 		if err != nil {
-			return reqBody, "", routing.Spec{}, &modelAliasLookupError{err: err}
+			return req, "", routing.Spec{}, &modelAliasLookupError{err: err}
 		}
 		if ok {
 			base, spec, perr := routing.ParseModel(target)
 			if perr != nil {
-				return reqBody, "", routing.Spec{}, &modelAliasTargetError{msg: fmt.Sprintf(
+				return req, "", routing.Spec{}, &modelAliasTargetError{msg: fmt.Sprintf(
 					"model alias %q has an unparsable target %q: %v", model, target, perr)}
 			}
 			// The target names its provider. openrouter/ is the OpenRouter
@@ -737,7 +776,7 @@ func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte
 			// it into the native-Anthropic path. Any other leading provider
 			// segment names a provider this proxy has no route to.
 			if name, _ := providers.SplitRaw(base); name != "" && name != "openrouter" && name != "anthropic" {
-				return reqBody, "", routing.Spec{}, &modelAliasTargetError{msg: fmt.Sprintf(
+				return req, "", routing.Spec{}, &modelAliasTargetError{msg: fmt.Sprintf(
 					"model alias %q targets provider %q, which this proxy cannot route", model, name)}
 			}
 			base = strings.TrimPrefix(base, "openrouter/")
@@ -748,24 +787,24 @@ func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte
 	}
 	resolved, err := routing.ResolveModel(p.catalog, p.defaultModel, model)
 	if err != nil {
-		return reqBody, "", routing.Spec{}, err
+		return req, "", routing.Spec{}, err
 	}
 	changed := false
 	if aliasHit || resolved != requested {
-		model, err := json.Marshal(resolved)
+		encoded, err := json.Marshal(resolved)
 		if err != nil {
-			return reqBody, "", routing.Spec{}, fmt.Errorf("encode resolved model %q: %w", resolved, err)
+			return req, "", routing.Spec{}, fmt.Errorf("encode resolved model %q: %w", resolved, err)
 		}
-		body["model"] = model
+		body["model"] = encoded
 		changed = true
 	}
 	if p.adaptEffortMap(body, resolved) {
 		changed = true
 	}
 	if !changed {
-		return reqBody, resolved, aliasSpec, nil
+		return req, resolved, aliasSpec, nil
 	}
-	out, err := json.Marshal(body)
+	out, err := req.WithFields(body)
 	if err != nil {
 		if aliasHit {
 			// The body in hand still names the ALIAS, so forwarding it would send
@@ -774,10 +813,10 @@ func (p *MessagesProxy) resolveAndAdapt(r *http.Request, reqBody []byte) ([]byte
 			// (the callers answer a plain error 502) rather than rewrite nothing.
 			p.logger.Warn("proxy: request rewrite marshal failed after an alias hit; refusing to forward the alias",
 				"alias", requested, "model", resolved, "error", err)
-			return reqBody, "", routing.Spec{}, fmt.Errorf("model alias %q could not be applied: %w", requested, err)
+			return req, "", routing.Spec{}, fmt.Errorf("model alias %q could not be applied: %w", requested, err)
 		}
 		p.logger.Warn("proxy: request rewrite marshal failed; forwarding original", "model", requested, "error", err)
-		return reqBody, requested, aliasSpec, nil
+		return req, requested, aliasSpec, nil
 	}
 	return out, resolved, aliasSpec, nil
 }
@@ -853,7 +892,7 @@ type captureRef struct {
 	isSubagent     bool   // cc_is_subagent, parsed once in beginCapture (absent billing header means false)
 	hasBilling     bool   // a billing header was present (gates the claude thread debug log)
 	billing        claudethread.Billing
-	reqBody        []byte // decomposed post-stream in streamAndCapture (see beginCapture)
+	req            *anthropicreq.Request // the request as sent upstream, decoded ONCE (see beginCapture); nil when capture is off
 	prefixHash     string
 	recordRequests bool // per-session recording opt-in (X-Rafiki-Record-Requests)
 	threadID       string
@@ -873,14 +912,30 @@ type captureOutcome struct {
 	responseMessageID string
 }
 
+// parseRequest decodes a /v1/messages body ONCE for the whole request. A body
+// that does not decode is still a usable Request — it is forwarded verbatim,
+// exactly as it always was — so the returned value is never nil and the log is
+// the only trace of the failure.
+func (p *MessagesProxy) parseRequest(body []byte) *anthropicreq.Request {
+	req, err := anthropicreq.Parse(body)
+	if err != nil {
+		p.logger.Warn("proxy: request rewrite decode failed", "error", err)
+	}
+	return req
+}
+
 func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	reqBody, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
-	reqBody, model, aliasSpec, err := p.resolveAndAdapt(r, reqBody)
+	// ONE decode of the body: every step below reads this Request's lazily
+	// parsed keys instead of unmarshalling the conversation again. A body that
+	// does not decode is still forwarded verbatim, exactly as before.
+	req := p.parseRequest(body)
+	req, model, aliasSpec, err := p.resolveAndAdapt(r, req)
 	if err != nil {
 		if writeModelAliasError(w, err) {
 			return
@@ -898,9 +953,9 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The chat span is opened once the model is known (it names the span) and
 	// before capture, so every downstream log and step carries it.
 	ctx, span := startChatSpan(r.Context(), p.tracer, p.spanParent,
-		routingSessionID(r), claudethread.PreviousMessageID(reqBody), model, "", "anthropic")
+		routingSessionID(r), req.PreviousMessageID(), model, "", "anthropic")
 	thread := "main"
-	if billing, ok := claudethread.BillingFromRequest(reqBody); ok && billing.IsSubagent {
+	if billing, ok := req.Billing(); ok && billing.IsSubagent {
 		thread = "subagent"
 	}
 	span.SetAttributes(attribute.String("rafiki.thread", thread))
@@ -908,17 +963,17 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	// Best-effort capture setup (never blocks the proxy on failure).
-	cr := p.beginCapture(r, reqBody, model)
-	defer p.reportCapture(r, cr, reqBody)
+	cr := p.beginCapture(r, req, model)
+	defer p.reportCapture(r, cr, req)
 	if cr.refused != "" {
 		http.Error(w, "rafiki capture unavailable: "+cr.refused, http.StatusServiceUnavailable)
 		return
 	}
 	// Whether the client asked for a stream decides what a well-formed 2xx
 	// Content-Type must be — see the guard in streamAndCapture.
-	stream := requestsStream(reqBody)
+	stream := req.Stream()
 
-	resp, upstream, err, handled := p.selectUpstream(w, r, reqBody, model, "/v1/messages", cr)
+	resp, upstream, err, handled := p.selectUpstream(w, r, req, model, "/v1/messages", cr)
 	if handled {
 		return // selectUpstream already wrote the response and resolved the turn
 	}
@@ -934,8 +989,8 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// of a dead turn. Only output_config.effort changes; the messages are
 	// untouched, so the begun capture still describes this turn.
 	if resp.StatusCode == http.StatusBadRequest {
-		if retryBody, ok := p.effortRetry(resp, reqBody, model); ok {
-			resp, upstream, err, handled = p.selectUpstream(w, r, retryBody, model, "/v1/messages", cr)
+		if retryReq, ok := p.effortRetry(resp, req, model); ok {
+			resp, upstream, err, handled = p.selectUpstream(w, r, retryReq, model, "/v1/messages", cr)
 			if handled {
 				return
 			}
@@ -953,11 +1008,11 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // effortRetry inspects a 400 upstream response. If it is a provider rejection
 // enumerating supported effort values, it learns the constraint into the cache,
-// clamps this request's effort to it, and returns the retry body (ok=true).
+// clamps this request's effort to it, and returns the retry request (ok=true).
 // Otherwise it restores resp.Body (consumed while inspecting) so the caller can
 // surface the original error, and returns ok=false. Either way it reads and
 // replaces resp.Body.
-func (p *MessagesProxy) effortRetry(resp *http.Response, reqBody []byte, model string) ([]byte, bool) {
+func (p *MessagesProxy) effortRetry(resp *http.Response, req *anthropicreq.Request, model string) (*anthropicreq.Request, bool) {
 	raw, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	allowed, ok := routing.ParseSupportedEfforts(raw)
@@ -967,14 +1022,14 @@ func (p *MessagesProxy) effortRetry(resp *http.Response, reqBody []byte, model s
 	}
 	p.effortCache.Learn(model, allowed)
 	p.logger.Info("proxy: learned effort constraint from upstream rejection", "model", model, "allowed", allowed)
-	retryBody := p.clampEffortBody(reqBody, model)
-	if bytes.Equal(retryBody, reqBody) {
+	retryReq := p.clampEffortBody(req, model)
+	if bytes.Equal(retryReq.Raw(), req.Raw()) {
 		// Nothing to clamp (the request carried no effort to adjust); an identical
 		// retry would just fail again. Surface the original error.
 		resp.Body = io.NopCloser(bytes.NewReader(raw))
 		return nil, false
 	}
-	return retryBody, true
+	return retryReq, true
 }
 
 // mentionsEffortParam guards against mistaking a non-effort "Supported values
@@ -985,20 +1040,18 @@ func mentionsEffortParam(body []byte) bool {
 		bytes.Contains(body, []byte("reasoning"))
 }
 
-// clampEffortBody re-marshals reqBody with output_config.effort clamped or
-// stripped per the cache's current knowledge of the model. Best-effort: a
-// decode/marshal failure or a no-op clamp returns reqBody unchanged.
-func (p *MessagesProxy) clampEffortBody(reqBody []byte, model string) []byte {
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(reqBody, &body); err != nil {
-		return reqBody
-	}
+// clampEffortBody returns req with output_config.effort clamped or stripped per
+// the cache's current knowledge of the model. Best-effort: a no-op clamp or a
+// marshal failure returns req itself, which is what the caller's identity check
+// turns into "nothing to retry".
+func (p *MessagesProxy) clampEffortBody(req *anthropicreq.Request, model string) *anthropicreq.Request {
+	body := req.Fields()
 	if !p.adaptEffortMap(body, model) {
-		return reqBody
+		return req
 	}
-	out, err := json.Marshal(body)
+	out, err := req.WithFields(body)
 	if err != nil {
-		return reqBody
+		return req
 	}
 	return out
 }
@@ -1045,7 +1098,7 @@ func (p *MessagesProxy) primaryOutOfCredit(resp *http.Response, status int) bool
 // selectUpstream routes the request and returns the upstream response. The
 // routing decision is RouteModel's; a refusal is answered here without
 // contacting an upstream.
-func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, reqBody []byte, model, path string, cr captureRef) (resp *http.Response, upstream string, err error, handled bool) {
+func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, req *anthropicreq.Request, model, path string, cr captureRef) (resp *http.Response, upstream string, err error, handled bool) {
 	passthrough := PassthroughCredential(r.Context()) != ""
 
 	route, rerr := RouteModel(model, passthrough, p.orKey != "")
@@ -1061,14 +1114,14 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 	if route == RouteOpenRouter {
 		// No failover: the caller asked for this specific model.
 		// doOpenRouter forwards slash ids untranslated.
-		resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
+		resp, err = p.doOpenRouter(r.Context(), path, req, r, cr.convID)
 		return resp, "openrouter", err, false
 	}
 	if passthrough {
 		// No breaker and no failover: every fallback path this function owns
 		// leads to OpenRouter on rafiki's key. An upstream error surfaces to
 		// the caller verbatim instead.
-		resp, err = p.doUpstream(r.Context(), p.upstreamURL, "" /*key unused; the credential comes from the context*/, path, false, reqBody, r)
+		resp, err = p.doUpstream(r.Context(), p.upstreamURL, "" /*key unused; the credential comes from the context*/, path, false, req, r)
 		// Only a transport error is retried: it means no response byte arrived
 		// (a pooled h2 connection that died, a reset on connect), so the replay
 		// is invisible to the caller and the next attempt dials fresh. A status
@@ -1082,13 +1135,13 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 			}
 			p.logger.WarnContext(r.Context(), "proxy: passthrough upstream transport error, retrying",
 				"attempt", i+1, "error", err)
-			resp, err = p.doUpstream(r.Context(), p.upstreamURL, "", path, false, reqBody, r)
+			resp, err = p.doUpstream(r.Context(), p.upstreamURL, "", path, false, req, r)
 		}
 		return resp, "anthropic", err, false
 	}
 	now := time.Now()
 	if p.breaker == nil || p.breaker.UsePrimary(now) {
-		resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false /* x-api-key */, reqBody, r)
+		resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false /* x-api-key */, req, r)
 		if p.breaker == nil {
 			return resp, "anthropic", err, false
 		}
@@ -1115,7 +1168,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 			}
 			p.logger.WarnContext(r.Context(), "proxy: primary failed, retrying before failover",
 				"attempt", i+1, "status", status, "error", err)
-			resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false, reqBody, r)
+			resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false, req, r)
 			status = statusOf(resp)
 			primaryFailed = routing.ClassifyFailure(status, err)
 		}
@@ -1137,7 +1190,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		if resp != nil {
 			resp.Body.Close()
 		}
-		resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
+		resp, err = p.doOpenRouter(r.Context(), path, req, r, cr.convID)
 		return resp, "openrouter", err, false
 	}
 	if p.orKey == "" {
@@ -1145,7 +1198,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		http.Error(w, "no upstream available", http.StatusBadGateway)
 		return nil, "", nil, true
 	}
-	resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
+	resp, err = p.doOpenRouter(r.Context(), path, req, r, cr.convID)
 	return resp, "openrouter", err, false
 }
 
@@ -1160,16 +1213,6 @@ func maskedPrimaryClass(status int, err error, outOfCredit bool) errclass.Class 
 		return errclass.FromError(err)
 	}
 	return errclass.FromHTTP(status, nil)
-}
-
-// requestsStream reports whether the request body asked for a streamed (SSE)
-// response — which determines what Content-Type a well-formed 2xx must carry.
-func requestsStream(body []byte) bool {
-	var s struct {
-		Stream bool `json:"stream"`
-	}
-	_ = json.Unmarshal(body, &s)
-	return s.Stream
 }
 
 // contentTypeMatches reports whether a 2xx response's Content-Type is the one
@@ -1278,6 +1321,13 @@ func (p *MessagesProxy) recordRawTrace(ctx context.Context, r *http.Request, res
 	}
 	respStatus := resp.StatusCode
 	convID := cr.convID
+	// cr.req is set only when capture began, which is when this field was filled
+	// before the parse was threaded through: a capture-less proxy still records
+	// the pair, without the request body.
+	var reqBody json.RawMessage
+	if cr.req != nil {
+		reqBody = cr.req.Raw()
+	}
 	_ = p.rawTrace.Insert(ctx, rawtrace.RawHTTPRequest{
 		Source:         "proxy",
 		Model:          model,
@@ -1285,7 +1335,7 @@ func (p *MessagesProxy) recordRawTrace(ctx context.Context, r *http.Request, res
 		ReqMethod:      "POST",
 		ReqPath:        "/v1/messages",
 		ReqHeaders:     upstreamReqHeaders(resp),
-		ReqBody:        cr.reqBody,
+		ReqBody:        reqBody,
 		RespStatus:     &respStatus,
 		RespHeaders:    upstreamRespHeaders(resp),
 		RespBody:       respBody,
@@ -1508,7 +1558,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	}
 	if cerr := p.store.CompleteCapturedTurn(capCtx, capture.TurnCompletion{
 		TurnResult: result, Session: cr.session, PrevMessageID: cr.prevMessageID, OwnMessageID: ownMsg,
-		IsSubagent: cr.isSubagent, ReqBody: cr.reqBody, PrefixHash: cr.prefixHash, Canonical: canonical,
+		IsSubagent: cr.isSubagent, Req: cr.req, PrefixHash: cr.prefixHash, Canonical: canonical,
 	}); cerr != nil {
 		p.logger.WarnContext(r.Context(), "proxy capture: complete captured turn failed", "conversation", cr.convID, "error", cerr)
 		p.failCompletion(r, cr, result, ownMsg, cerr)
@@ -1567,7 +1617,7 @@ func (p *MessagesProxy) failCompletion(r *http.Request, cr captureRef, result ca
 	if terr := p.store.RecordThread(ctx, cr.session, cr.convID, cr.turnID, cr.createdAt, cr.prevMessageID, ownMsg, cr.isSubagent); terr != nil {
 		p.logger.WarnContext(ctx, "proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
 	}
-	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash, cr.prevMessageID); derr != nil {
+	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.req, cr.prefixHash, cr.prevMessageID); derr != nil {
 		p.logger.WarnContext(ctx, "proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
 	}
 }
@@ -1608,7 +1658,7 @@ func boundedErrorBody(b []byte) string {
 	return string(b)
 }
 
-// decomposeRequestCtx decomposes cr.reqBody into conversation_message rows on a
+// decomposeRequestCtx decomposes cr.req into conversation_message rows on a
 // fail path against a caller-supplied context, so it can share the fail path's
 // one detached context. No-op (nil) when capture is off. A failure is returned:
 // the request rows were not stored and the caller records that on the turn.
@@ -1616,7 +1666,7 @@ func (p *MessagesProxy) decomposeRequestCtx(ctx context.Context, cr captureRef) 
 	if !cr.on {
 		return nil
 	}
-	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash, cr.prevMessageID); derr != nil {
+	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.req, cr.prefixHash, cr.prevMessageID); derr != nil {
 		p.logger.WarnContext(ctx, "proxy capture: decompose request (failed turn) failed", "conversation", cr.convID, "error", derr)
 		return derr
 	}
@@ -1874,9 +1924,9 @@ func authorAttribution(reqBody []byte, source string) (authorKind, outSource str
 
 // authorAttributionParsed is the decision table behind authorAttribution,
 // taking an already-parsed billing header so the client-driven path (which
-// parses the body once in beginCapture) does not lex the request body a
-// second time. The reqBody variant remains for callers with no parsed header
-// in hand (the OpenAI face) and for the unit tests pinning the table.
+// reads it off the request's one parse in beginCapture) does not lex the body a
+// second time. The reqBody variant remains for callers with no parsed header in
+// hand (the OpenAI face) and for the unit tests pinning the table.
 func authorAttributionParsed(b claudethread.Billing, ok bool, source string) (authorKind, outSource string) {
 	if !ok || !b.IsSubagent {
 		return "human", source
@@ -1929,7 +1979,7 @@ func authorAttributionParsed(b claudethread.Billing, ok bool, source string) (au
 //     main thread continues" from "an independent thread starts". A founder
 //     that omits the flag keeps the pre-fix behavior (root row), never a
 //     spuriously forked main thread.
-func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model string) captureRef {
+func (p *MessagesProxy) beginCapture(r *http.Request, req *anthropicreq.Request, model string) captureRef {
 	if p.store == nil {
 		return captureRef{} // capture-less (no store configured)
 	}
@@ -1962,12 +2012,12 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	// thread, every Task subagent and the titler under one session header, so
 	// without this they share a conversation row and therefore one tree.
 	// One indexed lookup; a miss is a thread root, never a guess.
-	// PreviousMessageID and BillingFromRequest are parsed ONCE here and carried
-	// on the captureRef: streamAndCapture and RecordThread's call site use the
-	// carried values, so a multi-MB conversation body is not re-lexed per
-	// request just to re-read the same two fields.
-	prevMsg := claudethread.PreviousMessageID(reqBody)
-	billing, hasBilling := claudethread.BillingFromRequest(reqBody)
+	// The thread signals come off the request's ONE decode and are carried on the
+	// captureRef: streamAndCapture and RecordThread's call site use the carried
+	// values, so a multi-MB conversation body is never re-read for the same two
+	// fields.
+	prevMsg := req.PreviousMessageID()
+	billing, hasBilling := req.Billing()
 	isSubagent := billing.IsSubagent
 	threadID := ""
 	mintedTurnID := "" // set only for an independent thread's founding request
@@ -2027,7 +2077,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	// spend is not lost: it folds into the parent child's own cost through
 	// SubtreeSelector.ExternalRefPrefixes, which is where a tool call the
 	// parent made belongs anyway.
-	if threadID != "" && p.threadObserver != nil && claudethread.DeclaresClientTools(reqBody) {
+	if threadID != "" && p.threadObserver != nil && req.DeclaresClientTools() {
 		if eerr := p.threadObserver.EnsureThreadChild(session, threadID, convID); eerr != nil {
 			p.logger.WarnContext(r.Context(), "proxy capture: ensure thread child failed",
 				"session", session, "thread", threadID, "error", eerr)
@@ -2036,7 +2086,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	// Ordering on the client path is by created_at; ordinal is unused here.
 	// Request is no longer stored verbatim on the turn row — DecomposeRequest
 	// below covers it as conversation_message rows.
-	prefixHash := routing.PrefixHash(reqBody)
+	prefixHash := req.PrefixHash()
 	authorKind, turnSource := authorAttributionParsed(billing, hasBilling, source)
 	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
 		ID: mintedTurnID, ConversationID: convID, Ordinal: 0, Model: model,
@@ -2053,7 +2103,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 		convID: convID, turnID: turnID, createdAt: createdAt, on: true,
 		session: session, prevMessageID: prevMsg,
 		isSubagent: isSubagent, hasBilling: hasBilling, billing: billing,
-		reqBody: reqBody, prefixHash: prefixHash,
+		req: req, prefixHash: prefixHash,
 		recordRequests: r.Header.Get("X-Rafiki-Record-Requests") == "1",
 		threadID:       threadID, outcome: &captureOutcome{},
 	}
@@ -2129,12 +2179,13 @@ func (p *MessagesProxy) shouldRecord(r *http.Request) bool {
 // pair is written to the raw trace store.
 func (p *MessagesProxy) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	reqBody, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
-	reqBody, model, aliasSpec, err := p.resolveAndAdapt(r, reqBody)
+	req := p.parseRequest(body)
+	req, model, aliasSpec, err := p.resolveAndAdapt(r, req)
 	if err != nil {
 		if writeModelAliasError(w, err) {
 			return
@@ -2149,7 +2200,7 @@ func (p *MessagesProxy) ServeCountTokens(w http.ResponseWriter, r *http.Request)
 		r = r.WithContext(withAliasSpec(r.Context(), aliasSpec))
 	}
 	const path = "/v1/messages/count_tokens"
-	resp, upstream, err, handled := p.selectUpstream(w, r, reqBody, model, path, captureRef{})
+	resp, upstream, err, handled := p.selectUpstream(w, r, req, model, path, captureRef{})
 	if handled {
 		return
 	}
@@ -2158,7 +2209,7 @@ func (p *MessagesProxy) ServeCountTokens(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer resp.Body.Close()
-	p.forwardPassthrough(w, r, resp, upstream, model, path, reqBody, start)
+	p.forwardPassthrough(w, r, resp, upstream, model, path, req, start)
 }
 
 // ServeHello proxies the Anthropic connectivity preflight probe Claude Code
@@ -2168,8 +2219,8 @@ func (p *MessagesProxy) ServeCountTokens(w http.ResponseWriter, r *http.Request)
 // recording is on.
 func (p *MessagesProxy) ServeHello(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	reqBody, _ := io.ReadAll(r.Body) // a probe carries no body; read anyway so recording sees any bytes
-	up, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstreamURL+r.URL.Path, bytes.NewReader(reqBody))
+	body, _ := io.ReadAll(r.Body) // a probe carries no body; read anyway so recording sees any bytes
+	up, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstreamURL+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "build upstream request", http.StatusInternalServerError)
 		return
@@ -2186,7 +2237,10 @@ func (p *MessagesProxy) ServeHello(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	p.forwardPassthrough(w, r, resp, "anthropic", "", r.URL.Path, reqBody, start)
+	// A probe body is not a Messages request and nothing is derived from it; it
+	// is wrapped only so the forwarder and the raw trace take one shape.
+	req, _ := anthropicreq.Parse(body)
+	p.forwardPassthrough(w, r, resp, "anthropic", "", r.URL.Path, req, start)
 }
 
 // forwardPassthrough copies a small, non-streamed upstream response back to the
@@ -2195,7 +2249,7 @@ func (p *MessagesProxy) ServeHello(w http.ResponseWriter, r *http.Request) {
 // are metadata endpoints (token counting, connectivity probes), not
 // conversation turns. HEAD responses carry no body, so the body is written only
 // for other methods.
-func (p *MessagesProxy) forwardPassthrough(w http.ResponseWriter, r *http.Request, resp *http.Response, upstream, model, path string, reqBody []byte, start time.Time) {
+func (p *MessagesProxy) forwardPassthrough(w http.ResponseWriter, r *http.Request, resp *http.Response, upstream, model, path string, req *anthropicreq.Request, start time.Time) {
 	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, maxPassthroughBody))
 	if rerr != nil {
 		p.logger.Warn("proxy: passthrough read failed", "path", path, "error", rerr)
@@ -2226,7 +2280,7 @@ func (p *MessagesProxy) forwardPassthrough(w http.ResponseWriter, r *http.Reques
 		ReqMethod:   r.Method,
 		ReqPath:     path,
 		ReqHeaders:  upstreamReqHeaders(resp),
-		ReqBody:     reqBody,
+		ReqBody:     req.Raw(),
 		RespStatus:  &respStatus,
 		RespHeaders: upstreamRespHeaders(resp),
 		RespBody:    raw,

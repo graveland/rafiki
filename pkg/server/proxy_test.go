@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -33,6 +34,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
+
+// parsed decodes a request body the way ServeHTTP does, for the tests that call
+// a request-taking helper directly.
+func parsed(t *testing.T, body []byte) *anthropicreq.Request {
+	t.Helper()
+	req, err := anthropicreq.Parse(body)
+	if err != nil {
+		t.Fatalf("test request body does not parse: %v", err)
+	}
+	return req
+}
 
 type fakeProxyStore struct {
 	convTokens []capture.ModelTokens
@@ -157,7 +169,7 @@ func (f *fakeProxyStore) CompleteCapturedTurn(ctx context.Context, c capture.Tur
 		return err
 	}
 	_ = f.recordThread(ctx, c.Session, c.ConversationID, c.TurnID, c.CreatedAt, c.PrevMessageID, c.OwnMessageID, c.IsSubagent, false)
-	head, err := f.decomposeRequest(ctx, c.ConversationID, c.TurnID, c.CreatedAt, c.ReqBody, c.PrefixHash, c.PrevMessageID, false)
+	head, err := f.decomposeRequest(ctx, c.ConversationID, c.TurnID, c.CreatedAt, c.Req, c.PrefixHash, c.PrevMessageID, false)
 	if err != nil {
 		return err
 	}
@@ -191,13 +203,13 @@ func (f *fakeProxyStore) FailCompletedTurn(ctx context.Context, r capture.TurnRe
 	return f.failCompletedErr
 }
 
-func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string) (string, error) {
-	return f.decomposeRequest(ctx, convID, turnID, createdAt, reqBody, prefixHash, prevMessageID, true)
+func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, req *anthropicreq.Request, prefixHash, prevMessageID string) (string, error) {
+	return f.decomposeRequest(ctx, convID, turnID, createdAt, req, prefixHash, prevMessageID, true)
 }
 
 // decomposeRequest is DecomposeRequest with the call log made optional, so a
 // delegation from CompleteCapturedTurn logs only the outer completion.
-func (f *fakeProxyStore) decomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash, prevMessageID string, logCall bool) (string, error) {
+func (f *fakeProxyStore) decomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, req *anthropicreq.Request, prefixHash, prevMessageID string, logCall bool) (string, error) {
 	if logCall {
 		f.calls = append(f.calls, "DecomposeRequest")
 	}
@@ -1248,34 +1260,37 @@ func TestProxyResolveModel(t *testing.T) {
 	})
 
 	// empty model -> default (anthropic/haiku-latest) -> concrete anthropic id
-	body, resolved, _, err := p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"max_tokens":1,"messages":[]}`))
+	body, resolved, _, err := p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), parsed(t, []byte(`{"max_tokens":1,"messages":[]}`)))
 	c.Require().NoError(err, "empty->default errored")
-	c.Eq("claude-haiku-4-5", modelOf(t, body), "empty->default")
+	c.Eq("claude-haiku-4-5", modelOf(t, body.Raw()), "empty->default")
 	c.Eq("claude-haiku-4-5", resolved, "empty->default resolved")
 	// explicit anthropic/sonnet-latest -> concrete
-	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"anthropic/sonnet-latest","max_tokens":1}`))
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), parsed(t, []byte(`{"model":"anthropic/sonnet-latest","max_tokens":1}`)))
 	c.Require().NoError(err, "anthropic/sonnet-latest errored")
-	c.Eq("claude-sonnet-5", modelOf(t, body), "anthropic/sonnet-latest")
+	c.Eq("claude-sonnet-5", modelOf(t, body.Raw()), "anthropic/sonnet-latest")
 	c.Eq("claude-sonnet-5", resolved, "anthropic/sonnet-latest resolved")
 	// concrete id -> untouched
-	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"claude-opus-4-8"}`))
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), parsed(t, []byte(`{"model":"claude-opus-4-8"}`)))
 	c.Require().NoError(err, "concrete errored")
-	c.Eq("claude-opus-4-8", modelOf(t, body), "concrete")
+	c.Eq("claude-opus-4-8", modelOf(t, body.Raw()), "concrete")
 	c.Eq("claude-opus-4-8", resolved, "concrete resolved")
 	// a short name is not a built-in alias: it passes through untouched even
 	// though the catalog contains the model line it spells
-	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"kimi-k3","max_tokens":1}`))
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), parsed(t, []byte(`{"model":"kimi-k3","max_tokens":1}`)))
 	c.Require().NoError(err, "kimi-k3 errored")
-	c.Eq("kimi-k3", modelOf(t, body), "kimi-k3")
+	c.Eq("kimi-k3", modelOf(t, body.Raw()), "kimi-k3")
 	c.Eq("kimi-k3", resolved, "kimi-k3 resolved")
 	// a "<family>-latest" the catalog can't resolve -> error (no hardcoded fallback)
-	if _, _, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(`{"model":"anthropic/opus-latest"}`)); err == nil {
+	if _, _, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), parsed(t, []byte(`{"model":"anthropic/opus-latest"}`))); err == nil {
 		t.Error("anthropic/opus-latest absent from catalog must error")
 	}
-	// malformed body -> best-effort passthrough, no error
+	// malformed body -> best-effort passthrough, no error. Parse still answers a
+	// usable Request for it, which is what keeps the forward path intact.
 	garbage := []byte(`not json`)
-	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), garbage)
-	c.False(err != nil || resolved != "" || string(body) != string(garbage), "malformed body = (%q,%q,%v), want passthrough+empty+nil", body, resolved, err)
+	unparsable, perr := anthropicreq.Parse(garbage)
+	c.Require().Error(perr, "a malformed body must report its decode failure")
+	body, resolved, _, err = p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), unparsable)
+	c.False(err != nil || resolved != "" || string(body.Raw()) != string(garbage), "malformed body = (%q,%q,%v), want passthrough+empty+nil", body.Raw(), resolved, err)
 }
 
 // A rewritten body keeps every field it did not touch byte-exact in value:
@@ -1290,13 +1305,13 @@ func TestProxyResolveModelPreservesUntouchedFields(t *testing.T) {
 
 	in := `{"model":"anthropic/sonnet-latest","seed":9007199254740993,"metadata":{"user_id":"u"},` +
 		`"messages":[{"role":"user","content":[{"type":"text","text":"a < b & \"c\""}]}]}`
-	body, resolved, _, err := p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), []byte(in))
+	body, resolved, _, err := p.resolveAndAdapt(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), parsed(t, []byte(in)))
 	c.Require().NoError(err, "resolveAndAdapt")
 	c.Eq("claude-sonnet-5", resolved, "resolved")
-	c.StrContains(string(body), `"seed":9007199254740993`, "an integer past 2^53 must survive")
+	c.StrContains(string(body.Raw()), `"seed":9007199254740993`, "an integer past 2^53 must survive")
 
 	var got, want map[string]any
-	c.Require().NoError(json.Unmarshal(body, &got), "decode rewritten body")
+	c.Require().NoError(json.Unmarshal(body.Raw(), &got), "decode rewritten body")
 	c.Require().NoError(json.Unmarshal([]byte(in), &want), "decode input")
 	want["model"] = "claude-sonnet-5"
 	c.EqDeep(want, got, "only the model changes")

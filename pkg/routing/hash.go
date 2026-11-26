@@ -3,9 +3,7 @@
 package routing
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 )
 
 // PrefixHash returns a sha256 of the request's static cache-prefix: the request
@@ -18,16 +16,11 @@ import (
 // changes the hash, catching non-deterministic tool ordering; and it correlates
 // with the captured cache_read/cache_creation tokens to explain WHY a cache broke.
 // Returns "" when the request can't be parsed (best-effort; column is nullable).
+//
+// The rule itself lives in pkg/anthropicreq, which owns the one implementation
+// the proxy reaches off its single parse of the body. This stays the byte-slice
+// entry point for callers that only ever have bytes (the OpenAI face, tests).
 func PrefixHash(requestJSON []byte) string {
-	var m map[string]any
-	if err := json.Unmarshal(requestJSON, &m); err != nil {
-		return ""
-	}
-	delete(m, "messages")
-	canonical, err := json.Marshal(m)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:])
+	req, _ := anthropicreq.Parse(requestJSON)
+	return req.PrefixHash()
 }

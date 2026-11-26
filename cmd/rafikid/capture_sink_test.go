@@ -8,6 +8,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/conv"
@@ -259,7 +260,9 @@ func assertPublishedTsMatchesHistory(t *testing.T, role string) {
 
 	convID, err := cs.EnsureConversation(ctx, capture.ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	ck.Require().NoError(err, "EnsureConversation")
-	req := []byte(`{"messages":[{"role":"user","content":"hello contract"}]}`)
+	body := []byte(`{"messages":[{"role":"user","content":"hello contract"}]}`)
+	req, perr := anthropicreq.Parse(body)
+	ck.Require().NoError(perr, "Parse the request body")
 	turnID, createdAt, err := cs.InsertTurnIntent(ctx, capture.TurnIntent{ConversationID: convID, Model: "m"})
 	ck.Require().NoError(err, "InsertTurnIntent")
 	head, err := cs.DecomposeRequest(ctx, convID, turnID, createdAt, req, "", "")

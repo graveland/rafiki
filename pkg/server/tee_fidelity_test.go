@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.graveland.dev/rafiki/pkg/anthropicreq"
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/conv"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -289,7 +290,7 @@ func (f *recordingChatStore) FailTurn(_ context.Context, _ string, _ time.Time, 
 	return nil
 }
 
-func (f *recordingChatStore) DecomposeRequest(_ context.Context, _, _ string, _ time.Time, _ []byte, _, _ string) (string, error) {
+func (f *recordingChatStore) DecomposeRequest(_ context.Context, _, _ string, _ time.Time, _ *anthropicreq.Request, _, _ string) (string, error) {
 	return "head-1", nil
 }
 
