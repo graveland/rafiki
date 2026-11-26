@@ -4225,14 +4225,6 @@ func (c *Controller) Close(childID string) error {
 		return c.closeNativeChild(childID)
 	}
 
-	// Its thread children close FIRST, with the same persist-before-tombstone
-	// step and the same fail-closed rule: a native child whose row cannot be
-	// written fails the parent's close, so a closed parent never leaves a live
-	// subagent row pointing at it.
-	if _, err := c.closeNativeChildrenOf(childID); err != nil {
-		return err
-	}
-
 	// Persist the child's current snapshot BEFORE forgetting it: the upsert
 	// carries its session_id/conversation_id to conversations.child (and clears
 	// closed_at), and the tombstone below stamps closed_at again. A child whose
@@ -4245,6 +4237,15 @@ func (c *Controller) Close(childID string) error {
 	// daemon is not ours to write (the upsert would stamp our daemon label and
 	// our exited status onto a live child's row), and we do not tombstone it
 	// below for the same reason.
+	//
+	// THE ORDER IS THE INVARIANT: parent persist → native children (persist then
+	// tombstone) → parent tombstone. It is the only order in which every
+	// reachable failure leaves a consistent pair. A parent persist failure closes
+	// NOTHING (no native row has been touched yet); a native persist failure
+	// fails the parent's close with the parent still live and un-tombstoned, so
+	// the pair is retried together on the next call; and a native child can never
+	// be closed while its parent is still live, which is the shape that used to
+	// leave a live parent's thread traffic writing to a tombstoned child.
 	owns := c.ownsChildRow(snap)
 	if owns {
 		if err := c.writeRecord(childID); err != nil {
@@ -4256,6 +4257,14 @@ func (c *Controller) Close(childID string) error {
 			slog.Warn("close: child not persisted", "childId", childID, "errorType", fmt.Sprintf("%T", err))
 			return fmt.Errorf("close %s: %w", childID, err)
 		}
+	}
+
+	// Now its thread children: persisted and tombstoned one by one, with the same
+	// fail-closed rule, while the parent is still live. A native child whose row
+	// cannot be written fails the parent's close before the parent's own row goes,
+	// so a tombstoned parent never leaves a live subagent under it.
+	if _, err := c.closeNativeChildrenOf(childID); err != nil {
+		return err
 	}
 
 	// Revoke the daraja's ability to reconnect — the row is going away.
@@ -4464,16 +4473,6 @@ func (c *Controller) CloseAllExited(olderThan time.Duration, owns func(childID s
 		if s.Native {
 			continue
 		}
-		// Its thread children close FIRST, with the same persist-before-tombstone
-		// step and the same fail-closed rule as the parent's own write below: on a
-		// failure this parent is left for a later sweep rather than closing into a
-		// live subagent row.
-		nativeClosed, err := c.closeNativeChildrenOf(s.ChildID)
-		if err != nil {
-			slog.Warn("close-all-exited: native child not persisted", "childId", s.ChildID, "errorType", fmt.Sprintf("%T", err))
-			failed++
-			continue
-		}
 		// Gated on ownsChildRow, same reasoning as Forget above: a recovered
 		// record, including one belonging to a still-live OTHER daemon's child,
 		// is loaded as exited and carries its old ExitedAt, so it passes the
@@ -4486,12 +4485,23 @@ func (c *Controller) CloseAllExited(olderThan time.Duration, owns func(childID s
 		// call), log the child id, and count the failure to surface in the
 		// result. Only for a row this daemon owns — another daemon's recovered
 		// row is not ours to write (nor to tombstone below).
+		//
+		// Same order as Close, for the same reason: parent persist → its native
+		// children → parent tombstone. A parent whose own write fails hasn't
+		// touched them, and a native failure leaves the parent live and
+		// un-tombstoned for a later sweep.
 		if ownedRow {
 			if err := c.writeRecord(s.ChildID); err != nil {
 				slog.Warn("close-all-exited: child not persisted", "childId", s.ChildID, "errorType", fmt.Sprintf("%T", err))
 				failed++
 				continue
 			}
+		}
+		nativeClosed, err := c.closeNativeChildrenOf(s.ChildID)
+		if err != nil {
+			slog.Warn("close-all-exited: native child not persisted", "childId", s.ChildID, "errorType", fmt.Sprintf("%T", err))
+			failed++
+			continue
 		}
 		c.publishChildClosed(s.ChildID)
 		c.st.Delete(s.ChildID)

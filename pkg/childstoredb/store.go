@@ -219,6 +219,26 @@ func (s *Store) Delete(ctx context.Context, childID string) error {
 	return nil
 }
 
+// IsClosed reports whether childID's row exists with a close tombstone. A
+// missing row is false, not an error: "no such row" and "a live row" are the
+// same answer to the caller (its id may be reused freely), and only a tombstone
+// forbids it.
+//
+// This is the one question List cannot answer — List returns live rows only,
+// by design — and it exists because a native thread child's id is
+// deterministic: the same (parent, thread) is rematerialized on every turn, so
+// a live parent's thread can address a row an earlier close tombstoned.
+func (s *Store) IsClosed(ctx context.Context, childID string) (bool, error) {
+	var closed bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM conversations.child
+		                 WHERE child_id = $1 AND closed_at IS NOT NULL)`, childID).Scan(&closed)
+	if err != nil {
+		return false, fmt.Errorf("childstoredb: is closed %s: %w", childID, err)
+	}
+	return closed, nil
+}
+
 // adoptSQL re-stamps ownership and nothing else.
 //
 // Three properties are load-bearing:

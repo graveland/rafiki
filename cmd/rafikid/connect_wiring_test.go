@@ -66,6 +66,11 @@ func (stubChildStore) Upsert(context.Context, childstore.ChildRecord) error   { 
 func (stubChildStore) Delete(context.Context, string) error                   { return nil }
 func (stubChildStore) List(context.Context) ([]childstore.ChildRecord, error) { return nil, nil }
 func (stubChildStore) AdoptOwnership(context.Context, string, string) error   { return nil }
+
+// IsClosed answers "not closed": a stub store holds no rows, so no id it is asked
+// about can carry a tombstone.
+func (stubChildStore) IsClosed(context.Context, string) (bool, error) { return false, nil }
+
 func (stubChildStore) NameHolder(context.Context, string, string, string) (string, string, bool, error) {
 	return "", "", false, nil
 }

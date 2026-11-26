@@ -329,6 +329,12 @@ func (c *Controller) loadChildren(ctx context.Context) {
 		slog.Info("recovery scoped by daemon ownership",
 			"skippedForeignLive", skipped, "adoptedForeignLapsed", adopted)
 	}
+	// The walk is what makes the parent question answerable, so the native
+	// reconcile runs HERE and not inside recoverOne: a thread child whose parent
+	// recovered as exited (a daemon that crashed never ran handleChildExit) has
+	// to be ended, and a parent earlier in the walk is only "exited" once it has
+	// been loaded. Spawned children are untouched — that is the scope boundary.
+	c.reconcileNativeChildren()
 	for _, rec := range scriptSettles {
 		// The process is gone (local hosting: the script dies with whichever
 		// daemon hosted it, and this one just classified the row as adoptable

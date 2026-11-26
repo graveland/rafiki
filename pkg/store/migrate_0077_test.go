@@ -113,12 +113,18 @@ func TestMigrate0077BackfillsSubagentThreadsOnly(t *testing.T) {
 	subRef := parentID + ":thread-sub"
 	helperRef := parentID + ":thread-helper"
 	nullSchemaRef := helperParentID + ":thread-nullschema"
+	deepRef := parentID + ":thread-deep:extra"
 	mcpRef := "mcp:user:0f0e1d2c-3b4a-4c5d-8e9f-0a1b2c3d4e5f"
 
 	subConv := seedM77Thread(t, ctx, pool, subRef,
 		`[{"name":"Bash","input_schema":{"type":"object"}}]`)
 	seedM77Thread(t, ctx, pool, helperRef, `[{"name":"web_search","type":"web_search_20250305"}]`)
 	seedM77Thread(t, ctx, pool, nullSchemaRef, `[{"name":"Bash","input_schema":null}]`)
+	// A ref with THREE segments is not a thread of the child its first segment
+	// names: taking it would give the row the wrong parent and a name built from
+	// the second segment. It declares a client tool, so only the two-segment rule
+	// excludes it.
+	seedM77Thread(t, ctx, pool, deepRef, `[{"name":"Bash","input_schema":{"type":"object"}}]`)
 	seedM77Thread(t, ctx, pool, mcpRef, `[{"name":"Bash","input_schema":{"type":"object"}}]`)
 
 	c.Require().NoError(migrateTo(ctx, pool, 77), "migrate to 0077")
@@ -129,7 +135,7 @@ func TestMigrate0077BackfillsSubagentThreadsOnly(t *testing.T) {
 		`SELECT count(*) FROM conversations.child WHERE labels ? 'rafiki/native-subagent'`).
 		Scan(&nativeRows), "count backfilled rows")
 	c.Eq(1, nativeRows, "rows created by the backfill")
-	for _, ref := range []string{helperRef, nullSchemaRef, mcpRef} {
+	for _, ref := range []string{helperRef, nullSchemaRef, deepRef, mcpRef} {
 		var n int
 		c.Require().NoError(pool.QueryRow(ctx,
 			`SELECT count(*) FROM conversations.child WHERE child_id = $1`, ref).Scan(&n),

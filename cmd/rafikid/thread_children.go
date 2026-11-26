@@ -87,6 +87,30 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 	if snap, ok := c.st.Get(id); ok {
 		return c.reviveThreadChild(snap, conversationID)
 	}
+	// A CLOSED ROW IS FINAL, INCLUDING FOR THIS DETERMINISTIC ID. A child id is
+	// <parent>:<thread>, so the same thread asks for the same row on every turn —
+	// and the row write is an upsert that clears closed_at, which would silently
+	// un-close a child an operator deliberately closed (`rafiki close <id>`) and
+	// put it back in `rafiki list`. Never that: a tombstone is the daemon's
+	// promise that the child can never be resumed, reattached or continued, and a
+	// native subagent cannot be a second row (the id IS the join key for its
+	// conversation, its lineage and its spend). So the row is refused and NO
+	// session is inserted — the thread's traffic is still captured into its
+	// branch conversation, it simply has no rail row or lineage entry any more,
+	// which is exactly the state the close left it in.
+	//
+	// This state is reachable, not theoretical: before the close ORDER was fixed,
+	// a parent persist failure could close its native children under a live
+	// parent, and an operator can close a thread's row while the parent process
+	// keeps running.
+	if closed, err := c.threadChildRowClosed(id); err != nil {
+		return fmt.Errorf("ensure thread child: %w", err)
+	} else if closed {
+		return &connectapi.ControllerError{
+			Code:    protocol.ErrFailedPrecondition,
+			Message: fmt.Sprintf("thread child %s is closed; a closed child is never revived and its id is never reused", id),
+		}
+	}
 	parent, ok := c.st.Get(parentChildID)
 	if !ok {
 		return fmt.Errorf("ensure thread child: parent %q not found", parentChildID)
@@ -199,10 +223,13 @@ func (c *Controller) persistThreadChild(childID, threadID string) error {
 // The row is persisted before returning because the row is what every other
 // reader sees: a child left "exited" in the database is a killed child to
 // recovery, and rafiki list would show a dead subagent under a running parent.
+// A failed write therefore ROLLS THE MEMORY BACK to the exited shape it found,
+// rather than leaving the store saying idle over a row that still says exited.
 func (c *Controller) reviveThreadChild(snap childstore.Snapshot, conversationID string) error {
 	if snap.Status != protocol.StatusExited {
 		return nil
 	}
+	wasSessionID := snap.SessionID
 	c.st.SetStatus(snap.ChildID, protocol.StatusIdle)
 	if err := c.st.Update(snap.ChildID, func(s *childstore.Session) {
 		s.ExitedAt = time.Time{}
@@ -217,6 +244,18 @@ func (c *Controller) reviveThreadChild(snap childstore.Snapshot, conversationID 
 	if err := c.writeRecord(snap.ChildID); err != nil {
 		slog.Warn("ensure thread child: reviving row not persisted",
 			"child", snap.ChildID, "error", err)
+		// Roll back to exactly the snapshot the revive started from: a store that
+		// says idle over a row that still says exited is the disagreement this
+		// whole task exists to remove.
+		c.st.SetStatus(snap.ChildID, protocol.StatusExited)
+		if uerr := c.st.Update(snap.ChildID, func(s *childstore.Session) {
+			s.ExitedAt = snap.ExitedAt
+			s.ExitCode = snap.ExitCode
+			s.ExitSignal = snap.ExitSignal
+			s.SessionID = wasSessionID
+		}); uerr != nil {
+			slog.Warn("ensure thread child: revive rollback failed", "child", snap.ChildID, "error", uerr)
+		}
 		return err
 	}
 	// No state machine drives a native child, so nothing else will tell the rail
@@ -228,6 +267,27 @@ func (c *Controller) reviveThreadChild(snap childstore.Snapshot, conversationID 
 		Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: string(protocol.StatusIdle)}},
 	})
 	return nil
+}
+
+// threadChildRowClosed asks the durable store whether this thread's row already
+// exists WITH a close tombstone — the one question List cannot answer, because
+// List returns live rows only.
+//
+// A read failure is returned, never swallowed into "not closed": that is the
+// answer that resurrects the tombstone this guard exists to protect. No store at
+// all is the documented memory-only mode (children do not survive a restart
+// anyway), so it answers false.
+func (c *Controller) threadChildRowClosed(childID string) (bool, error) {
+	if c.children == nil {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	closed, err := c.children.IsClosed(ctx, childID)
+	if err != nil {
+		return false, fmt.Errorf("read thread child %s: %w", childID, err)
+	}
+	return closed, nil
 }
 
 // nativeSubagentRefusal is what Kill, Send and Resume answer for a native
@@ -348,8 +408,17 @@ func (c *Controller) exitNativeChild(childID string, at time.Time) bool {
 	// claims is still running under a parent that is gone. Best effort — the
 	// parent's own exit already succeeded, and a failed row write must not stop
 	// the remaining threads from ending.
-	if err := c.writeRecord(childID); err != nil {
-		slog.Warn("native subagent exit not persisted", "child", childID, "parent", snap.Labels[childstore.LabelParent], "error", err)
+	//
+	// NOT during the daemon's own shutdown, exactly like the parent's write
+	// (handleChildExit's `if !c.stopping.Load()`): there the rows deliberately
+	// keep their LIVE statuses so the next daemon resumes the parent and its
+	// threads with it. Writing the native row exited while the parent row still
+	// says idle would split the pair — the parent would resume and load a thread
+	// it had just declared dead — and would leave no exit to reconcile from.
+	if !c.stopping.Load() {
+		if err := c.writeRecord(childID); err != nil {
+			slog.Warn("native subagent exit not persisted", "child", childID, "parent", snap.Labels[childstore.LabelParent], "error", err)
+		}
 	}
 
 	var code int32
@@ -375,6 +444,67 @@ func (c *Controller) exitNativeChildrenOf(parentChildID string, at time.Time) {
 			slog.Debug("native subagent ended with its parent", "child", id, "parent", parentChildID)
 		}
 	}
+}
+
+// reconcileNativeChildren ends the native thread children whose parent cannot be
+// running any more, at boot. It is the other half of exitNativeChildrenOf:
+// that runs from handleChildExit, which a daemon that CRASHED never reached, so
+// the parent is recovered as exited while its threads' rows still read idle —
+// and no verb can end them (Close demands an exited child, and Kill/Send/Resume
+// refuse a native one). Without this, a crash strands them until an operator
+// intervenes.
+//
+// Decided once, from the loaded store, after the recovery walk has loaded every
+// row: a parent is "gone" when its session is absent (its row is closed — List
+// skips tombstones — or never existed) or reads exited AND is a row this daemon
+// owns. A FOREIGN parent is deliberately left alone: recovery loads every
+// other daemon's row as exited here, so its status says nothing about its
+// threads, and writing another daemon's child rows is not ours to do.
+//
+// Best effort and never boot-fatal: a failed row write is logged by
+// exitNativeChild and the walk carries on.
+func (c *Controller) reconcileNativeChildren() {
+	var ended int
+	for _, snap := range c.st.List() {
+		if !snap.Native || snap.Status == protocol.StatusExited {
+			continue
+		}
+		at, gone := c.nativeParentEnded(snap)
+		if !gone {
+			continue
+		}
+		if c.exitNativeChild(snap.ChildID, at) {
+			ended++
+		}
+	}
+	if ended > 0 {
+		slog.Info("native subagents ended with a parent that is no longer running", "count", ended)
+	}
+}
+
+// nativeParentEnded reports whether snap's parent cannot be running, and the
+// instant to end the thread at. See reconcileNativeChildren for why a foreign
+// parent is never "ended".
+func (c *Controller) nativeParentEnded(snap childstore.Snapshot) (time.Time, bool) {
+	parentID, ok := childstore.ParentLabel(snap.Labels)
+	if !ok {
+		// A native child with no parent label only ever existed as a thread, so
+		// there is no process that could still be running it.
+		return time.Time{}, true
+	}
+	parent, present := c.st.Get(parentID)
+	if !present {
+		return time.Time{}, true
+	}
+	if !c.ownsChildRow(parent) || parent.Status != protocol.StatusExited {
+		return time.Time{}, false
+	}
+	at := parent.ExitedAt
+	if at.IsZero() {
+		// A recovered row always carries one; a hand-built one may not.
+		at = time.Now()
+	}
+	return at, true
 }
 
 // closeNativeChild finalizes one synthetic thread child: persist, announce,

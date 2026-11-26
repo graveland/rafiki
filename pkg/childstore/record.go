@@ -166,6 +166,14 @@ type ChildStore interface {
 	// foreign-lapsed row — see Controller.adoptOwnership for why both
 	// ownership fields must move together.
 	AdoptOwnership(ctx context.Context, childID, daemonID string) error
+	// IsClosed reports whether childID's row exists WITH A CLOSE TOMBSTONE. It
+	// is the one question List cannot answer (List returns live rows only), and
+	// it exists because a native thread child's id is deterministic: the same
+	// (parent, thread) is rematerialized on every turn, so "the row already
+	// exists and is CLOSED" is a reachable state that Upsert — which clears
+	// closed_at on purpose — would otherwise silently un-close. A missing row is
+	// false, not an error.
+	IsClosed(ctx context.Context, childID string) (bool, error)
 }
 
 // ExecutorSetWriter updates one durable column of a child row: its executor

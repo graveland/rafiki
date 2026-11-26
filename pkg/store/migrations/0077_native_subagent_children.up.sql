@@ -60,6 +60,13 @@ SELECT c.external_ref,
     ON p.child_id = split_part(c.external_ref, ':', 1)
  WHERE c.external_ref LIKE '%:%'
    AND c.external_ref <> p.child_id
+   -- EXACTLY TWO SEGMENTS: a thread ref is '<child id>:<thread id>'. A deeper
+   -- ref ('root:t1:t2') is not a thread of the child its first segment names,
+   -- and taking it would create a row with the wrong parent and a
+   -- 'task:<second segment>' name. The daemon's refs are built from real child
+   -- ids, so this is a guard against hand-built or foreign refs, not a shape
+   -- the proxy produces.
+   AND split_part(c.external_ref, ':', 3) = ''
    AND EXISTS (
        SELECT 1
          FROM conversations.conversation_turn t

@@ -16,12 +16,14 @@ import (
 )
 
 // failingChildStore is a childstore.ChildStore whose Upsert always fails,
-// recording the child ids it was asked to write. failIDs, when non-nil, narrows
-// the failure to those ids so a test can mix a failing child with a healthy one.
+// recording the child ids it was asked to write and tombstone. failIDs, when
+// non-nil, narrows the failure to those ids so a test can mix a failing child
+// with a healthy one.
 type failingChildStore struct {
 	stubChildStore
 	failIDs map[string]bool
 	failed  []string
+	deleted []string
 }
 
 func (f *failingChildStore) Upsert(_ context.Context, rec childstore.ChildRecord) error {
@@ -29,6 +31,13 @@ func (f *failingChildStore) Upsert(_ context.Context, rec childstore.ChildRecord
 	if f.failIDs == nil || f.failIDs[rec.ChildID] {
 		return errors.New("child store upsert failed")
 	}
+	return nil
+}
+
+// Delete records the tombstone instead of taking one, so a test can assert that
+// a failed close tombstoned nothing.
+func (f *failingChildStore) Delete(_ context.Context, childID string) error {
+	f.deleted = append(f.deleted, childID)
 	return nil
 }
 

@@ -227,8 +227,11 @@ cockpit and its own cost attribution, rather than disappearing into one
 opaque parent turn. The thread is also a real `conversations.child` row (marked
 `rafiki/native-subagent`, with a NULL pid), so it survives a daemon restart and
 keeps its place in its parent's lineage; it exits when its parent's process
-exits and is closed with its parent, and `kill`/`send`/`resume` address the
-parent, not the thread (`invalid_argument`, reason `native_subagent`). A helper
+exits (including after a crash, when the next daemon ends it as it recovers the
+parent) and is closed with its parent, and `kill`/`send`/`resume` address the
+parent, not the thread (`invalid_argument`, reason `native_subagent`). A closed
+thread stays closed: its id is deterministic, so the same thread speaking again
+under a still-running parent is refused rather than rematerialized. A helper
 Claude Code spawns internally for a single tool call (its WebFetch/WebSearch
 summarizers) is captured too but not shown as an agent row — its cost still
 rolls up into its parent's total.

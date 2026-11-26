@@ -188,6 +188,10 @@ func (r *recordingChildStore) Upsert(_ context.Context, rec childstore.ChildReco
 
 func (r *recordingChildStore) Delete(_ context.Context, _ string) error { return nil }
 
+// IsClosed answers "not closed": no test in this package seeds a tombstoned row
+// into this fake, and the real refusal is pinned against childstoredb.
+func (r *recordingChildStore) IsClosed(_ context.Context, _ string) (bool, error) { return false, nil }
+
 func (r *recordingChildStore) AdoptOwnership(_ context.Context, childID, daemonID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -221,6 +225,19 @@ func (r *recordingChildStore) lastUpsertFor(childID string) (childstore.ChildRec
 		return childstore.ChildRecord{}, false
 	}
 	return *found, true
+}
+
+// upsertsFor returns every record written for childID, in write order.
+func (r *recordingChildStore) upsertsFor(childID string) []childstore.ChildRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []childstore.ChildRecord
+	for i := range r.upserts {
+		if r.upserts[i].ChildID == childID {
+			out = append(out, r.upserts[i])
+		}
+	}
+	return out
 }
 
 // hasUpsertWithStatus reports whether any record for childID was written with
