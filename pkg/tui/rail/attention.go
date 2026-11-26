@@ -181,7 +181,7 @@ func (r *Rail) NextAttention() string {
 // PrevAttention returns the previous child needing attention, scanning
 // backwards from the focused row and wrapping.
 //
-// The backwards mirror of NextAttention. Both exist so alt+n and alt+p are a
+// The backwards mirror of NextAttention. Both exist so ^N and ^P are a
 // real pair: with attention on both sides of where you are, "next" and "prev"
 // must land on different children or the second binding is decoration.
 func (r *Rail) PrevAttention() string {

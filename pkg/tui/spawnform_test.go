@@ -282,7 +282,7 @@ func TestCtrlCCancelsTheFormWithoutArmingQuit(t *testing.T) {
 // ^A/^E are line-start/line-end in EVERY text surface, and a modal's rows are
 // bubbles/textinputs like any other. The executor browser used to sit on ^E,
 // which silently took end-of-line away from the fields the form was editing;
-// it is ⌥E now. Both keys are driven through the REAL key path so a future
+// it is ^O now. Both keys are driven through the REAL key path so a future
 // modal binding that claims one of them fails here.
 func TestFormCtrlAAndCtrlEAreLineEnds(t *testing.T) {
 	ck := assert.NewCollecting(t)

@@ -420,12 +420,14 @@ type Cockpit struct {
 	showHelp   bool
 	helpTop    int
 	railHidden bool
-	expandArgs bool
-	// expandInjected draws injected messages at full length; collapsed they show
-	// their first few rows. It is a LEVEL OF DETAIL, not a visibility switch —
-	// they are always drawn (see renderer.expandInjected). A VIEW flag only: the
-	// blocks stay in the session, so ^T expands history already fetched, with no
-	// refetch.
+	// detail is the ^O level of detail. expandArgs and expandInjected are
+	// derived from it by cycleDetail and are what the renderer reads.
+	// Injected messages are always drawn; the level only decides how many
+	// rows (see renderer.expandInjected). A VIEW flag only: the blocks stay in
+	// the session, so a level change applies to history already fetched, with
+	// no refetch.
+	detail         detailLevel
+	expandArgs     bool
 	expandInjected bool
 	// railPeek records that an explicit request revealed a rail the default look
 	// hides — ⇥ onto a hidden rail, or ^R below two rows — so committing or
@@ -554,7 +556,7 @@ type Cockpit struct {
 	// filled in.
 	picker *modelPicker
 	// execPicker mirrors picker for the executor field: the full browser
-	// opened from the form's executor row (alt+e), or auto-opened when a
+	// opened from the form's executor row (^O), or auto-opened when a
 	// submit would leave the daemon to guess between several eligible
 	// executors. Same stacking rule: esc returns to the form.
 	execPicker *executorPicker
@@ -2107,24 +2109,14 @@ func (c *Cockpit) handleGlobalKey(msg tea.KeyPressMsg, armed bool) (tea.Model, t
 		c.helpTop = 0
 		return c, nil, true
 	case key.Matches(msg, k.ExpandArgs):
-		c.expandArgs = !c.expandArgs
+		c.cycleDetail()
 		// paneSig alone is NOT enough. It makes linesFor call Lines again, but
 		// Lines reuses r.cached for every block below Finalized -- which is the
 		// whole visible transcript -- so the toggle reached only the live tail.
+		// An injected block renders a different number of rows per level for
+		// the same reason.
 		c.invalidatePanes()
-		return c, nil, true
-	case key.Matches(msg, k.ToggleInjected):
-		// Same trap as ^O above: an injected block renders a different number
-		// of rows in each mode, and Lines reuses r.cached for everything below
-		// Finalized, so without the invalidation the toggle would reach only the
-		// live tail.
-		c.expandInjected = !c.expandInjected
-		c.invalidatePanes()
-		if c.expandInjected {
-			c.setNotice("injected messages: expanded")
-		} else {
-			c.setNotice("injected messages: collapsed")
-		}
+		c.setNotice("detail: " + c.detail.String())
 		return c, nil, true
 	case key.Matches(msg, k.ToggleImages):
 		if c.caps.mode() != imageModeKitty {
@@ -3847,7 +3839,6 @@ func (c *Cockpit) footerHints() string {
 		// says "[+N lines]" and a folded tool call says "[omitted N lines]",
 		// and neither marker can name the key that opens it.
 		c.keys.ExpandArgs.Help().Key+" "+c.keys.ExpandArgs.Help().Desc,
-		c.keys.ToggleInjected.Help().Key+" "+c.keys.ToggleInjected.Help().Desc,
 		c.keys.Redraw.Help().Key+" "+c.keys.Redraw.Help().Desc)
 	return strings.Join(parts, "  ")
 }
@@ -3899,8 +3890,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.ToggleRail, "Show or hide the rail (^B does the same). Hiding it leaves your agents running."},
 		entry{k.SearchToggle, "Switch the rail between the agent list and the conversation search. Type to search, move as in the agent rail, ⏎ to switch to the conversation (a closed one opens read-only), tab to cycle the sort; esc or ^S again goes back."},
 		entry{k.Help, "Show or hide this page."},
-		entry{k.ExpandArgs, "Expand or collapse tool-call details: full arguments and results."},
-		entry{k.ToggleInjected, "Expand or collapse injected messages: the notices the daemon and the agent's harness add. Drawn short by default."},
+		entry{k.ExpandArgs, "Cycle the level of detail: collapsed, then tool-call arguments and results in full, then the notices the daemon and the agent's harness inject in full as well."},
 		entry{k.ToggleImages, "Show or hide image thumbnails. Needs a terminal with Kitty graphics."},
 		entry{k.Redraw, "Repaint the screen. Try it when the display or the cursor looks wrong."},
 		entry{k.Quit, "Quit; press twice within two seconds to confirm. Your agents keep running."},

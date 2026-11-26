@@ -74,16 +74,15 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | Key | Does |
 |---|---|
 | `⇥` / `⇧⇥` | Toggle between input box and agent rail; reveals it if hidden |
-| `⌥N` / `^PgDn` | Hop to the next agent that needs you |
-| `⌥P` / `^PgUp` | Hop to the previous agent that needs you |
+| `^N` / `^PgDn` | Hop to the next agent that needs you |
+| `^P` / `^PgUp` | Hop to the previous agent that needs you |
 | `^↑` / `^↓` | Hop up/down the rail without changing pane |
 | `esc` / `^X` | Abort the running turn |
 | `^R` / `^B` | Collapse/restore the agent rail; with one agent, peek it |
 | `^S` | Search conversations in place of the rail (see below); `^S` or `esc` returns |
 | `^G` | Toggle the help page: every key with a sentence on what it does. `PgUp`/`PgDn`, `home`/`end` scroll it when it does not fit |
-| `^O` | Expand tool arguments in full rather than folded |
+| `^O` | Cycle the level of detail: collapsed, then tool arguments in full, then the messages the daemon and the harness injected in full as well (see below) |
 | `^Y` | Toggle image thumbnails (Kitty-graphics terminals only) |
-| `^T` | Expand the messages the daemon and the harness injected — drawn short by default (see below) |
 | `^C`/`^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time |
 
 **Input pane**
@@ -95,7 +94,7 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | `⇧⏎` / `^J` | Insert a newline (`⇧⏎` needs a Kitty-keyboard-protocol terminal — Ghostty, Kitty, WezTerm, recent iTerm2/Alacritty; `^J` works everywhere) |
 | paste | Over six lines or 800 characters folds to `[pasted #1: 40 lines]`; paste again to insert in full |
 | `^U` | Kill the cursor's line; on an empty line, remove the line above, so repeating it unrolls the input |
-| `⌥K` | Clear the whole input, folded pastes included |
+| `^\` | Clear the whole input, folded pastes included |
 | `PgUp`/`PgDn`, `home`/`end` | Scroll the transcript without leaving the input box |
 | `↑` / `↓` | Move the cursor; with nowhere to move, scroll the transcript |
 
@@ -196,9 +195,9 @@ the block, so the message reads as one unit.
 
 They are always drawn. Hiding them by default was wrong: a reader who cannot
 see that the daemon spoke cannot tell why the agent did what it did. They are
-drawn SHORT instead — three rows, then `[+N lines]` — and `^T` expands every
-injected message to its full text, the same two-level shape `^O` gives tool
-arguments. Both keys are named in the footer. Each kind carries its own glyph
+drawn SHORT instead — three rows, then `[+N lines]` — and the last `^O` level
+expands every injected message to its full text, one step past the level that
+opens tool arguments. The key is named in the footer. Each kind carries its own glyph
 and names itself on the first row, expanded or not, so a restart is not a job
 exit:
 

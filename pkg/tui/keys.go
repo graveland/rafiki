@@ -49,12 +49,7 @@ type keyMap struct {
 	Redraw        key.Binding
 	// ^Y is free: not in textareaKeys, and bound nowhere else in the cockpit.
 	ToggleImages key.Binding
-	// ToggleInjected expands the injected messages the transcript draws
-	// collapsed — the two-level shape ^O gives tool arguments. ^T is a textarea
-	// key (transpose), so like ^B/^G/^D it is grandfathered: you cannot
-	// transpose a character while typing in the prompt.
-	ToggleInjected key.Binding
-	Abort          key.Binding
+	Abort        key.Binding
 
 	// SearchToggle switches the rail column between the agent list and the
 	// conversation search. ^S is free: not in textareaKeys (the textarea has
@@ -107,11 +102,15 @@ func defaultKeyMap() keyMap {
 		// Both spellings in the help text: the confirmation notice is built
 		// from it, and naming only ^C after someone pressed ^D reads as the
 		// cockpit having missed the key.
-		Quit:          key.NewBinding(key.WithKeys("ctrl+c", "ctrl+d"), key.WithHelp("^C/^D", "quit")),
-		NextPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("⇥", "next pane")),
-		PrevPane:      key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "prev pane")),
-		NextAttention: key.NewBinding(key.WithKeys("alt+n", "ctrl+pgdown"), key.WithHelp("⌥N", "next needing you")),
-		PrevAttention: key.NewBinding(key.WithKeys("alt+p", "ctrl+pgup"), key.WithHelp("⌥P", "prev needing you")),
+		Quit:     key.NewBinding(key.WithKeys("ctrl+c", "ctrl+d"), key.WithHelp("^C/^D", "quit")),
+		NextPane: key.NewBinding(key.WithKeys("tab"), key.WithHelp("⇥", "next pane")),
+		PrevPane: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "prev pane")),
+		// ^N/^P are textarea keys (cursor down/up) and are grandfathered:
+		// ↑/↓ cover that movement, and the alt chords this replaced are not
+		// delivered reliably (a macOS terminal sends Option+letter as a
+		// composed character unless it is set to send Meta).
+		NextAttention: key.NewBinding(key.WithKeys("ctrl+n", "ctrl+pgdown"), key.WithHelp("^N", "next needing you")),
+		PrevAttention: key.NewBinding(key.WithKeys("ctrl+p", "ctrl+pgup"), key.WithHelp("^P", "prev needing you")),
 		HopPrev:       key.NewBinding(key.WithKeys("ctrl+up"), key.WithHelp("^↑", "hop up")),
 		HopNext:       key.NewBinding(key.WithKeys("ctrl+down"), key.WithHelp("^↓", "hop down")),
 		// ^R for "rail". Used to be ^A ("agents"), which cost the textarea its
@@ -125,7 +124,9 @@ func defaultKeyMap() keyMap {
 		Help:       key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("^G", "help")),
 		// ^E would be the mnemonic and is taken: the textarea binds it to
 		// end-of-line. ^O is free and is what other agent TUIs use.
-		ExpandArgs: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("^O", "expand detail")),
+		// ^O CYCLES the detail level: collapsed, then tool arguments in full,
+		// then injected messages in full as well.
+		ExpandArgs: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("^O", "detail level")),
 		// ^L repaints. It is a safety net for output that bypasses slog and
 		// lands on the alt screen, not the primary defence -- see the ring
 		// handler in cmd/rafiki.
@@ -134,10 +135,6 @@ func defaultKeyMap() keyMap {
 		// Kitty graphics support. ^Y is free: not in textareaKeys, and bound
 		// nowhere else in the cockpit.
 		ToggleImages: key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("^Y", "images")),
-		// ^T shows the harness-injected system-role messages -- heartbeat
-		// nudges, environment updates -- that the transcript hides by default.
-		// They are real history but not conversation, so the default is off.
-		ToggleInjected: key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("^T", "expand injected")),
 		// esc first: it is what muscle memory reaches for to stop a running
 		// turn, and it is free in the input pane (the textarea ignores it,
 		// and the other two panes match their own Escape before this).
@@ -203,10 +200,11 @@ func defaultKeyMap() keyMap {
 		// backwards.
 		ClearInput: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("^U", "kill line")),
 
-		// Clearing everything in one stroke is the rarer wish, so it takes the
-		// modified key. alt+k is free in the textarea keymap, and sits beside
-		// its ctrl+k (delete to end of line).
-		ClearAll: key.NewBinding(key.WithKeys("alt+k"), key.WithHelp("⌥K", "clear all")),
+		// Clearing everything in one stroke is the rarer wish, so it takes a
+		// key off the letter row. ^\ is byte 0x1c: the terminal is in raw mode
+		// while the cockpit runs, so it is delivered as a key rather than
+		// raising SIGQUIT, and nothing in the textarea keymap claims it.
+		ClearAll: key.NewBinding(key.WithKeys("ctrl+\\"), key.WithHelp("^\\", "clear all")),
 
 		// Scrolling from the INPUT pane. Reaching the transcript should not
 		// require leaving the box you type in: the whole point of reading back
@@ -294,20 +292,17 @@ var textareaKeys = map[string]bool{
 }
 
 // grandfathered are textarea keys the cockpit takes anyway. ctrl+b (rail) and
-// ctrl+g (help) must stay reachable from every pane, ctrl+d quits, and ctrl+t
-// shows the injected messages. The design accepts that you cannot use them
-// while typing.
+// ctrl+g (help) must stay reachable from every pane, ctrl+d quits, and
+// ctrl+n/ctrl+p hop between agents needing you. The design accepts that you
+// cannot use them while typing.
 // ctrl+a is deliberately NOT here: it used to be ToggleRail's primary
 // binding, and now that ToggleRail moved to ctrl+r, ctrl+a reaches the
 // textarea's line-start like every other unclaimed emacs key should.
 var grandfathered = map[string]bool{
 	"ctrl+b": true, "ctrl+g": true, "ctrl+d": true,
-	// ^T shows the injected system-role messages. It IS a textarea key
-	// (transpose-character-backward), and the cockpit takes it anyway: reading
-	// what the harness said to the agent is the point of the toggle, and
-	// transposing a character mid-prompt is the rarer need. Same trade as
-	// ^B/^G/^D.
-	"ctrl+t": true,
+	// ^N/^P are cursor down/up in the textarea; ↑/↓ do the same job, and a
+	// hop to the next agent needing you must work from the input pane.
+	"ctrl+n": true, "ctrl+p": true,
 	// Scroll keys the input pane claims outright. pgup/pgdown page a
 	// three-line box, which is meaningless; home/end are line-start/line-end,
 	// which ^A gave up anyway and alt+</ctrl+home still provide.
@@ -323,9 +318,8 @@ func (k keyMap) globalConflicts() []string {
 		"HopPrev": k.HopPrev, "HopNext": k.HopNext,
 		"ToggleRail": k.ToggleRail, "Help": k.Help,
 		"ExpandArgs": k.ExpandArgs, "ToggleImages": k.ToggleImages,
-		"ToggleInjected": k.ToggleInjected,
-		"SearchToggle":   k.SearchToggle,
-		"Redraw":         k.Redraw, "Abort": k.Abort,
+		"SearchToggle": k.SearchToggle,
+		"Redraw":       k.Redraw, "Abort": k.Abort,
 	}
 	var out []string
 	for name, b := range globals {

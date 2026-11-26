@@ -42,9 +42,10 @@ resubscribing.
 ⏎ sends — it joins the agent's running turn if it has one — ^Q queues the same
 text as the next turn instead (⌃⏎ where the terminal reports it), ⇧⏎ (or ^J)
 inserts a newline, esc (or ^X) aborts the turn.
-^O expands full tool arguments and thinking, ^L repaints the screen.
+^O cycles the level of detail (tool arguments and thinking in full, then injected
+messages in full), ^L repaints the screen.
 ⇥ cycles the three panes — input, agents, transcript — and each one owns its
-keys while it has focus. ⌥N hops to the next agent that needs you, ^↑/^↓ move,
+keys while it has focus. ^N hops to the next agent that needs you, ^↑/^↓ move,
 ^B collapses the rail, ^S turns it into a conversation search (⏎ switches to
 the conversation under the cursor), ^G toggles help. Children keep running after you quit —
 reattach any time.`,

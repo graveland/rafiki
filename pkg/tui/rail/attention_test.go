@@ -253,7 +253,7 @@ func TestConcurrentApplyAndCursorAreSafe(t *testing.T) {
 
 // TestPrevAttentionScansBackwards pairs with the NextAttention tests. With
 // attention on both sides of the focused row, next and prev must disagree —
-// otherwise alt+p is just alt+n with a different name.
+// otherwise ^P is just ^N with a different name.
 func TestPrevAttentionScansBackwards(t *testing.T) {
 	c := assert.NewCollecting(t)
 	r := rail.New()

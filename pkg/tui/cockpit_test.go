@@ -1507,7 +1507,7 @@ func TestHelpPageNamesEveryInputAndRailKey(t *testing.T) {
 	k := c.keys
 	for _, b := range []key.Binding{k.Send, k.Queue, k.Newline, k.ClipboardPaste, k.ClearInput, k.ClearAll, k.Abort,
 		k.SelectUp, k.FoldLeft, k.Commit, k.NewAgent, k.EndAgent, k.Resume, k.EditBudget, k.Rename, k.Escape,
-		k.ToggleRail, k.SearchToggle, k.ToggleInjected, k.ToggleImages, k.ExpandArgs, k.Redraw, k.Quit} {
+		k.ToggleRail, k.SearchToggle, k.ToggleImages, k.ExpandArgs, k.Redraw, k.Quit} {
 		ck.StrContains(help, b.Help().Key, "the help page is missing a key")
 	}
 }
@@ -2763,7 +2763,7 @@ func TestPasteUnderBothBoundsIsInsertedWhole(t *testing.T) {
 	assert.NewCollecting(t).Eq(small, c.ta.Value(), "a paste under both bounds must be inserted whole")
 }
 
-// ⌥K empties the whole box, folded pastes included.
+// ^\ empties the whole box, folded pastes included.
 func TestClearAllEmptiesTheBoxAndItsPastes(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
@@ -2774,11 +2774,11 @@ func TestClearAllEmptiesTheBoxAndItsPastes(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	ck.Require().False(c.ta.Value() == "" || len(c.pastes) == 0, "fixture is vacuous: nothing to clear")
 
-	c.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModAlt})
+	c.Update(tea.KeyPressMsg{Code: '\\', Mod: tea.ModCtrl})
 
 	ck.Eq("", c.ta.Value(), "box still holds")
 	ck.Empty(c.pastes, "folded pastes outlived the input that referenced them")
-	ck.False(c.quitting, "⌥K quit the cockpit")
+	ck.False(c.quitting, "^\\ quit the cockpit")
 }
 
 // ^U kills the cursor's line wherever the cursor sits in it, and on an empty
@@ -3259,7 +3259,7 @@ func injectedCockpit(t *testing.T) *Cockpit {
 }
 
 // Injected messages are ALWAYS drawn: a reader who cannot see that the daemon
-// spoke cannot tell why the agent did what it did. They are drawn short, and ^T
+// spoke cannot tell why the agent did what it did. They are drawn short, and ^O
 // is a level of detail rather than a visibility switch.
 func TestCockpitShowsInjectedCollapsedByDefault(t *testing.T) {
 	ck := assert.NewCollecting(t)
@@ -3276,10 +3276,11 @@ func TestCockpitShowsInjectedCollapsedByDefault(t *testing.T) {
 }
 
 // A long injected message is drawn short and COUNTED, so the reader knows there
-// is more; ^T draws all of it and collapses it again. Neither press may touch
-// the session: it is a view flag, so already-fetched history expands with no
+// is more. ^O steps collapsed -> tool calls -> everything and wraps, and the
+// injected message opens only at the last level. No press may touch the
+// session: it is a view flag, so already-fetched history expands with no
 // refetch.
-func TestCockpitCtrlTExpandsInjected(t *testing.T) {
+func TestCockpitCtrlOCyclesDetailThroughInjected(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -3294,37 +3295,44 @@ func TestCockpitCtrlTExpandsInjected(t *testing.T) {
 	ck.NotStrContains(collapsed, "line five", "a long injected message was not collapsed:\n")
 	ck.StrContains(collapsed, "[+", "the collapsed block does not say how much it hides:\n")
 
-	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	ck.True(c.expandInjected, "^T did not expand")
+	c.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	ck.True(c.expandArgs, "first ^O did not expand tool calls")
+	ck.False(c.expandInjected, "first ^O already expanded injected messages")
+	ck.NotStrContains(ansi.Strip(c.View().Content), "line five",
+		"the tool-call level drew the whole injected message:\n")
+
+	c.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	ck.True(c.expandArgs, "the injected level dropped the tool-call level")
+	ck.True(c.expandInjected, "second ^O did not expand injected messages")
 	expanded := ansi.Strip(c.View().Content)
-	ck.StrContains(expanded, "line five", "^T did not draw the whole injected message:\n")
+	ck.StrContains(expanded, "line five", "^O did not draw the whole injected message:\n")
 	ck.NotStrContains(expanded, "[+", "the truncation marker survived expansion:\n")
 
-	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	ck.False(c.expandInjected, "^T did not collapse again")
+	c.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	ck.False(c.expandArgs, "third ^O did not wrap back to collapsed")
+	ck.False(c.expandInjected, "third ^O did not collapse injected messages")
 	ck.NotStrContains(ansi.Strip(c.View().Content), "line five",
-		"^T collapsed the flag but left the expanded rows on screen:\n")
+		"^O collapsed the flag but left the expanded rows on screen:\n")
 
-	ck.Len(s.Blocks, 1, "the toggle changed the session model; the level of detail is a render decision only")
+	ck.Len(s.Blocks, 1, "the cycle changed the session model; the level of detail is a render decision only")
 }
 
-// ^T must be discoverable: a key that changes the transcript and appears
+// ^O must be discoverable: a key that changes the transcript and appears
 // nowhere in the help overlay may as well not exist.
-func TestHelpShowsInjectedToggle(t *testing.T) {
+func TestHelpShowsDetailLevelKey(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	help := ansi.Strip(c.View().Content)
-	h := c.keys.ToggleInjected.Help()
-	ck.StrContains(help, h.Key, "the help overlay does not name the injected toggle's key:\n")
+	h := c.keys.ExpandArgs.Help()
+	ck.StrContains(help, h.Key, "the help overlay does not name the detail key:\n")
 	// The page's own sentence, not the binding's short label: the page is what
-	// the reader reads, and it has to say that the key EXPANDS rather than
-	// reveals — that is the behaviour the key now has. Only the part that fits
-	// on one wrapped line is asserted, because the overlay wraps its column.
-	ck.StrContains(help, "Expand or collapse injected",
-		"the help overlay does not describe the injected toggle:\n")
+	// the reader reads. Only the part that fits on one wrapped line is
+	// asserted, because the overlay wraps its column.
+	ck.StrContains(help, "Cycle the level of detail",
+		"the help overlay does not describe the detail key:\n")
 }
 
 // An injected-only transcript is CONTENT, not an empty conversation: it is
@@ -3388,18 +3396,18 @@ func TestOneMergedEchoRetiresEverySendItAnswers(t *testing.T) {
 	ck.EqDeep([]string{"third"}, pendingTexts(c), "a merged echo left its sends behind")
 }
 
-// ^T is the only key that opens a collapsed injected message, and the marker
-// the block carries cannot name it. The footer is where a reader learns it —
-// beside ^O, which opens a folded tool call the same way.
-func TestFooterNamesTheInjectedToggle(t *testing.T) {
+// ^O is the only key that opens a collapsed injected message or a folded tool
+// call, and the markers the blocks carry cannot name it. The footer is where a
+// reader learns it.
+func TestFooterNamesTheDetailKey(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 200, Height: 30})
 
 	footer := ansi.Strip(c.footerHints())
-	h := c.keys.ToggleInjected.Help()
+	h := c.keys.ExpandArgs.Help()
 	ck.StrContains(footer, h.Key+" "+h.Desc,
-		"the footer does not name the injected toggle:\n")
+		"the footer does not name the detail key:\n")
 }
 
 // ── the search rail ──────────────────────────────────────────────────────────

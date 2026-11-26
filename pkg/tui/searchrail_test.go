@@ -1203,8 +1203,8 @@ func TestSearchRailHopKeysDoNotMoveTheAgentRail(t *testing.T) {
 	c := searchFromRail(t, fake)
 
 	for _, msg := range []tea.KeyPressMsg{
-		{Code: 'n', Mod: tea.ModAlt},
-		{Code: 'p', Mod: tea.ModAlt},
+		{Code: 'n', Mod: tea.ModCtrl},
+		{Code: 'p', Mod: tea.ModCtrl},
 		{Code: tea.KeyUp, Mod: tea.ModCtrl},
 		{Code: tea.KeyDown, Mod: tea.ModCtrl},
 	} {

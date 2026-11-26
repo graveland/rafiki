@@ -465,7 +465,7 @@ var (
 	styleInjectedKind = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)
 )
 
-// injectedPreviewRows is how much of an injected message is drawn before ^T.
+// injectedPreviewRows is how much of an injected message is drawn before ^O's last level.
 // Three: enough for the one-line notices that are most of them, short enough
 // that a pasted report does not bury the turn it interrupted.
 const injectedPreviewRows = 3
@@ -532,8 +532,8 @@ func (r *renderer) renderBlock(b session.Block) string {
 		// different things.
 		//
 		// Collapsed (the default) it shows a few rows of body and counts the
-		// rest; ^T shows all of it — the same two-level shape ^O gives tool
-		// arguments. The title row is never counted or truncated.
+		// rest; the last ^O level shows all of it, one step past the level that
+		// opens tool arguments. The title row is never counted or truncated.
 		d := decorationFor(b.InjectedKind)
 		bar := styleInjectedBar.Render("▌ ")
 		pad := styleInjectedBar.Render("▌")

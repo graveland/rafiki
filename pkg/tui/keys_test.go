@@ -50,8 +50,10 @@ func TestDefaultKeyMapBindsWhatTheFooterClaims(t *testing.T) {
 		{"quit", "ctrl+c", k.Quit},
 		{"nextPane", "tab", k.NextPane},
 		{"prevPane", "shift+tab", k.PrevPane},
-		{"nextAttention", "alt+n", k.NextAttention},
-		{"prevAttention", "alt+p", k.PrevAttention},
+		{"nextAttention", "ctrl+n", k.NextAttention},
+		{"prevAttention", "ctrl+p", k.PrevAttention},
+		{"clearAll", "ctrl+\\", k.ClearAll},
+		{"expandArgs", "ctrl+o", k.ExpandArgs},
 		{"toggleRail", "ctrl+r", k.ToggleRail},
 		{"toggleRail", "ctrl+b", k.ToggleRail},
 		{"help", "ctrl+g", k.Help},
@@ -147,9 +149,8 @@ func TestLifecycleKeysStayRailLocal(t *testing.T) {
 		"HopPrev": k.HopPrev, "HopNext": k.HopNext,
 		"ToggleRail": k.ToggleRail, "Help": k.Help,
 		"ExpandArgs": k.ExpandArgs, "ToggleImages": k.ToggleImages,
-		"ToggleInjected": k.ToggleInjected,
-		"SearchToggle":   k.SearchToggle,
-		"Redraw":         k.Redraw, "Abort": k.Abort,
+		"SearchToggle": k.SearchToggle,
+		"Redraw":       k.Redraw, "Abort": k.Abort,
 	}
 	rail := map[string]bool{}
 	for _, s := range k.NewAgent.Keys() {
