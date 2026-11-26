@@ -421,10 +421,17 @@ func (c *Controller) subtreeSpend(ctx context.Context, rootChildID string) (floa
 	}
 	total, unpriced := c.coster.PriceUsage(usage)
 	if len(unpriced) > 0 {
-		// Nothing in the daemon acts on the unpriced list — the number is a
-		// display and budget figure either way — but a model with no list price
-		// reads as free, so name them so the gap is diagnosable.
-		slog.Debug("subtree spend could not price every model",
+		// WARN, not Debug: a model with no list price records its usage as $0,
+		// and the dollars this returns are what checkBudget, sweepBudgets and
+		// budgetHalted compare a child's lifetime maxCost against. The number that
+		// degrades is the GUARDRAIL's, not a display figure, and silently is how a
+		// child runs past its budget unnoticed.
+		//
+		// Deliberately not fatal: the turns ran and were captured, so refusing here
+		// would wedge a healthy fleet over a missing catalog entry. PriceUsage names
+		// each unpriced model ONCE, so one uncatalogued model prints one line
+		// however many conversations spent on it.
+		slog.Warn("subtree spend: an unpriced model's usage is counted as $0, so this budget cannot see its cost",
 			"root", rootChildID, "models", unpriced)
 	}
 	return total, nil

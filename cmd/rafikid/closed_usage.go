@@ -38,7 +38,14 @@ func (m *closedUsageMemo) get(childID string) ([]insights.ConversationUsage, boo
 // put records a closed member's rows for the life of the daemon. The slice is
 // shared with every subsequent read, so callers treat what they get back as
 // read-only.
+//
+// An EMPTY child id is refused: the key identifies the member the rows belong
+// to, and a blank one would be a row set owned by every empty-id member (and
+// handed back to whichever asked first).
 func (m *closedUsageMemo) put(childID string, rows []insights.ConversationUsage) {
+	if childID == "" {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.rows == nil {
