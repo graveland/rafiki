@@ -354,8 +354,9 @@ type renderer struct {
 	// cached holds rendered lines for blocks[:cachedUpTo], all finalized and
 	// therefore immutable. The live tail is re-rendered per call and is never
 	// stored here.
-	cached     []string
-	cachedUpTo int
+	cached        []string
+	cachedUpTo    int
+	cachedDivider time.Time // last divider in the finalized prefix
 
 	lastFP  string
 	liveOut []string
@@ -867,8 +868,12 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 		r.lastFP = ""
 		r.liveOut = nil
 	}
+	if r.cachedUpTo == 0 {
+		r.cachedDivider = time.Time{}
+	}
+	prefixChanged := r.cachedUpTo != finalized
 	for i := r.cachedUpTo; i < finalized; i++ {
-		r.cached = append(r.cached, r.drawBlock(blocks, i)...)
+		r.cached = append(r.cached, r.drawBlock(blocks[i], &r.cachedDivider)...)
 	}
 	r.cachedUpTo = finalized
 
@@ -876,11 +881,12 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 	// cached, and when the tail is empty (so the cache empties rather than
 	// stranding the last streaming fragment below finalized content).
 	fp := session.LiveFingerprint(blocks, finalized)
-	if fp != r.lastFP || r.liveOut == nil || finalized >= len(blocks) {
+	if prefixChanged || fp != r.lastFP || r.liveOut == nil || finalized >= len(blocks) {
 		r.lastFP = fp
+		lastDivider := r.cachedDivider
 		var tail []string
 		for i := finalized; i < len(blocks); i++ {
-			tail = append(tail, r.drawBlock(blocks, i)...)
+			tail = append(tail, r.drawBlock(blocks[i], &lastDivider)...)
 		}
 		r.liveOut = tail
 	}

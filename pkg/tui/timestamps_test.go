@@ -39,7 +39,7 @@ func TestDividerLabel(t *testing.T) {
 		{"quiet pause today", local(2026, 11, 26, 14, 40, 0), local(2026, 11, 26, 14, 32, 0), "14:40", true},
 		{"quiet pause on an old day still says which day", local(2026, 11, 20, 14, 40, 0), local(2026, 11, 20, 14, 32, 0), "Fri Nov 20 14:40 · 6d ago", true},
 		{"ordinary rhythm", local(2026, 11, 26, 14, 36, 0), local(2026, 11, 26, 14, 32, 0), "", false},
-		{"exactly the threshold is not a pause", local(2026, 11, 26, 14, 37, 0), local(2026, 11, 26, 14, 32, 0), "", false},
+		{"exactly the interval", local(2026, 11, 26, 14, 37, 0), local(2026, 11, 26, 14, 32, 0), "14:37", true},
 		{"midnight crossed within the threshold", local(2026, 11, 26, 0, 1, 0), local(2026, 11, 25, 23, 58, 0), "Thu Nov 26 00:01", true},
 	} {
 		got, shown := dividerLabel(tc.at, tc.prev, now)
@@ -105,10 +105,10 @@ func renderTimed(mode timeMode, base, now time.Time) string {
 	return ansi.Strip(strings.Join(r.Lines(blocks, len(blocks), 80), "\n"))
 }
 
-func TestGapsModeDrawsDividersAndTheTurnDuration(t *testing.T) {
+func TestPeriodicModeDrawsDividersAndTheTurnDuration(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	base := local(2026, 11, 26, 14, 32, 5)
-	out := renderTimed(timeGaps, base, local(2026, 11, 26, 18, 0, 0))
+	out := renderTimed(timePeriodic, base, local(2026, 11, 26, 18, 0, 0))
 
 	// Above the first block, and above the one after a 20 minute pause; not
 	// above the answer 20 seconds after its question.
@@ -120,10 +120,10 @@ func TestGapsModeDrawsDividersAndTheTurnDuration(t *testing.T) {
 
 // Opening an old conversation is the common case: every divider says which day
 // it is and how long ago, because nothing else on screen does.
-func TestGapsModeOnAnOldConversationNamesTheDayAndAge(t *testing.T) {
+func TestPeriodicModeOnAnOldConversationNamesTheDayAndAge(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	base := local(2026, 11, 20, 14, 32, 5)
-	out := renderTimed(timeGaps, base, local(2026, 11, 26, 18, 0, 0))
+	out := renderTimed(timePeriodic, base, local(2026, 11, 26, 18, 0, 0))
 
 	ck.EqDeep([]string{"── Fri Nov 20 14:32 · 6d ago ──", "── Fri Nov 20 14:52 · 6d ago ──"},
 		trimAll(dividerRow.FindAllString(out, -1)), "dividers in:\n%s", out)
@@ -245,7 +245,7 @@ func TestCtrlTCyclesTimingAndRedrawsCachedBlocks(t *testing.T) {
 	ck.NotStrContains(off, stamp, "off mode kept the stamp:\n")
 
 	c.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	ck.Eq(timeGaps, c.timeMode, "third ^T wraps")
+	ck.Eq(timePeriodic, c.timeMode, "third ^T wraps")
 }
 
 func TestHelpAndFooterNameTheTimeKey(t *testing.T) {
@@ -278,7 +278,7 @@ func TestPaneRebuildsCachedBlocksWhenOnlyTheTimeModeChanges(t *testing.T) {
 	off := p.linesFor(s, 80, 20, renderOpts{timeMode: timeOff}, overlay{})
 	ck.NotStrContains(join(off), "──", "off drew a divider:\n")
 
-	gaps := p.linesFor(s, 80, 20, renderOpts{timeMode: timeGaps}, overlay{})
+	gaps := p.linesFor(s, 80, 20, renderOpts{timeMode: timePeriodic}, overlay{})
 	ck.StrContains(join(gaps), "── "+then.Local().Format("15:04")+" ──",
 		"the cached block was not redrawn when the mode changed:\n")
 }
@@ -329,4 +329,17 @@ func TestAllModeDrawsNoDividers(t *testing.T) {
 	ck.Len(dividerRow.FindAllString(out, -1), 0, "every-message mode drew a divider:\n%s", out)
 	ck.StrContains(out, "Nov 25 14:32:05 · 1d ago", "the message is not stamped:\n")
 	ck.StrContains(out, "12.4s", "the turn duration was dropped:\n")
+}
+
+func TestPeriodicDividersAcrossFourMinuteWaits(t *testing.T) {
+	base := local(2026, 11, 26, 10, 0, 0)
+	var blocks []session.Block
+	for i := range 5 {
+		blocks = append(blocks, session.Block{Kind: session.KindInjected, At: base.Add(time.Duration(i) * 4 * time.Minute), Text: "waiting"})
+	}
+	r := timedRenderer(timePeriodic, base)
+	for _, finalized := range []int{0, 1, 2, 3, 4, 5, 0} {
+		out := ansi.Strip(strings.Join(r.Lines(blocks, finalized, 80), "\n"))
+		assert.NewCollecting(t).EqDeep([]string{"── 10:00 ──", "── 10:08 ──", "── 10:16 ──"}, trimAll(dividerRow.FindAllString(out, -1)), "finalized=%d", finalized)
+	}
 }

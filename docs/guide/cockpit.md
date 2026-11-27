@@ -67,6 +67,9 @@ spend, the fundi and claude children it spawned priced into it.
 
 ## Keys
 
+The agent rail indents the whole row two columns per tree level. Each row reserves
+space for the `+` fold marker, so sibling status icons stay aligned.
+
 Two focus targets — the input box and the agent rail — toggled with `⇥`.
 
 **Global**
@@ -83,7 +86,7 @@ Two focus targets — the input box and the agent rail — toggled with `⇥`.
 | `^G` | Toggle the help page: every key with a sentence on what it does. `PgUp`/`PgDn`, `home`/`end` scroll it when it does not fit |
 | `^O` | Cycle the level of detail: collapsed, then tool arguments in full, then the messages the daemon and the harness injected in full as well (see below) |
 | `^Y` | Toggle image thumbnails (Kitty-graphics terminals only) |
-| `^T` | Cycle the transcript's timing: gap dividers and turn durations (default), a time on every message, none (see below) |
+| `^T` | Cycle the transcript's timing: periodic dividers and turn durations (default), a time on every message, none (see below) |
 | `^C`/`^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time |
 
 **Input pane**
@@ -229,7 +232,7 @@ when your client received them.
 
 | Level | Draws |
 |---|---|
-| gaps (default) | A dim divider above the first message, wherever the conversation was quiet for more than five minutes, and wherever the day changed, plus each finished turn's duration in the footnote under its last reply (`── 12.4s`). A divider for today reads `── 14:32 ──`; for any other day it names the date and how long ago, `── Fri Nov 20 14:32 · 6d ago ──`, so an old conversation always says which day you are looking at |
+| periodic (default) | A dim divider above the first message, above the first message at least five minutes after the last divider, and wherever the day changed, plus each finished turn's duration in the footnote under its last reply (`── 12.4s`). A divider for today reads `── 14:32 ──`; for any other day it names the date and how long ago, `── Fri Nov 20 14:32 · 6d ago ──`, so an old conversation always says which day you are looking at |
 | every message | Instead of the dividers (they would repeat it), the time right-aligned on the first row of every message, with the turn durations kept: `14:32:05` for today, `Nov 20 14:32:05 · 6d ago` for an older day, shortened to what fits |
 | off | Nothing beyond a tool call's own duration, which is always shown |
 

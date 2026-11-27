@@ -429,7 +429,7 @@ type Cockpit struct {
 	detail         detailLevel
 	expandArgs     bool
 	expandInjected bool
-	// timeMode is the ^T density of timing in the transcript: gap dividers
+	// timeMode is the ^T density of timing in the transcript: periodic dividers
 	// and turn durations (the default), a stamp on every message, or none.
 	timeMode timeMode
 	// railPeek records that an explicit request revealed a rail the default look
@@ -3903,7 +3903,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		entry{k.SearchToggle, "Switch the rail between the agent list and the conversation search. Type to search, move as in the agent rail, ⏎ to switch to the conversation (a closed one opens read-only), tab to cycle the sort; esc or ^S again goes back."},
 		entry{k.Help, "Show or hide this page."},
 		entry{k.ExpandArgs, "Cycle the level of detail: collapsed, then tool-call arguments and results in full, then the notices the daemon and the agent's harness inject in full as well."},
-		entry{k.ToggleTime, "Cycle the timing shown in the transcript: a divider where the conversation paused plus each turn's duration, then a time on every message in place of the dividers, then none."},
+		entry{k.ToggleTime, "Cycle the timing shown in the transcript: a divider at least five minutes after the last divider plus each turn's duration, then a time on every message in place of the dividers, then none."},
 		entry{k.ToggleImages, "Show or hide image thumbnails. Needs a terminal with Kitty graphics."},
 		entry{k.Redraw, "Repaint the screen. Try it when the display or the cursor looks wrong."},
 		entry{k.Quit, "Quit; press twice within two seconds to confirm. Your agents keep running."},

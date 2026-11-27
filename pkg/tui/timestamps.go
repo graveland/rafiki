@@ -12,15 +12,15 @@ import (
 )
 
 // timeMode is how much of the transcript's timing is drawn. ^T cycles it. The
-// zero value is the default, so a renderer built without setting it draws gap
+// zero value is the default, so a renderer built without setting it draws periodic
 // dividers rather than nothing.
 type timeMode int
 
 const (
-	// timeGaps draws a dim divider where the conversation paused, where the
+	// timePeriodic draws a dim divider at least five minutes after the last divider, where the
 	// day changed, and above the first block, plus each finished turn's
 	// duration.
-	timeGaps timeMode = iota
+	timePeriodic timeMode = iota
 	// timeAll stamps every block's first row with its time (and date and age
 	// when it is not from today) INSTEAD of drawing dividers, which it would
 	// only repeat. Turn durations stay.
@@ -33,8 +33,8 @@ const (
 
 func (m timeMode) String() string {
 	switch m {
-	case timeGaps:
-		return "gaps"
+	case timePeriodic:
+		return "periodic"
 	case timeAll:
 		return "every message"
 	case timeOff:
@@ -43,9 +43,8 @@ func (m timeMode) String() string {
 	return "?"
 }
 
-// timeGapThreshold is how long the conversation must be quiet before a
-// divider marks the pause. Shorter pauses are the ordinary rhythm of a turn.
-const timeGapThreshold = 5 * time.Minute
+// dividerInterval is the minimum event time between same-day dividers.
+const dividerInterval = 5 * time.Minute
 
 // firstContentRow is the index of the first row that draws anything, or -1.
 func firstContentRow(lines []string) int {
@@ -66,15 +65,9 @@ func (r *renderer) now() time.Time {
 	return time.Now()
 }
 
-// drawBlock renders blocks[i] with its timing decoration.
-//
-// The decoration depends only on blocks[i] and blocks[i-1], whose At never
-// changes, so a block's lines stay valid in the renderer's cache for as long
-// as the mode does (paneSig carries the mode and linesFor drops the cache when
-// it changes).
-func (r *renderer) drawBlock(blocks []session.Block, i int) []string {
-	lines := blockLines(r.renderBlock(blocks[i]))
-	b := blocks[i]
+// drawBlock advances lastDivider only when it emits a divider.
+func (r *renderer) drawBlock(b session.Block, lastDivider *time.Time) []string {
+	lines := blockLines(r.renderBlock(b))
 	if r.timeMode == timeOff || b.At.IsZero() {
 		return lines
 	}
@@ -88,18 +81,15 @@ func (r *renderer) drawBlock(blocks []session.Block, i int) []string {
 		}
 		return lines
 	}
-	var prev time.Time
-	if i > 0 {
-		prev = blocks[i-1].At
-	}
-	if label, ok := dividerLabel(b.At, prev, r.now()); ok {
+	if label, ok := dividerLabel(b.At, *lastDivider, r.now()); ok {
+		*lastDivider = b.At
 		return append([]string{r.dividerRow(label)}, lines...)
 	}
 	return lines
 }
 
 // dividerLabel says whether a divider belongs above a block at `at` that
-// follows a block at `prev` (zero when there is none, or it carries no time),
+// follows a divider at `prev` (zero when there is none),
 // and what it reads.
 //
 // A divider describes itself: anything not from today carries its date and how
@@ -109,7 +99,7 @@ func (r *renderer) drawBlock(blocks []session.Block, i int) []string {
 func dividerLabel(at, prev, now time.Time) (string, bool) {
 	at, prev, now = at.Local(), prev.Local(), now.Local()
 	havePrev := !prev.IsZero() && prev.Unix() > 0
-	if havePrev && at.Sub(prev) <= timeGapThreshold && sameDay(at, prev) {
+	if havePrev && at.Sub(prev) < dividerInterval && sameDay(at, prev) {
 		return "", false
 	}
 	if sameDay(at, now) && (!havePrev || sameDay(at, prev)) {

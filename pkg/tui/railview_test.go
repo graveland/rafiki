@@ -232,3 +232,18 @@ func TestRailWidthCountsKids(t *testing.T) {
 	// a wrong-width regression from a correct one.
 	assert.NewAborting(t).Eq(len(" (2)"), kw-pw, "kid count width")
 }
+
+func TestRailIndentsCursorAndReservesFoldSlot(t *testing.T) {
+	nodes := []rail.Node{{ChildID: "parent", Status: "idle"}, {ChildID: "leaf", Depth: 1, Status: "idle"}, {ChildID: "branch", Depth: 1, Status: "idle", Kids: 2}}
+	ck := assert.NewCollecting(t)
+	for _, folded := range []bool{false, true} {
+		nodes[2].Folded = folded
+		fold := "  "
+		if folded {
+			fold = "+ "
+		}
+		rows := strings.Split(strings.TrimSuffix(ansi.Strip(renderRail(nodes, "", "branch", 80, true, nil, 0)), "\n"), "\n")
+		glyph := rail.Glyph(nodes[0])
+		ck.EqDeep([]string{"    " + glyph + " parent", "      " + glyph + " leaf", "  ▶ " + fold + glyph + " branch (2)"}, rows, "folded=%t", folded)
+	}
+}

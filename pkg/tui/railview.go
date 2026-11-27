@@ -104,12 +104,9 @@ func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 			name = n.ChildID
 		}
 		kids := kidsTag(n)
-		w := 2 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name) + ansi.StringWidth(nativeTag(n)) + ansi.StringWidth(kindTag(n.Kind)) + ansi.StringWidth(kids)
+		w := 4 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name) + ansi.StringWidth(nativeTag(n)) + ansi.StringWidth(kindTag(n.Kind)) + ansi.StringWidth(kids)
 		if n.Attention > 0 {
 			w += 2 + len(strconv.Itoa(n.Attention))
-		}
-		if n.Folded {
-			w++
 		}
 		if cost := fmtCost(n.TotalCost(), cur); cost != "" {
 			w += 1 + len(cost)
@@ -154,11 +151,11 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 		// like the cursor and the badge. Rows are clipped before styling, so
 		// anything appended afterwards escapes the pane and bleeds colour into
 		// the transcript.
-		fold := ""
+		fold := "  "
 		if n.Folded {
-			fold = "+"
+			fold = "+ "
 		}
-		left := cursor + strings.Repeat("  ", n.Depth) + fold + rail.AnimatedGlyph(n, tick) + " " + nativeTag(n) + name + kindTag(n.Kind) + kidsTag(n) + badge
+		left := strings.Repeat("  ", n.Depth) + cursor + fold + rail.AnimatedGlyph(n, tick) + " " + nativeTag(n) + name + kindTag(n.Kind) + kidsTag(n) + badge
 		cost := fmtCost(n.TotalCost(), cur)
 		row := clip(left, width)
 		if cost != "" {
