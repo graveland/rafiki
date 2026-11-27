@@ -146,3 +146,38 @@ func TestPagingKeysTraverseTheRail(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: tea.KeyHome})
 	ck.Eq("c_100", c.selected, "home")
 }
+
+func foldSeed() []*rafikiv1.ChildSummary {
+	kid := summaryFor("c_b", "bravo", 0)
+	kid.Labels[rail.ParentLabel] = "c_a"
+	grand := summaryFor("c_c", "charlie", 0)
+	grand.Labels[rail.ParentLabel] = "c_b"
+	return []*rafikiv1.ChildSummary{summaryFor("c_a", "alpha", 0), kid, grand, summaryFor("c_d", "delta", 0)}
+}
+
+func TestInitialSeedFoldsEveryTopLevelRow(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_d")
+	defer c.shutdown()
+	c.Update(seedMsg{children: foldSeed()})
+	ck.EqDiff([]string{"c_a", "c_d"}, visibleIDs(c), "rows drawn after the initial seed")
+	ck.Eq(true, c.railNodes()[0].Folded, "a top-level row with children is folded")
+}
+
+func TestInitialSeedRevealsTheAttachedChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_c")
+	defer c.shutdown()
+	c.Update(seedMsg{children: foldSeed()})
+	ck.EqDiff([]string{"c_a", "c_b", "c_c", "c_d"}, visibleIDs(c), "rows drawn when attached to a nested child")
+}
+
+func TestLaterSeedKeepsAnOpenedRowOpen(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_d")
+	defer c.shutdown()
+	c.Update(seedMsg{children: foldSeed()})
+	c.setCollapsed("c_a", false)
+	c.Update(seedMsg{children: foldSeed()})
+	ck.EqDiff([]string{"c_a", "c_b", "c_c", "c_d"}, visibleIDs(c), "a re-seed must not re-fold a row the user opened")
+}

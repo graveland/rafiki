@@ -486,7 +486,7 @@ type Cockpit struct {
 	// cursor rested" must not depend on the tick firing at 150.0ms exactly.
 	selectedSeq int
 	// collapsed holds the rail rows whose descendants are hidden. Session
-	// state only: a relaunch opens every row. railTop is the first rail row
+	// state only: a launch folds every top-level row (foldTopLevel). railTop is the first rail row
 	// drawn when the tree is taller than the pane (see railWindow).
 	collapsed map[string]bool
 	railTop   int
@@ -1160,6 +1160,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmds []tea.Cmd
 		retired := seed(inSubject)
+		if first {
+			c.foldTopLevel()
+		}
 		for _, id := range unknownKind {
 			if !c.textAckFor(id) {
 				continue

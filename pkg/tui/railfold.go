@@ -27,6 +27,21 @@ func (c *Cockpit) setCollapsed(id string, v bool) {
 	delete(c.collapsed, id)
 }
 
+// foldTopLevel folds every top-level row, then reopens the path to the child
+// the cockpit opened on, so `attach <id>` on a nested agent still draws it. It
+// runs once, on the first seed: a later seed must not re-fold a row the user
+// opened.
+func (c *Cockpit) foldTopLevel() {
+	for _, n := range c.rail.Nodes() {
+		if n.Depth == 0 {
+			c.setCollapsed(n.ChildID, true)
+		}
+	}
+	if f := c.focused(); f != "" {
+		c.reveal(f)
+	}
+}
+
 // reveal expands every ancestor of id, so a jump to a child hidden under a
 // fold (an attention hop, a freshly spawned grandchild) lands on a row that is
 // actually drawn.
