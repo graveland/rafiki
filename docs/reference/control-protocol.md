@@ -403,7 +403,10 @@ sends them to the resumed child as ONE prompt, oldest first, each under its own
 `undelivered` (`inject.KindUndelivered`). That prompt is a new inbox row, so it
 gets its own receipt and a captured `UserMessage` whose `injected_kind` is
 `undelivered`; the original sends are not linked to it, and the "delivered"
-mark a client drew for them ends with the aborted turn. A message that lands
+mark a client drew for them ends with the aborted turn. A carried send the
+child never echoed has no receipt of its own, so the abort publishes one naming
+the original row once the resend is queued; otherwise the client's pending line
+for it would never resolve. A message that lands
 while the process is dying is carried too. A message whose request had already
 gone out is not resent. If the resume fails the prompt is left pending and the
 next delivery to the child sends it; a daraja-hosted child takes the same path

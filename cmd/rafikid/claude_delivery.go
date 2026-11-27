@@ -138,6 +138,12 @@ type claudeDeliveryRegistry struct {
 type undelivered struct {
 	text        string
 	attachments []inbox.Attachment
+	// rowID is the inbox row the message was sent as. receipted says that row
+	// already published its message_delivered receipt (the child echoed it);
+	// one that did not gets its receipt when the resend is queued, because the
+	// resend is a new row and nothing else would ever name the original.
+	rowID     string
+	receipted bool
 }
 
 // beginLaunch starts a new launch generation for childID and retires every
@@ -356,7 +362,7 @@ func (r *claudeDeliveryRegistry) outstandingLocked(childID string, gen uint64) [
 	var out []undelivered
 	for _, a := range r.accepted[childID] {
 		if a.gen == gen && a.responseID == "" {
-			out = append(out, undelivered{text: a.text, attachments: a.attachments})
+			out = append(out, undelivered{text: a.text, attachments: a.attachments, rowID: a.rowID, receipted: true})
 		}
 	}
 	var keys []claudeDeliveryKey
@@ -368,7 +374,7 @@ func (r *claudeDeliveryRegistry) outstandingLocked(childID string, gen uint64) [
 	slices.SortFunc(keys, func(a, b claudeDeliveryKey) int { return strings.Compare(a.uuid, b.uuid) })
 	for _, k := range keys {
 		d := r.rows[k]
-		out = append(out, undelivered{text: d.text, attachments: d.attachments})
+		out = append(out, undelivered{text: d.text, attachments: d.attachments, rowID: d.rowID})
 	}
 	return out
 }
@@ -748,5 +754,25 @@ func (c *Controller) parkUndelivered(childID string, msgs []undelivered) bool {
 			"childId", childID, "messages", len(msgs), "error", err)
 		return false
 	}
+	c.publishUndeliveredReceipts(childID, msgs)
 	return true
+}
+
+// publishUndeliveredReceipts names, in a message_delivered receipt, every
+// interrupted send that never got one. The resend is a new inbox row, so
+// without this the client's pending line for the original row is never
+// resolved.
+func (c *Controller) publishUndeliveredReceipts(childID string, msgs []undelivered) {
+	for _, m := range msgs {
+		if m.receipted || m.rowID == "" {
+			continue
+		}
+		c.publishEvent(childID, &rafikiv1.Event{
+			ChildId: childID,
+			Ts:      timestamppb.Now(),
+			Payload: &rafikiv1.Event_MessageDelivered{MessageDelivered: &rafikiv1.MessageDelivered{
+				MessageId: m.rowID,
+			}},
+		})
+	}
 }

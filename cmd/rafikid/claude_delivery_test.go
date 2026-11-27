@@ -738,6 +738,29 @@ func TestClaudeDeliveryDuplicateEchoPublishesOneReceipt(t *testing.T) {
 	ck.Eq(0, h.c.claudeDeliveries.entryCount("c_deliver"), "entries left after teardown")
 }
 
+// An abort resends a message the child was handed but never echoed as a NEW
+// inbox row, so the original row would never get a receipt and the client's
+// pending line for it would stay grey forever. The abort publishes the original
+// row's receipt, once the resend is queued.
+func TestClaudeAbortPublishesAReceiptForAnUnechoedMessage(t *testing.T) {
+	ck := assert.NewAborting(t)
+	h := newClaudeDeliveryHarness(t, "c_deliver")
+	_, inst := h.launch(t, "c_deliver")
+
+	var written []string
+	h.writeEcho(nil, &written, nil)
+	rowID := h.send(t, "c_deliver", "never echoed")
+	ck.Require().Len(written, 1, "frames written")
+	h.drain()
+
+	h.c.claudeDeliveries.beginAbort("c_deliver")
+	h.c.claudeDeliveries.endLaunch("c_deliver", inst)
+	lost := h.c.claudeDeliveries.takeCarried("c_deliver")
+	h.c.resendUndelivered("c_deliver", lost)
+
+	ck.EqDiff([]string{rowID}, receipts(h.drain()), "receipts for the interrupted send")
+}
+
 // A claude child whose process cannot be exec'd never reaches abortSpawn: there
 // is no instance for the generation installChildHooks minted to attach to, so
 // Spawn's own early return has to retire it. Without that a coordinator retrying
