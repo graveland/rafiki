@@ -1053,12 +1053,10 @@ func TestEmbeddedPostgresMovesOntoANewBuild(t *testing.T) {
 // TestEmbeddedPostgresInstallsAndUpdatesExtensions pins the start-up reconcile on a
 // real server: the first resolve of a fresh install CREATEs vector and
 // pg_textsearch (nothing ran migrate, so only the reconcile could have), and a
-// resolve after the recorded version has fallen behind the tree's runs ALTER
-// EXTENSION UPDATE. Only the current base script of each extension is installed,
-// so an old version cannot be truly installed: the drift is faked by rewriting
-// the recorded version, which makes the test about the reconcile's decision and
-// the statement it issues, not about an old-to-new schema transition (that is the
-// extension's own update script's business).
+// resolve after vector's recorded version has fallen behind runs ALTER
+// EXTENSION UPDATE. The vector upgrade script used here is compatible with
+// the current schema. Do not fake pg_textsearch drift: its update scripts
+// can create objects that already exist on a fresh install.
 //
 // Everything goes through `rafikid db psql` with an empty PATH, so the clients
 // are the tree's own, and each call's resolve is what runs the reconcile BEFORE
@@ -1111,13 +1109,11 @@ func TestEmbeddedPostgresInstallsAndUpdatesExtensions(t *testing.T) {
 	// The recorded versions fall behind the tree's, as they do after a new tree
 	// replaces an old one. The same call reads them back to prove the drift is
 	// really there before the next resolve fixes it.
-	drifted := psql("-c", `UPDATE pg_extension SET extversion = '0.8.6' WHERE extname = 'vector'`,
-		"-c", `UPDATE pg_extension SET extversion = '1.5.0' WHERE extname = 'pg_textsearch'`,
-		"-c", installedSQL)
-	c.Eq("pg_textsearch=1.5.0,vector=0.8.6", drifted, "the drift must be in place before the next resolve")
+	drifted := psql("-c", `UPDATE pg_extension SET extversion = '0.8.6' WHERE extname = 'vector'`, "-c", installedSQL)
+	c.Eq(strings.Split(shipped, ",")[0]+",vector=0.8.6", drifted, "the drift must be in place before the next resolve")
 
 	c.Eq(shipped, psql("-c", installedSQL),
-		"the next resolve must update both extensions to the versions the tree ships")
+		"the next resolve must restore vector to the version the tree ships")
 }
 
 // TestEmbeddedPostgresDumpRoundTripUsesTheBundledClients is the default backup of

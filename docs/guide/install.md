@@ -58,7 +58,7 @@ names the `rafiki logs <child>` command for the rest.
 ### The embedded database
 
 The default database mode. `RAFIKI_DB=embedded` makes `rafikid` run its own
-PostgreSQL 18.6 with the `vector` and `pg_textsearch` extensions (so recall
+PostgreSQL 18.7 with the `vector` and `pg_textsearch` extensions (so recall
 search works), on a unix socket only — no TCP listener, no Docker, nothing to
 install:
 
@@ -83,8 +83,15 @@ server lives outside the unit and keeps running after the service stops, until
 you stop it yourself:
 
 ```sh
-~/.cache/rafiki/embedpg/18.6-1-<os>-<arch>/bin/pg_ctl -D ~/.local/share/rafiki/pg stop
+~/.cache/rafiki/embedpg/18.7-1-<os>-<arch>/bin/pg_ctl -D ~/.local/share/rafiki/pg stop
 ```
+
+A Rafiki upgrade that changes the pinned bundle starts the new PostgreSQL
+binary on the existing data directory and updates the SQL extensions before
+`rafikid` serves requests. PostgreSQL 18.7 does not require dump/restore from
+18.x. Check the [PostgreSQL 18.7 release notes](https://www.postgresql.org/docs/18/release-18-7.html)
+and the [pg_textsearch 1.6.0 upgrade guide](https://github.com/timescale/pg_textsearch/blob/v1.6.0/UPGRADING.md)
+for indexes that need a separate `REINDEX`.
 
 `rafikid db psql` opens `psql` on whatever `RAFIKI_DB` names, the embedded
 database included, printing the target first (because `service.env` may name a

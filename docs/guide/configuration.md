@@ -12,7 +12,7 @@ rafiki follows the XDG base directories:
 | records | `~/.local/share/rafiki/state` | `$XDG_DATA_HOME` |
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
 | config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `profiles.toml`, `rafikid.toml`) | `$XDG_CONFIG_HOME` |
-| embedded postgres binaries | `~/.cache/rafiki/embedpg/18.6-1-<os>-<arch>` | `$XDG_CACHE_HOME` |
+| embedded postgres binaries | `~/.cache/rafiki/embedpg/18.7-1-<os>-<arch>` | `$XDG_CACHE_HOME` |
 | embedded postgres data | `~/.local/share/rafiki/pg` (mode 0700; also its unix socket directory) | `$XDG_DATA_HOME` |
 | embedded postgres log | `~/.local/state/rafiki/pg.log` | `$XDG_STATE_HOME` |
 

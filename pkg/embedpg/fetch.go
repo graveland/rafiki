@@ -27,7 +27,7 @@ const (
 	// keys the extracted tree by this string. It moves only together with the
 	// sha256 digests below: a bump without re-pinned digests fails every
 	// download closed.
-	Version = "18.6-1"
+	Version = "18.7-1"
 	// MajorVersion is what a data directory must report in PG_VERSION. A data
 	// directory from another major cannot be opened by these binaries, and
 	// pg_upgrade is not something this package does.
@@ -50,10 +50,10 @@ type artifact struct {
 
 // darwin ships one universal (x86_64 + arm64) tree for both architectures.
 var artifacts = map[string]artifact{
-	"darwin/arm64": {"postgres-darwin-universal.txz", "cfdb27871e5ad87e5a69be1e4d62c15a6158dad553e634bbbcb9451d00ec70ed"},
-	"darwin/amd64": {"postgres-darwin-universal.txz", "cfdb27871e5ad87e5a69be1e4d62c15a6158dad553e634bbbcb9451d00ec70ed"},
-	"linux/amd64":  {"postgres-linux-amd64.txz", "14daf3936b0bc2ee00e220cc750647e96eaf3b3b04665b1f6f9d1dae24386c14"},
-	"linux/arm64":  {"postgres-linux-arm64.txz", "519d4417a4a8d65ac2bfba34a4679798704cbcd7589e3161bb9f04e0be5b7abe"},
+	"darwin/arm64": {"postgres-darwin-universal.txz", "fb4c4af74c24080f7ba6eac893442131ebebaf497ef3f5774304614c0930fd81"},
+	"darwin/amd64": {"postgres-darwin-universal.txz", "fb4c4af74c24080f7ba6eac893442131ebebaf497ef3f5774304614c0930fd81"},
+	"linux/amd64":  {"postgres-linux-amd64.txz", "c5ef0d05b195c15d5d7ae26dccd1483c6155ea0e3e9d6fbfc8ed7360da730d21"},
+	"linux/arm64":  {"postgres-linux-arm64.txz", "7a6b36669046bfdaf88992b0f8995f4a503a10f2842ce71b9d5975f7aabd891b"},
 }
 
 // artifactFor returns the pinned build for goos/goarch. The platform list in
